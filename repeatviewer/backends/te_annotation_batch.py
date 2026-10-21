@@ -83,6 +83,8 @@ class TeAnnotationBatchResult:
     gff_path: Path | None = None
     # Sequences that failed detection but did not abort the batch: (id, reason).
     skipped_sequences: tuple[tuple[str, str], ...] = ()
+    # Features newly present after this run (not in the pre-job baseline).
+    identified_count: int = 0
 
     @property
     def output_paths(self) -> list[Path]:
@@ -233,6 +235,11 @@ def _annotate_one_record_fasta(
             num_threads=auto_threads,
         )
         features = auto_result.features
+        if progress is not None and auto_result.message.strip():
+            for line in auto_result.message.splitlines():
+                text = line.strip()
+                if text:
+                    progress(text)
 
     if run_similarity and options.similarity_databases:
         if progress is not None:
@@ -248,6 +255,11 @@ def _annotate_one_record_fasta(
             progress=progress,
         )
         features = sim_result.features
+        if progress is not None and sim_result.message.strip():
+            for line in sim_result.message.splitlines():
+                text = line.strip()
+                if text:
+                    progress(text)
     return list(features)
 
 
@@ -519,6 +531,32 @@ def run_te_annotation_on_fasta(
                             )
         _apply_msa_tsd()
 
+    def _feature_signature(feat: SequenceFeature) -> tuple:
+        return (
+            str(getattr(feat, "feature_type", "") or ""),
+            int(getattr(feat, "start", 0) or 0),
+            int(getattr(feat, "end", 0) or 0),
+            str(getattr(feat, "strand", "") or ""),
+            str(getattr(feat, "name", "") or ""),
+            int(getattr(feat, "track", 0) or 0),
+        )
+
+    baseline_sigs = {
+        rid: {_feature_signature(feat) for feat in (existing_by_id.get(rid) or [])}
+        for rid in annotate_ids
+    }
+    identified_count = 0
+    for rid in annotate_ids:
+        before = baseline_sigs.get(rid) or set()
+        for feat in features_by_id.get(rid) or []:
+            if _feature_signature(feat) not in before:
+                identified_count += 1
+
+    # Stream into the process monitor (Worker.log_line / FunctionWorker.log_line).
+    from repeatviewer.external_process import emit_process_log
+
+    emit_process_log(f"Identified features: {identified_count}")
+
     json_path: Path | None = None
     gff_path: Path | None = None
     if persist:
@@ -539,4 +577,5 @@ def run_te_annotation_on_fasta(
         json_path=json_path,
         gff_path=gff_path,
         skipped_sequences=tuple(skipped),
+        identified_count=identified_count,
     )

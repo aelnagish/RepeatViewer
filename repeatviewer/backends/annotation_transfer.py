@@ -3,7 +3,7 @@
 Strategy (default ``hybrid``):
 1. **Sequence→sequence** alignment, then lift features through the alignment
    (Geneious-style Transfer by Alignment / liftOver-like):
-   - sequences shorter than 10 kb → MAFFT fast mode (FFT-NS-1:
+   - sequences shorter than 30 kb → MAFFT fast mode (FFT-NS-1:
      ``--retree 1 --maxiterate 0``)
    - longer sequences → minimap2 ``asm20``
 2. **Per-feature blastn** for any feature that was lost or failed thresholds —
@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import subprocess
 import tempfile
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -35,7 +36,9 @@ _DEFAULT_TRANSFER_SOURCE = "Annotation transfer"
 # Whole-seq lift is preferred when alignment is at least this strong.
 _LIFT_ALIGN_MIN_IDENTITY = 0.35
 # Prefer MAFFT pairwise lift when both sequences are shorter than this.
-_LIFT_MAFFT_MAX_LEN = 10_000
+# FFT-NS-1 pairwise stays accurate for TE-scale copies; minimap2 is used
+# above this length (and as a fallback when MAFFT is weak / missing).
+_LIFT_MAFFT_MAX_LEN = 30_000
 _FASTA_SUFFIXES = {".fa", ".fasta", ".fna", ".fas", ".ffn", ".faa"}
 
 
@@ -118,6 +121,29 @@ def discover_annotated_transfer_sources(path: Path) -> list[AnnotatedTransferSou
     return []
 
 
+# User-facing transfer modes (stored as ``strategy``).
+# Yes → whole-seq lift then blastn leftovers; No → blastn only.
+TRANSFER_STRATEGY_HYBRID = "hybrid"
+TRANSFER_STRATEGY_LIFTOVER = "liftover"  # legacy; normalized to hybrid
+TRANSFER_STRATEGY_BLASTN = "blastn"
+TRANSFER_STRATEGIES = (
+    TRANSFER_STRATEGY_HYBRID,
+    TRANSFER_STRATEGY_BLASTN,
+)
+# Combo labels: answer “is the target similar to the source?”
+TRANSFER_STRATEGY_CHOICES: tuple[tuple[str, str], ...] = (
+    (
+        TRANSFER_STRATEGY_HYBRID,
+        "Yes",
+    ),
+    (
+        TRANSFER_STRATEGY_BLASTN,
+        "No",
+    ),
+)
+_TRANSFER_STRATEGY_SETTINGS_KEY = "annotation_transfer/strategy"
+
+
 @dataclass
 class AnnotationTransferOptions:
     """Thresholds and strategy for annotation transfer."""
@@ -128,15 +154,110 @@ class AnnotationTransferOptions:
     allow_reverse: bool = True
     evalue: float = 10.0
     # hybrid | liftover | blastn
-    strategy: str = "hybrid"
+    strategy: str = TRANSFER_STRATEGY_HYBRID
     annotation_source: str = _DEFAULT_TRANSFER_SOURCE
     use_system_blast: bool = False
     use_system_mafft: bool = False
 
 
+def normalize_transfer_strategy(value: object | None) -> str:
+    """Return a valid transfer strategy (default ``hybrid`` / Yes)."""
+    raw = str(value or "").strip().lower()
+    if raw in TRANSFER_STRATEGIES:
+        return raw
+    # Legacy liftover-only and “Yes/similar” aliases → Yes (lift + blastn).
+    if raw in {
+        "similar",
+        "yes",
+        "lift",
+        "align",
+        "liftover",
+        "auto",
+        "both",
+        "",
+    }:
+        return TRANSFER_STRATEGY_HYBRID
+    if raw in {"divergent", "no", "blast", "feature", "blastn"}:
+        return TRANSFER_STRATEGY_BLASTN
+    return TRANSFER_STRATEGY_HYBRID
+
+
+def transfer_strategy_label(strategy: object | None) -> str:
+    """Short user-facing label for a transfer strategy."""
+    key = normalize_transfer_strategy(strategy)
+    for value, label in TRANSFER_STRATEGY_CHOICES:
+        if value == key:
+            return label
+    return TRANSFER_STRATEGY_CHOICES[0][1]
+
+
+def load_transfer_strategy() -> str:
+    """Persisted Transfer strategy (default hybrid / Yes)."""
+    from PySide6.QtCore import QSettings
+
+    s = QSettings()
+    return normalize_transfer_strategy(s.value(_TRANSFER_STRATEGY_SETTINGS_KEY))
+
+
+def save_transfer_strategy(strategy: object | None) -> str:
+    """Persist Transfer strategy; returns the normalized value."""
+    from PySide6.QtCore import QSettings
+
+    value = normalize_transfer_strategy(strategy)
+    s = QSettings()
+    s.setValue(_TRANSFER_STRATEGY_SETTINGS_KEY, value)
+    return value
+
+
 def prefer_mafft_liftover(source_len: int, target_len: int) -> bool:
     """True when sequences are short enough for MAFFT fast pairwise lift."""
     return max(int(source_len), int(target_len)) < _LIFT_MAFFT_MAX_LEN
+
+
+def mafft_liftover_max_kb() -> int:
+    """User-facing kb cutoff for MAFFT vs minimap2 whole-seq lift."""
+    return max(1, int(_LIFT_MAFFT_MAX_LEN) // 1000)
+
+
+def transfer_parallel_workers(num_jobs: int) -> int:
+    """Concurrent source→target pairs from Preferences → Max. parallel jobs.
+
+    Each pair still uses the Transfer Threads setting for MAFFT / minimap2 /
+    blastn. Peak CPU use ≈ parallel workers × Threads.
+    """
+    import os
+
+    from repeatviewer.backends.thread_budget import load_batch_workers
+
+    requested = load_batch_workers()
+    jobs = max(1, int(num_jobs))
+    if jobs <= 1 or requested <= 1:
+        return 1
+    cpus = os.cpu_count() or 4
+    return max(1, min(requested, jobs, cpus))
+
+
+def transfer_skipped_reminder_parts(
+    skipped: Sequence[tuple[str, str]] | None,
+) -> tuple[str, str]:
+    """Return ``(headline, body)`` for a Transfer skip reminder dialog."""
+    items = list(skipped or ())
+    if not items:
+        return "", ""
+    headline = (
+        f"Transfer finished, but {len(items)} source(s) were skipped"
+    )
+    lines: list[str] = []
+    for label, reason in items[:20]:
+        detail = str(reason or "unknown error").strip() or "unknown error"
+        if len(detail) > 180:
+            detail = detail[:177] + "…"
+        lines.append(f"• {label}: {detail}")
+    if len(items) > 20:
+        lines.append(f"• …and {len(items) - 20} more")
+    lines.append("")
+    lines.append("Other sources transferred normally; their placements were kept.")
+    return headline, "\n".join(lines)
 
 
 def load_use_system_mafft_from_settings() -> bool:
@@ -167,10 +288,16 @@ class AnnotationTransferResult:
     message: str = ""
     alignment_identity: float = 0.0
     strand: str = "+"
+    # Multi-source batch: (label, reason) for pairs that failed but did not abort.
+    skipped_sources: tuple[tuple[str, str], ...] = ()
 
     @property
     def features(self) -> list[SequenceFeature]:
         return [item.feature for item in self.lifted if item.feature is not None]
+
+    def skipped_reminder_parts(self) -> tuple[str, str]:
+        """Return ``(headline, body)`` for a skip reminder dialog."""
+        return transfer_skipped_reminder_parts(self.skipped_sources)
 
     def counts(self) -> dict[str, int]:
         out = {
@@ -320,6 +447,9 @@ def _make_placed(
             source=ann_source,
             pident=float(identity) * 100.0,
             subject_id=str(source_id or ""),
+            coverage=max(0.0, min(1.0, float(coverage))),
+            source_start=int(src.start),
+            source_end=int(src.end),
         ),
     )
 
@@ -575,7 +705,8 @@ def _transfer_via_liftover(
 ) -> tuple[dict[int, LiftedAnnotation], float, str]:
     """Whole-sequence alignment → lift features. Returns by feature index.
 
-    Short pairs (<10 kb) use MAFFT fast mode; longer pairs use minimap2.
+    Short pairs use MAFFT fast mode; longer pairs use minimap2
+    (see ``_LIFT_MAFFT_MAX_LEN``).
     """
     from repeatviewer.backends.map_reference import (
         MAP_ENGINE_MINIMAP2,
@@ -591,13 +722,14 @@ def _transfer_via_liftover(
     use_mafft = prefer_mafft_liftover(len(source_sequence), len(target_sequence))
     mafft_ok = bool(mafft_command(use_system_mafft=bool(cfg.use_system_mafft)))
     minimap_ok = bool(engine_executable(MAP_ENGINE_MINIMAP2))
+    mafft_kb = mafft_liftover_max_kb()
 
     if use_mafft and mafft_ok:
         aligner = "mafft"
         _emit(
             progress,
-            "Method A — sequence→sequence (MAFFT fast, <10 kb), then lift "
-            "features through the alignment…",
+            f"Method A — sequence→sequence (MAFFT fast, <{mafft_kb} kb), then "
+            "lift features through the alignment…",
         )
     elif use_mafft and not mafft_ok and minimap_ok:
         aligner = "minimap2"
@@ -788,7 +920,8 @@ def _transfer_via_blastn(
 
     _emit(
         progress,
-        "Method B — extract each feature’s DNA and blastn against the target…",
+        "Method B — extract feature DNAs into one query FASTA, then one "
+        "blastn against the target…",
     )
     try:
         blastn = _blast_executable("blastn", use_system_blast=cfg.use_system_blast)
@@ -868,9 +1001,14 @@ def _transfer_via_blastn(
                 check=True,
                 cancel=cancel,
             )
+            # Default blastn task is megablast (word size 28) — too strict for
+            # diverged TE copies that whole-seq MAFFT can still lift. Use
+            # traditional blastn (word size 11) for feature DNA search.
             run_logged_process(
                 [
                     blastn,
+                    "-task",
+                    "blastn",
                     "-query",
                     str(query_fa),
                     "-db",
@@ -910,7 +1048,9 @@ def _transfer_via_blastn(
         rows = _parse_blast_rows(
             out_tsv.read_text(encoding="utf-8") if out_tsv.is_file() else ""
         )
+        _emit(progress, f"blastn returned {len(rows)} HSP(s).")
         best_by_qid: dict[str, dict[str, str]] = {}
+        rejected_threshold = 0
         for row in rows:
             qid = row["qseqid"]
             if qid not in feature_by_qid:
@@ -933,6 +1073,7 @@ def _transfer_via_blastn(
             qcov = abs(qend - qstart) + 1
             coverage = min(1.0, max(aln_len, qcov) / float(qlen))
             if pident < float(cfg.min_identity) or coverage < float(cfg.min_coverage):
+                rejected_threshold += 1
                 continue
             prev = best_by_qid.get(qid)
             if prev is None or bits > float(prev["bitscore"]):
@@ -970,8 +1111,24 @@ def _transfer_via_blastn(
                 tgt_len=tgt_len,
             )
 
-    placed = sum(1 for item in by_index.values() if item.feature is not None)
-    _emit(progress, f"blastn placed {placed}/{len(indices)} feature(s).")
+        placed = sum(1 for item in by_index.values() if item.feature is not None)
+        if not rows:
+            _emit(
+                progress,
+                "blastn placed 0 feature(s) — no HSPs (try Yes = align + "
+                "blastn, or sequences may be too divergent for blastn).",
+            )
+        elif rejected_threshold and placed == 0:
+            _emit(
+                progress,
+                f"blastn placed 0/{len(indices)} feature(s) "
+                f"({rejected_threshold} HSP(s) below identity/coverage).",
+            )
+        else:
+            _emit(
+                progress,
+                f"blastn placed {placed}/{len(indices)} feature(s).",
+            )
     return by_index
 
 
@@ -989,19 +1146,18 @@ def transfer_annotations(
 ) -> AnnotationTransferResult:
     """Hybrid transfer: whole-seq lift first, then blastn for leftovers."""
     cfg = opts or AnnotationTransferOptions()
-    strategy = str(cfg.strategy or "hybrid").strip().lower()
-    if strategy not in {"hybrid", "liftover", "blastn"}:
-        strategy = "hybrid"
+    strategy = normalize_transfer_strategy(cfg.strategy)
 
+    mafft_kb = mafft_liftover_max_kb()
     _emit(
         progress,
         "Transfer strategy: hybrid — (1) whole-seq alignment + feature lift "
-        "(MAFFT fast if <10 kb, else minimap2), then (2) blastn on remaining "
-        "feature DNAs."
+        f"(MAFFT fast if <{mafft_kb} kb, else minimap2), then (2) blastn on "
+        "remaining feature DNAs."
         if strategy == "hybrid"
         else (
-            "Transfer strategy: liftover only (MAFFT fast if <10 kb, else "
-            "minimap2)."
+            "Transfer strategy: liftover only (MAFFT fast if "
+            f"<{mafft_kb} kb, else minimap2)."
             if strategy == "liftover"
             else "Transfer strategy: blastn only (feature DNA → target)."
         ),

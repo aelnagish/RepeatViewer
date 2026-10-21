@@ -188,6 +188,11 @@ class SequenceFeature:
     pident: float = 0.0
     # Normalized subject accession for multi-HSP grouping (Online BLAST).
     subject_id: str = ""
+    # Query coverage as a fraction 0–1 (Transfer annotation; 0 = unset).
+    coverage: float = 0.0
+    # 1-based inclusive coords on the Transfer source sequence (0 = unset).
+    source_start: int = 0
+    source_end: int = 0
 
     def __post_init__(self) -> None:
         self.start = int(self.start)
@@ -213,6 +218,28 @@ class SequenceFeature:
         except (TypeError, ValueError):
             self.pident = 0.0
         self.subject_id = str(self.subject_id or "").strip()
+        try:
+            cov = float(self.coverage or 0.0)
+        except (TypeError, ValueError):
+            cov = 0.0
+        # Accept legacy percent values (>1) and store as a 0–1 fraction.
+        if cov > 1.0:
+            cov = cov / 100.0
+        self.coverage = max(0.0, min(1.0, cov))
+        try:
+            self.source_start = max(0, int(self.source_start or 0))
+        except (TypeError, ValueError):
+            self.source_start = 0
+        try:
+            self.source_end = max(0, int(self.source_end or 0))
+        except (TypeError, ValueError):
+            self.source_end = 0
+        if (
+            self.source_start > 0
+            and self.source_end > 0
+            and self.source_start > self.source_end
+        ):
+            self.source_start, self.source_end = self.source_end, self.source_start
 
     @staticmethod
     def _normalize_strand(strand: str) -> str:
@@ -237,6 +264,18 @@ class SequenceFeature:
             pident = float(data.get("pident", 0.0) or 0.0)
         except (TypeError, ValueError):
             pident = 0.0
+        try:
+            coverage = float(data.get("coverage", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            coverage = 0.0
+        try:
+            source_start = int(data.get("source_start", 0) or 0)
+        except (TypeError, ValueError):
+            source_start = 0
+        try:
+            source_end = int(data.get("source_end", 0) or 0)
+        except (TypeError, ValueError):
+            source_end = 0
         return cls(
             start=int(data.get("start", 1)),
             end=int(data.get("end", 1)),
@@ -249,7 +288,73 @@ class SequenceFeature:
             source=str(data.get("source", "") or ""),
             pident=pident,
             subject_id=str(data.get("subject_id", "") or ""),
+            coverage=coverage,
+            source_start=source_start,
+            source_end=source_end,
         )
+
+
+def _is_transfer_source(source: str) -> bool:
+    return str(source or "").strip().lower().startswith("transfer")
+
+
+def feature_hover_detail_text(feat: SequenceFeature, *, primary: str = "") -> str:
+    """Multi-line hover text: label plus source / identity / coverage when set."""
+    lines: list[str] = []
+    label = str(primary or "").strip()
+    if label:
+        lines.append(label)
+    source = str(getattr(feat, "source", "") or "").strip()
+    if source:
+        lines.append(f"Source: {source}")
+    try:
+        src_start = int(getattr(feat, "source_start", 0) or 0)
+        src_end = int(getattr(feat, "source_end", 0) or 0)
+    except (TypeError, ValueError):
+        src_start, src_end = 0, 0
+    if _is_transfer_source(source) and src_start > 0 and src_end > 0:
+        lines.append(f"Source position: {src_start}–{src_end}")
+    subject = str(getattr(feat, "subject_id", "") or "").strip()
+    if subject and subject not in label:
+        lines.append(f"Subject: {subject}")
+    try:
+        pident = float(getattr(feat, "pident", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        pident = 0.0
+    if pident > 0:
+        lines.append(f"Identity: {pident:.1f}%")
+    try:
+        coverage = float(getattr(feat, "coverage", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        coverage = 0.0
+    if coverage > 0:
+        if coverage <= 1.0:
+            lines.append(f"Coverage: {coverage * 100.0:.1f}%")
+        else:
+            lines.append(f"Coverage: {coverage:.1f}%")
+    return "\n".join(lines)
+
+
+def feature_has_hover_meta(feat: SequenceFeature) -> bool:
+    """True when hover should show source / identity / coverage extras."""
+    if str(getattr(feat, "source", "") or "").strip():
+        return True
+    if str(getattr(feat, "subject_id", "") or "").strip():
+        return True
+    try:
+        if int(getattr(feat, "source_start", 0) or 0) > 0:
+            return True
+    except (TypeError, ValueError):
+        pass
+    try:
+        if float(getattr(feat, "pident", 0.0) or 0.0) > 0:
+            return True
+    except (TypeError, ValueError):
+        pass
+    try:
+        return float(getattr(feat, "coverage", 0.0) or 0.0) > 0
+    except (TypeError, ValueError):
+        return False
 
 
 def remount_parent_ids(
@@ -281,6 +386,9 @@ def remount_parent_ids(
                 source=feat.source,
                 pident=feat.pident,
                 subject_id=feat.subject_id,
+                coverage=feat.coverage,
+                source_start=feat.source_start,
+                source_end=feat.source_end,
             )
         )
     return updated
@@ -336,6 +444,9 @@ def with_feature_source(
         source=label,
         pident=feat.pident,
         subject_id=feat.subject_id,
+        coverage=feat.coverage,
+        source_start=feat.source_start,
+        source_end=feat.source_end,
     )
 
 
@@ -1128,6 +1239,9 @@ def _merge_feature_colors_from_json(
                 source=feat.source,
                 pident=feat.pident,
                 subject_id=feat.subject_id,
+                coverage=feat.coverage,
+                source_start=feat.source_start,
+                source_end=feat.source_end,
             )
         )
     return merged
@@ -1382,6 +1496,18 @@ def load_features_from_gff(path: Path, *, expected_id: str) -> list[SequenceFeat
             pident = float(row.attributes.get("pident", 0) or 0)
         except (TypeError, ValueError):
             pident = 0.0
+        try:
+            coverage = float(row.attributes.get("coverage", 0) or 0)
+        except (TypeError, ValueError):
+            coverage = 0.0
+        try:
+            source_start = int(row.attributes.get("source_start", 0) or 0)
+        except (TypeError, ValueError):
+            source_start = 0
+        try:
+            source_end = int(row.attributes.get("source_end", 0) or 0)
+        except (TypeError, ValueError):
+            source_end = 0
         features.append(
             SequenceFeature(
                 start=row.start,
@@ -1395,6 +1521,9 @@ def load_features_from_gff(path: Path, *, expected_id: str) -> list[SequenceFeat
                 source=str(row.attributes.get("source", "") or "").strip(),
                 pident=pident,
                 subject_id=str(row.attributes.get("subject_id", "") or "").strip(),
+                coverage=coverage,
+                source_start=source_start,
+                source_end=source_end,
             )
         )
     return sorted(features, key=lambda f: (f.start, f.end))
@@ -1490,6 +1619,10 @@ def _gff_feature_line(sequence_id: str, feat: SequenceFeature, sequence_length: 
     if feat.subject_id:
         safe_subject = feat.subject_id.replace("\t", " ").replace("\n", " ").replace(";", ",")
         attrs += f";subject_id={safe_subject}"
+    if feat.coverage > 0:
+        attrs += f";coverage={feat.coverage:.4f}"
+    if feat.source_start > 0 and feat.source_end > 0:
+        attrs += f";source_start={int(feat.source_start)};source_end={int(feat.source_end)}"
     return f"{sequence_id}\tRepeatViewer\t{safe_type}\t{start}\t{end}\t.\t{strand}\t.\t{attrs}"
 
 
@@ -1696,6 +1829,18 @@ def _gff_rows_to_sequence_features(
             pident = float(row.attributes.get("pident", 0) or 0)
         except (TypeError, ValueError):
             pident = 0.0
+        try:
+            coverage = float(row.attributes.get("coverage", 0) or 0)
+        except (TypeError, ValueError):
+            coverage = 0.0
+        try:
+            source_start = int(row.attributes.get("source_start", 0) or 0)
+        except (TypeError, ValueError):
+            source_start = 0
+        try:
+            source_end = int(row.attributes.get("source_end", 0) or 0)
+        except (TypeError, ValueError):
+            source_end = 0
         features.append(
             SequenceFeature(
                 start=start,
@@ -1709,6 +1854,9 @@ def _gff_rows_to_sequence_features(
                 source=str(row.attributes.get("source", "") or "").strip(),
                 pident=pident,
                 subject_id=str(row.attributes.get("subject_id", "") or "").strip(),
+                coverage=coverage,
+                source_start=source_start,
+                source_end=source_end,
             )
         )
     return sorted(features, key=lambda f: (f.start, f.end))

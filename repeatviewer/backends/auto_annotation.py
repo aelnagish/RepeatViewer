@@ -79,12 +79,32 @@ def _remove_features_for_mode(
     return [feat for feat in features if feat.feature_type != feature_type]
 
 
+def _is_curated_or_imported_source(source: str) -> bool:
+    """True for Transfer / GFF imports that must survive Feature detection re-runs."""
+    label = str(source or "").strip()
+    if not label:
+        return False
+    if label == REPEATVIEWER_INTERNAL_SOURCE:
+        return False
+    # Transfer annotation stamps ``Transfer (…)``; imports use the file name.
+    return True
+
+
 def _is_auto_generated_orf(feat: SequenceFeature) -> bool:
-    return feat.feature_type == "ORF" and bool(_AUTO_ORF_NAME.match(feat.name or ""))
+    """ORF from Feature detection (not Transfer / manual import).
+
+    Transferred ORFs often keep names like ``ORF1`` from the source; those must
+    not be deleted when the user re-runs ORF detection on the target.
+    """
+    if feat.feature_type != "ORF" or not _AUTO_ORF_NAME.match(feat.name or ""):
+        return False
+    return not _is_curated_or_imported_source(str(feat.source or ""))
 
 
 def _is_auto_generated_tsd(feat: SequenceFeature) -> bool:
-    return feat.feature_type == "TSD" and bool(_AUTO_TSD_NAME.match(feat.name or ""))
+    if feat.feature_type != "TSD" or not _AUTO_TSD_NAME.match(feat.name or ""):
+        return False
+    return not _is_curated_or_imported_source(str(feat.source or ""))
 
 
 def _remove_features_for_auto_rerun(

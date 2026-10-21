@@ -455,6 +455,9 @@ def _feature_with_bounds(
         source=feat.source,
         pident=feat.pident,
         subject_id=feat.subject_id,
+        coverage=feat.coverage,
+        source_start=feat.source_start,
+        source_end=feat.source_end,
     )
 
 
@@ -3388,18 +3391,9 @@ class _BarsCanvas(QWidget):
                 flat_i += 1
 
     def _feature_full_label(self, feat: SequenceFeature) -> str:
-        label = _feature_display_label(
+        return _feature_display_label(
             feat, show_database_name=self._show_similarity_database_name
         )
-        extras: list[str] = []
-        if float(getattr(feat, "pident", 0) or 0) > 0 and "(" not in label:
-            extras.append(f"{float(feat.pident):.1f}% id")
-        subject = str(getattr(feat, "subject_id", "") or "").strip()
-        if subject and subject not in label:
-            extras.append(subject)
-        if extras:
-            return f"{label} ({', '.join(extras)})" if label else ", ".join(extras)
-        return label
 
     def _feature_label_overflows(self, feat: SequenceFeature, rect: QRectF) -> bool:
         label = self._feature_full_label(feat)
@@ -4041,6 +4035,11 @@ class _BarsCanvas(QWidget):
                 flat_index += 1
 
     def _paint_feature_hover_tip(self, painter: QPainter) -> None:
+        from repeatviewer.backends.sequence_features import (
+            feature_has_hover_meta,
+            feature_hover_detail_text,
+        )
+
         hover = self._hover_feat
         if hover is None or self._rubber_active:
             return
@@ -4049,18 +4048,24 @@ class _BarsCanvas(QWidget):
         rect = self._feature_rect(row, flat_index)
         if feat is None or rect is None:
             return
-        full_label = self._feature_full_label(feat)
-        if not full_label or not self._feature_label_overflows(feat, rect):
+        tip_text = feature_hover_detail_text(
+            feat, primary=self._feature_full_label(feat)
+        )
+        show_tip = bool(tip_text) and (
+            feature_has_hover_meta(feat) or self._feature_label_overflows(feat, rect)
+        )
+        if not show_tip:
             return
         tip_font = QFont(painter.font())
         tip_font.setPointSize(8)
         painter.setFont(tip_font)
         fm = QFontMetrics(tip_font)
+        lines = tip_text.split("\n")
         tip_w = min(
-            max(fm.horizontalAdvance(full_label) + 10, 40),
+            max(max(fm.horizontalAdvance(line) for line in lines) + 10, 40),
             max(80, self.width() - 8),
         )
-        tip_h = fm.height() + 6
+        tip_h = fm.height() * len(lines) + 6
         tip_x = min(
             max(4.0, rect.left()),
             max(4.0, float(self.width()) - tip_w - 4.0),
@@ -4073,11 +4078,18 @@ class _BarsCanvas(QWidget):
         painter.setBrush(QColor(255, 255, 255, 235))
         painter.drawRoundedRect(tip_rect, 3, 3)
         painter.setPen(QColor("#222222"))
-        painter.drawText(
-            tip_rect.adjusted(5, 0, -5, 0),
-            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
-            full_label,
-        )
+        for index, line in enumerate(lines):
+            line_rect = QRectF(
+                tip_rect.left() + 5.0,
+                tip_rect.top() + 3.0 + index * fm.height(),
+                tip_rect.width() - 10.0,
+                float(fm.height()),
+            )
+            painter.drawText(
+                line_rect,
+                Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                line,
+            )
 
     def _msa_standard_extent_columns(self) -> tuple[int, int] | None:
         """0-based inclusive ``(first, last)`` non-gap columns on the standard row.
@@ -6163,6 +6175,7 @@ class MultiSequenceOverviewPanel(QWidget):
             self._open_add_feature_buttons_settings
         )
         rail.transferRequested.connect(self._on_transfer_annotations_clicked)
+        rail.transferSettingsClicked.connect(self._open_transfer_annotation_settings)
         rail.trackHeightChanged.connect(self._on_track_height_changed)
         rail.annotationThicknessChanged.connect(self._on_annotation_thickness_changed)
         rail.annotationDistanceChanged.connect(self._on_annotation_distance_changed)
@@ -6891,6 +6904,28 @@ class MultiSequenceOverviewPanel(QWidget):
         )
         self._refresh_similarity_database_rows()
         self.statusMessage.emit("Similarity annotation settings saved.")
+
+    def _open_transfer_annotation_settings(self) -> None:
+        from repeatviewer.backends.annotation_transfer import save_transfer_strategy
+        from repeatviewer.backends.auto_annotation_settings import (
+            save_annotation_run_options,
+        )
+        from repeatviewer.widgets.sequence_map_viewer import (
+            TransferAnnotationSettingsDialog,
+        )
+
+        dialog = TransferAnnotationSettingsDialog(parent=self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        threads, show, close = dialog.run_options()
+        save_annotation_run_options(
+            num_threads=threads,
+            show_process_window=show,
+            close_process_window_when_finished=close,
+        )
+        save_transfer_strategy(dialog.transfer_strategy())
+        self._rail.refresh_transfer_run_tooltip()
+        self.statusMessage.emit("Transfer annotation settings saved.")
 
     def _on_manage_database_clicked(self, host: QWidget | None = None) -> None:
         window = self.window()
@@ -9545,11 +9580,18 @@ class MultiSequenceOverviewPanel(QWidget):
         from repeatviewer.backends.annotation_transfer import (
             AnnotationTransferOptions,
             discover_annotated_transfer_sources,
+            load_transfer_strategy,
             load_use_system_mafft_from_settings,
             transfer_annotations,
         )
+        from repeatviewer.backends.auto_annotation_settings import (
+            load_annotation_run_options,
+        )
         from repeatviewer.backends.similarity_annotation import (
             load_use_system_blast_from_settings,
+        )
+        from repeatviewer.widgets.process_monitor_dialog import (
+            attach_annotation_worker_process_monitor,
         )
 
         target_ids = self._require_selected_record_ids("Transfer")
@@ -9582,10 +9624,13 @@ class MultiSequenceOverviewPanel(QWidget):
         if source_path.is_dir():
             source_label = f"{source_path.name}/ ({len(sources)} annotated)"
         ann_source = f"Transfer ({source_label})"
+        threads, show_process, close_process = load_annotation_run_options()
         opts = AnnotationTransferOptions(
             min_identity=float(self._rail.transfer_min_identity_value()),
             min_coverage=float(self._rail.transfer_min_coverage_value()),
+            threads=max(1, int(threads)),
             allow_reverse=bool(self._rail.transfer_allow_reverse.isChecked()),
+            strategy=load_transfer_strategy(),
             annotation_source=ann_source,
             use_system_blast=load_use_system_blast_from_settings(),
             use_system_mafft=load_use_system_mafft_from_settings(),
@@ -9594,6 +9639,9 @@ class MultiSequenceOverviewPanel(QWidget):
         self._transfer_cancel = JobCancellation()
         self._rail.transfer_run_btn.setText("Stop")
         self._rail.transfer_run_btn.setFixedWidth(52)
+        settings_btn = getattr(self._rail, "transfer_ann_settings_btn", None)
+        if settings_btn is not None:
+            settings_btn.setEnabled(False)
         n_targets = len(target_ids)
         self.statusMessage.emit(
             f"Transferring annotations onto {n_targets:,} selected sequence(s)…"
@@ -9617,7 +9665,20 @@ class MultiSequenceOverviewPanel(QWidget):
                 return
 
         def _job(*, progress=None):
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            import threading
+
             from Bio import SeqIO
+
+            from repeatviewer.backends.annotation_transfer import (
+                transfer_parallel_workers,
+            )
+            from repeatviewer.backends.job_cancel import JobCancelledError
+            from repeatviewer.backends.msa_coordinates import (
+                project_features_to_gapped,
+                project_features_to_ungapped,
+                ungap_sequence,
+            )
 
             source_seqs: dict[tuple[str, str], tuple[str, list]] = {}
             for entry in job_sources:
@@ -9641,21 +9702,13 @@ class MultiSequenceOverviewPanel(QWidget):
                     continue
                 source_seqs[key] = (seq, feats)
 
-            new_by_id: dict[str, list] = {rid: [] for rid in job_targets}
-            step = 0
-            total = max(1, len(job_targets) * max(1, len(job_sources)))
+            # Build transferable (target, source) pairs up front.
+            work: list[tuple] = []
             for tgt_id in job_targets:
-                if cancel.requested:
-                    from repeatviewer.backends.job_cancel import JobCancelledError
-
-                    raise JobCancelledError("Annotation transfer cancelled.")
                 tgt_seq = target_seqs.get(tgt_id) or ""
                 if not tgt_seq:
                     continue
                 for entry in job_sources:
-                    step += 1
-                    if progress is not None:
-                        progress(f"{step}/{total} {tgt_id} ← {entry.sequence_id}")
                     key = (str(entry.fasta_path), str(entry.sequence_id))
                     src_seq, src_feats = source_seqs.get(key, ("", []))
                     if not src_seq or not src_feats:
@@ -9669,13 +9722,6 @@ class MultiSequenceOverviewPanel(QWidget):
                         same_file = False
                     if same_file:
                         continue
-                    # MSA rows: strip gaps for transfer, project hits back to columns.
-                    from repeatviewer.backends.msa_coordinates import (
-                        project_features_to_gapped,
-                        project_features_to_ungapped,
-                        ungap_sequence,
-                    )
-
                     src_u, src_keep = ungap_sequence(src_seq)
                     tgt_u, tgt_keep = ungap_sequence(tgt_seq)
                     src_feats_u = project_features_to_ungapped(
@@ -9683,6 +9729,31 @@ class MultiSequenceOverviewPanel(QWidget):
                     )
                     if not src_u or not tgt_u or not src_feats_u:
                         continue
+                    work.append(
+                        (tgt_id, entry, src_u, tgt_u, src_feats_u, tgt_keep)
+                    )
+
+            total = max(1, len(work))
+            parallel = transfer_parallel_workers(len(work))
+            if progress is not None:
+                progress(f"0/{total} starting")
+                progress(
+                    f"Threads={job_opts.threads} per pair; "
+                    f"up to {parallel} pair(s) in parallel "
+                    f"(Preferences → Max. parallel jobs); "
+                    f"allow_reverse={job_opts.allow_reverse}"
+                )
+
+            new_by_id: dict[str, list] = {rid: [] for rid in job_targets}
+            skipped: list[tuple[str, str]] = []
+            completed = 0
+            progress_lock = threading.Lock()
+            result_lock = threading.Lock()
+
+            def _run_one(payload):
+                tgt_id, entry, src_u, tgt_u, src_feats_u, tgt_keep = payload
+                label = f"{tgt_id} ← {entry.sequence_id}"
+                try:
                     result = transfer_annotations(
                         source_id=entry.sequence_id,
                         source_sequence=src_u,
@@ -9692,16 +9763,62 @@ class MultiSequenceOverviewPanel(QWidget):
                         opts=job_opts,
                         cancel=cancel,
                         source_fasta=entry.fasta_path,
+                        progress=None if parallel > 1 else progress,
                     )
-                    for item in getattr(result, "lifted", []) or []:
-                        feat = getattr(item, "feature", None)
-                        if feat is None:
-                            continue
-                        projected = project_features_to_gapped([feat], tgt_keep)
-                        new_by_id[tgt_id].extend(projected)
-            return new_by_id
+                except JobCancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001 — skip this pair only
+                    return tgt_id, label, [], str(exc) or exc.__class__.__name__
+                projected: list = []
+                for item in getattr(result, "lifted", []) or []:
+                    feat = getattr(item, "feature", None)
+                    if feat is None:
+                        continue
+                    projected.extend(project_features_to_gapped([feat], tgt_keep))
+                return tgt_id, label, projected, None
+
+            with ThreadPoolExecutor(max_workers=max(1, parallel)) as pool:
+                futures = [pool.submit(_run_one, item) for item in work]
+                for future in as_completed(futures):
+                    if cancel.requested:
+                        for pending in futures:
+                            pending.cancel()
+                        raise JobCancelledError("Annotation transfer cancelled.")
+                    try:
+                        tgt_id, label, projected, error = future.result()
+                    except JobCancelledError:
+                        for pending in futures:
+                            pending.cancel()
+                        raise
+                    with progress_lock:
+                        completed += 1
+                        done = completed
+                    if error:
+                        with result_lock:
+                            skipped.append((label, error))
+                        if progress is not None:
+                            short = error if len(error) <= 80 else error[:77] + "…"
+                            progress(f"{done}/{total} skipped {label}: {short}")
+                        continue
+                    if projected:
+                        with result_lock:
+                            new_by_id[tgt_id].extend(projected)
+                    if progress is not None:
+                        progress(f"{done}/{total} {label}")
+            return {
+                "features_by_id": new_by_id,
+                "skipped": tuple(skipped),
+            }
 
         worker = Worker(_job, progress=True)
+        attach_annotation_worker_process_monitor(
+            self,
+            worker,
+            title="Transfer annotation",
+            enabled=bool(show_process),
+            close_when_finished=bool(close_process),
+            tool_key="transfer_annotation",
+        )
         thread = QThread(self)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
@@ -9739,18 +9856,46 @@ class MultiSequenceOverviewPanel(QWidget):
         self._end_window_job_progress()
         if not isinstance(result, dict):
             return
+        # New shape: {"features_by_id": {...}, "skipped": (...)}
+        # Legacy: plain rid → features map.
+        if "features_by_id" in result:
+            raw_by_id = result.get("features_by_id") or {}
+            skipped = list(result.get("skipped") or ())
+        else:
+            raw_by_id = result
+            skipped = []
         new_by_id = {
             rid: list(feats)
-            for rid, feats in result.items()
+            for rid, feats in raw_by_id.items()
             if feats and rid in self._lengths
         }
+        if skipped:
+            from repeatviewer.backends.annotation_transfer import (
+                transfer_skipped_reminder_parts,
+            )
+
+            headline, body = transfer_skipped_reminder_parts(skipped)
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Icon.Warning)
+            box.setWindowTitle("Transfer — some sources skipped")
+            box.setText(headline)
+            box.setInformativeText(body)
+            box.setStandardButtons(QMessageBox.StandardButton.Ok)
+            box.exec()
         if not new_by_id:
-            self.statusMessage.emit("Transfer finished — no features placed.")
+            self.statusMessage.emit(
+                "Transfer finished — no features placed."
+                + (f" ({len(skipped)} source(s) skipped.)" if skipped else "")
+            )
             return
         if self.add_features_and_save(new_by_id):
             n = sum(len(v) for v in new_by_id.values())
+            suffix = (
+                f" ({len(skipped)} source(s) skipped.)" if skipped else ""
+            )
             self.statusMessage.emit(
-                f"Transfer saved {n:,} feature(s) on {len(new_by_id):,} sequence(s)."
+                f"Transfer saved {n:,} feature(s) on "
+                f"{len(new_by_id):,} sequence(s).{suffix}"
             )
 
     @Slot(str)
@@ -9771,6 +9916,9 @@ class MultiSequenceOverviewPanel(QWidget):
         self._transfer_worker = None
         self._rail.transfer_run_btn.setText("Run")
         self._rail.transfer_run_btn.setFixedWidth(52)
+        settings_btn = getattr(self._rail, "transfer_ann_settings_btn", None)
+        if settings_btn is not None:
+            settings_btn.setEnabled(True)
 
     def _on_region_zoom(self, start_bp: float, end_bp: float) -> None:
         self._sync_viewport_fill()

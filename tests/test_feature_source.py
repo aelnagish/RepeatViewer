@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from repeatviewer.backends.sequence_features import (
     SequenceFeature,
     feature_display_pack_key,
@@ -46,6 +48,66 @@ def test_source_round_trip_and_missing_defaults_empty() -> None:
         }
     )
     assert legacy.source == ""
+
+
+def test_transfer_meta_round_trip_and_hover_text() -> None:
+    from repeatviewer.backends.sequence_features import (
+        feature_has_hover_meta,
+        feature_hover_detail_text,
+    )
+
+    feat = SequenceFeature(
+        start=10,
+        end=100,
+        name="LTR5 (93.8%)",
+        feature_type="LTR",
+        source="Transfer (Tork0002192.fa)",
+        pident=37.3,
+        coverage=0.806,
+        subject_id="Tork0002192",
+        source_start=120,
+        source_end=210,
+    )
+    payload = feat.to_dict()
+    assert payload["coverage"] == 0.806
+    assert payload["pident"] == 37.3
+    assert payload["source_start"] == 120
+    assert payload["source_end"] == 210
+    restored = SequenceFeature.from_dict(payload)
+    assert restored.coverage == 0.806
+    assert restored.pident == 37.3
+    assert restored.source_start == 120
+    assert restored.source_end == 210
+    # Percent-style coverage in JSON is normalized to 0–1.
+    assert SequenceFeature.from_dict({**payload, "coverage": 80.6}).coverage == pytest.approx(
+        0.806
+    )
+
+    tip = feature_hover_detail_text(feat, primary=feat.name)
+    assert "LTR5 (93.8%)" in tip
+    assert "Source: Transfer (Tork0002192.fa)" in tip
+    assert "Source position: 120–210" in tip
+    assert "Identity: 37.3%" in tip
+    assert "Coverage: 80.6%" in tip
+    assert feature_has_hover_meta(feat) is True
+    assert feature_has_hover_meta(SequenceFeature(start=1, end=2, name="x")) is False
+
+
+def test_transfer_hover_omits_source_position_for_non_transfer() -> None:
+    from repeatviewer.backends.sequence_features import feature_hover_detail_text
+
+    tip = feature_hover_detail_text(
+        SequenceFeature(
+            start=1,
+            end=10,
+            name="ORF1",
+            source="genes.gff3",
+            source_start=5,
+            source_end=15,
+        ),
+        primary="ORF1",
+    )
+    assert "Source position:" not in tip
 
 
 def test_pack_rows_split_by_source_separates_same_track() -> None:

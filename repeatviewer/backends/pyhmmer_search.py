@@ -1,7 +1,8 @@
-"""pyhmmer HMM scan helpers (supports pyhmmer 0.10 easy API and 0.12+ plan7/hmmer API)."""
+"""pyhmmer / nhmmscan helpers for protein and DNA HMM databases (e.g. Pfam, Dfam)."""
 
 from __future__ import annotations
 
+import shutil
 import tempfile
 from pathlib import Path
 
@@ -203,7 +204,11 @@ def _collect_with_modern_pyhmmer(
     thread_count = max(1, int(cpus))
     _log_scan(f"Loaded {len(queries)} query sequence(s) from {query_path.name}")
     with HMMFile(str(hmm_path)) as hmm_file:
-        profiles = hmm_file.optimized_profiles()
+        try:
+            profiles = hmm_file.optimized_profiles()
+        except ValueError:
+            # Unpressed .hmm (no .h3*): optimize profiles in memory.
+            profiles = list(hmm_file)
         for top_hits in hmmscan(
             queries,
             profiles,
@@ -245,6 +250,87 @@ def _collect_with_legacy_pyhmmer(
     return raw_hits
 
 
+def nhmmscan_available() -> bool:
+    """Whether the HMMER ``nhmmscan`` binary is on PATH (best for large DNA DBs like Dfam)."""
+    return shutil.which("nhmmscan") is not None
+
+
+def hmm_pressed_indexes_present(hmm_path: Path) -> bool:
+    """True when hmmpress wrote ``.h3m/.h3i/.h3f/.h3p`` beside the profile."""
+    hmm_path = hmm_path.expanduser().resolve()
+    return all(Path(f"{hmm_path}{suffix}").is_file() for suffix in (".h3m", ".h3i", ".h3f", ".h3p"))
+
+
+def parse_nhmmscan_tblout(
+    text: str,
+) -> list[tuple[float, float | None, str, str, int, int]]:
+    """Parse ``nhmmscan --tblout`` lines into (score, evalue, query, hmm, env_from, env_to)."""
+    hits: list[tuple[float, float | None, str, str, int, int]] = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split()
+        # target accession query accession hmmfrom hmmto alifrom alito
+        # envfrom envto modlen strand E-value score bias …
+        if len(parts) < 15:
+            continue
+        try:
+            hmm_name = parts[0]
+            query_id = parts[2]
+            env_from = int(parts[8])
+            env_to = int(parts[9])
+            evalue = float(parts[12])
+            score = float(parts[13])
+        except (TypeError, ValueError, IndexError):
+            continue
+        hits.append((score, evalue, query_id, hmm_name, env_from, env_to))
+    return hits
+
+
+def collect_nhmmscan_domain_hits(
+    hmm_path: Path,
+    query_path: Path,
+    *,
+    report_e: float,
+    cpus: int = 1,
+    cancel=None,
+) -> list[tuple[float, float | None, str, str, int, int]]:
+    """Scan a DNA query against a DNA HMM DB with system ``nhmmscan`` (multi-CPU)."""
+    from repeatviewer.external_process import run_logged_process
+
+    hmm_path = hmm_path.expanduser().resolve()
+    query_path = query_path.expanduser().resolve()
+    cpu_n = max(1, int(cpus))
+    with tempfile.TemporaryDirectory(prefix="repeatviewer_nhmmscan_") as tmp:
+        tblout = Path(tmp) / "hits.tbl"
+        cmd = [
+            "nhmmscan",
+            "--cpu",
+            str(cpu_n),
+            "-E",
+            f"{float(report_e):g}",
+            "--incE",
+            f"{float(report_e):g}",
+            "--tblout",
+            str(tblout),
+            "--noali",
+            str(hmm_path),
+            str(query_path),
+        ]
+        result = run_logged_process(
+            cmd,
+            tool="nhmmscan",
+            inputs=[hmm_path, query_path],
+            check=True,
+            cancel=cancel,
+        )
+        if tblout.is_file():
+            return parse_nhmmscan_tblout(tblout.read_text(encoding="utf-8", errors="replace"))
+        # Rare: tblout missing but stdout still has a table.
+        return parse_nhmmscan_tblout(result.stdout or "")
+
+
 def collect_pyhmmer_domain_hits(
     hmm_path: Path,
     query_path: Path,
@@ -261,6 +347,16 @@ def collect_pyhmmer_domain_hits(
     """
     import pyhmmer  # type: ignore[import-untyped]  # noqa: F401
 
+    # Mirror BLAST's "Command:" block so Similarity detailed log shows the search.
+    cpu_n = max(1, int(cpus))
+    _log_scan("Command:")
+    _log_scan(
+        f"pyhmmer hmmscan -E {report_e:g} --cpu {cpu_n} "
+        f"--hmm {hmm_path} --query {query_path}"
+    )
+    _log_scan("")
+    _log_scan("—— program output ——")
+
     if hasattr(pyhmmer, "easy"):
         return _collect_with_legacy_pyhmmer(
             hmm_path,
@@ -270,6 +366,43 @@ def collect_pyhmmer_domain_hits(
             cpus=cpus,
         )
     return _collect_with_modern_pyhmmer(
+        hmm_path,
+        query_path,
+        report_e=report_e,
+        domain_e=domain_e,
+        cpus=cpus,
+    )
+
+
+def collect_dna_hmm_domain_hits(
+    hmm_path: Path,
+    query_path: Path,
+    *,
+    report_e: float,
+    domain_e: float | None = None,
+    cpus: int = 1,
+    cancel=None,
+) -> list[tuple[float, float | None, str, str, int, int]]:
+    """DNA HMM search: prefer system ``nhmmscan`` (scales with CPUs on large Dfam DBs).
+
+    Falls back to pyhmmer ``hmmscan`` when ``nhmmscan`` is not installed. pyhmmer's
+    DNA path does not usefully parallelize a single query against a pressed DB, so
+    Dfam curated searches feel much slower without ``nhmmscan``.
+    """
+    hmm_path = hmm_path.expanduser().resolve()
+    # nhmmscan needs a pressed DB; that is also where multi-CPU helps most (Dfam).
+    if nhmmscan_available() and hmm_pressed_indexes_present(hmm_path):
+        try:
+            return collect_nhmmscan_domain_hits(
+                hmm_path,
+                query_path,
+                report_e=report_e,
+                cpus=cpus,
+                cancel=cancel,
+            )
+        except Exception as exc:  # noqa: BLE001 — fall back to pyhmmer
+            _log_scan(f"nhmmscan failed ({exc}); falling back to pyhmmer hmmscan")
+    return collect_pyhmmer_domain_hits(
         hmm_path,
         query_path,
         report_e=report_e,

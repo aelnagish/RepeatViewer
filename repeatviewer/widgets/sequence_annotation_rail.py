@@ -716,6 +716,7 @@ class SequenceAnnotationRail(QWidget):
     similarityAnnotateClicked = Signal()
     similaritySettingsClicked = Signal()
     transferRequested = Signal()
+    transferSettingsClicked = Signal()
     transferThresholdChanged = Signal()
     transferSourceChanged = Signal()
     tabChanged = Signal(int)
@@ -1804,21 +1805,21 @@ class SequenceAnnotationRail(QWidget):
         transfer_section.add_widget(self.transfer_selected_only)
         transfer_section.add_widget(self.transfer_allow_reverse)
 
-        self.transfer_run_btn = QPushButton("Run", transfer_section)
-        self.transfer_run_btn.setFixedWidth(52)
-        self.transfer_run_btn.setToolTip(
-            "Hybrid: whole-seq alignment + feature lift (MAFFT fast if <10 kb, "
-            "else minimap2), then blastn for leftovers. Matches become source "
-            "“Transfer (…)”."
+        xfer_btn_row, self.transfer_run_btn, self.transfer_ann_settings_btn = (
+            self._compact_run_more_row(
+                transfer_section,
+                run_tooltip=self._transfer_run_tooltip(),
+                more_tooltip=(
+                    "Transfer annotation settings (target similar to source, "
+                    "threads, and process window; Threads / process window "
+                    "are shared with Feature detection and Similarity "
+                    "annotation)"
+                ),
+                run_clicked=self.transferRequested.emit,
+                more_clicked=self.transferSettingsClicked.emit,
+            )
         )
-        self.transfer_run_btn.clicked.connect(
-            lambda: self.transferRequested.emit()
-        )
-        transfer_run_row = QHBoxLayout()
-        transfer_run_row.setContentsMargins(0, 0, 0, 0)
-        transfer_run_row.addWidget(self.transfer_run_btn, 0)
-        transfer_run_row.addStretch(1)
-        transfer_section.add_layout(transfer_run_row)
+        transfer_section.add_widget(xfer_btn_row)
         layout.addWidget(transfer_section)
 
         self._annotation_sections: dict[str, _CollapsibleSection] = {
@@ -2773,6 +2774,36 @@ class SequenceAnnotationRail(QWidget):
 
     def transfer_min_coverage_value(self) -> float:
         return float(self.transfer_min_coverage_slider.value()) / 100.0
+
+    def refresh_transfer_run_tooltip(self) -> None:
+        """Refresh Run tooltip from the saved Transfer strategy setting."""
+        self.transfer_run_btn.setToolTip(self._transfer_run_tooltip())
+
+    def _transfer_run_tooltip(self) -> str:
+        from repeatviewer.backends.annotation_transfer import (
+            TRANSFER_STRATEGY_BLASTN,
+            load_transfer_strategy,
+            mafft_liftover_max_kb,
+            transfer_strategy_label,
+        )
+
+        strategy = load_transfer_strategy()
+        label = transfer_strategy_label(strategy)
+        if strategy == TRANSFER_STRATEGY_BLASTN:
+            detail = (
+                "Combine all feature DNAs into one query FASTA and blastn "
+                "against the target (no whole-seq lift)."
+            )
+        else:
+            detail = (
+                "Whole-seq lift first "
+                f"(MAFFT fast if <{mafft_liftover_max_kb()} kb, else minimap2), "
+                "then blastn for leftovers."
+            )
+        return (
+            f"Target similar to source: {label}. {detail} "
+            "Matches become source “Transfer (…)”."
+        )
 
     def populate_manual_feature_types(
         self, buttons: list[tuple[str, str]] | None = None

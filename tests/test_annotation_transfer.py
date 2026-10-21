@@ -9,8 +9,15 @@ import pytest
 from repeatviewer.backends.annotation_transfer import (
     AnnotationTransferOptions,
     AnnotationTransferResult,
+    TRANSFER_STRATEGY_BLASTN,
+    TRANSFER_STRATEGY_HYBRID,
+    normalize_transfer_strategy,
     prefer_mafft_liftover,
+    save_transfer_strategy,
     transfer_annotations,
+    transfer_parallel_workers,
+    transfer_skipped_reminder_parts,
+    transfer_strategy_label,
 )
 from repeatviewer.backends.map_reference import (
     STATUS_INTACT,
@@ -42,12 +49,85 @@ def _perfect_read(*, ref_len: int = 100, name: str = "tgt") -> MappedRead:
     return compute_stats(read)
 
 
-def test_prefer_mafft_liftover_under_10kb() -> None:
+def test_prefer_mafft_liftover_under_30kb() -> None:
     assert prefer_mafft_liftover(100, 200) is True
-    assert prefer_mafft_liftover(9_999, 9_999) is True
-    assert prefer_mafft_liftover(10_000, 100) is False
-    assert prefer_mafft_liftover(100, 10_000) is False
+    assert prefer_mafft_liftover(29_999, 29_999) is True
+    assert prefer_mafft_liftover(30_000, 100) is False
+    assert prefer_mafft_liftover(100, 30_000) is False
     assert prefer_mafft_liftover(50_000, 50_000) is False
+
+
+def test_normalize_transfer_strategy() -> None:
+    assert normalize_transfer_strategy("hybrid") == TRANSFER_STRATEGY_HYBRID
+    assert normalize_transfer_strategy("LIFTOVER") == TRANSFER_STRATEGY_HYBRID
+    assert normalize_transfer_strategy("blastn") == TRANSFER_STRATEGY_BLASTN
+    assert normalize_transfer_strategy("yes") == TRANSFER_STRATEGY_HYBRID
+    assert normalize_transfer_strategy("no") == TRANSFER_STRATEGY_BLASTN
+    assert normalize_transfer_strategy("auto") == TRANSFER_STRATEGY_HYBRID
+    assert normalize_transfer_strategy("bogus") == TRANSFER_STRATEGY_HYBRID
+    assert transfer_strategy_label(TRANSFER_STRATEGY_HYBRID) == "Yes"
+    assert transfer_strategy_label(TRANSFER_STRATEGY_BLASTN) == "No"
+
+
+def test_save_load_transfer_strategy(monkeypatch: pytest.MonkeyPatch) -> None:
+    store: dict[str, object] = {}
+
+    class _FakeSettings:
+        def value(self, key, default=None):
+            return store.get(key, default)
+
+        def setValue(self, key, value):
+            store[key] = value
+
+    monkeypatch.setattr(
+        "PySide6.QtCore.QSettings",
+        lambda *a, **k: _FakeSettings(),
+    )
+    from repeatviewer.backends.annotation_transfer import load_transfer_strategy
+
+    assert save_transfer_strategy("blastn") == TRANSFER_STRATEGY_BLASTN
+    assert load_transfer_strategy() == TRANSFER_STRATEGY_BLASTN
+    assert save_transfer_strategy("Yes") == TRANSFER_STRATEGY_HYBRID
+    assert load_transfer_strategy() == TRANSFER_STRATEGY_HYBRID
+    # Old liftover-only setting upgrades to Yes (align + blastn).
+    assert save_transfer_strategy("liftover") == TRANSFER_STRATEGY_HYBRID
+
+
+def test_transfer_skipped_reminder_parts() -> None:
+    assert transfer_skipped_reminder_parts([]) == ("", "")
+    headline, body = transfer_skipped_reminder_parts(
+        [
+            ("srcA", "blastn failed"),
+            ("srcB", "MAFFT not found"),
+        ]
+    )
+    assert "2 source(s) were skipped" in headline
+    assert "srcA: blastn failed" in body
+    assert "srcB: MAFFT not found" in body
+    result = AnnotationTransferResult(
+        skipped_sources=(("x", "err"),),
+    )
+    h2, b2 = result.skipped_reminder_parts()
+    assert "1 source(s)" in h2
+    assert "x: err" in b2
+
+
+def test_transfer_parallel_workers_caps_by_jobs_and_setting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "repeatviewer.backends.thread_budget.load_batch_workers",
+        lambda: 7,
+    )
+    monkeypatch.setattr("os.cpu_count", lambda: 8)
+    assert transfer_parallel_workers(1) == 1
+    assert transfer_parallel_workers(3) == 3
+    assert transfer_parallel_workers(20) == 7
+    monkeypatch.setattr(
+        "repeatviewer.backends.thread_budget.load_batch_workers",
+        lambda: 1,
+    )
+    assert transfer_parallel_workers(20) == 1
 
 
 def test_lift_features_intact_span() -> None:
@@ -149,10 +229,62 @@ def test_transfer_annotations_identical_sequences(tmp_path: Path) -> None:
     assert result.features
     assert len(result.features) == 2
     assert all(f.source == "Transfer (test)" for f in result.features)
+    by_name = {f.name: f for f in result.features}
+    assert by_name["f1"].source_start == 21 and by_name["f1"].source_end == 60
+    assert by_name["f2"].source_start == 200 and by_name["f2"].source_end == 240
+    assert all(f.coverage > 0 for f in result.features)
     counts = result.counts()
     assert counts["transferred"] == 2
     assert counts["lost"] == 0
     assert counts.get("liftover", 0) + counts.get("blastn", 0) == 2
+
+
+def test_transfer_blastn_places_features_at_moderate_divergence() -> None:
+    """blastn-only must use -task blastn so ~70% TE copies still hit."""
+    from repeatviewer.backends.similarity_annotation import _blast_executable
+
+    try:
+        _blast_executable("blastn", use_system_blast=False)
+    except FileNotFoundError:
+        try:
+            _blast_executable("blastn", use_system_blast=True)
+        except FileNotFoundError:
+            pytest.skip("blastn unavailable")
+
+    import random
+
+    rng = random.Random(3)
+    src = "".join(rng.choice("ACGT") for _ in range(800))
+
+    def _mutate(seq: str, rate: float) -> str:
+        out: list[str] = []
+        for base in seq:
+            if rng.random() < rate:
+                out.append(rng.choice([b for b in "ACGT" if b != base]))
+            else:
+                out.append(base)
+        return "".join(out)
+
+    tgt = _mutate(src, 0.28)
+    features = [
+        SequenceFeature(start=51, end=250, name="LTR5", feature_type="LTR", strand="+"),
+        SequenceFeature(start=300, end=550, name="ORF1", feature_type="ORF", strand="+"),
+    ]
+    result = transfer_annotations(
+        source_id="src",
+        source_sequence=src,
+        target_id="tgt",
+        target_sequence=tgt,
+        features=features,
+        opts=AnnotationTransferOptions(
+            min_identity=0.0,
+            min_coverage=0.0,
+            strategy="blastn",
+            annotation_source="Transfer (test)",
+        ),
+    )
+    assert result.counts()["blastn"] >= 1
+    assert result.features
 
 
 def test_sequence_map_panel_has_geneious_rail() -> None:
@@ -179,6 +311,8 @@ def test_sequence_map_panel_has_geneious_rail() -> None:
         assert hasattr(panel._rail, "show_complement")
         assert hasattr(panel._rail, "transfer_run_btn")
         assert panel._rail.transfer_run_btn.text() == "Run"
+        assert hasattr(panel._rail, "transfer_ann_settings_btn")
+        assert panel._rail.transfer_ann_settings_btn.text() == "Setting"
         assert panel.layout().indexOf(panel._map) >= 0
         assert panel.layout().indexOf(panel._rail) >= 0
         assert panel.layout().indexOf(panel._map) < panel.layout().indexOf(panel._rail)

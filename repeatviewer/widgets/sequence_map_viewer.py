@@ -1556,6 +1556,9 @@ def _feature_with_track(feat: SequenceFeature, track: int) -> SequenceFeature:
         source=feat.source,
         pident=feat.pident,
         subject_id=feat.subject_id,
+        coverage=feat.coverage,
+        source_start=feat.source_start,
+        source_end=feat.source_end,
     )
 
 
@@ -1577,6 +1580,9 @@ def _feature_with_bounds(
         source=feat.source,
         pident=feat.pident,
         subject_id=feat.subject_id,
+        coverage=feat.coverage,
+        source_start=feat.source_start,
+        source_end=feat.source_end,
     )
 
 
@@ -1593,6 +1599,9 @@ def _feature_with_color(feat: SequenceFeature, color: str) -> SequenceFeature:
         source=feat.source,
         pident=feat.pident,
         subject_id=feat.subject_id,
+        coverage=feat.coverage,
+        source_start=feat.source_start,
+        source_end=feat.source_end,
     )
 
 
@@ -2458,27 +2467,30 @@ class AnnotationTrackWidget(QWidget):
             and not self._move_active
             and not self._resize_active
         ):
+            from repeatviewer.backends.sequence_features import (
+                feature_has_hover_meta,
+                feature_hover_detail_text,
+            )
+
             feat = self._features[hover_idx]
             rect = self._feature_rect(hover_idx)
-            full_label = self._feature_full_label(feat)
-            if str(getattr(feat, "source", "") or "") == "ncbi_online_blast":
-                extras: list[str] = []
-                if float(getattr(feat, "pident", 0) or 0) > 0:
-                    extras.append(f"{float(feat.pident):.1f}% id")
-                if str(getattr(feat, "subject_id", "") or "").strip():
-                    extras.append(str(feat.subject_id).strip())
-                if extras:
-                    full_label = f"{full_label} ({', '.join(extras)})" if full_label else ", ".join(extras)
-            if full_label and self._label_overflows(feat, rect):
+            tip_text = feature_hover_detail_text(
+                feat, primary=self._feature_full_label(feat)
+            )
+            show_tip = bool(tip_text) and (
+                feature_has_hover_meta(feat) or self._label_overflows(feat, rect)
+            )
+            if show_tip:
                 tip_font = QFont(painter.font())
                 tip_font.setPointSize(8)
                 painter.setFont(tip_font)
                 fm = QFontMetrics(tip_font)
+                lines = tip_text.split("\n")
                 tip_w = min(
-                    max(fm.horizontalAdvance(full_label) + 10, 40),
+                    max(max(fm.horizontalAdvance(line) for line in lines) + 10, 40),
                     max(80, self.width() - 8),
                 )
-                tip_h = fm.height() + 6
+                tip_h = fm.height() * len(lines) + 6
                 tip_x = min(
                     max(4.0, rect.left()),
                     max(4.0, float(self.width()) - tip_w - 4.0),
@@ -2491,11 +2503,18 @@ class AnnotationTrackWidget(QWidget):
                 painter.setBrush(QColor(255, 255, 255, 235))
                 painter.drawRoundedRect(tip_rect, 3, 3)
                 painter.setPen(QColor("#222222"))
-                painter.drawText(
-                    tip_rect.adjusted(5, 0, -5, 0),
-                    Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
-                    full_label,
-                )
+                for index, line in enumerate(lines):
+                    line_rect = QRectF(
+                        tip_rect.left() + 5.0,
+                        tip_rect.top() + 3.0 + index * fm.height(),
+                        tip_rect.width() - 10.0,
+                        float(fm.height()),
+                    )
+                    painter.drawText(
+                        line_rect,
+                        Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                        line,
+                    )
 
         if self._marquee_active:
             marquee = self._marquee_rect()
@@ -6295,6 +6314,9 @@ class ModifyFeatureDialog(QDialog):
             self._source = raw_source
         self._pident = float(getattr(feature, "pident", 0.0) or 0.0)
         self._subject_id = str(getattr(feature, "subject_id", "") or "").strip()
+        self._coverage = float(getattr(feature, "coverage", 0.0) or 0.0)
+        self._source_start = int(getattr(feature, "source_start", 0) or 0)
+        self._source_end = int(getattr(feature, "source_end", 0) or 0)
 
         start_pos, end_pos = sorted((int(feature.start), int(feature.end)))
 
@@ -6403,6 +6425,9 @@ class ModifyFeatureDialog(QDialog):
             source=self._source,
             pident=self._pident,
             subject_id=self._subject_id,
+            coverage=self._coverage,
+            source_start=self._source_start,
+            source_end=self._source_end,
         )
 
 
@@ -7381,6 +7406,162 @@ class SimilarityAnnotationSettingsPanel(QWidget):
 
 
 
+class TransferAnnotationSettingsDialog(QDialog):
+    """Similarity mode, threads, and process-window options for Transfer."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        from repeatviewer.backends.annotation_transfer import (
+            TRANSFER_STRATEGY_CHOICES,
+            load_transfer_strategy,
+            mafft_liftover_max_kb,
+        )
+        from repeatviewer.backends.auto_annotation_settings import (
+            load_annotation_run_options,
+        )
+        from repeatviewer.widgets.combo_boxes import NoWheelComboBox
+
+        self.setWindowTitle("Transfer annotation settings")
+        self.setMinimumWidth(420)
+        threads, show, close = load_annotation_run_options()
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(8)
+        form = QFormLayout()
+        form.setLabelAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(4)
+
+        mafft_kb = mafft_liftover_max_kb()
+        self._strategy = NoWheelComboBox(self)
+        for value, label in TRANSFER_STRATEGY_CHOICES:
+            self._strategy.addItem(label, value)
+        strategy_idx = self._strategy.findData(load_transfer_strategy())
+        if strategy_idx >= 0:
+            self._strategy.setCurrentIndex(strategy_idx)
+        self._strategy.setFixedWidth(_SETTINGS_FIELD_WIDTH)
+        form.addRow(
+            "Target similar to source:",
+            field_with_help(
+                self._strategy,
+                "Target similar to source",
+                "<b>Target similar to source</b><br>"
+                "Is the open target a related copy of the annotated source?<br>"
+                "• <b>Yes</b> — whole-sequence align + lift features "
+                f"(MAFFT if &lt;{mafft_kb} kb, else minimap2), then blastn "
+                "for any leftovers.<br>"
+                "• <b>No</b> — skip whole-seq lift; write all feature DNAs "
+                "into one query FASTA and run a single blastn against the "
+                "target (divergent, truncated, or rearranged copies).<br><br>"
+                "Identity / Coverage sliders on the Transfer rail still "
+                "filter the preview after Run.",
+                parent=self,
+            ),
+        )
+
+        self._num_threads = QSpinBox(self)
+        self._num_threads.setRange(1, 256)
+        self._num_threads.setValue(max(1, int(threads)))
+        self._num_threads.setFixedWidth(_SETTINGS_FIELD_WIDTH)
+        form.addRow(
+            "Threads:",
+            field_with_help(
+                self._num_threads,
+                "Threads",
+                "<b>What this controls</b><br>"
+                "CPU threads passed into each Transfer alignment / search "
+                "tool for the current source→target pair:<br>"
+                "• <b>MAFFT</b> (<code>--thread</code>) — whole-sequence "
+                f"pairwise lift when both sequences are under {mafft_kb} kb "
+                "(fast FFT-NS-1 mode)<br>"
+                "• <b>minimap2</b> (<code>-t</code>) — whole-sequence lift "
+                f"when either sequence is ≥{mafft_kb} kb, or when MAFFT is "
+                "missing / too weak<br>"
+                "• <b>blastn</b> (<code>-num_threads</code>) — one search of "
+                "all feature DNAs (Yes leftovers, or No / blastn-only "
+                "mode)<br><br>"
+                "<b>How Transfer uses them</b><br>"
+                "Each source→target pair gets this Threads budget. When the "
+                "source is a multi-record FASTA or a folder, several pairs "
+                "can run at once — concurrency comes from Preferences → "
+                "<b>Max. parallel jobs</b> (capped by how many annotated "
+                "sources you have and by CPUs).<br><br>"
+                "Peak use ≈ parallel jobs × Threads.<br><br>"
+                "<b>Shared setting</b><br>"
+                "The same Threads number is stored for Feature detection, "
+                "Similarity annotation, Sequence Annotation, and Transfer. "
+                "Changing it here updates those panels too. Default is 4.",
+                parent=self,
+            ),
+        )
+
+        self._show_process_window = QCheckBox(
+            "Show process window while run", self
+        )
+        self._show_process_window.setChecked(bool(show))
+        form.addRow(
+            "",
+            field_with_help(
+                self._show_process_window,
+                "Show process window",
+                "Open a live process window with Transfer steps and command "
+                "lines (MAFFT / minimap2 / blastn). Shared with Feature "
+                "detection and Similarity annotation.",
+                parent=self,
+                stretch=True,
+            ),
+        )
+
+        self._close_process_window = QCheckBox(
+            "Close process window when finished", self
+        )
+        self._close_process_window.setChecked(bool(close))
+        self._close_process_window.setEnabled(
+            self._show_process_window.isChecked()
+        )
+        self._show_process_window.toggled.connect(
+            self._close_process_window.setEnabled
+        )
+        form.addRow(
+            "",
+            field_with_help(
+                self._close_process_window,
+                "Close process window when finished",
+                "Close the process window automatically after a successful run. "
+                "On failure the window stays open so you can read the log.",
+                parent=self,
+                stretch=True,
+            ),
+        )
+        layout.addLayout(form)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def run_options(self) -> tuple[int, bool, bool]:
+        """Return ``(num_threads, show_process_window, close_when_finished)``."""
+        return (
+            max(1, int(self._num_threads.value())),
+            bool(self._show_process_window.isChecked()),
+            bool(self._close_process_window.isChecked()),
+        )
+
+    def transfer_strategy(self) -> str:
+        """Selected Transfer strategy (`hybrid` / `liftover` / `blastn`)."""
+        from repeatviewer.backends.annotation_transfer import (
+            normalize_transfer_strategy,
+        )
+
+        return normalize_transfer_strategy(self._strategy.currentData())
+
+
 class SimilarityAnnotationSettingsDialog(QDialog):
     """Configure similarity-annotation search thresholds."""
 
@@ -7543,6 +7724,7 @@ class SequenceMapPanel(QWidget):
         self._rail.featureDetectSettingsClicked.connect(self._open_auto_annotation_settings)
         self._rail.similarityAnnotateClicked.connect(self._on_similarity_run_clicked)
         self._rail.similaritySettingsClicked.connect(self._open_similarity_annotation_settings)
+        self._rail.transferSettingsClicked.connect(self._open_transfer_annotation_settings)
         self._rail.transferRequested.connect(self._on_transfer_annotations_clicked)
         self._rail.transferSourceChanged.connect(self._on_transfer_source_changed)
         self._rail.transferThresholdChanged.connect(self._apply_transfer_preview_filter)
@@ -7963,6 +8145,9 @@ class SequenceMapPanel(QWidget):
                     source=feat.source,
                     pident=feat.pident,
                     subject_id=feat.subject_id,
+                    coverage=feat.coverage,
+                    source_start=feat.source_start,
+                    source_end=feat.source_end,
                 )
             )
         if changed:
@@ -8995,6 +9180,7 @@ class SequenceMapPanel(QWidget):
 
     def _set_transfer_run_button(self, *, stop_mode: bool) -> None:
         btn = self._rail.transfer_run_btn
+        settings_btn = getattr(self._rail, "transfer_ann_settings_btn", None)
         if stop_mode:
             btn.setText("Stop")
             btn.setFixedWidth(52)
@@ -9003,6 +9189,9 @@ class SequenceMapPanel(QWidget):
             btn.setText("Run")
             btn.setFixedWidth(52)
             btn.setEnabled(True)
+        if settings_btn is not None:
+            # Allow Setting during live preview; disable only while searching.
+            settings_btn.setEnabled(not self._transfer_running())
         self._sync_main_window_stop_for_transfer(stop_mode)
 
     def _sync_main_window_stop_for_transfer(self, stop_mode: bool) -> None:
@@ -9186,12 +9375,19 @@ class SequenceMapPanel(QWidget):
             AnnotationTransferOptions,
             AnnotationTransferResult,
             discover_annotated_transfer_sources,
+            load_transfer_strategy,
             load_use_system_mafft_from_settings,
             transfer_annotations,
+        )
+        from repeatviewer.backends.auto_annotation_settings import (
+            load_annotation_run_options,
         )
         from repeatviewer.backends.sequence_features import load_sequence_map_data
         from repeatviewer.backends.similarity_annotation import (
             load_use_system_blast_from_settings,
+        )
+        from repeatviewer.widgets.process_monitor_dialog import (
+            attach_annotation_worker_process_monitor,
         )
 
         data = self._loaded_data
@@ -9233,12 +9429,15 @@ class SequenceMapPanel(QWidget):
             source_label = f"{source_path.stem} ({len(sources)} records)"
         ann_source = f"Transfer ({source_label})"
 
+        threads, show_process, close_process = load_annotation_run_options()
         # Thresholds applied live via sliders after Run; search keeps all hits.
         # BLAST/lift intermediates stay in tempfile dirs (never next to source).
         opts = AnnotationTransferOptions(
             min_identity=0.0,
             min_coverage=0.0,
+            threads=max(1, int(threads)),
             allow_reverse=bool(self._rail.transfer_allow_reverse.isChecked()),
+            strategy=load_transfer_strategy(),
             annotation_source=ann_source,
             use_system_blast=load_use_system_blast_from_settings(),
             use_system_mafft=load_use_system_mafft_from_settings(),
@@ -9264,37 +9463,59 @@ class SequenceMapPanel(QWidget):
         job_opts = opts
 
         def _job(*, progress=None):
-            all_lifted = []
-            used = 0
-            total = max(1, len(job_sources))
-            if progress is not None:
-                progress(f"0/{total} starting")
-            for index, entry in enumerate(job_sources):
-                if self._transfer_cancel.requested:
-                    from repeatviewer.backends.job_cancel import JobCancelledError
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            import threading
 
+            from repeatviewer.backends.annotation_transfer import (
+                transfer_parallel_workers,
+            )
+            from repeatviewer.backends.job_cancel import JobCancelledError
+
+            # Prepare transferable pairs on this worker thread first.
+            work: list[tuple] = []
+            skipped: list[tuple[str, str]] = []
+            for entry in job_sources:
+                if self._transfer_cancel.requested:
                     raise JobCancelledError("Annotation transfer cancelled.")
                 label = str(entry.label or entry.sequence_id or entry.fasta_path.stem)
-                if progress is not None:
-                    progress(f"{index}/{total} {label}")
                 try:
                     same_file = entry.fasta_path.resolve() == job_target_path.resolve()
                 except OSError:
                     same_file = False
-                source_data = load_sequence_map_data(
-                    entry.fasta_path, active_id=entry.sequence_id
-                )
+                try:
+                    source_data = load_sequence_map_data(
+                        entry.fasta_path, active_id=entry.sequence_id
+                    )
+                except Exception as exc:  # noqa: BLE001 — keep batch going
+                    skipped.append((label, str(exc) or exc.__class__.__name__))
+                    continue
                 src_id = str(source_data.sequence_id or entry.sequence_id)
                 src_seq = str(source_data.sequence or "")
                 features = list(source_data.features)
                 if not src_seq or not features:
-                    if progress is not None:
-                        progress(f"{index + 1}/{total} {label}")
                     continue
                 if same_file and src_id == job_tgt_id:
-                    if progress is not None:
-                        progress(f"{index + 1}/{total} {label}")
                     continue
+                work.append((entry, label, src_id, src_seq, features))
+
+            total = max(1, len(work) + len(skipped))
+            parallel = transfer_parallel_workers(len(work))
+            if progress is not None:
+                progress(f"0/{total} starting")
+                progress(
+                    f"Threads={job_opts.threads} per pair; "
+                    f"up to {parallel} pair(s) in parallel "
+                    f"(Preferences → Max. parallel jobs); "
+                    f"allow_reverse={job_opts.allow_reverse}"
+                )
+
+            all_lifted = []
+            used = 0
+            completed = len(skipped)
+            progress_lock = threading.Lock()
+
+            def _run_one(payload):
+                entry, label, src_id, src_seq, features = payload
                 per_opts = AnnotationTransferOptions(
                     min_identity=job_opts.min_identity,
                     min_coverage=job_opts.min_coverage,
@@ -9302,45 +9523,101 @@ class SequenceMapPanel(QWidget):
                     allow_reverse=job_opts.allow_reverse,
                     evalue=job_opts.evalue,
                     strategy=job_opts.strategy,
-                    annotation_source=(
-                        f"Transfer ({entry.label or src_id})"
-                    ),
+                    annotation_source=f"Transfer ({entry.label or src_id})",
                     use_system_blast=job_opts.use_system_blast,
+                    use_system_mafft=job_opts.use_system_mafft,
                 )
-                result = transfer_annotations(
-                    source_id=src_id,
-                    source_sequence=src_seq,
-                    target_id=job_tgt_id,
-                    target_sequence=job_tgt_seq,
-                    features=features,
-                    opts=per_opts,
-                    cancel=self._transfer_cancel,
-                    source_fasta=entry.fasta_path,
-                    progress=None,
-                )
-                all_lifted.extend(result.lifted)
-                used += 1
-                if progress is not None:
-                    progress(f"{index + 1}/{total} {label}")
-            if used <= 0:
+                try:
+                    result = transfer_annotations(
+                        source_id=src_id,
+                        source_sequence=src_seq,
+                        target_id=job_tgt_id,
+                        target_sequence=job_tgt_seq,
+                        features=features,
+                        opts=per_opts,
+                        cancel=self._transfer_cancel,
+                        source_fasta=entry.fasta_path,
+                        progress=None if parallel > 1 else progress,
+                    )
+                    return label, result, None
+                except JobCancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001 — skip this source only
+                    return label, None, str(exc) or exc.__class__.__name__
+
+            with ThreadPoolExecutor(max_workers=max(1, parallel)) as pool:
+                futures = [pool.submit(_run_one, item) for item in work]
+                for future in as_completed(futures):
+                    if self._transfer_cancel.requested:
+                        for pending in futures:
+                            pending.cancel()
+                        raise JobCancelledError("Annotation transfer cancelled.")
+                    try:
+                        label, result, error = future.result()
+                    except JobCancelledError:
+                        for pending in futures:
+                            pending.cancel()
+                        raise
+                    with progress_lock:
+                        completed += 1
+                        done = completed
+                    if error:
+                        skipped.append((label, error))
+                        if progress is not None:
+                            short = error if len(error) <= 80 else error[:77] + "…"
+                            progress(f"{done}/{total} skipped {label}: {short}")
+                        continue
+                    assert result is not None
+                    all_lifted.extend(result.lifted)
+                    used += 1
+                    if progress is not None:
+                        progress(f"{done}/{total} {label}")
+
+            if used <= 0 and not skipped:
                 raise AnnotationTransferError(
                     "No transferable annotated sequences were found.\n"
                     "Source and target may be the same sequence, or sources "
                     "had no usable features."
+                )
+            if used <= 0 and skipped:
+                raise AnnotationTransferError(
+                    "Transfer could not place features from any source.\n\n"
+                    + "\n".join(
+                        f"• {lab}: {reason}" for lab, reason in skipped[:12]
+                    )
+                    + (
+                        f"\n• …and {len(skipped) - 12} more"
+                        if len(skipped) > 12
+                        else ""
+                    )
                 )
             msg = (
                 f"Transferred from {used} source sequence(s); "
                 f"{sum(1 for item in all_lifted if item.feature is not None)} "
                 f"placement(s) available for filtering."
             )
+            if skipped:
+                msg += f" Skipped {len(skipped)} source(s)."
             return (
-                AnnotationTransferResult(lifted=all_lifted, message=msg),
+                AnnotationTransferResult(
+                    lifted=all_lifted,
+                    message=msg,
+                    skipped_sources=tuple(skipped),
+                ),
                 job_tgt_id,
                 job_tgt_seq,
                 None,
             )
 
         worker = Worker(_job, progress=True)
+        attach_annotation_worker_process_monitor(
+            self,
+            worker,
+            title="Transfer annotation",
+            enabled=bool(show_process),
+            close_when_finished=bool(close_process),
+            tool_key="transfer_annotation",
+        )
         thread = QThread(self)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
@@ -9355,6 +9632,9 @@ class SequenceMapPanel(QWidget):
         self._transfer_worker = worker
         self._transfer_thread = thread
         thread.start()
+        settings_btn = getattr(self._rail, "transfer_ann_settings_btn", None)
+        if settings_btn is not None:
+            settings_btn.setEnabled(False)
 
     @Slot(str)
     def _on_transfer_annotation_progress(self, message: str) -> None:
@@ -9406,6 +9686,23 @@ class SequenceMapPanel(QWidget):
             "Transfer annotation",
             detail=getattr(result, "message", ""),
         )
+        skipped = list(getattr(result, "skipped_sources", ()) or ())
+        if skipped:
+            from repeatviewer.backends.annotation_transfer import (
+                transfer_skipped_reminder_parts,
+            )
+
+            headline, body = transfer_skipped_reminder_parts(skipped)
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Icon.Warning)
+            box.setWindowTitle("Transfer — some sources skipped")
+            box.setText(headline)
+            box.setInformativeText(body)
+            box.setStandardButtons(QMessageBox.StandardButton.Ok)
+            box.exec()
+            self.statusMessage.emit(
+                f"Transfer finished with {len(skipped)} source(s) skipped."
+            )
 
     @Slot(str)
     def _on_transfer_error(self, message: str) -> None:
@@ -10062,6 +10359,26 @@ class SequenceMapPanel(QWidget):
         self._broadcast_shared_annotation_settings_changed()
         self.refresh_similarity_databases()
         self.statusMessage.emit("Similarity annotation settings saved.")
+
+    def _open_transfer_annotation_settings(self) -> None:
+        from repeatviewer.backends.annotation_transfer import save_transfer_strategy
+        from repeatviewer.backends.auto_annotation_settings import (
+            save_annotation_run_options,
+        )
+
+        dialog = TransferAnnotationSettingsDialog(parent=self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        threads, show, close = dialog.run_options()
+        save_annotation_run_options(
+            num_threads=threads,
+            show_process_window=show,
+            close_process_window_when_finished=close,
+        )
+        save_transfer_strategy(dialog.transfer_strategy())
+        self._rail.refresh_transfer_run_tooltip()
+        self._broadcast_shared_annotation_settings_changed()
+        self.statusMessage.emit("Transfer annotation settings saved.")
 
     def _current_similarity_annotation_settings(self) -> SimilarityAnnotationSettings:
         return self._similarity_ann_settings

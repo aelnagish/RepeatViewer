@@ -6,9 +6,10 @@ import platform
 from pathlib import Path
 
 from PySide6.QtCore import QItemSelectionModel, QMimeData, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QBrush, QColor, QDrag, QFont, QMouseEvent
+from PySide6.QtGui import QBrush, QColor, QDrag, QFont, QFontMetrics, QMouseEvent, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QColorDialog,
     QDialog,
     QHeaderView,
@@ -162,6 +163,8 @@ class FileListTableWidget(QTableWidget):
     currentItemChanged = Signal(object, object)
     itemClicked = Signal(object)
     itemDoubleClicked = Signal(object)
+    # Emitted when a Files-list drag starts (copy/move to Folders); cancel Preview.
+    dragStarted = Signal()
     open_in_preview_requested = Signal(list)
     open_in_preview_tab_requested = Signal(list)
     open_in_text_editor_requested = Signal(list)
@@ -192,6 +195,8 @@ class FileListTableWidget(QTableWidget):
         self._sort_column = _COL_NAME
         self._sort_ascending = True
         self._suppress_selection_preview = False
+        # After a drag, Qt often fires cellClicked on mouse release — skip Preview.
+        self._skip_click_preview_once = False
         # Name sort: tint source + tool-output families. Other sorts: even/odd rows.
         self._family_banding_enabled = False
         self._row_zebra_enabled = False
@@ -1210,6 +1215,11 @@ class FileListTableWidget(QTableWidget):
     def _on_cell_clicked(self, row: int, column: int) -> None:
         if column == _COL_CHECK:
             return
+        if self._skip_click_preview_once:
+            # Mouse-up after drag must not open the dragged file in Preview.
+            self._skip_click_preview_once = False
+            self._suppress_selection_preview = False
+            return
         if column == _COL_IMAGES and self.cyto_image_count(row) > 0:
             raw = self._path_for_row(row)
             if raw:
@@ -1368,6 +1378,16 @@ class FileListTableWidget(QTableWidget):
                 menu.addSeparator()
                 menu.addAction("Cut", lambda: self.cut_files_requested.emit(paths))
                 menu.addAction("Copy", lambda: self.copy_files_requested.emit(paths))
+                if len(paths) == 1:
+                    menu.addAction(
+                        "Copy Path",
+                        lambda ps=list(paths): self._copy_file_paths_to_clipboard(ps),
+                    )
+                else:
+                    menu.addAction(
+                        f"Copy {len(paths)} Paths",
+                        lambda ps=list(paths): self._copy_file_paths_to_clipboard(ps),
+                    )
                 if can_paste:
                     menu.addAction("Paste", lambda: self.paste_files_requested.emit())
                 menu.addSeparator()
@@ -1501,6 +1521,25 @@ class FileListTableWidget(QTableWidget):
         if hasattr(window, "_open_selected_in_aliview"):
             window._open_selected_in_aliview()
 
+    def _copy_file_paths_to_clipboard(self, paths: list[Path]) -> None:
+        """Copy absolute file path(s) to the system clipboard (one per line)."""
+        lines: list[str] = []
+        for path in paths:
+            try:
+                lines.append(str(Path(path).expanduser().resolve()))
+            except OSError:
+                lines.append(str(Path(path).expanduser()))
+        if not lines:
+            return
+        QApplication.clipboard().setText("\n".join(lines))
+        window = self.window()
+        status = getattr(window, "_set_status_message", None)
+        if callable(status):
+            if len(lines) == 1:
+                status("File path copied", 3000)
+            else:
+                status(f"{len(lines)} file paths copied", 3000)
+
     def _reveal_paths(self, paths: list[Path]) -> None:
         window = self.window()
         if hasattr(window, "_reveal_in_file_manager"):
@@ -1509,20 +1548,89 @@ class FileListTableWidget(QTableWidget):
     def mimeData(self, items: list[FileListRow]) -> QMimeData:  # noqa: N802 (Qt API)
         mime = QMimeData()
         urls = []
+        names: list[str] = []
         for row_item in items:
             raw = row_item.data(_ROLE_PATH)
             if raw:
-                urls.append(Path(str(raw)).as_uri())
+                path = Path(str(raw))
+                urls.append(path.as_uri())
+                names.append(path.name)
         if urls:
             from PySide6.QtCore import QUrl
 
             mime.setUrls([QUrl(u) for u in urls])
+        # Prefer filenames for any text-based drag preview (not file:// URIs).
+        if names:
+            mime.setText("\n".join(names))
         return mime
+
+    def _drag_filename_pixmap(self, items: list[FileListRow]) -> QPixmap:
+        """Compact drag ghost: short elided name, trails right of the cursor.
+
+        Long FASTA names must not cover Folders drop targets under the pointer.
+        Built at the widget device-pixel ratio so Retina/HiDPI stays sharp.
+        """
+        names: list[str] = []
+        for row_item in items:
+            raw = row_item.data(_ROLE_PATH)
+            if raw:
+                names.append(Path(str(raw)).name)
+        if not names:
+            return QPixmap()
+        if len(names) == 1:
+            text = names[0]
+        else:
+            text = f"{len(names)} files"
+        font = self.font()
+        font.setPointSize(max(9, font.pointSize() - 1))
+        fm = QFontMetrics(font)
+        # Keep the badge narrow so Folders rows stay readable under the cursor.
+        text = fm.elidedText(text, Qt.TextElideMode.ElideMiddle, 140)
+        pad_x, pad_y = 8, 4
+        width = max(36, fm.horizontalAdvance(text) + pad_x * 2)
+        height = max(20, fm.height() + pad_y * 2)
+        dpr = max(1.0, float(self.devicePixelRatioF()))
+        pixmap = QPixmap(int(round(width * dpr)), int(round(height * dpr)))
+        pixmap.setDevicePixelRatio(dpr)
+        pixmap.fill(QColor(0, 0, 0, 0))
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        # Solid white so the short label stays readable over Folders/Files.
+        painter.setBrush(QColor(255, 255, 255))
+        painter.setPen(QColor(160, 160, 160))
+        painter.drawRoundedRect(0, 0, width - 1, height - 1, 5, 5)
+        painter.setPen(self.palette().color(self.foregroundRole()))
+        painter.setFont(font)
+        # Integer baseline avoids sub-pixel blur on the text.
+        painter.drawText(pad_x, pad_y + fm.ascent(), text)
+        painter.end()
+        return pixmap
 
     def startDrag(self, supportedActions):  # noqa: N802 (Qt API)
         items = self.selectedItems()
         if not items:
             return
+        # Selecting a row to drag must not open / switch Preview.
+        self._suppress_selection_preview = True
+        self._skip_click_preview_once = True
+        self.dragStarted.emit()
         drag = QDrag(self)
         drag.setMimeData(self.mimeData(items))
-        drag.exec(supportedActions)
+        pixmap = self._drag_filename_pixmap(items)
+        if not pixmap.isNull():
+            drag.setPixmap(pixmap)
+            # Anchor at the left so the label sits to the right of the cursor
+            # and does not cover the Folders row being hovered.
+            drag.setHotSpot(pixmap.rect().topLeft())
+        try:
+            drag.exec(supportedActions)
+        finally:
+            # Delay past the mouse-release cellClicked that Qt fires after a drag.
+            QTimer.singleShot(150, self._finish_drag_preview_guard)
+
+    def _finish_drag_preview_guard(self) -> None:
+        """Clear suppress if no post-drag click arrived (e.g. Escape cancel)."""
+        if self._skip_click_preview_once:
+            self._skip_click_preview_once = False
+        self._suppress_selection_preview = False

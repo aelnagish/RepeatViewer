@@ -29,6 +29,8 @@ class Worker(QObject):
     finished = Signal(object)
     error = Signal(str)
     progress = Signal(str)
+    # Command lines / process stdout from run_logged_process → process monitor.
+    log_line = Signal(str)
 
     def __init__(self, func: Callable[..., Any], *args: Any, **kwargs: Any) -> None:
         super().__init__()
@@ -40,13 +42,20 @@ class Worker(QObject):
 
     @Slot()
     def run(self) -> None:
+        from repeatviewer.external_process import process_log_sink
+
         kwargs = dict(self._kwargs)
         # Route progress callbacks through this worker's signal so UI updates
         # are queued to the main thread (never touch widgets here).
         if "progress" in kwargs and kwargs["progress"] is not None:
             kwargs["progress"] = self.progress.emit
+
+        def _log(message: str) -> None:
+            self.log_line.emit(str(message))
+
         try:
-            result = self._func(*self._args, **kwargs)
+            with process_log_sink(_log):
+                result = self._func(*self._args, **kwargs)
             self.finished.emit(result)
         except Exception as exc:  # noqa: BLE001 — surface to UI
             self.error.emit(str(exc))

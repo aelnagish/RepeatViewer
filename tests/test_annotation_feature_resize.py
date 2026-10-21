@@ -21,8 +21,11 @@ def test_feature_with_bounds_keeps_metadata() -> None:
         color="#c0392b",
         strand="-",
         track=2,
-        source="repeatviewer_internal",
+        source="Transfer (src.fa)",
         pident=90.0,
+        coverage=0.75,
+        source_start=100,
+        source_end=200,
     )
     updated = _feature_with_bounds(feat, 5, 25)
     assert (updated.start, updated.end) == (5, 25)
@@ -30,6 +33,10 @@ def test_feature_with_bounds_keeps_metadata() -> None:
     assert updated.strand == "-"
     assert updated.track == 2
     assert updated.pident == 90.0
+    assert updated.coverage == 0.75
+    assert updated.source == "Transfer (src.fa)"
+    assert updated.source_start == 100
+    assert updated.source_end == 200
 
 
 def test_overview_edge_hit_and_resize(qapp: QApplication, tmp_path) -> None:

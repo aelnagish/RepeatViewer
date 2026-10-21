@@ -739,7 +739,11 @@ class SettingsDialog(QDialog):
             "<b>Example BLAST:</b><br>"
             "If you select 10 FASTA files and set this to 3, RepeatViewer starts "
             "BLAST on three files in parallel. When one finishes, the next "
-            "waiting file starts, until all 10 are done."
+            "waiting file starts, until all 10 are done.<br><br>"
+            "<b>Transfer annotation:</b><br>"
+            "Also used when the Transfer source is a multi-sequence FASTA or a "
+            "folder — how many source→target pairs run at once. Each pair still "
+            "uses the Transfer Threads setting for MAFFT / minimap2 / blastn."
         )
         performance = _group("Performance", [
             (

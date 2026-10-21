@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from PySide6.QtCore import QObject, Qt, Signal, Slot
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
@@ -13,6 +15,81 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+
+# Matches "4 hit(s)", "4 BLASTN hit(s)", "4 pyhmmer domain hit(s)", etc.
+_HIT_COUNT_RE = re.compile(r"(\d+)\s+(?:\S+\s+)*hit\(s\)", re.IGNORECASE)
+
+
+def annotation_job_summary_lines(result: object) -> list[str]:
+    """Lines to append when Feature / Similarity / Transfer jobs finish.
+
+    Prefer the job ``message`` (already includes per-module counts) and add a
+    clear ``Identified features: N`` total when it can be derived.
+    """
+    if result is None:
+        return []
+    # Transfer annotation returns ``(AnnotationTransferResult, …)``.
+    if isinstance(result, tuple) and result:
+        result = result[0]
+
+    lines: list[str] = []
+    message = getattr(result, "message", None)
+    if isinstance(message, str):
+        for raw in message.splitlines():
+            text = raw.strip()
+            if text:
+                lines.append(text)
+
+    identified: int | None = None
+    type_name = type(result).__name__
+
+    if type_name == "AutoAnnotationResult":
+        features = getattr(result, "features", None)
+        if features is not None:
+            identified = len(features)
+    elif type_name == "MultiAutoAnnotationResult":
+        features = getattr(result, "features", None) or ()
+        modes = getattr(result, "modes", None) or ()
+        type_names = {str(getattr(mode, "value", mode)) for mode in modes}
+        if type_names:
+            identified = sum(
+                1
+                for feat in features
+                if str(getattr(feat, "feature_type", "")) in type_names
+            )
+        else:
+            identified = len(features)
+    elif type_name == "SimilarityAnnotationResult":
+        total_hits = 0
+        found = False
+        for line in lines:
+            match = _HIT_COUNT_RE.search(line)
+            if match:
+                total_hits += int(match.group(1))
+                found = True
+        if found:
+            identified = total_hits
+    elif type_name == "AnnotationTransferResult":
+        # Detailed transfer message is already streamed via progress.
+        lines.clear()
+        lifted = getattr(result, "lifted", None) or []
+        identified = sum(
+            1 for item in lifted if getattr(item, "feature", None) is not None
+        )
+    elif type_name == "TeAnnotationBatchResult":
+        # ``Identified features: N`` is already streamed via emit_process_log
+        # during the batch; only add the sequence count here.
+        n_seq = len(getattr(result, "record_ids", None) or ())
+        if n_seq:
+            lines.append(f"Annotated sequences: {n_seq}")
+        return lines
+
+    if identified is not None:
+        summary = f"Identified features: {identified}"
+        if summary not in lines:
+            lines.append(summary)
+    return lines
 
 
 class ProcessMonitorDialog(QDialog):
@@ -216,6 +293,9 @@ def attach_annotation_worker_process_monitor(
             def __init__(self) -> None:
                 super().__init__(parent)
                 queued = Qt.ConnectionType.QueuedConnection
+                # BLAST / hmmscan command lines (process_log_sink → Worker.log_line).
+                if hasattr(worker, "log_line"):
+                    worker.log_line.connect(self.log_line, queued)
                 worker.progress.connect(self._on_progress, queued)
                 worker.finished.connect(self._on_finished, queued)
                 worker.error.connect(self.failed, queued)
@@ -228,7 +308,12 @@ def attach_annotation_worker_process_monitor(
                     self.progress.emit(0, text)
 
             @Slot(object)
-            def _on_finished(self, _result: object) -> None:
+            def _on_finished(self, result: object) -> None:
+                summary = annotation_job_summary_lines(result)
+                if summary:
+                    self.log_line.emit("")
+                    for line in summary:
+                        self.log_line.emit(line)
                 self.finished.emit()
 
         adapter = _Adapter()
@@ -261,11 +346,18 @@ def attach_annotation_worker_process_monitor(
 
     class _FinishRelay(QObject):
         @Slot(object)
-        def on_finished(self, _result: object) -> None:
+        def on_finished(self, result: object) -> None:
+            summary = annotation_job_summary_lines(result)
+            if summary:
+                bridge.on_line("")
+                for line in summary:
+                    bridge.on_line(line)
             bridge.on_finished()
 
     relay = _FinishRelay(parent)
     queued = Qt.ConnectionType.QueuedConnection
+    if hasattr(worker, "log_line"):
+        worker.log_line.connect(bridge.on_line, queued)
     worker.progress.connect(bridge.on_line, queued)
     worker.finished.connect(relay.on_finished, queued)
     worker.error.connect(bridge.on_failed, queued)

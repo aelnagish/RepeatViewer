@@ -16,8 +16,10 @@ from repeatviewer.backends.database_prepare import (
     pyhmmer_install_hint,
 )
 from repeatviewer.backends.pyhmmer_search import (
+    collect_dna_hmm_domain_hits,
     collect_pyhmmer_domain_hits,
     hmm_uses_nucleotide_query,
+    nhmmscan_available,
 )
 from repeatviewer.backends.sequence_operations import predicted_orf_records
 from repeatviewer.job_options import (
@@ -199,8 +201,12 @@ def run_hmmer_search(
     cancel=None,
 ) -> list[Path]:
     """Search ``query_path`` against ``database`` and optionally write a hit table."""
-    del cancel  # reserved for future cooperative cancel in pyhmmer loops
-    if not _pyhmmer_available():
+    nucleotide_preview = hmm_uses_nucleotide_query(
+        database.path.expanduser().resolve()
+    )
+    if nucleotide_preview and nhmmscan_available():
+        pass  # system nhmmscan is enough for DNA HMM DBs such as Dfam
+    elif not _pyhmmer_available():
         raise RuntimeError(
             f"pyhmmer is not installed ({pyhmmer_install_hint()})."
         )
@@ -251,16 +257,33 @@ def run_hmmer_search(
             mode = "nucleotide" if nucleotide_hmm else "protein"
             _hmmer_process_log(f"Search mode: {mode} query against HMM profile(s)")
 
-        _hmmer_process_log("Running hmmscan…")
-        raw_hits = collect_pyhmmer_domain_hits(
-            hmm_path,
-            search_query,
-            report_e=report_e,
-            domain_e=domain_e,
-            cpus=max(1, int(opts.num_threads)),
-        )
+        if nucleotide_hmm:
+            from repeatviewer.backends.pyhmmer_search import hmm_pressed_indexes_present
 
-    _hmmer_process_log(f"hmmscan finished: {len(raw_hits)} domain hit(s) before filtering")
+            use_nhmmscan = nhmmscan_available() and hmm_pressed_indexes_present(hmm_path)
+            engine = "nhmmscan" if use_nhmmscan else "pyhmmer hmmscan"
+            _hmmer_process_log(f"Running {engine}…")
+            raw_hits = collect_dna_hmm_domain_hits(
+                hmm_path,
+                search_query,
+                report_e=report_e,
+                domain_e=domain_e,
+                cpus=max(1, int(opts.num_threads)),
+                cancel=cancel,
+            )
+        else:
+            _hmmer_process_log("Running hmmscan…")
+            raw_hits = collect_pyhmmer_domain_hits(
+                hmm_path,
+                search_query,
+                report_e=report_e,
+                domain_e=domain_e,
+                cpus=max(1, int(opts.num_threads)),
+            )
+
+    _hmmer_process_log(
+        f"HMM search finished: {len(raw_hits)} domain hit(s) before filtering"
+    )
     selected = _select_hits(
         raw_hits,
         max_hits=opts.max_hits,

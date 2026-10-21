@@ -176,10 +176,15 @@ class _ToolbarPopup(QWidget):
                 row_layout.addWidget(separator)
                 layout.addWidget(row)
                 continue
-            button = QPushButton(action.text().replace("&", ""), panel)
+            label = action.text().replace("&", "")
+            button = QPushButton(label, panel)
             button.setCursor(Qt.CursorShape.ArrowCursor)
             button.setEnabled(action.isEnabled())
-            button.setToolTip(action.toolTip())
+            # QAction.toolTip() falls back to the action text when unset — that
+            # just repeats the button label in a white hover box (Visualization,
+            # BLAST, …). Only keep a tip when it adds something new.
+            tip = (action.toolTip() or "").replace("&", "").strip()
+            button.setToolTip(tip if tip and tip != label.strip() else "")
             button.clicked.connect(
                 lambda _checked=False, selected=action: self._run_action(selected)
             )
@@ -1997,12 +2002,21 @@ class FolderTreeWidget(QTreeWidget):
             if len(folders) == 1:
                 folder = folders[0]
                 menu.addAction("Rename folder", lambda: self.rename_folder_requested.emit(folder))
+                menu.addAction(
+                    "Copy Path",
+                    lambda fs=list(folders): self._copy_folder_paths_to_clipboard(fs),
+                )
                 window = self.window()
                 if hasattr(window, "_clipboard_can_paste") and window._clipboard_can_paste():
                     menu.addAction(
                         "Paste",
                         lambda f=folder: self.paste_to_folder_requested.emit(f),
                     )
+            else:
+                menu.addAction(
+                    f"Copy {len(folders)} Paths",
+                    lambda fs=list(folders): self._copy_folder_paths_to_clipboard(fs),
+                )
             if len(folders) == 1:
                 menu.addAction(
                     "Duplicate",
@@ -2061,6 +2075,26 @@ class FolderTreeWidget(QTreeWidget):
                     lambda: self.delete_folders_requested.emit(folders),
                 )
         menu.exec(self.mapToGlobal(position))
+
+    def _copy_folder_paths_to_clipboard(self, folders: list[Path]) -> None:
+        """Copy absolute folder path(s) to the system clipboard (one per line)."""
+        lines: list[str] = []
+        for folder in folders:
+            try:
+                lines.append(str(Path(folder).expanduser().resolve()))
+            except OSError:
+                lines.append(str(Path(folder).expanduser()))
+        if not lines:
+            return
+        QApplication.clipboard().setText("\n".join(lines))
+        window = self.window()
+        status = getattr(window, "_set_status_message", None)
+        if callable(status):
+            if len(lines) == 1:
+                status("Folder path copied", 3000)
+            else:
+                status(f"{len(lines)} folder paths copied", 3000)
+
     def _set_folders_color(
         self,
         folder_items: list[tuple[Path, QTreeWidgetItem]],
@@ -2454,6 +2488,7 @@ class MainWindow(QMainWindow):
         self._file_list.currentItemChanged.connect(self._on_file_current_item_changed)
         self._file_list.itemClicked.connect(self._on_file_item_clicked)
         self._file_list.itemDoubleClicked.connect(self._on_file_double_clicked)
+        self._file_list.dragStarted.connect(self._on_file_list_drag_started)
         self._file_list.open_in_preview_requested.connect(self._open_files_in_preview)
         self._file_list.open_in_preview_tab_requested.connect(self._open_files_in_preview_tabs)
         self._file_list.open_in_text_editor_requested.connect(self._open_selected_in_text_editor)
@@ -9834,6 +9869,11 @@ class MainWindow(QMainWindow):
                     self._folder_nav.set_file(path, record_history=True)
             except OSError:
                 pass
+
+    def _on_file_list_drag_started(self) -> None:
+        """Cancel a Preview open queued by selecting a row just to drag it."""
+        self._pending_preview_selection = None
+        self._preview_selection_timer.stop()
 
     def _on_file_current_item_changed(
         self,

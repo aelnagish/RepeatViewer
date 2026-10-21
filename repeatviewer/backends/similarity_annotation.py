@@ -18,7 +18,12 @@ from Bio.SeqRecord import SeqRecord
 
 from repeatviewer.backends.thread_budget import load_batch_workers
 from repeatviewer.backends.auto_annotation_settings import OrfSettings
-from repeatviewer.backends.pyhmmer_search import collect_pyhmmer_domain_hits, hmm_uses_nucleotide_query
+from repeatviewer.backends.pyhmmer_search import (
+    collect_dna_hmm_domain_hits,
+    collect_pyhmmer_domain_hits,
+    hmm_uses_nucleotide_query,
+    nhmmscan_available,
+)
 from repeatviewer.backends.similarity_annotation_settings import (
     SimilarityAnnotationSettings,
     similarity_feature_name,
@@ -1191,28 +1196,37 @@ def _annotate_protein_hmm_with_pyhmmer(
     )
 
 
-def _annotate_dna_hmm_with_pyhmmer(
+def _annotate_dna_hmm_search(
     sequence: str,
     seq_id: str,
     database: UserDatabase,
     *,
     settings: SimilarityAnnotationSettings,
     cpus: int = 1,
+    cancel: JobCancellation | None = None,
 ) -> tuple[tuple[SequenceFeature, ...], str]:
     hmm_path = database.path.expanduser().resolve()
     max_hits = _max_hits(settings.max_hits_per_database)
+    report_e = _clamp_evalue(settings.hmm_evalue, default=DEFAULT_HMM_EVALUE)
+    from repeatviewer.backends.pyhmmer_search import hmm_pressed_indexes_present
+
+    engine = (
+        "nhmmscan"
+        if nhmmscan_available() and hmm_pressed_indexes_present(hmm_path)
+        else "pyhmmer"
+    )
     with tempfile.TemporaryDirectory(prefix="repeatviewer_simann_nhmm_") as tmp:
         query_fa = Path(tmp) / "query.fa"
         SeqIO.write([SeqRecord(Seq(sequence), id=seq_id or "query")], str(query_fa), "fasta")
-        raw_hits = collect_pyhmmer_domain_hits(
+        raw_hits = collect_dna_hmm_domain_hits(
             hmm_path,
             query_fa,
-            report_e=_clamp_evalue(settings.hmm_evalue, default=DEFAULT_HMM_EVALUE),
+            report_e=report_e,
             cpus=max(1, int(cpus)),
+            cancel=cancel,
         )
     selected = _select_pyhmmer_hits_by_coverage(raw_hits, max_hits=max_hits)
     if not selected:
-        report_e = _clamp_evalue(settings.hmm_evalue, default=DEFAULT_HMM_EVALUE)
         return (), f"{database.name}: no HMM hits (E-value ≤ {report_e:g})."
     features = _domain_features_from_nucleotide_hmm_hits(
         selected,
@@ -1221,10 +1235,10 @@ def _annotate_dna_hmm_with_pyhmmer(
     )
     if not features:
         return (), f"{database.name}: no HMM hits found."
-    report_e = _clamp_evalue(settings.hmm_evalue, default=DEFAULT_HMM_EVALUE)
     return (
         tuple(features),
-        f"{database.name}: {len(features)} pyhmmer domain hit(s) (E-value ≤ {report_e:g}).",
+        f"{database.name}: {len(features)} {engine} domain hit(s) "
+        f"(E-value ≤ {report_e:g}).",
     )
 
 
@@ -1256,18 +1270,31 @@ def _annotate_dna_hmm_database(
     *,
     settings: SimilarityAnnotationSettings,
     cpus: int = 1,
+    cancel: JobCancellation | None = None,
 ) -> tuple[tuple[SequenceFeature, ...], str]:
-    try:
-        import pyhmmer  # type: ignore[import-untyped]  # noqa: F401
-    except ImportError:
-        return (), f"{database.name}: pyhmmer is not installed ({pyhmmer_install_hint()})."
+    if not nhmmscan_available():
+        try:
+            import pyhmmer  # type: ignore[import-untyped]  # noqa: F401
+        except ImportError:
+            return (
+                (),
+                f"{database.name}: install HMMER (nhmmscan) or pyhmmer "
+                f"({pyhmmer_install_hint()}) to search DNA HMM databases such as Dfam.",
+            )
 
     try:
-        return _annotate_dna_hmm_with_pyhmmer(
-            sequence, seq_id, database, settings=settings, cpus=cpus
+        return _annotate_dna_hmm_search(
+            sequence,
+            seq_id,
+            database,
+            settings=settings,
+            cpus=cpus,
+            cancel=cancel,
         )
+    except JobCancelledError:
+        raise
     except Exception as exc:  # noqa: BLE001
-        return (), f"{database.name}: pyhmmer search failed ({exc})."
+        return (), f"{database.name}: DNA HMM search failed ({exc})."
 
 
 def _annotate_hmm_database(
@@ -1278,6 +1305,7 @@ def _annotate_hmm_database(
     *,
     settings: SimilarityAnnotationSettings,
     cpus: int = 1,
+    cancel: JobCancellation | None = None,
 ) -> tuple[tuple[SequenceFeature, ...], str]:
     hmm_path = database.path.expanduser().resolve()
     readiness = database_search_readiness(database)
@@ -1286,7 +1314,12 @@ def _annotate_hmm_database(
 
     if hmm_uses_nucleotide_query(hmm_path):
         return _annotate_dna_hmm_database(
-            sequence, seq_id, database, settings=settings, cpus=cpus
+            sequence,
+            seq_id,
+            database,
+            settings=settings,
+            cpus=cpus,
+            cancel=cancel,
         )
     return _annotate_protein_hmm_database(
         sequence, orfs, database, settings=settings, cpus=cpus
@@ -1355,6 +1388,7 @@ def _annotate_single_similarity_database(
             db,
             settings=settings,
             cpus=blast_threads,
+            cancel=cancel,
         )
     if db.db_type == DATABASE_TYPE_PROTEIN:
         return _annotate_protein_database(
@@ -1485,27 +1519,51 @@ def run_similarity_annotations(
 
         total = len(databases)
         thread_budget = max(1, int(cfg.num_threads))
-        workers = _similarity_parallel_workers(total, thread_budget=thread_budget)
-        blast_threads = _similarity_blast_threads(total, thread_budget=thread_budget)
+        # Large DNA HMM DBs (Dfam curated) scale with CPUs via nhmmscan; keep them
+        # sequential so they get the full Threads budget instead of sharing it.
+        has_dna_hmm = any(
+            entry.database.is_hmm
+            and hmm_uses_nucleotide_query(entry.database.path)
+            for entry in databases
+        )
+        workers = (
+            1
+            if has_dna_hmm
+            else _similarity_parallel_workers(total, thread_budget=thread_budget)
+        )
+        blast_threads = _similarity_blast_threads(
+            total if workers > 1 else 1,
+            thread_budget=thread_budget,
+        )
         db_results: list[
             tuple[SimilarityDatabaseRun, tuple[SequenceFeature, ...], str] | None
         ] = [None] * total
         completed = 0
 
+        # Re-bind the process-monitor sink inside pool threads (ContextVar does
+        # not always follow ThreadPoolExecutor workers).
+        from repeatviewer.external_process import (
+            current_process_log_sink,
+            process_log_sink,
+        )
+
+        log_sink = current_process_log_sink()
+
         def _run_one(
             index: int, entry: SimilarityDatabaseRun
         ) -> tuple[int, SimilarityDatabaseRun, tuple[SequenceFeature, ...], str]:
-            check_cancelled(cancel)
-            detected, msg = _annotate_single_similarity_database(
-                entry=entry,
-                sequence=sequence,
-                seq_id=seq_id,
-                orfs=orfs,
-                settings=cfg,
-                use_system_blast=use_system_blast,
-                blast_threads=blast_threads,
-                cancel=cancel,
-            )
+            with process_log_sink(log_sink):
+                check_cancelled(cancel)
+                detected, msg = _annotate_single_similarity_database(
+                    entry=entry,
+                    sequence=sequence,
+                    seq_id=seq_id,
+                    orfs=orfs,
+                    settings=cfg,
+                    use_system_blast=use_system_blast,
+                    blast_threads=blast_threads,
+                    cancel=cancel,
+                )
             return index, entry, detected, msg
 
         if progress is not None:

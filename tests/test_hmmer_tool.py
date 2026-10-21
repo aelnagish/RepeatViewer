@@ -109,7 +109,7 @@ def test_run_hmmer_emits_process_log(tmp_path: Path, monkeypatch) -> None:
         lambda _db: None,
     )
     monkeypatch.setattr(
-        "repeatviewer.backends.hmmer_tool.collect_pyhmmer_domain_hits",
+        "repeatviewer.backends.hmmer_tool.collect_dna_hmm_domain_hits",
         lambda *a, **k: [(1.0, 0.1, "q", "test", 1, 5)],
     )
     monkeypatch.setattr(
@@ -126,7 +126,7 @@ def test_run_hmmer_emits_process_log(tmp_path: Path, monkeypatch) -> None:
     with process_log_sink(lines.append):
         run_hmmer_search(query, db, options=HmmerOptions(write_text=False))
     joined = "\n".join(lines)
-    assert "Running hmmscan" in joined
+    assert "Running pyhmmer hmmscan" in joined or "Running nhmmscan" in joined
     assert "domain hit(s) before filtering" in joined
     assert "Done." in joined
 
@@ -151,7 +151,7 @@ def test_run_hmmer_dna_path_writes_table(tmp_path: Path, monkeypatch) -> None:
     )
     hits = [(12.0, 0.001, "q", "test", 1, 20)]
 
-    def _fake_collect(hmm_path, query_path, *, report_e, domain_e=None, cpus=1):
+    def _fake_collect(hmm_path, query_path, *, report_e, domain_e=None, cpus=1, cancel=None):
         assert Path(hmm_path) == hmm.resolve()
         assert Path(query_path) == query.resolve()
         assert cpus == 3
@@ -159,7 +159,7 @@ def test_run_hmmer_dna_path_writes_table(tmp_path: Path, monkeypatch) -> None:
         return hits
 
     monkeypatch.setattr(
-        "repeatviewer.backends.hmmer_tool.collect_pyhmmer_domain_hits",
+        "repeatviewer.backends.hmmer_tool.collect_dna_hmm_domain_hits",
         _fake_collect,
     )
     monkeypatch.setattr(
@@ -197,7 +197,7 @@ def test_run_hmmer_numbered_table_when_default_exists(
         lambda _db: None,
     )
     monkeypatch.setattr(
-        "repeatviewer.backends.hmmer_tool.collect_pyhmmer_domain_hits",
+        "repeatviewer.backends.hmmer_tool.collect_dna_hmm_domain_hits",
         lambda *a, **k: [(1.0, 0.1, "q", "test", 1, 5)],
     )
     monkeypatch.setattr(
@@ -280,7 +280,7 @@ def test_hmmer_dialog_sections_and_advanced(qapp: QApplication) -> None:
     assert "Define inputs" in radios
     texts = [b.text() for b in dlg.findChildren(QPushButton)]
     assert any(t.startswith("Advanced Settings") for t in texts)
-    assert "Manage databases…" in texts
+    assert any("Manage Database" in t for t in texts)
     assert dlg.input_source() == ALIGN_INPUT_SELECTED
     assert dlg._hmmer_advanced_panel.isHidden()
     group_titles = [g.title() for g in dlg.findChildren(QGroupBox)]
