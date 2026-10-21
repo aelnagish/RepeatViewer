@@ -463,6 +463,82 @@ class _Ruler(QWidget):
         super().__init__(view)
         self._view = view
         self._horizontal = horizontal
+        self.setMouseTracking(True)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        """Show the full sequence name when the elided axis label is hovered."""
+        view = self._view
+        entries = view.axis_entries(self._horizontal)
+        tip = ""
+        if entries and view.plot_length() > 0:
+            pos = float(event.position().x() if self._horizontal else event.position().y())
+            for entry in entries:
+                start = float(view.scene_to_ruler(float(entry.offset), self._horizontal))
+                end = float(
+                    view.scene_to_ruler(
+                        float(entry.offset + entry.length), self._horizontal
+                    )
+                )
+                lo, hi = (start, end) if start <= end else (end, start)
+                if lo <= pos <= hi:
+                    tip = str(entry.name)
+                    break
+        if tip != self.toolTip():
+            self.setToolTip(tip)
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802
+        self.setToolTip("")
+        super().leaveEvent(event)
+
+    def _paint_sequence_axis_labels(
+        self, painter: QPainter, view: "DotplotCanvas", entries: list
+    ) -> None:
+        """Draw multi-sequence names, elided to each block so they do not overlap.
+
+        Full names are often longer than a panel at Fit zoom; clipping each
+        label to its sequence's pixel span keeps neighbours readable. Zoom in
+        on a block to see more of the name.
+        """
+        painter.setPen(QPen(_RULER_FG))
+        metrics = painter.fontMetrics()
+        # Below this many pixels a label is just noise — skip it.
+        min_px = max(14, metrics.horizontalAdvance("…") + 4)
+        pad = 4.0
+        for entry in entries:
+            start = float(view.scene_to_ruler(float(entry.offset), self._horizontal))
+            end = float(
+                view.scene_to_ruler(
+                    float(entry.offset + entry.length), self._horizontal
+                )
+            )
+            lo, hi = (start, end) if start <= end else (end, start)
+            avail = hi - lo - pad
+            if avail < min_px:
+                continue
+            centre = (lo + hi) / 2.0
+            if self._horizontal:
+                if centre < 0 or centre > self.width():
+                    continue
+            else:
+                if centre < 0 or centre > self.height():
+                    continue
+            text = metrics.elidedText(
+                str(entry.name),
+                Qt.TextElideMode.ElideMiddle,
+                max(1, int(avail)),
+            )
+            if not text:
+                continue
+            w = metrics.horizontalAdvance(text)
+            if self._horizontal:
+                painter.drawText(int(centre - w / 2), self.height() - 5, text)
+            else:
+                painter.save()
+                painter.translate(self.width() - 4, centre)
+                painter.rotate(-90)
+                painter.drawText(int(-w / 2), 0, text)
+                painter.restore()
 
     def paintEvent(self, event) -> None:  # noqa: N802
         view = self._view
@@ -478,23 +554,7 @@ class _Ruler(QWidget):
 
         entries = view.axis_entries(self._horizontal)
         if entries:
-            painter.setPen(QPen(_RULER_FG))
-            for entry in entries:
-                centre = entry.offset + entry.length / 2.0
-                pos = view.scene_to_ruler(centre, self._horizontal)
-                text = entry.name
-                if self._horizontal:
-                    if 0 <= pos <= self.width():
-                        w = painter.fontMetrics().horizontalAdvance(text)
-                        painter.drawText(int(pos - w / 2), self.height() - 5, text)
-                else:
-                    if 0 <= pos <= self.height():
-                        painter.save()
-                        painter.translate(self.width() - 4, pos)
-                        painter.rotate(-90)
-                        w = painter.fontMetrics().horizontalAdvance(text)
-                        painter.drawText(int(-w / 2), 0, text)
-                        painter.restore()
+            self._paint_sequence_axis_labels(painter, view, entries)
             painter.setPen(QPen(_RULER_LINE))
             if self._horizontal:
                 painter.drawLine(0, self.height() - 1, self.width(), self.height() - 1)
