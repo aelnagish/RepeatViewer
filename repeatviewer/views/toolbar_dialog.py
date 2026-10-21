@@ -116,7 +116,7 @@ TOOLBAR_LABELS: dict[str, str] = {
     "teaid": "TE-Aid",
     "msa_clean": "MSA Clean",
     "consensus": "Consensus",
-    "flexidot": "Flexidot",
+    "flexidot": "Dotplot",
     "te_annotation": "Sequence Annotation",
     "te_genome_map": "Visualization",
     "te_divergence_plot": "TE divergence",

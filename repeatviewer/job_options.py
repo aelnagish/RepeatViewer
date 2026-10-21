@@ -690,7 +690,8 @@ DEFAULT_FLEXIDOT_INCLUDE_REVERSE = True
 DEFAULT_FLEXIDOT_ONLY_VS_FIRST = False
 DEFAULT_FLEXIDOT_LINE_WIDTH = 1.0
 DEFAULT_FLEXIDOT_LENGTH_SCALING = False
-DEFAULT_FLEXIDOT_COMBINED = True
+# False = Self comparison (default, like FastGA); True = Pairwise comparison.
+DEFAULT_FLEXIDOT_COMBINED = False
 DEFAULT_FLEXIDOT_SEQUENCE_TYPE = "nuc"
 FLEXIDOT_SEQUENCE_NUC = "nuc"
 FLEXIDOT_SEQUENCE_AA = "aa"
@@ -700,9 +701,47 @@ FLEXIDOT_SEQUENCE_TYPES = (FLEXIDOT_SEQUENCE_NUC, FLEXIDOT_SEQUENCE_AA)
 # all-vs-all from sequence count). Not exposed in the Flexidot dialog.
 FLEXIDOT_MODE_CHOICES = ("0", "1", "2")
 DEFAULT_FLEXIDOT_MODES: tuple[str, ...] = ()
-FLEXIDOT_RIGHT_CLICK_RUN = "run"
+# Right-click on the Dotplot toolbar button.
+FLEXIDOT_RIGHT_CLICK_BUILTIN = "builtin"
+FLEXIDOT_RIGHT_CLICK_FLEXIDOT = "flexidot"
 FLEXIDOT_RIGHT_CLICK_DIALOG = "dialog"
-FLEXIDOT_RIGHT_CLICK_ACTIONS = (FLEXIDOT_RIGHT_CLICK_RUN, FLEXIDOT_RIGHT_CLICK_DIALOG)
+# Legacy “run with saved parameters” (pre Built-in/Flexidot split).
+FLEXIDOT_RIGHT_CLICK_RUN = "run"
+FLEXIDOT_RIGHT_CLICK_ACTIONS = (
+    FLEXIDOT_RIGHT_CLICK_BUILTIN,
+    FLEXIDOT_RIGHT_CLICK_FLEXIDOT,
+    FLEXIDOT_RIGHT_CLICK_DIALOG,
+)
+
+
+def normalize_flexidot_right_click_action(raw: object) -> str:
+    """Return ``builtin``, ``flexidot``, or ``dialog`` for Dotplot right-click."""
+    value = str(raw or FLEXIDOT_RIGHT_CLICK_BUILTIN).strip().lower()
+    if value in FLEXIDOT_RIGHT_CLICK_ACTIONS:
+        return value
+    # Old “Run Dotplot with saved parameters” → Built-in (default engine).
+    if value in {"run", "default", "saved"}:
+        return FLEXIDOT_RIGHT_CLICK_BUILTIN
+    return FLEXIDOT_RIGHT_CLICK_BUILTIN
+
+# Dotplot parameters dialog tabs (BLAST-style engine chooser).
+DOTPLOT_DIALOG_TAB_BUILTIN = "builtin"
+DOTPLOT_DIALOG_TAB_FLEXIDOT = "flexidot"
+DOTPLOT_DIALOG_TABS = (DOTPLOT_DIALOG_TAB_BUILTIN, DOTPLOT_DIALOG_TAB_FLEXIDOT)
+DEFAULT_BUILTIN_DOTPLOT_WORD_SIZE = 15
+DEFAULT_BUILTIN_DOTPLOT_INCLUDE_REVERSE = True
+# False = Self comparison (default); True = Pairwise comparison.
+DEFAULT_BUILTIN_DOTPLOT_COMBINED = False
+
+
+def normalize_dotplot_dialog_tab(raw: object) -> str:
+    """Return ``builtin`` or ``flexidot`` for the Dotplot parameters dialog."""
+    value = str(raw or DOTPLOT_DIALOG_TAB_BUILTIN).strip().lower()
+    if value in DOTPLOT_DIALOG_TABS:
+        return value
+    if value in {"parameters", "flexi", "external"}:
+        return DOTPLOT_DIALOG_TAB_FLEXIDOT
+    return DOTPLOT_DIALOG_TAB_BUILTIN
 
 
 def normalize_flexidot_sequence_type(raw: object) -> str:
@@ -750,7 +789,7 @@ def normalize_flexidot_output_format(value: str) -> str:
 
 @dataclass
 class FlexidotOptions:
-    """Saved matching, display, and output parameters for Flexidot."""
+    """Saved Dotplot dialog settings (Built-in + Flexidot engines)."""
 
     wordsize: int = DEFAULT_FLEXIDOT_WORDSIZE
     # Flexidot -t: ``nuc`` (DNA, default) or ``aa`` (protein).
@@ -766,14 +805,21 @@ class FlexidotOptions:
     line_width: float = DEFAULT_FLEXIDOT_LINE_WIDTH
     # Scale pairwise/all-vs-all plots by sequence length (flexidot -L).
     length_scaling: bool = DEFAULT_FLEXIDOT_LENGTH_SCALING
-    # Combine all selected files into one dotplot; also the right-click mode.
-    # When False, each selected file is plotted separately.
+    # Mode: False = Self comparison (each selected file vs itself);
+    # True = Pairwise comparison (each against the others, one Flexidot run).
     combined: bool = DEFAULT_FLEXIDOT_COMBINED
     # Explicit flexidot comparison modes (-m); empty tuple = auto (see above).
     modes: tuple[str, ...] = DEFAULT_FLEXIDOT_MODES
-    right_click_action: str = FLEXIDOT_RIGHT_CLICK_RUN
+    right_click_action: str = FLEXIDOT_RIGHT_CLICK_BUILTIN
     show_process_window: bool = DEFAULT_SHOW_PROCESS_WINDOW
     close_process_window_when_finished: bool = DEFAULT_CLOSE_PROCESS_WINDOW_WHEN_FINISHED
+    # Built-in RepeatViewer dotplot (``*_self_dot.paf`` / ``*_multi_dot.paf``).
+    builtin_word_size: int = DEFAULT_BUILTIN_DOTPLOT_WORD_SIZE
+    builtin_include_reverse: bool = DEFAULT_BUILTIN_DOTPLOT_INCLUDE_REVERSE
+    # Mode: False = Self; True = Pairwise (legacy key name ``builtin_combined``).
+    builtin_combined: bool = DEFAULT_BUILTIN_DOTPLOT_COMBINED
+    # Active engine tab in the Dotplot parameters dialog.
+    last_dialog_tab: str = DOTPLOT_DIALOG_TAB_BUILTIN
 
 
 TE_ANNOTATION_RIGHT_CLICK_RUN = "run"
@@ -2195,12 +2241,16 @@ def save_consensus_options(opts: ConsensusOptions) -> None:
 
 
 def load_flexidot_options() -> FlexidotOptions:
+    from repeatviewer.backends.dotplot import MAX_WORD_SIZE, MIN_WORD_SIZE
+
     v = _load_settings_group("flexidot")
     wordsize = int(v.get("wordsize", DEFAULT_FLEXIDOT_WORDSIZE))
     wordsize = max(MIN_FLEXIDOT_WORDSIZE, min(MAX_FLEXIDOT_WORDSIZE, wordsize))
-    right_click_action = str(v.get("right_click_action", FLEXIDOT_RIGHT_CLICK_RUN))
-    if right_click_action not in FLEXIDOT_RIGHT_CLICK_ACTIONS:
-        right_click_action = FLEXIDOT_RIGHT_CLICK_RUN
+    right_click_action = normalize_flexidot_right_click_action(
+        v.get("right_click_action", FLEXIDOT_RIGHT_CLICK_BUILTIN)
+    )
+    builtin_word = int(v.get("builtin_word_size", DEFAULT_BUILTIN_DOTPLOT_WORD_SIZE))
+    builtin_word = max(MIN_WORD_SIZE, min(MAX_WORD_SIZE, builtin_word))
     return FlexidotOptions(
         wordsize=wordsize,
         sequence_type=normalize_flexidot_sequence_type(
@@ -2222,8 +2272,11 @@ def load_flexidot_options() -> FlexidotOptions:
         line_width=max(0.1, min(20.0, float(v.get("line_width", 1.0)))),
         length_scaling=str(v.get("length_scaling", "false")).lower()
         in {"1", "true", "yes"},
-        combined=str(v.get("combined", "true")).lower() in {"1", "true", "yes"},
-        # Comparison mode is always automatic (not exposed in the dialog).
+        combined=str(
+            v.get("combined", "true" if DEFAULT_FLEXIDOT_COMBINED else "false")
+        ).lower()
+        in {"1", "true", "yes"},
+        # Flexidot -m stays automatic from sequence count when Pairwise is on.
         modes=DEFAULT_FLEXIDOT_MODES,
         right_click_action=right_click_action,
         show_process_window=str(v.get("show_process_window", "true" if DEFAULT_SHOW_PROCESS_WINDOW else "false")).lower()
@@ -2232,10 +2285,31 @@ def load_flexidot_options() -> FlexidotOptions:
             v.get("close_process_window_when_finished", "true" if DEFAULT_CLOSE_PROCESS_WINDOW_WHEN_FINISHED else "false")
         ).lower()
         in {"1", "true", "yes"},
+        builtin_word_size=builtin_word,
+        builtin_include_reverse=str(
+            v.get("builtin_include_reverse", "true")
+        ).lower()
+        in {"1", "true", "yes"},
+        builtin_combined=str(
+            v.get(
+                "builtin_combined",
+                "true" if DEFAULT_BUILTIN_DOTPLOT_COMBINED else "false",
+            )
+        ).lower()
+        in {"1", "true", "yes"},
+        last_dialog_tab=normalize_dotplot_dialog_tab(
+            v.get("last_dialog_tab", DOTPLOT_DIALOG_TAB_BUILTIN)
+        ),
     )
 
 
 def save_flexidot_options(opts: FlexidotOptions) -> None:
+    from repeatviewer.backends.dotplot import MAX_WORD_SIZE, MIN_WORD_SIZE
+
+    builtin_word = max(
+        MIN_WORD_SIZE,
+        min(MAX_WORD_SIZE, int(opts.builtin_word_size)),
+    )
     _save_settings_group(
         "flexidot",
         {
@@ -2253,15 +2327,17 @@ def save_flexidot_options(opts: FlexidotOptions) -> None:
             "length_scaling": opts.length_scaling,
             "combined": opts.combined,
             "modes": ",".join(opts.modes),
-            "right_click_action": (
+            "right_click_action": normalize_flexidot_right_click_action(
                 opts.right_click_action
-                if opts.right_click_action in FLEXIDOT_RIGHT_CLICK_ACTIONS
-                else FLEXIDOT_RIGHT_CLICK_RUN
             ),
             "show_process_window": opts.show_process_window,
             "close_process_window_when_finished": (
                 opts.close_process_window_when_finished
             ),
+            "builtin_word_size": builtin_word,
+            "builtin_include_reverse": opts.builtin_include_reverse,
+            "builtin_combined": opts.builtin_combined,
+            "last_dialog_tab": normalize_dotplot_dialog_tab(opts.last_dialog_tab),
         },
     )
 

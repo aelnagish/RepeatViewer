@@ -1,7 +1,11 @@
 from repeatviewer.job_options import (
+    FLEXIDOT_RIGHT_CLICK_BUILTIN,
+    FLEXIDOT_RIGHT_CLICK_DIALOG,
+    FLEXIDOT_RIGHT_CLICK_FLEXIDOT,
     FlexidotOptions,
     load_flexidot_options,
     normalize_flexidot_output_format,
+    normalize_flexidot_right_click_action,
     normalize_flexidot_sequence_type,
     save_flexidot_options,
 )
@@ -21,6 +25,50 @@ def test_normalize_flexidot_sequence_type() -> None:
     assert normalize_flexidot_sequence_type("aa") == "aa"
     assert normalize_flexidot_sequence_type("protein") == "aa"
     assert normalize_flexidot_sequence_type("") == "nuc"
+
+
+def test_normalize_flexidot_right_click_action() -> None:
+    assert (
+        normalize_flexidot_right_click_action("builtin")
+        == FLEXIDOT_RIGHT_CLICK_BUILTIN
+    )
+    assert (
+        normalize_flexidot_right_click_action("flexidot")
+        == FLEXIDOT_RIGHT_CLICK_FLEXIDOT
+    )
+    assert (
+        normalize_flexidot_right_click_action("dialog")
+        == FLEXIDOT_RIGHT_CLICK_DIALOG
+    )
+    # Legacy “run with saved parameters” → Built-in.
+    assert (
+        normalize_flexidot_right_click_action("run") == FLEXIDOT_RIGHT_CLICK_BUILTIN
+    )
+    assert (
+        normalize_flexidot_right_click_action("") == FLEXIDOT_RIGHT_CLICK_BUILTIN
+    )
+
+
+def test_save_and_load_flexidot_right_click(monkeypatch) -> None:
+    saved: dict = {}
+
+    def _save(group, values):
+        saved[group] = values
+
+    def _load(group):
+        return saved.get(group, {})
+
+    monkeypatch.setattr("repeatviewer.job_options._save_settings_group", _save)
+    monkeypatch.setattr("repeatviewer.job_options._load_settings_group", _load)
+
+    save_flexidot_options(
+        FlexidotOptions(right_click_action=FLEXIDOT_RIGHT_CLICK_FLEXIDOT)
+    )
+    assert load_flexidot_options().right_click_action == FLEXIDOT_RIGHT_CLICK_FLEXIDOT
+
+    saved.clear()
+    save_flexidot_options(FlexidotOptions(right_click_action="run"))
+    assert load_flexidot_options().right_click_action == FLEXIDOT_RIGHT_CLICK_BUILTIN
 
 
 def test_save_and_load_flexidot_output_format(monkeypatch) -> None:

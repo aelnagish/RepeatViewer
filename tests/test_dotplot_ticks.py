@@ -243,6 +243,38 @@ def test_axis_exact_step_end_keeps_single_end() -> None:
     assert 800 in ticks
 
 
+def test_multi_dot_identity_spans_per_sequence_block(qapp) -> None:
+    """All-sequences / multi_dot: thick identity only inside each self block."""
+    from repeatviewer.backends.dotplot import DotplotResult
+    from repeatviewer.backends.paf_dotplot import AxisEntry
+    from repeatviewer.widgets.dotplot_view import DotplotCanvas
+
+    canvas = DotplotCanvas()
+    result = DotplotResult(
+        sequence_id="2 x 2 sequences", sequence_length=200, word_size=0
+    )
+    canvas.set_axes(
+        [AxisEntry("a", 0, 100), AxisEntry("b", 100, 100)],
+        [AxisEntry("a", 0, 100), AxisEntry("b", 100, 100)],
+    )
+    spans, mirror = canvas._identity_spans_for(result)
+    assert spans == [
+        (0.0, 0.0, 100.0, 100.0),
+        (100.0, 100.0, 200.0, 200.0),
+    ]
+    assert mirror is False
+    canvas.set_axes([], [])
+    cross, cross_mirror = canvas._identity_spans_for(
+        DotplotResult(sequence_id="a vs b", sequence_length=100, word_size=0)
+    )
+    assert cross == [] and cross_mirror is False
+    self_spans, self_mirror = canvas._identity_spans_for(
+        DotplotResult(sequence_id="a", sequence_length=50, word_size=0)
+    )
+    assert self_spans == [(0.0, 0.0, 50.0, 50.0)] and self_mirror is True
+    canvas.deleteLater()
+
+
 def test_non_overlapping_prefers_sequence_end() -> None:
     ticks = [0, 100, 200, 800, 810]
     positions = {t: float(t) for t in ticks}

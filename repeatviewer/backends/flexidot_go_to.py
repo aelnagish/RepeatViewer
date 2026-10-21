@@ -50,9 +50,10 @@ def _axis_target(seq, start, end) -> tuple[str, int, int] | None:
 
 
 def fasta_for_flexidot_html(html_path: Path) -> Path | None:
-    """Map ``sample_flexidot.html`` / ``sample_flexidot_multi.html`` to ``sample.fa``."""
+    """Map ``…_flexidot.html`` / ``…_multi_flexidot.html`` to the source FASTA."""
     name = html_path.name
-    for marker in ("_flexidot_multi", "_flexidot"):
+    # Longer markers first so ``_multi_flexidot`` is not split on ``_flexidot``.
+    for marker in ("_multi_flexidot", "_flexidot_multi", "_flexidot"):
         if marker not in name:
             continue
         base = name.split(marker, 1)[0]

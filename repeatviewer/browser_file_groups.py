@@ -85,10 +85,15 @@ _TOOL_OUTPUT_SUFFIXES: tuple[str, ...] = (
     "_TEAid.html",
     "_teaid.html",
     # Flexidot
-    "_flexidot_multi.png",
-    "_flexidot_multi.html",
+    "_multi_flexidot.png",
+    "_multi_flexidot.html",
+    "_flexidot_multi.png",  # legacy
+    "_flexidot_multi.html",  # legacy
     "_flexidot.png",
     "_flexidot.html",
+    # Built-in Dotplot PAF (self / multi)
+    "_multi_dot.paf",
+    "_self_dot.paf",
     # HMMER / TSD / annotation
     ".tsd_search.txt",
     ".seqmap_RV.json",
@@ -125,7 +130,11 @@ _NUMBERED_MAP_RE = re.compile(
 )
 _NUMBERED_TEAID_RE = re.compile(r"_(?:p)?TEAid(?:_\d+)?\.html$", re.IGNORECASE)
 _NUMBERED_FLEXIDOT_RE = re.compile(
-    r"_flexidot(?:_multi)?(?:_\d+)?\.(?:png|html)$",
+    r"(?:_multi_flexidot|_flexidot_multi|_flexidot)(?:_\d+)?\.(?:png|html)$",
+    re.IGNORECASE,
+)
+_NUMBERED_BUILTIN_DOTPLOT_RE = re.compile(
+    r"_(?:self|multi)_dot(?:_\d+)?\.paf$",
     re.IGNORECASE,
 )
 _EXTEND_RE = re.compile(r"_L\d+_R\d+(?:_\d+)?\.fa$", re.IGNORECASE)
@@ -150,6 +159,7 @@ _REGEX_STRIPPERS: tuple[re.Pattern[str], ...] = (
     _PLOT_TAG_RE,
     _FASTGA_RE,
     _MSA_CLEAN_RE,
+    _NUMBERED_BUILTIN_DOTPLOT_RE,
     _NUMBERED_FLEXIDOT_RE,
     _NUMBERED_TEAID_RE,
     _NUMBERED_TREE_RE,

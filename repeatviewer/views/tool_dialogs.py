@@ -507,10 +507,15 @@ from repeatviewer.job_options import (
     DEFAULT_FLEXIDOT_OUTPUT_FORMAT,
     DEFAULT_FLEXIDOT_WORDSIZE,
     DEFAULT_FLEXIDOT_MODES,
+    DOTPLOT_DIALOG_TAB_BUILTIN,
+    DOTPLOT_DIALOG_TAB_FLEXIDOT,
     FLEXIDOT_SEQUENCE_AA,
     FLEXIDOT_SEQUENCE_NUC,
-    FLEXIDOT_RIGHT_CLICK_RUN,
+    FLEXIDOT_RIGHT_CLICK_BUILTIN,
+    FLEXIDOT_RIGHT_CLICK_FLEXIDOT,
     FLEXIDOT_RIGHT_CLICK_DIALOG,
+    normalize_dotplot_dialog_tab,
+    normalize_flexidot_right_click_action,
     TE_ANNOTATION_RIGHT_CLICK_RUN,
     TE_ANNOTATION_RIGHT_CLICK_DIALOG,
     TeAnnotationJobOptions,
@@ -8582,12 +8587,31 @@ class ConsensusParamsDialog(QDialog):
         )
 
 
+_BUILTIN_DOTPLOT_MODE_HELP = (
+    "<b>Self comparison</b>: each selected FASTA is compared with itself "
+    "(writes <code>*_self_dot.paf</code>, reopenable in Preview).<br><br>"
+    "<b>Pairwise comparison</b>: each selected sequence is compared with every "
+    "other (writes one <code>*_multi_dot.paf</code>). Needs two or more sequences."
+)
+_BUILTIN_DOTPLOT_INPUTS_HELP = (
+    "<b>Use selected sequences</b> (default): Built-in Dotplot uses the FASTA "
+    "files selected in the Files panel when you click Run.<br><br>"
+    "<b>Define inputs</b>: choose different FASTA files. Paths are "
+    "for this run only and are not remembered next time."
+)
+_BUILTIN_DOTPLOT_WORD_HELP = (
+    "K-mer / word size for the built-in self-dotplot (same engine as Preview → "
+    "Dotplot (Self)). Larger values are faster but less sensitive."
+)
+_BUILTIN_DOTPLOT_REVERSE_HELP = (
+    "Include reverse-complement matches (inverted repeats, TIRs). Clear to "
+    "plot forward-strand matches only."
+)
 _FLEXIDOT_MODE_HELP = (
-    "<b>Combine all selected files into one dotplot</b>: draw a single Flexidot "
-    "comparison across every selected FASTA.<br><br>"
-    "<b>Plot each selected file separately</b>: run Flexidot once per selected "
-    "FASTA (self / pairwise / all-vs-all is chosen automatically from sequence "
-    "count)."
+    "<b>Self comparison</b>: each selected FASTA is plotted against itself "
+    "(one Flexidot run per file).<br><br>"
+    "<b>Pairwise comparison</b>: all selected sequences are compared with each "
+    "other in one Flexidot run (pairwise for two sequences, all-vs-all for more)."
 )
 _FLEXIDOT_INPUTS_HELP = (
     "<b>Use selected sequences</b> (default): Flexidot uses the FASTA files that "
@@ -8642,15 +8666,16 @@ _FLEXIDOT_LENGTH_SCALING_HELP = (
 
 
 class FlexidotParamsDialog(QDialog):
-    """Flexidot parameters (Align-style Mode / Inputs / Outputs / Settings).
+    """Dotplot parameters: Built-in (self PAF) + Flexidot, BLAST-style tabs.
 
-    Left-click the toolbar button opens this dialog. The Parameters tab holds
-    matching and output settings; Advanced Settings collapses less-used flags.
-    The Options tab sets what right-clicking the toolbar button does.
+    Left-click the toolbar button opens this dialog. Built-in writes
+    ``*_self_dot.paf`` / ``*_multi_dot.paf`` for Preview; Flexidot keeps
+    HTML/PNG/SVG/PDF outputs. The Options tab sets right-click behaviour.
     """
 
     _DIALOG_WIDTH = TOOL_PARAMS_DIALOG_WIDTH
     _SETTINGS_LABEL_REF = "Output format:"
+    _BUILTIN_SETTINGS_LABEL_REF = "Word size:"
 
     def __init__(
         self,
@@ -8660,7 +8685,13 @@ class FlexidotParamsDialog(QDialog):
         parent=None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Flexidot parameters")
+        from repeatviewer.backends.dotplot import (
+            DEFAULT_WORD_SIZE as _BUILTIN_DEFAULT_WORD,
+            MAX_WORD_SIZE as _BUILTIN_MAX_WORD,
+            MIN_WORD_SIZE as _BUILTIN_MIN_WORD,
+        )
+
+        self.setWindowTitle("Dotplot parameters")
         self.setMinimumWidth(self._DIALOG_WIDTH)
         opts = initial or FlexidotOptions()
         self._for_run = for_run
@@ -8669,20 +8700,166 @@ class FlexidotParamsDialog(QDialog):
         self._lcs_shading = opts.lcs_shading
         self._only_vs_first_value = opts.only_vs_first
         self._flexidot_compact_size: QSize | None = None
+        self._last_engine_tab = normalize_dotplot_dialog_tab(opts.last_dialog_tab)
 
-        self._combine = QRadioButton(
-            "Combine all selected files into one dotplot", self
-        )
-        self._separate = QRadioButton(
-            "Plot each selected file separately", self
-        )
-        self._mode_group = QButtonGroup(self)
-        self._mode_group.addButton(self._combine)
-        self._mode_group.addButton(self._separate)
-        if opts.combined:
-            self._combine.setChecked(True)
+        # ---- Built-in (*_self_dot.paf / *_multi_dot.paf) ----
+        # builtin_combined True = Pairwise; False = Self (legacy key name).
+        self._builtin_self = QRadioButton("Self comparison", self)
+        self._builtin_pairs = QRadioButton("Pairwise comparison", self)
+        self._builtin_mode_group = QButtonGroup(self)
+        self._builtin_mode_group.addButton(self._builtin_self)
+        self._builtin_mode_group.addButton(self._builtin_pairs)
+        if opts.builtin_combined:
+            self._builtin_pairs.setChecked(True)
         else:
-            self._separate.setChecked(True)
+            self._builtin_self.setChecked(True)
+        # Compat aliases used by older tests.
+        self._builtin_combine = self._builtin_pairs
+        self._builtin_separate = self._builtin_self
+
+        self._builtin_input_group = QButtonGroup(self)
+        self._builtin_input_selected = QRadioButton("Use selected sequences", self)
+        self._builtin_input_define = QRadioButton("Define inputs", self)
+        self._builtin_input_group.addButton(self._builtin_input_selected)
+        self._builtin_input_group.addButton(self._builtin_input_define)
+        self._builtin_input_selected.setChecked(True)
+        self._builtin_define_inputs = TeMultiInputFilesWidget(
+            self,
+            initial=None,
+            start_empty=False,
+            placeholder="Click in Files/Folders or Browse…",
+            browse_title="Choose a FASTA file",
+            file_filter=(
+                "FASTA (*.fa *.fasta *.fna *.fas *.faa *.fsa);;All files (*)"
+            ),
+            add_button_label="Add another input",
+            add_button_tooltip=(
+                "Add another FASTA file path. Click a file in the Files panel "
+                "to fill a row, or use Browse."
+            ),
+            path_mode="file",
+        )
+        self._builtin_input_selected.toggled.connect(self._sync_builtin_inputs)
+        self._builtin_input_define.toggled.connect(self._sync_builtin_inputs)
+        self._builtin_define_inputs.paths_changed.connect(self._sync_builtin_inputs)
+
+        self._builtin_word_size = QSpinBox()
+        self._builtin_word_size.setRange(_BUILTIN_MIN_WORD, _BUILTIN_MAX_WORD)
+        self._builtin_word_size.setValue(
+            max(
+                _BUILTIN_MIN_WORD,
+                min(
+                    _BUILTIN_MAX_WORD,
+                    int(opts.builtin_word_size or _BUILTIN_DEFAULT_WORD),
+                ),
+            )
+        )
+        self._builtin_word_size.setFixedWidth(260)
+        self._builtin_include_reverse = QCheckBox(
+            "Include reverse-complement matches", self
+        )
+        self._builtin_include_reverse.setChecked(bool(opts.builtin_include_reverse))
+
+        builtin_tab = QWidget(self)
+        builtin_root = QVBoxLayout(builtin_tab)
+        builtin_root.setContentsMargins(16, 10, 16, 10)
+        builtin_root.setSpacing(4)
+        builtin_basic = QWidget(builtin_tab)
+        self._builtin_basic = builtin_basic
+        builtin_basic.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum
+        )
+        builtin_form = QFormLayout(builtin_basic)
+        builtin_form.setContentsMargins(0, 0, 0, 0)
+        builtin_form.setLabelAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        builtin_form.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow
+        )
+        builtin_form.setHorizontalSpacing(12)
+        builtin_form.setVerticalSpacing(4)
+
+        def _builtin_section(title: str) -> QLabel:
+            return QLabel(f"<b>{title}</b>", builtin_tab)
+
+        builtin_form.addRow(_builtin_section("Mode"))
+        builtin_mode_box = QWidget(builtin_basic)
+        builtin_mode_layout = QVBoxLayout(builtin_mode_box)
+        builtin_mode_layout.setContentsMargins(0, 0, 0, 0)
+        builtin_mode_layout.setSpacing(2)
+        builtin_mode_layout.addWidget(
+            field_with_help(
+                self._builtin_self,
+                "Built-in Dotplot mode",
+                _BUILTIN_DOTPLOT_MODE_HELP,
+                stretch=True,
+            )
+        )
+        builtin_mode_layout.addWidget(self._builtin_pairs)
+        self._builtin_mode_label = QLabel("")
+        builtin_form.addRow(self._builtin_mode_label, builtin_mode_box)
+
+        builtin_form.addRow(_form_section_separator())
+        builtin_form.addRow(_builtin_section("Inputs"))
+        builtin_inputs_box = QWidget(builtin_basic)
+        builtin_inputs_layout = QVBoxLayout(builtin_inputs_box)
+        builtin_inputs_layout.setContentsMargins(0, 0, 0, 0)
+        builtin_inputs_layout.setSpacing(2)
+        builtin_inputs_layout.addWidget(
+            field_with_help(
+                self._builtin_input_selected,
+                "Built-in Dotplot inputs",
+                _BUILTIN_DOTPLOT_INPUTS_HELP,
+                stretch=True,
+            )
+        )
+        builtin_inputs_layout.addWidget(self._builtin_input_define)
+        self._builtin_inputs_radios_label = QLabel("")
+        self._builtin_inputs_define_label = QLabel("")
+        builtin_form.addRow(self._builtin_inputs_radios_label, builtin_inputs_box)
+        builtin_form.addRow(
+            self._builtin_inputs_define_label, self._builtin_define_inputs
+        )
+
+        builtin_form.addRow(_form_section_separator())
+        builtin_form.addRow(_builtin_section("Settings"))
+        builtin_form.addRow(
+            "Word size:",
+            field_with_help(
+                self._builtin_word_size,
+                "Word size",
+                _BUILTIN_DOTPLOT_WORD_HELP,
+            ),
+        )
+        self._builtin_reverse_spacer = QLabel("")
+        builtin_form.addRow(
+            self._builtin_reverse_spacer,
+            field_with_help(
+                self._builtin_include_reverse,
+                "Reverse-complement matches",
+                _BUILTIN_DOTPLOT_REVERSE_HELP,
+            ),
+        )
+        self._builtin_basic_form = builtin_form
+        builtin_root.addWidget(builtin_basic)
+        builtin_root.addStretch(1)
+        self._builtin_tab = builtin_tab
+
+        # ---- Flexidot engine ----
+        # combined True = Pairwise; False = Self (legacy key name).
+        self._flexidot_self = QRadioButton("Self comparison", self)
+        self._flexidot_pairs = QRadioButton("Pairwise comparison", self)
+        self._mode_group = QButtonGroup(self)
+        self._mode_group.addButton(self._flexidot_self)
+        self._mode_group.addButton(self._flexidot_pairs)
+        if opts.combined:
+            self._flexidot_pairs.setChecked(True)
+        else:
+            self._flexidot_self.setChecked(True)
+        # Compat aliases used by older tests.
+        self._combine = self._flexidot_pairs
+        self._separate = self._flexidot_self
 
         self._input_group = QButtonGroup(self)
         self._input_selected = QRadioButton("Use selected sequences", self)
@@ -8814,13 +8991,13 @@ class FlexidotParamsDialog(QDialog):
         mode_layout.setSpacing(2)
         mode_layout.addWidget(
             field_with_help(
-                self._combine,
+                self._flexidot_self,
                 "Flexidot mode",
                 _FLEXIDOT_MODE_HELP,
                 stretch=True,
             )
         )
-        mode_layout.addWidget(self._separate)
+        mode_layout.addWidget(self._flexidot_pairs)
         self._mode_label = QLabel("")
         form.addRow(self._mode_label, mode_box)
 
@@ -8942,23 +9119,25 @@ class FlexidotParamsDialog(QDialog):
 
         self._right_click_group = QButtonGroup(self)
         self._right_click_buttons: dict[str, QRadioButton] = {}
+        saved_rc = normalize_flexidot_right_click_action(opts.right_click_action)
         for label, value in (
-            ("Run Flexidot with saved parameters", FLEXIDOT_RIGHT_CLICK_RUN),
+            ("Run Built-in Dotplot", FLEXIDOT_RIGHT_CLICK_BUILTIN),
+            ("Run Flexidot", FLEXIDOT_RIGHT_CLICK_FLEXIDOT),
             ("Open this dialog", FLEXIDOT_RIGHT_CLICK_DIALOG),
         ):
             radio = QRadioButton(label, self)
-            radio.setChecked(opts.right_click_action == value)
+            radio.setChecked(saved_rc == value)
             self._right_click_group.addButton(radio)
             self._right_click_buttons[value] = radio
         if not any(b.isChecked() for b in self._right_click_buttons.values()):
-            self._right_click_buttons[FLEXIDOT_RIGHT_CLICK_RUN].setChecked(True)
+            self._right_click_buttons[FLEXIDOT_RIGHT_CLICK_BUILTIN].setChecked(True)
 
         rc_box = QGroupBox("Right-click action", self)
         rc_box.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
         rc_box_layout = QVBoxLayout(rc_box)
         rc_box_layout.setSpacing(6)
         rc_box_layout.addWidget(
-            QLabel("Right-clicking the Flexidot button does:", self)
+            QLabel("Right-clicking the Dotplot button does:", self)
         )
         for radio in self._right_click_buttons.values():
             rc_box_layout.addWidget(radio)
@@ -8966,7 +9145,7 @@ class FlexidotParamsDialog(QDialog):
         process_box, self._show_process_window, self._close_process_window = (
             make_process_output_box(
                 self,
-                tool_name="Flexidot",
+                tool_name="Dotplot",
                 checked=bool(getattr(opts, "show_process_window", True)),
                 close_when_finished=bool(
                     getattr(opts, "close_process_window_when_finished", True)
@@ -8991,8 +9170,14 @@ class FlexidotParamsDialog(QDialog):
         self._tabs.setSizePolicy(
             QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
         )
-        self._tabs.addTab(params_tab, "Parameters")
+        self._tabs.addTab(builtin_tab, "Built-in")
+        self._tabs.addTab(params_tab, "Flexidot")
         self._tabs.addTab(options_tab, "Options")
+        open_tab = normalize_dotplot_dialog_tab(opts.last_dialog_tab)
+        if open_tab == DOTPLOT_DIALOG_TAB_FLEXIDOT:
+            self._tabs.setCurrentWidget(params_tab)
+        else:
+            self._tabs.setCurrentWidget(builtin_tab)
         self._tabs.currentChanged.connect(self._on_flexidot_tab_changed)
 
         restore = QPushButton("Restore Defaults", self)
@@ -9014,21 +9199,40 @@ class FlexidotParamsDialog(QDialog):
         layout.addWidget(self._tabs, 0)
         layout.addWidget(self._button_box, 0)
 
+        self._sync_builtin_inputs(resize=False)
         self._sync_flexidot_inputs(resize=False)
         self._on_sequence_type_changed()
+        self._on_flexidot_tab_changed(self._tabs.currentIndex())
         self.resize(self._DIALOG_WIDTH, 420)
-        QTimer.singleShot(0, lambda: self._resize_for_flexidot_advanced(False))
+        QTimer.singleShot(0, self._fit_active_dotplot_tab)
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
         self._flexidot_compact_size = None
         self._sync_field_column()
-        QTimer.singleShot(0, lambda: self._resize_for_flexidot_advanced(False))
+        self._sync_builtin_field_column()
+        QTimer.singleShot(0, self._fit_active_dotplot_tab)
 
     def should_run(self) -> bool:
         return dialog_should_run(self)
 
+    def active_engine_tab(self) -> str:
+        """Return ``builtin`` or ``flexidot`` for the active Parameters engine."""
+        current = self._tabs.currentWidget()
+        if current is self._params_tab:
+            return DOTPLOT_DIALOG_TAB_FLEXIDOT
+        if current is self._builtin_tab:
+            return DOTPLOT_DIALOG_TAB_BUILTIN
+        # Options tab: keep last engine selection from options().
+        return normalize_dotplot_dialog_tab(
+            getattr(self, "_last_engine_tab", DOTPLOT_DIALOG_TAB_BUILTIN)
+        )
+
     def input_source(self) -> str:
+        if self.active_engine_tab() == DOTPLOT_DIALOG_TAB_BUILTIN:
+            if self._builtin_input_define.isChecked():
+                return ALIGN_INPUT_DEFINE
+            return ALIGN_INPUT_SELECTED
         if self._input_define.isChecked():
             return ALIGN_INPUT_DEFINE
         return ALIGN_INPUT_SELECTED
@@ -9037,7 +9241,12 @@ class FlexidotParamsDialog(QDialog):
         from repeatviewer.backends.fastga_dotplot import expand_fastga_input_paths
 
         if self.input_source() == ALIGN_INPUT_DEFINE:
-            return expand_fastga_input_paths(self._define_inputs.paths())
+            widget = (
+                self._builtin_define_inputs
+                if self.active_engine_tab() == DOTPLOT_DIALOG_TAB_BUILTIN
+                else self._define_inputs
+            )
+            return expand_fastga_input_paths(widget.paths())
         return [Path(p) for p in (panel_files or [])]
 
     def apply_path_from_panel(self, path: Path) -> bool:
@@ -9049,7 +9258,12 @@ class FlexidotParamsDialog(QDialog):
             candidate = Path(path).expanduser().resolve()
         except OSError:
             return False
-        return bool(self._define_inputs.accept_path(candidate))
+        widget = (
+            self._builtin_define_inputs
+            if self.active_engine_tab() == DOTPLOT_DIALOG_TAB_BUILTIN
+            else self._define_inputs
+        )
+        return bool(widget.accept_path(candidate))
 
     def apply_folder_from_panel(self, folder: Path) -> bool:
         if self.input_source() != ALIGN_INPUT_DEFINE:
@@ -9062,10 +9276,36 @@ class FlexidotParamsDialog(QDialog):
             return False
         if not candidate.is_dir():
             return False
-        return bool(self._define_inputs.accept_path(candidate))
+        widget = (
+            self._builtin_define_inputs
+            if self.active_engine_tab() == DOTPLOT_DIALOG_TAB_BUILTIN
+            else self._define_inputs
+        )
+        return bool(widget.accept_path(candidate))
+
+    def _sync_builtin_inputs(self, *, resize: bool = True) -> None:
+        define = self._builtin_input_define.isChecked()
+        form = self._builtin_basic.layout()
+        if isinstance(form, QFormLayout):
+            form.setRowVisible(self._builtin_define_inputs, define)
+        self._builtin_define_inputs.setVisible(define)
+        if define:
+            self._builtin_define_inputs.setMinimumHeight(0)
+            self._builtin_define_inputs.setMaximumHeight(16777215)
+        else:
+            self._builtin_define_inputs.setFixedHeight(0)
+        self._builtin_define_inputs.updateGeometry()
+        self._builtin_basic.updateGeometry()
+        self._sync_builtin_field_column()
+        if (
+            resize
+            and self.isVisible()
+            and self._tabs.currentWidget() is self._builtin_tab
+        ):
+            self._fit_builtin_content()
 
     def _sync_flexidot_inputs(self, *, resize: bool = True) -> None:
-        define = self.input_source() == ALIGN_INPUT_DEFINE
+        define = self._input_define.isChecked()
         form = self._flexidot_basic.layout()
         if isinstance(form, QFormLayout):
             form.setRowVisible(self._define_inputs, define)
@@ -9086,6 +9326,21 @@ class FlexidotParamsDialog(QDialog):
         ):
             self._flexidot_compact_size = None
             self._resize_for_flexidot_advanced(False)
+
+    def _sync_builtin_field_column(self) -> None:
+        if not hasattr(self, "_builtin_inputs_radios_label"):
+            return
+        sync_form_field_column_spacers(
+            self,
+            [
+                self._builtin_mode_label,
+                self._builtin_inputs_radios_label,
+                self._builtin_inputs_define_label,
+                self._builtin_reverse_spacer,
+            ],
+            [getattr(self, "_builtin_basic_form", None)],
+            ref_label=self._BUILTIN_SETTINGS_LABEL_REF,
+        )
 
     def _sync_field_column(self) -> None:
         if not hasattr(self, "_inputs_radios_label"):
@@ -9108,20 +9363,71 @@ class FlexidotParamsDialog(QDialog):
             ref_label=self._SETTINGS_LABEL_REF,
         )
 
+    def _fit_active_dotplot_tab(self) -> None:
+        current = self._tabs.currentWidget()
+        if current is self._builtin_tab:
+            self._fit_builtin_content()
+        elif current is self._params_tab:
+            self._resize_for_flexidot_advanced(
+                self._advanced_settings_btn.isChecked()
+            )
+        else:
+            self._fit_options_content()
+
+    def _fit_builtin_content(self) -> None:
+        page = self._builtin_tab
+        self.setMinimumHeight(0)
+        self.setMaximumHeight(16777215)
+        pin_tool_tabs_height(self._tabs, None)
+        root = page.layout()
+        if root is not None:
+            root.invalidate()
+            root.activate()
+        page.updateGeometry()
+        basic_h = max(
+            self._builtin_basic.minimumSizeHint().height(),
+            self._builtin_basic.sizeHint().height(),
+        )
+        margins = root.contentsMargins() if root is not None else None
+        margin_h = (margins.top() + margins.bottom()) if margins is not None else 20
+        spacing = root.spacing() if root is not None else 4
+        content_h = margin_h + basic_h + spacing
+        chrome = self._dialog_chrome_height()
+        width = tool_params_dialog_width(
+            define_inputs=self._builtin_input_define.isChecked()
+        )
+        self.setMinimumWidth(width)
+        height = chrome + content_h
+        height = min(max(height, 220), 10_000)
+        pin_tool_tabs_height(self._tabs, content_h)
+        self.setMaximumHeight(height)
+        self.resize(width, height)
+        self.setMaximumHeight(16777215)
+
     def _on_flexidot_tab_changed(self, _index: int) -> None:
-        on_params = self._tabs.currentWidget() is self._params_tab
-        self._advanced_settings_btn.setVisible(on_params)
-        if not on_params:
+        current = self._tabs.currentWidget()
+        on_flexidot = current is self._params_tab
+        on_builtin = current is self._builtin_tab
+        on_options = current is self._options_tab
+        self._advanced_settings_btn.setVisible(on_flexidot)
+        if on_flexidot or on_builtin:
+            self._last_engine_tab = (
+                DOTPLOT_DIALOG_TAB_FLEXIDOT if on_flexidot else DOTPLOT_DIALOG_TAB_BUILTIN
+            )
+        if not on_flexidot:
             if self._advanced_settings_btn.isChecked():
                 self._advanced_settings_btn.blockSignals(True)
                 self._advanced_settings_btn.setChecked(False)
                 self._advanced_settings_btn.setText("Advanced Settings ▸")
                 self._advanced_settings_btn.blockSignals(False)
                 self._set_flexidot_advanced_visible(False)
-            if self.isVisible():
-                self._fit_options_content()
+        if not self.isVisible():
             return
-        if self.isVisible():
+        if on_options:
+            self._fit_options_content()
+        elif on_builtin:
+            self._fit_builtin_content()
+        else:
             self._resize_for_flexidot_advanced(False)
 
     def _set_flexidot_advanced_visible(self, visible: bool) -> None:
@@ -9248,8 +9554,19 @@ class FlexidotParamsDialog(QDialog):
 
     def _restore_defaults(self) -> None:
         defaults = FlexidotOptions()
-        self._combine.setChecked(defaults.combined)
-        self._separate.setChecked(not defaults.combined)
+        if defaults.builtin_combined:
+            self._builtin_pairs.setChecked(True)
+        else:
+            self._builtin_self.setChecked(True)
+        self._builtin_input_selected.setChecked(True)
+        self._builtin_define_inputs.clear_paths()
+        self._sync_builtin_inputs()
+        self._builtin_word_size.setValue(defaults.builtin_word_size)
+        self._builtin_include_reverse.setChecked(defaults.builtin_include_reverse)
+        if defaults.combined:
+            self._flexidot_pairs.setChecked(True)
+        else:
+            self._flexidot_self.setChecked(True)
         self._input_selected.setChecked(True)
         self._define_inputs.clear_paths()
         self._sync_flexidot_inputs()
@@ -9273,20 +9590,26 @@ class FlexidotParamsDialog(QDialog):
         self._close_process_window.setChecked(
             defaults.close_process_window_when_finished
         )
-        self._right_click_buttons[FLEXIDOT_RIGHT_CLICK_RUN].setChecked(True)
+        self._right_click_buttons[FLEXIDOT_RIGHT_CLICK_BUILTIN].setChecked(True)
         self._on_sequence_type_changed()
 
     def options(self) -> FlexidotOptions:
         fmt = self._output_format.currentData()
-        right_click_action = FLEXIDOT_RIGHT_CLICK_RUN
+        right_click_action = FLEXIDOT_RIGHT_CLICK_BUILTIN
         for value, radio in self._right_click_buttons.items():
             if radio.isChecked():
                 right_click_action = value
                 break
+        right_click_action = normalize_flexidot_right_click_action(right_click_action)
         seq_type = normalize_flexidot_sequence_type(self._sequence_type.currentData())
         include_reverse = self._include_reverse.isChecked()
         if seq_type == FLEXIDOT_SEQUENCE_AA:
             include_reverse = False
+        engine = self.active_engine_tab()
+        if self._tabs.currentWidget() is self._options_tab:
+            engine = normalize_dotplot_dialog_tab(
+                getattr(self, "_last_engine_tab", DOTPLOT_DIALOG_TAB_BUILTIN)
+            )
         return FlexidotOptions(
             wordsize=self._wordsize.value(),
             sequence_type=seq_type,
@@ -9302,16 +9625,23 @@ class FlexidotParamsDialog(QDialog):
             only_vs_first=self._only_vs_first_value,
             line_width=self._line_width.value(),
             length_scaling=self._length_scaling.isChecked(),
-            combined=self._combine.isChecked(),
-            # Comparison mode is automatic: self for one sequence,
-            # pairwise/all-vs-all for multiple.
+            combined=self._flexidot_pairs.isChecked(),
+            # Flexidot -m stays automatic from sequence count when Pairwise is on.
             modes=DEFAULT_FLEXIDOT_MODES,
             right_click_action=right_click_action,
             show_process_window=self._show_process_window.isChecked(),
             close_process_window_when_finished=(
                 self._close_process_window.isChecked()
             ),
+            builtin_word_size=int(self._builtin_word_size.value()),
+            builtin_include_reverse=bool(self._builtin_include_reverse.isChecked()),
+            builtin_combined=bool(self._builtin_pairs.isChecked()),
+            last_dialog_tab=engine,
         )
+
+
+# Public alias matching the Tools → Dotplot name.
+DotplotParamsDialog = FlexidotParamsDialog
 
 
 _TE_ANNOTATION_PARAMS_WIDTH = TOOL_PARAMS_DIALOG_WIDTH

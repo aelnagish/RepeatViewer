@@ -292,6 +292,22 @@ def _axis_layout(lengths: dict[str, int]) -> tuple[list[AxisEntry], int]:
     return entries, max(offset, 1)
 
 
+def _unified_sequence_lengths(alignments: PafAlignments) -> dict[str, int]:
+    """Merge query and target lengths so every sequence appears on both axes.
+
+    Pairwise PAFs (e.g. ``*_multi_dot.paf``) only list a name as query or as
+    target depending on pair order. Building X from queries and Y from targets
+    alone puts the same sequence at different offsets, so the identity
+    diagonal breaks into staggered blocks instead of one straight line.
+    """
+    lengths: dict[str, int] = {}
+    for name, n in alignments.query_lengths.items():
+        lengths[name] = max(lengths.get(name, 0), int(n))
+    for name, n in alignments.target_lengths.items():
+        lengths[name] = max(lengths.get(name, 0), int(n))
+    return lengths
+
+
 def result_for_all(
     alignments: PafAlignments,
     *,
@@ -299,29 +315,33 @@ def result_for_all(
 ) -> tuple[DotplotResult, list[AxisEntry], list[AxisEntry]]:
     """Dotplot of every sequence, laid end to end on both axes.
 
+    X and Y share one sequence order and the same offsets so self-comparison
+    blocks sit on a single straight identity diagonal.
+
     Returns the result plus the axis layouts, so the viewer can draw separator
     lines and label each sequence along the edges.
     """
-    x_entries, x_total = _axis_layout(alignments.query_lengths)
-    y_entries, y_total = _axis_layout(alignments.target_lengths)
-    x_off = {e.name: e.offset for e in x_entries}
-    y_off = {e.name: e.offset for e in y_entries}
+    lengths = _unified_sequence_lengths(alignments)
+    entries, total = _axis_layout(lengths)
+    # Same layout on both axes (copy lists so callers can mutate independently).
+    x_entries = list(entries)
+    y_entries = list(entries)
+    offset_of = {e.name: e.offset for e in entries}
 
     segments: list[DotplotSegment] = []
     for qname, _ql, qstart, qend, strand, tname, _tl, tstart, tend in alignments.records:
         seg = _segment(
             qstart, qend, strand, tstart, tend,
-            x_off.get(qname, 0), y_off.get(tname, 0),
+            offset_of.get(qname, 0), offset_of.get(tname, 0),
         )
         if seg is not None and seg.length >= min_length:
             segments.append(seg)
 
-    # The canvas assumes a square plot, so both axes share one span.
-    axis_length = max(x_total, y_total, 1)
+    n = len(entries)
     return (
         DotplotResult(
-            sequence_id=f"{len(x_entries)} x {len(y_entries)} sequences",
-            sequence_length=axis_length,
+            sequence_id=f"{n} x {n} sequences",
+            sequence_length=max(total, 1),
             word_size=0,
             segments=segments,
             include_reverse=True,

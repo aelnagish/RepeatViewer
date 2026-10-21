@@ -362,6 +362,11 @@ from repeatviewer.job_options import (
     BLAST_PROGRAM_ONLINE,
     EXTEND_RIGHT_CLICK_DIALOG,
     FLEXIDOT_RIGHT_CLICK_DIALOG,
+    FLEXIDOT_RIGHT_CLICK_FLEXIDOT,
+    DOTPLOT_DIALOG_TAB_BUILTIN,
+    DOTPLOT_DIALOG_TAB_FLEXIDOT,
+    normalize_dotplot_dialog_tab,
+    normalize_flexidot_right_click_action,
     CONSENSUS_RIGHT_CLICK_DIALOG,
     TEAID_RIGHT_CLICK_DIALOG,
     HMMER_RIGHT_CLICK_DIALOG,
@@ -423,6 +428,7 @@ from repeatviewer.views.tool_dialogs import (
     ConsensusParamsDialog,
     ExtendParamsDialog,
     FlexidotParamsDialog,
+    DotplotParamsDialog,
     TeAnnotationDialog,
     batch_options_from_te_annotation_job,
     OrfPredictionParamsDialog,
@@ -589,7 +595,8 @@ _TOOLBAR_TOOLTIPS = {
     "tsd_search": "Search target site duplications near putative TE boundaries",
     "teaid": "TE-Aid interactive HTML report using default parameters",
     "msa_clean": "Trim or clean MSA using default parameters",
-    "flexidot": "Dotplot comparison of selected sequences using default parameters",
+    "flexidot": "Dotplot (Built-in or Flexidot) using saved parameters",
+    "builtin_dotplot": "Built-in Dotplot (writes *_self_dot.paf / *_multi_dot.paf)",
     "consensus": "Click: set consensus parameters and run. Right-click: run with saved settings.",
     "te_annotation": "Run sequence annotation on selected FASTA files (single- or multi-sequence)",
 }
@@ -605,7 +612,8 @@ _JOB_DISPLAY_TITLES = {
     "msa_clean_div": "Clean row with divergence",
     "msa_clean_gap": "Clean row with gap",
     "consensus_generation": "Consensus",
-    "flexidot": "Flexidot",
+    "flexidot": "Dotplot",
+    "builtin_dotplot": "Dotplot (Built-in)",
     "te_annotation": "Sequence Annotation",
     "reverse_complement": "Reverse complement",
     "orf_prediction": "ORF prediction",
@@ -5721,9 +5729,12 @@ class MainWindow(QMainWindow):
 
     def _populate_flexidot_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
         if not skip_default:
-            menu.addAction("Flexidot with default parameters", self._run_flexidot_combined)
+            menu.addAction(
+                "Dotplot with default parameters",
+                self._run_dotplot_default,
+            )
         menu.addSeparator()
-        menu.addAction("Change Flexidot parameters", self._modify_flexidot_parameters)
+        menu.addAction("Change Dotplot parameters", self._modify_flexidot_parameters)
 
     def _populate_orf_prediction_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
         if not skip_default:
@@ -5819,7 +5830,7 @@ class MainWindow(QMainWindow):
         self._populate_teaid_menu(tools_menu.addMenu("&TE-Aid"))
         self._populate_msa_clean_menu(tools_menu.addMenu("MSA &Clean"))
         self._populate_consensus_menu(tools_menu.addMenu("&Consensus"))
-        self._populate_flexidot_menu(tools_menu.addMenu("&Flexidot"))
+        self._populate_flexidot_menu(tools_menu.addMenu("&Dotplot"))
         self._populate_te_annotation_menu(tools_menu.addMenu("Sequence &Annotation"))
         tools_menu.addAction("Repeat &Quantify", self._open_repeat_quantify)
         self._populate_te_visualization_menu(tools_menu.addMenu("&Visualization"))
@@ -7448,10 +7459,10 @@ class MainWindow(QMainWindow):
         elif tool_id == "flexidot":
             self._add_toolbar_action_button(
                 bar,
-                "Flexidot",
+                "Dotplot",
                 self._open_flexidot_dialog,
                 tooltip=(
-                    "Click: set parameters and run.\n"
+                    "Click: Built-in or Flexidot parameters, then Run.\n"
                     "Right-click: run with saved settings (set in the Options tab)."
                 ),
                 right_click_slot=self._quick_flexidot_right_click,
@@ -12921,6 +12932,14 @@ class MainWindow(QMainWindow):
         """Menu: same Cancel / Save / Run dialog as the Consensus toolbar button."""
         self._open_consensus_dialog()
 
+    def _run_dotplot_default(self) -> None:
+        """Tools → Dotplot with default parameters (last active engine tab)."""
+        tab = normalize_dotplot_dialog_tab(self._flexidot_options.last_dialog_tab)
+        if tab == DOTPLOT_DIALOG_TAB_FLEXIDOT:
+            self._run_flexidot_saved()
+        else:
+            self._run_builtin_dotplot_saved()
+
     def _run_flexidot_combined(self) -> None:
         self._apply_function(
             "flexidot",
@@ -12936,8 +12955,105 @@ class MainWindow(QMainWindow):
             flexidot_options=self._flexidot_options,
         )
 
+    def _run_builtin_dotplot_saved(
+        self, *, preselected: list[Path] | None = None
+    ) -> None:
+        """Run built-in Dotplot: Self → ``*_self_dot.paf``, Pairwise → ``*_multi_dot.paf``.
+
+        File-list tinting matches Flexidot: sources + newly created outputs.
+        """
+        from repeatviewer.backends.dotplot import (
+            DotplotError,
+            write_pairwise_dotplot_paf,
+            write_self_dotplot_paf,
+        )
+        from repeatviewer.backends.fastga_dotplot import expand_fastga_input_paths
+
+        if preselected is not None:
+            seq_files = expand_fastga_input_paths(preselected)
+        else:
+            selected = self._selected_files()
+            seq_files = [
+                p
+                for p in selected
+                if p.suffix.lower() in _FASTA_SUFFIXES
+                or p.name.lower().endswith(".fa.gz")
+                or p.name.lower().endswith(".fasta.gz")
+            ]
+            seq_files = expand_fastga_input_paths(seq_files)
+        if not seq_files:
+            QMessageBox.information(
+                self,
+                "No sequence selected",
+                "Select one or more FASTA files in the Files panel.",
+            )
+            return
+
+        opts = self._flexidot_options
+        pairwise = bool(opts.builtin_combined)
+        outputs: list[Path] = []
+        errors: list[str] = []
+        if pairwise:
+            self._set_status_message(
+                f"Built-in Dotplot: multi_dot PAF for {len(seq_files)} file(s)…",
+                0,
+            )
+            QApplication.processEvents()
+            try:
+                outputs.append(
+                    write_pairwise_dotplot_paf(
+                        seq_files,
+                        word_size=int(opts.builtin_word_size),
+                        include_reverse=bool(opts.builtin_include_reverse),
+                    )
+                )
+            except DotplotError as exc:
+                errors.append(str(exc))
+            except Exception as exc:  # noqa: BLE001
+                errors.append(str(exc))
+        else:
+            self._set_status_message(
+                f"Built-in Dotplot: writing self_dot PAF for {len(seq_files)} file(s)…",
+                0,
+            )
+            QApplication.processEvents()
+            for fasta in seq_files:
+                try:
+                    out = write_self_dotplot_paf(
+                        fasta,
+                        word_size=int(opts.builtin_word_size),
+                        include_reverse=bool(opts.builtin_include_reverse),
+                    )
+                    outputs.append(out)
+                except DotplotError as exc:
+                    errors.append(f"{fasta.name}: {exc}")
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(f"{fasta.name}: {exc}")
+
+        if outputs:
+            # Same finish path as Flexidot jobs: tint used FASTAs + new PAFs,
+            # navigate/refresh the output folder, then open Preview.
+            mode_label = "multi" if pairwise else "self"
+            self._refresh_folders_after_job(outputs, seq_files)
+            self._auto_open_outputs(outputs, source_files=seq_files)
+            self._set_status_message(
+                f"Built-in Dotplot ({mode_label}): wrote {len(outputs)} PAF file(s).",
+                8000,
+            )
+        else:
+            self._set_status_message("Built-in Dotplot failed.", 6000)
+        if errors:
+            detail = "\n".join(errors[:12])
+            if len(errors) > 12:
+                detail += "\n…"
+            QMessageBox.warning(
+                self,
+                "Built-in Dotplot",
+                f"{len(errors)} error(s):\n\n{detail}",
+            )
+
     def _open_flexidot_dialog(self) -> None:
-        """Click Flexidot: parameters dialog. Run runs; Save (Options tab) stores only.
+        """Click Dotplot: Built-in / Flexidot parameters. Run runs; Save stores only.
 
         Non-modal so Files/Folders clicks can fill Define inputs (Align-style).
         """
@@ -12949,39 +13065,51 @@ class MainWindow(QMainWindow):
             save_flexidot_options(self._flexidot_options)
             self._persist_workspace()
             if not dialog.should_run():
-                self._set_status_message("Flexidot settings saved", 4000)
+                self._set_status_message("Dotplot settings saved", 4000)
                 return
+            engine = normalize_dotplot_dialog_tab(
+                self._flexidot_options.last_dialog_tab
+            )
             input_source = dialog.input_source()
             run_files = dialog.run_files()
-            if input_source == ALIGN_INPUT_DEFINE:
-                if not run_files:
-                    QMessageBox.information(
-                        self,
-                        "No FASTA inputs",
-                        "Add one or more FASTA files or folders under Define inputs.",
-                    )
-                    return
-                self._apply_function(
-                    "flexidot",
-                    flexidot_combined=self._flexidot_options.combined,
-                    flexidot_options=self._flexidot_options,
-                    preselected=run_files,
+            if input_source == ALIGN_INPUT_DEFINE and not run_files:
+                QMessageBox.information(
+                    self,
+                    "No FASTA inputs",
+                    "Add one or more FASTA files or folders under Define inputs.",
                 )
+                return
+            preselected = run_files if input_source == ALIGN_INPUT_DEFINE else None
+            if engine == DOTPLOT_DIALOG_TAB_FLEXIDOT:
+                if preselected is not None:
+                    self._apply_function(
+                        "flexidot",
+                        flexidot_combined=self._flexidot_options.combined,
+                        flexidot_options=self._flexidot_options,
+                        preselected=preselected,
+                    )
+                else:
+                    self._run_flexidot_saved()
             else:
-                self._run_flexidot_saved()
+                self._run_builtin_dotplot_saved(preselected=preselected)
 
-        dialog = FlexidotParamsDialog(
+        dialog = DotplotParamsDialog(
             initial=self._flexidot_options,
             parent=self,
         )
         self._present_te_viz_dialog(dialog, _accepted)
 
     def _quick_flexidot_right_click(self) -> None:
-        """Right-click Flexidot: run with saved settings, or open the dialog."""
-        if self._flexidot_options.right_click_action == FLEXIDOT_RIGHT_CLICK_DIALOG:
+        """Right-click Dotplot: run Built-in, Flexidot, or open the dialog."""
+        action = normalize_flexidot_right_click_action(
+            self._flexidot_options.right_click_action
+        )
+        if action == FLEXIDOT_RIGHT_CLICK_DIALOG:
             self._open_flexidot_dialog()
-        else:
+        elif action == FLEXIDOT_RIGHT_CLICK_FLEXIDOT:
             self._run_flexidot_saved()
+        else:
+            self._run_builtin_dotplot_saved()
 
     def _reload_shared_annotation_settings(self) -> None:
         """Reload TE/annotation settings into every open sequence-map panel."""
@@ -13153,7 +13281,7 @@ class MainWindow(QMainWindow):
         self._open_te_annotation_dialog()
 
     def _modify_flexidot_parameters(self) -> None:
-        """Menu: same Cancel / Save / Run dialog as the Flexidot toolbar button."""
+        """Menu: same Cancel / Save / Run dialog as the Dotplot toolbar button."""
         self._open_flexidot_dialog()
 
     def _add_msa_clean_menu_action(

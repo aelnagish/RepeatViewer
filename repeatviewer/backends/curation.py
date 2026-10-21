@@ -187,13 +187,13 @@ def _png_paths_in_dir(folder: Path) -> set[Path]:
 
 
 def flexidot_output_stem(seq_files: list[Path], genome_label: str = "") -> str:
-    """Output basename: ``{first.name}_flexidot`` or ``{first.name}_flexidot_multi``."""
+    """Output basename: ``{first.name}_flexidot`` or ``{first.name}_multi_flexidot``."""
     from repeatviewer.tool_output_paths import kept_input_name
 
     base = kept_input_name(seq_files[0].expanduser().resolve())
     suffix = genome_output_suffix(genome_label)
     if len(seq_files) >= 2:
-        return f"{base}_flexidot_multi{suffix}"
+        return f"{base}_multi_flexidot{suffix}"
     return f"{base}_flexidot{suffix}"
 
 
@@ -206,7 +206,7 @@ def is_flexidot_html_file(path: Path) -> bool:
 
 
 _FLEXIDOT_EXTRA_FILE_RE = re.compile(
-    r".+_flexidot(?:_multi)?.*_(\d+)\.(?:png|html)$",
+    r".+(?:_multi_flexidot|_flexidot_multi|_flexidot).*_(\d+)\.(?:png|html)$",
     re.IGNORECASE,
 )
 

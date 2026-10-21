@@ -315,6 +315,8 @@ class _SegmentsItem(QGraphicsItem):
         result: DotplotResult,
         *,
         line_width_step: int = _DEFAULT_LINE_WIDTH_STEP,
+        identity_spans: list[tuple[float, float, float, float]] | None = None,
+        mirror_symmetric: bool = True,
     ) -> None:
         super().__init__()
         self._result = result
@@ -322,6 +324,18 @@ class _SegmentsItem(QGraphicsItem):
         self._line_width_step = max(
             _MIN_LINE_WIDTH_STEP, min(_MAX_LINE_WIDTH_STEP, int(line_width_step))
         )
+        # Self-match diagonals: full (0,0)→(n,n) for one sequence, or one
+        # span per shared sequence block in a multi_dot / All-sequences layout.
+        # Empty list = cross comparison (no identity line).
+        if identity_spans is None:
+            n = float(self._n)
+            self._identity_spans: list[tuple[float, float, float, float]] = [
+                (0.0, 0.0, n, n)
+            ]
+        else:
+            self._identity_spans = list(identity_spans)
+        # Mirror forward hits across y=x — only valid for true self-dotplots.
+        self._mirror_symmetric = bool(mirror_symmetric)
         # Optional cosmetic width override for high-res PNG/SVG export.
         self._export_pen_px: float | None = None
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemUsesExtendedStyleOption, True)
@@ -347,14 +361,17 @@ class _SegmentsItem(QGraphicsItem):
         n = float(self._n)
         return QRectF(0.0, 0.0, n, n).adjusted(0.0, 0.0, 0.5, 0.5)
 
-    def _pen(self, color: QColor) -> QPen:
+    def _pen(self, color: QColor, *, square_cap: bool = False) -> QPen:
         pen = QPen(color)
         pen.setCosmetic(True)
         if self._export_pen_px is not None:
             pen.setWidthF(self._export_pen_px)
         else:
             pen.setWidthF(_line_width_px(self._line_width_step))
-        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        # Square caps give the chunky staircase identity look when zoomed.
+        pen.setCapStyle(
+            Qt.PenCapStyle.SquareCap if square_cap else Qt.PenCapStyle.RoundCap
+        )
         return pen
 
     def paint(self, painter: QPainter, option, widget=None) -> None:  # noqa: N802
@@ -377,13 +394,15 @@ class _SegmentsItem(QGraphicsItem):
         min_length = 0.0 if scale >= 1.0 else (1.0 / scale)
         visible = exposed
 
-        painter.setPen(self._pen(_DIAGONAL_COLOR))
-        painter.drawLine(QPointF(0, 0), QPointF(self._n, self._n))
+        painter.setPen(self._pen(_DIAGONAL_COLOR, square_cap=True))
+        for x1, y1, x2, y2 in self._identity_spans:
+            painter.drawLine(QPointF(x1, y1), QPointF(x2, y2))
 
         forward: list[tuple[float, float, float, float]] = []
         reverse: list[tuple[float, float, float, float]] = []
         forward_pts: list[QPointF] = []
         reverse_pts: list[QPointF] = []
+        mirror = self._mirror_symmetric
         for seg in self._result.segments:
             x1, y1 = float(seg.x), float(seg.y)
             x2, y2 = float(seg.end_x), float(seg.end_y)
@@ -395,7 +414,7 @@ class _SegmentsItem(QGraphicsItem):
                     or hi_y < visible.top() or lo_y > visible.bottom()
                 )
                 if off:
-                    if seg.strand == STRAND_REVERSE:
+                    if seg.strand == STRAND_REVERSE or not mirror:
                         continue
                     mirrored_off = (
                         hi_y < visible.left() or lo_y > visible.right()
@@ -409,7 +428,8 @@ class _SegmentsItem(QGraphicsItem):
                     reverse_pts.append(QPointF(x1, y1))
                 else:
                     forward_pts.append(QPointF(x1, y1))
-                    forward_pts.append(QPointF(y1, x1))  # self-symmetry
+                    if mirror:
+                        forward_pts.append(QPointF(y1, x1))  # self-symmetry
                 continue
             if seg.strand == STRAND_REVERSE:
                 reverse.append((x1, y1, x2, y2))
@@ -419,7 +439,8 @@ class _SegmentsItem(QGraphicsItem):
         painter.setPen(self._pen(_FORWARD_COLOR))
         for x1, y1, x2, y2 in forward:
             painter.drawLine(QPointF(x1, y1), QPointF(x2, y2))
-            painter.drawLine(QPointF(y1, x1), QPointF(y2, x2))  # self-symmetry
+            if mirror:
+                painter.drawLine(QPointF(y1, x1), QPointF(y2, x2))  # self-symmetry
         if forward_pts:
             painter.drawPoints(forward_pts)
 
@@ -749,6 +770,40 @@ class DotplotCanvas(QGraphicsView):
     def axis_entries(self, horizontal: bool) -> list:
         return self._axis_x if horizontal else self._axis_y
 
+    def _identity_spans_for(
+        self, result: DotplotResult
+    ) -> tuple[list[tuple[float, float, float, float]], bool]:
+        """Return (identity line spans, mirror_symmetric).
+
+        Multi-sequence ``*_multi_dot.paf`` / All-sequences: one thick diagonal
+        per shared sequence block (figure-2 style when zoomed), not one line
+        across the whole grid. Cross-only pairs get no identity line.
+        """
+        if self._axis_x or self._axis_y:
+            y_by_name = {e.name: e for e in self._axis_y}
+            spans: list[tuple[float, float, float, float]] = []
+            for xe in self._axis_x:
+                ye = y_by_name.get(xe.name)
+                if ye is None:
+                    continue
+                length = min(int(xe.length), int(ye.length))
+                if length <= 0:
+                    continue
+                spans.append(
+                    (
+                        float(xe.offset),
+                        float(ye.offset),
+                        float(xe.offset + length),
+                        float(ye.offset + length),
+                    )
+                )
+            return spans, False
+        label = str(getattr(result, "sequence_id", "") or "")
+        if " vs " in label:
+            return [], False
+        n = float(max(int(result.sequence_length), 1))
+        return [(0.0, 0.0, n, n)], True
+
     def plot_title(self) -> str:
         return self._title
 
@@ -837,7 +892,13 @@ class DotplotCanvas(QGraphicsView):
 
         scene = self.scene()
         scene.clear()
-        self._item = _SegmentsItem(result, line_width_step=self._line_width_step)
+        identity_spans, mirror = self._identity_spans_for(result)
+        self._item = _SegmentsItem(
+            result,
+            line_width_step=self._line_width_step,
+            identity_spans=identity_spans,
+            mirror_symmetric=mirror,
+        )
         self._length = result.sequence_length
         self._offset = int(getattr(result, "coordinate_offset", 0) or 0)
         self._selection = None

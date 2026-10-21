@@ -87,10 +87,23 @@ class DotplotResult:
     # real scaffold positions.
     coordinate_offset: int = 0
     full_sequence_length: int = 0
+    # Cross-sequence (pairwise) plots: empty ``target_id`` means self (query == target).
+    target_id: str = ""
+    target_length: int = 0
 
     @property
     def segment_count(self) -> int:
         return len(self.segments)
+
+    @property
+    def effective_target_id(self) -> str:
+        tid = str(self.target_id or "").strip()
+        return tid or str(self.sequence_id or "sequence").strip() or "sequence"
+
+    @property
+    def effective_target_length(self) -> int:
+        n = int(self.target_length or 0)
+        return n if n > 0 else int(self.sequence_length)
 
 
 def reverse_complement(sequence: str) -> str:
@@ -461,3 +474,331 @@ def compute_self_dotplot_for_fasta(
         include_reverse=include_reverse,
         max_matches=max_matches,
     )
+
+
+def self_dotplot_paf_path(fasta_path: Path) -> Path:
+    """Default path: ``{input.name}_self_dot.paf`` beside the FASTA (Flexidot-style)."""
+    from repeatviewer.backends.output_paths import next_numbered_path
+    from repeatviewer.tool_output_paths import kept_input_name
+
+    path = Path(fasta_path).expanduser().resolve()
+    return next_numbered_path(path.with_name(f"{kept_input_name(path)}_self_dot.paf"))
+
+
+def segments_to_paf_lines(result: DotplotResult) -> list[str]:
+    """Serialize dotplot segments as PAF lines (self or query×target)."""
+    qid = str(result.sequence_id or "sequence").strip() or "sequence"
+    tid = result.effective_target_id
+    qn = int(result.sequence_length)
+    tn = int(result.effective_target_length)
+    lines: list[str] = []
+    for seg in result.segments:
+        qstart = int(seg.x)
+        qend = int(seg.end_x)
+        if seg.strand == STRAND_REVERSE:
+            strand = "-"
+            tstart = int(seg.end_y)
+            tend = int(seg.y)
+        else:
+            strand = "+"
+            tstart = int(seg.y)
+            tend = int(seg.end_y)
+        span = max(0, int(seg.length))
+        if span <= 0 or qend <= qstart:
+            continue
+        # Standard PAF columns 1–12; mapq fixed at 255 (unavailable).
+        lines.append(
+            f"{qid}\t{qn}\t{qstart}\t{qend}\t{strand}\t{tid}\t{tn}\t"
+            f"{tstart}\t{tend}\t{span}\t{span}\t255"
+        )
+    return lines
+
+
+def compute_cross_dotplot(
+    query: str,
+    target: str,
+    *,
+    query_id: str = "",
+    target_id: str = "",
+    word_size: int = DEFAULT_WORD_SIZE,
+    include_reverse: bool = True,
+    max_matches: int = DEFAULT_MAX_MATCHES,
+) -> DotplotResult:
+    """Query×target k-mer dotplot (FastGA-style pairwise comparison)."""
+    q = query.upper()
+    t = target.upper()
+    nq = len(q)
+    nt = len(t)
+    if nq == 0 or nt == 0:
+        raise DotplotError("The sequence is empty.")
+    if nq > MAX_DOTPLOT_SEQUENCE_BYTES or nt > MAX_DOTPLOT_SEQUENCE_BYTES:
+        raise DotplotError(
+            f"Sequences are {nq:,} and {nt:,} bp. Dotplots are limited to "
+            f"{MAX_DOTPLOT_SEQUENCE_BYTES:,} bp per sequence."
+        )
+    word_size = max(MIN_WORD_SIZE, min(int(word_size), MAX_WORD_SIZE))
+    if word_size > nq or word_size > nt:
+        raise DotplotError(
+            f"Word size ({word_size}) is longer than one of the sequences "
+            f"({nq} bp × {nt} bp)."
+        )
+
+    result = DotplotResult(
+        sequence_id=query_id,
+        sequence_length=nq,
+        word_size=word_size,
+        include_reverse=include_reverse,
+        target_id=target_id,
+        target_length=nt,
+    )
+
+    target_index = _build_word_index(t, word_size)
+    raw = 0
+    diagonals: dict[int, list[int]] = defaultdict(list)
+    valid = set("ACGT")
+    limit = nq - word_size + 1
+    for i in range(limit):
+        word = q[i : i + word_size]
+        if not valid.issuperset(word):
+            continue
+        hits = target_index.get(word)
+        if not hits:
+            continue
+        for j in hits:
+            diagonals[j - i].append(i)
+            raw += 1
+        if raw > max_matches:
+            raise DotplotError(
+                f"Too many matches (over {max_matches:,}) at word size "
+                f"{word_size}. Try a larger word size."
+            )
+
+    for offset, starts in diagonals.items():
+        for start, length in _merge_runs(starts, word_size):
+            result.segments.append(
+                DotplotSegment(x=start, y=start + offset, length=length)
+            )
+
+    if include_reverse:
+        rc = reverse_complement(t)
+        rc_index = _build_word_index(rc, word_size)
+        anti: dict[int, list[int]] = defaultdict(list)
+        for i in range(limit):
+            word = q[i : i + word_size]
+            if not valid.issuperset(word):
+                continue
+            rc_hits = rc_index.get(word)
+            if not rc_hits:
+                continue
+            for j in rc_hits:
+                # rc[j:j+k] == RC of t[nt-j-k : nt-j]; y is exclusive end on target.
+                y = nt - j
+                anti[i + y].append(i)
+                raw += 1
+            if raw > max_matches:
+                result.truncated = True
+                result.note = (
+                    "Reverse-strand matches were truncated; try a larger word size."
+                )
+                break
+
+        for key, starts in anti.items():
+            for start, length in _merge_runs(starts, word_size):
+                result.segments.append(
+                    DotplotSegment(
+                        x=start,
+                        y=key - start,
+                        length=length,
+                        strand=STRAND_REVERSE,
+                    )
+                )
+
+    result.raw_match_count = raw
+    return result
+
+
+def pairwise_dotplot_paf_path(files: list[Path]) -> Path:
+    """Default path: ``{first.name}_multi_dot.paf`` (like Flexidot ``*_multi_flexidot``)."""
+    from repeatviewer.backends.output_paths import next_numbered_path
+    from repeatviewer.tool_output_paths import kept_input_name
+
+    if not files:
+        raise DotplotError("No FASTA files for pairwise comparison.")
+    first = Path(files[0]).expanduser().resolve()
+    return next_numbered_path(
+        first.with_name(f"{kept_input_name(first)}_multi_dot.paf")
+    )
+
+
+def write_self_dotplot_paf(
+    fasta_path: Path,
+    *,
+    word_size: int | None = None,
+    include_reverse: bool = True,
+    max_matches: int = DEFAULT_MAX_MATCHES,
+    out_path: Path | None = None,
+    all_records: bool = True,
+) -> Path:
+    """Compute self-dotplot(s) for a FASTA and write ``*_self_dot.paf``.
+
+    When ``all_records`` is True, every record in a multi-FASTA is plotted and
+    written into the same PAF (distinct ``qname`` / ``tname`` per record).
+    """
+    from repeatviewer.backends.sequence_features import (
+        list_fasta_record_ids,
+        load_fasta_record,
+        load_single_sequence_fasta,
+    )
+
+    resolved = Path(fasta_path).expanduser().resolve()
+    target = Path(out_path) if out_path is not None else self_dotplot_paf_path(resolved)
+    target = target.expanduser().resolve()
+
+    results: list[DotplotResult] = []
+    try:
+        if all_records:
+            try:
+                sid, seq = load_single_sequence_fasta(resolved)
+                results.append(
+                    compute_self_dotplot(
+                        seq,
+                        sequence_id=sid,
+                        word_size=word_size or suggest_word_size(len(seq)),
+                        include_reverse=include_reverse,
+                        max_matches=max_matches,
+                    )
+                )
+            except ValueError:
+                for rid in list_fasta_record_ids(resolved):
+                    sid, seq = load_fasta_record(resolved, rid)
+                    results.append(
+                        compute_self_dotplot(
+                            seq,
+                            sequence_id=sid,
+                            word_size=word_size or suggest_word_size(len(seq)),
+                            include_reverse=include_reverse,
+                            max_matches=max_matches,
+                        )
+                    )
+        else:
+            results.append(
+                compute_self_dotplot_for_fasta(
+                    resolved,
+                    word_size=word_size,
+                    include_reverse=include_reverse,
+                    max_matches=max_matches,
+                )
+            )
+    except (OSError, ValueError) as exc:
+        raise DotplotError(str(exc)) from exc
+
+    lines: list[str] = []
+    for result in results:
+        lines.extend(segments_to_paf_lines(result))
+    if not lines:
+        raise DotplotError(f"No self-dotplot matches to write for {resolved.name}.")
+
+    try:
+        target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    except OSError as exc:
+        raise DotplotError(f"Could not write {target.name}: {exc}") from exc
+    return target
+
+
+def _load_fasta_records_for_dotplot(path: Path) -> list[tuple[str, str]]:
+    """Return ``(id, sequence)`` for every record in ``path``."""
+    from repeatviewer.backends.sequence_features import (
+        list_fasta_record_ids,
+        load_fasta_record,
+        load_single_sequence_fasta,
+    )
+
+    resolved = Path(path).expanduser().resolve()
+    try:
+        sid, seq = load_single_sequence_fasta(resolved)
+        return [(sid, seq)]
+    except ValueError:
+        return [
+            load_fasta_record(resolved, rid)
+            for rid in list_fasta_record_ids(resolved)
+        ]
+
+
+def write_pairwise_dotplot_paf(
+    files: list[Path],
+    *,
+    word_size: int | None = None,
+    include_reverse: bool = True,
+    max_matches: int = DEFAULT_MAX_MATCHES,
+    out_path: Path | None = None,
+) -> Path:
+    """Compare each selected sequence against the others → one reopenable PAF.
+
+    With two or more FASTA files, every unordered file pair is compared (all
+    records in A × all records in B). With a single multi-FASTA, every unordered
+    record pair inside that file is compared.
+    """
+    import itertools
+
+    paths = [Path(p).expanduser().resolve() for p in files if p is not None]
+    if not paths:
+        raise DotplotError("Select one or more FASTA files for pairwise comparison.")
+
+    per_file: list[list[tuple[str, str]]] = []
+    try:
+        for path in paths:
+            records = _load_fasta_records_for_dotplot(path)
+            if not records:
+                raise DotplotError(f"No sequences found in {path.name}.")
+            per_file.append(records)
+    except (OSError, ValueError) as exc:
+        raise DotplotError(str(exc)) from exc
+
+    # Flatten to (file_index, id, seq) for within-file pairs when only one file.
+    comparisons: list[tuple[tuple[str, str], tuple[str, str]]] = []
+    if len(paths) == 1:
+        records = per_file[0]
+        if len(records) < 2:
+            raise DotplotError(
+                "Pairwise comparison needs two or more sequences "
+                "(select multiple FASTA files, or one multi-FASTA)."
+            )
+        for a, b in itertools.combinations(records, 2):
+            comparisons.append((a, b))
+    else:
+        for (i, recs_a), (j, recs_b) in itertools.combinations(
+            list(enumerate(per_file)), 2
+        ):
+            del i, j
+            for a in recs_a:
+                for b in recs_b:
+                    comparisons.append((a, b))
+
+    target = (
+        Path(out_path).expanduser().resolve()
+        if out_path is not None
+        else pairwise_dotplot_paf_path(paths).resolve()
+    )
+
+    lines: list[str] = []
+    for (qid, qseq), (tid, tseq) in comparisons:
+        resolved_word = word_size or suggest_word_size(max(len(qseq), len(tseq)))
+        result = compute_cross_dotplot(
+            qseq,
+            tseq,
+            query_id=qid,
+            target_id=tid,
+            word_size=resolved_word,
+            include_reverse=include_reverse,
+            max_matches=max_matches,
+        )
+        lines.extend(segments_to_paf_lines(result))
+
+    if not lines:
+        raise DotplotError("No pairwise matches to write for the selected sequences.")
+
+    try:
+        target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    except OSError as exc:
+        raise DotplotError(f"Could not write {target.name}: {exc}") from exc
+    return target

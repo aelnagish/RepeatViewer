@@ -47,7 +47,7 @@ def test_flexidot_output_stem_multi(tmp_path: Path) -> None:
     b = tmp_path / "b.fa"
     a.write_text(">a\nA\n")
     b.write_text(">b\nA\n")
-    assert flexidot_output_stem([a, b]) == "a.fa_flexidot_multi"
+    assert flexidot_output_stem([a, b]) == "a.fa_multi_flexidot"
 
 
 def test_flexidot_sidecar_paths_use_output_stem_once(tmp_path: Path) -> None:
