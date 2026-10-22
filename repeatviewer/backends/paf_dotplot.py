@@ -24,9 +24,11 @@ from __future__ import annotations
 import re
 import subprocess
 import sys
-from repeatviewer.external_process import run_logged_process
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from repeatviewer.external_process import run_logged_process
 
 from repeatviewer.backends.dotplot import (
     STRAND_FORWARD,
@@ -41,6 +43,19 @@ ALN_SUFFIXES = frozenset({".1aln"})
 # A PAF of a whole-genome comparison can hold millions of records. Past this
 # the plot is unreadable and the memory pointless, so stop and say so.
 MAX_PAF_RECORDS = 2_000_000
+
+# Built-in Dotplot writes this comment so Preview can show the run settings.
+# Example: ``# RepeatViewer-dotplot word_size=15 include_reverse=1``
+_PAF_RV_HEADER_PREFIX = "# RepeatViewer-dotplot"
+
+# Concatenated "All sequences" view: past this many scaffolds the axes and
+# tick labels become unusable (and building them stalls the UI).
+MAX_ALL_SEQUENCES = 128
+
+# Compare dropdown: filling a QComboBox with tens of thousands of pairs freezes
+# Qt. Keep the longest / self pairs; the rest stay reachable only if reopened
+# after filtering the PAF externally.
+MAX_PAIR_COMBO_ITEMS = 500
 
 
 def _natural_sort_key(name: str) -> list:
@@ -68,6 +83,40 @@ class AxisEntry:
         return self.offset + self.length
 
 
+def format_paf_rv_header(
+    *,
+    word_size: int | None = None,
+    include_reverse: bool | None = None,
+) -> str:
+    """One comment line recording built-in Dotplot run settings."""
+    parts = [_PAF_RV_HEADER_PREFIX]
+    if word_size is not None:
+        parts.append(f"word_size={max(0, int(word_size))}")
+    if include_reverse is not None:
+        parts.append(f"include_reverse={1 if include_reverse else 0}")
+    return " ".join(parts)
+
+
+def _parse_paf_rv_header(line: str) -> dict[str, str]:
+    """Pull ``key=value`` tokens from a RepeatViewer-dotplot comment line."""
+    text = line.strip()
+    if not text.startswith("#"):
+        return {}
+    body = text.lstrip("#").strip()
+    if not body.lower().startswith("repeatviewer"):
+        return {}
+    out: dict[str, str] = {}
+    for token in body.split():
+        if "=" not in token:
+            continue
+        key, _, value = token.partition("=")
+        key = key.strip().lower()
+        value = value.strip()
+        if key and value:
+            out[key] = value
+    return out
+
+
 @dataclass
 class PafAlignments:
     """Parsed PAF, grouped so either layout can be produced without re-reading."""
@@ -78,35 +127,85 @@ class PafAlignments:
     query_lengths: dict[str, int] = field(default_factory=dict)
     target_lengths: dict[str, int] = field(default_factory=dict)
     truncated: bool = False
+    # From ``# RepeatViewer-dotplot word_size=…`` when the built-in writer
+    # recorded it; None for FastGA / foreign PAFs.
+    word_size: int | None = None
+    include_reverse: bool | None = None
+
+    def unique_pairs(self) -> set[tuple[str, str]]:
+        """Observed (query, target) pairs — one pass over records."""
+        return {
+            (qname, tname)
+            for qname, _ql, _qs, _qe, _st, tname, _tl, _ts, _te in self.records
+        }
 
     def pairs(self) -> list[tuple[str, str]]:
         """Sequence pairs for the Compare menu.
 
-        Order: self-comparisons first (natural name order), then each query
-        against every other target (queries and targets both natural-sorted).
+        Order: self-comparisons first (natural name order), then cross pairs
+        (query then target, natural-sorted).
+
+        Only sorts pairs that actually appear in the file. An earlier version
+        walked every name × name combination, which hung forever on multi-
+        FastGA PAFs with hundreds of thousands of contigs.
         """
-        pair_set: set[tuple[str, str]] = set()
-        for qname, _ql, _qs, _qe, _st, tname, _tl, _ts, _te in self.records:
-            pair_set.add((qname, tname))
-        names = sorted(
-            {q for q, _t in pair_set} | {t for _q, t in pair_set},
-            key=_natural_sort_key,
+        pair_set = self.unique_pairs()
+        self_pairs = sorted(
+            (p for p in pair_set if p[0] == p[1]),
+            key=lambda p: _natural_sort_key(p[0]),
         )
-        ordered: list[tuple[str, str]] = []
-        for name in names:
-            if (name, name) in pair_set:
-                ordered.append((name, name))
-        for query in names:
-            for target in names:
-                if query == target:
-                    continue
-                if (query, target) in pair_set:
-                    ordered.append((query, target))
-        return ordered
+        cross_pairs = sorted(
+            (p for p in pair_set if p[0] != p[1]),
+            key=lambda p: (_natural_sort_key(p[0]), _natural_sort_key(p[1])),
+        )
+        return self_pairs + cross_pairs
+
+    def sequence_count(self) -> int:
+        """Distinct sequence names on either axis."""
+        return len(set(self.query_lengths) | set(self.target_lengths))
+
+    def supports_all_sequences_view(self) -> bool:
+        """Whether the concatenated multi-scaffold layout is practical."""
+        return self.sequence_count() <= MAX_ALL_SEQUENCES
+
+    def pairs_for_combo(
+        self, *, max_items: int = MAX_PAIR_COMBO_ITEMS
+    ) -> tuple[list[tuple[str, str]], int]:
+        """Pairs to list in the Compare menu, plus the total unique count.
+
+        Prefers self-comparisons of the longest sequences, then other pairs by
+        the longer participant. Caps the list so the dropdown stays responsive.
+        """
+        pair_set = self.unique_pairs()
+        total = len(pair_set)
+        if total == 0:
+            return [], 0
+        lengths = _unified_sequence_lengths(self)
+
+        def _rank(pair: tuple[str, str]) -> tuple:
+            query, target = pair
+            q_len = lengths.get(query, 0)
+            t_len = lengths.get(target, 0)
+            return (
+                0 if query == target else 1,
+                -max(q_len, t_len),
+                -min(q_len, t_len),
+                _natural_sort_key(query),
+                _natural_sort_key(target),
+            )
+
+        ranked = sorted(pair_set, key=_rank)
+        limit = max(1, int(max_items))
+        return ranked[:limit], total
 
     def is_single_pair(self) -> bool:
-        return len(self.pairs()) <= 1
-
+        """True when at most one (query, target) pair appears (no full sort)."""
+        seen: set[tuple[str, str]] = set()
+        for qname, _ql, _qs, _qe, _st, tname, _tl, _ts, _te in self.records:
+            seen.add((qname, tname))
+            if len(seen) > 1:
+                return False
+        return True
 
 def is_paf_file(path: Path) -> bool:
     return path.suffix.lower() in PAF_SUFFIXES
@@ -154,19 +253,56 @@ def convert_aln_to_paf(path: Path, out_path: Path | None = None) -> Path:
     return target
 
 
-def parse_paf(path: Path, *, max_records: int = MAX_PAF_RECORDS) -> PafAlignments:
+def parse_paf(
+    path: Path,
+    *,
+    max_records: int = MAX_PAF_RECORDS,
+    progress: Callable[[str], None] | None = None,
+    is_cancelled: Callable[[], bool] | None = None,
+) -> PafAlignments:
     """Read a PAF file into grouped alignment records.
 
     Only the first 9 columns are needed; anything after them (CIGAR, tags) is
     ignored, so files from any aligner are accepted.
+
+    ``progress`` receives short status strings (percent when file size is
+    known). ``is_cancelled`` is polled between lines so a Stop control can
+    abort a multi-hundred-megabyte read without killing the process.
     """
     resolved = path.expanduser().resolve()
     result = PafAlignments()
     try:
+        try:
+            file_size = resolved.stat().st_size
+        except OSError:
+            file_size = 0
+        # Do not call handle.tell() while iterating lines — on text streams
+        # next() disables telling ("telling position disabled by next() call").
+        bytes_read = 0
+        next_report_at = 0
+        report_step = max(file_size // 20, 1_000_000) if file_size > 0 else 0
         with resolved.open(encoding="utf-8", errors="replace") as handle:
             for raw in handle:
+                if is_cancelled is not None and is_cancelled():
+                    raise PafError("Cancelled.")
+                # PAF is ASCII in practice; len(raw) is a good byte proxy.
+                bytes_read += len(raw)
                 line = raw.strip()
-                if not line or line.startswith("#"):
+                if not line:
+                    continue
+                if line.startswith("#"):
+                    meta = _parse_paf_rv_header(line)
+                    if "word_size" in meta:
+                        try:
+                            result.word_size = int(meta["word_size"])
+                        except ValueError:
+                            pass
+                    if "include_reverse" in meta:
+                        result.include_reverse = meta["include_reverse"] not in {
+                            "0",
+                            "false",
+                            "no",
+                        }
                     continue
                 parts = line.split("\t")
                 if len(parts) < 9:
@@ -190,6 +326,14 @@ def parse_paf(path: Path, *, max_records: int = MAX_PAF_RECORDS) -> PafAlignment
                     result.query_lengths[qname] = qlen
                 if tlen > result.target_lengths.get(tname, 0):
                     result.target_lengths[tname] = tlen
+                if (
+                    progress is not None
+                    and file_size > 0
+                    and bytes_read >= next_report_at
+                ):
+                    pct = min(99, int(100 * bytes_read / file_size))
+                    progress(f"Reading alignments… {pct}%")
+                    next_report_at = bytes_read + report_step
                 if len(result.records) >= max_records:
                     result.truncated = True
                     break
@@ -199,7 +343,6 @@ def parse_paf(path: Path, *, max_records: int = MAX_PAF_RECORDS) -> PafAlignment
     if not result.records:
         raise PafError(f"No alignments found in {resolved.name}.")
     return result
-
 
 def _segment(qstart: int, qend: int, strand: str, tstart: int, tend: int,
              x_off: int, y_off: int) -> DotplotSegment | None:
@@ -220,6 +363,26 @@ def _segment(qstart: int, qend: int, strand: str, tstart: int, tend: int,
     )
 
 
+def _transpose_segment(seg: DotplotSegment) -> DotplotSegment:
+    """Mirror a segment across y=x (fills the other triangle of the matrix).
+
+    Pairwise PAFs store each unordered pair once (A→B, not B→A). The
+    All-sequences view is symmetric, so the missing half is drawn by
+    reflecting every hit.
+    """
+    if seg.strand == STRAND_REVERSE:
+        # Reverse runs (x,y)→(x+L,y−L); mirror is (y−L,x+L)→(y,x).
+        return DotplotSegment(
+            x=seg.end_y,
+            y=seg.end_x,
+            length=seg.length,
+            strand=STRAND_REVERSE,
+        )
+    return DotplotSegment(
+        x=seg.y, y=seg.x, length=seg.length, strand=STRAND_FORWARD
+    )
+
+
 def _intersects(seg: DotplotSegment, lo: int, hi: int) -> bool:
     """True when the segment overlaps [lo, hi] on both axes."""
     x_lo, x_hi = seg.x, seg.end_x
@@ -237,20 +400,31 @@ def result_for_pair(
 ) -> DotplotResult:
     """Dotplot of one query against one target, in file coordinates.
 
-    ``window`` restricts the plot to a base range (1-based inclusive) on both
-    axes -- the square block on the diagonal -- which is how a small region of
-    a very large scaffold is inspected without redrawing everything.
-    """
-    q_len = alignments.query_lengths.get(query, 0)
-    t_len = alignments.target_lengths.get(target, 0)
-    full_length = max(q_len, t_len, 1)
+    X is the query length and Y is the target length. When the two sequences
+    differ in size the plot is rectangular (not a square padded to
+    ``max(q, t)``).
 
-    if window is not None:
+    ``window`` restricts a *self* comparison to a base range (1-based
+    inclusive) on both axes — the square block on the diagonal. For unequal
+    query/target pairs the shared window is ignored and the full extents are
+    used.
+    """
+    q_len = max(int(alignments.query_lengths.get(query, 0)), 1)
+    t_len = max(int(alignments.target_lengths.get(target, 0)), 1)
+    is_self = query == target
+
+    # Shared square window only makes sense when both axes are the same sequence.
+    use_window = window is not None and is_self
+    if use_window:
+        assert window is not None
         lo = max(1, min(window[0], window[1]))
-        hi = min(full_length, max(window[0], window[1]))
+        hi = min(q_len, max(window[0], window[1]))
+        shift = lo - 1
+        plot_q = plot_t = max(hi - shift, 1)
     else:
-        lo, hi = 1, full_length
-    shift = lo - 1
+        lo, hi = 1, max(q_len, t_len)
+        shift = 0
+        plot_q, plot_t = q_len, t_len
 
     segments: list[DotplotSegment] = []
     for qname, _ql, qstart, qend, strand, tname, _tl, tstart, tend in alignments.records:
@@ -259,7 +433,7 @@ def result_for_pair(
         seg = _segment(qstart, qend, strand, tstart, tend, 0, 0)
         if seg is None or seg.length < min_length:
             continue
-        if window is not None:
+        if use_window:
             if not _intersects(seg, lo - 1, hi):
                 continue
             seg = DotplotSegment(
@@ -267,18 +441,21 @@ def result_for_pair(
             )
         segments.append(seg)
 
-    label = query if query == target else f"{query} vs {target}"
+    label = query if is_self else f"{query} vs {target}"
+    recorded_word = int(alignments.word_size or 0)
     return DotplotResult(
         sequence_id=label,
-        sequence_length=max(hi - shift, 1),
-        word_size=0,
+        sequence_length=plot_q,
+        word_size=recorded_word,
         segments=segments,
         include_reverse=True,
         raw_match_count=len(segments),
         truncated=alignments.truncated,
         note="Truncated: too many records." if alignments.truncated else "",
         coordinate_offset=shift,
-        full_sequence_length=full_length,
+        full_sequence_length=q_len,
+        target_id="" if is_self else target,
+        target_length=0 if is_self else plot_t,
     )
 
 
@@ -320,29 +497,54 @@ def result_for_all(
 
     Returns the result plus the axis layouts, so the viewer can draw separator
     lines and label each sequence along the edges.
+
+    Raises ``PafError`` when there are too many sequences for a readable
+    concatenated view (see ``MAX_ALL_SEQUENCES``).
     """
     lengths = _unified_sequence_lengths(alignments)
+    n_seq = len(lengths)
+    if n_seq > MAX_ALL_SEQUENCES:
+        raise PafError(
+            f"All-sequences view supports at most {MAX_ALL_SEQUENCES} "
+            f"sequences (this file has {n_seq}). Pick one pair in Compare."
+        )
     entries, total = _axis_layout(lengths)
     # Same layout on both axes (copy lists so callers can mutate independently).
     x_entries = list(entries)
     y_entries = list(entries)
     offset_of = {e.name: e.offset for e in entries}
 
+    # Two-sequence pairwise matrices are cross-only (no A×A / B×B clutter).
+    skip_self = n_seq == 2
+
     segments: list[DotplotSegment] = []
     for qname, _ql, qstart, qend, strand, tname, _tl, tstart, tend in alignments.records:
+        if skip_self and qname == tname:
+            continue
         seg = _segment(
             qstart, qend, strand, tstart, tend,
             offset_of.get(qname, 0), offset_of.get(tname, 0),
         )
-        if seg is not None and seg.length >= min_length:
-            segments.append(seg)
+        if seg is None or seg.length < min_length:
+            continue
+        segments.append(seg)
+        # Pairwise files only store one triangle (and self plots often only
+        # one half of the diagonal block). Reflect so the matrix looks full.
+        mirrored = _transpose_segment(seg)
+        if (
+            mirrored.x != seg.x
+            or mirrored.y != seg.y
+            or mirrored.strand != seg.strand
+        ):
+            segments.append(mirrored)
 
     n = len(entries)
+    recorded_word = int(alignments.word_size or 0)
     return (
         DotplotResult(
             sequence_id=f"{n} x {n} sequences",
             sequence_length=max(total, 1),
-            word_size=0,
+            word_size=recorded_word,
             segments=segments,
             include_reverse=True,
             raw_match_count=len(segments),
@@ -354,10 +556,25 @@ def result_for_all(
     )
 
 
-def load_alignment_file(path: Path) -> tuple[PafAlignments, Path]:
+def load_alignment_file(
+    path: Path,
+    *,
+    progress: Callable[[str], None] | None = None,
+    is_cancelled: Callable[[], bool] | None = None,
+) -> tuple[PafAlignments, Path]:
     """Read a .paf, or convert a .1aln first. Returns (alignments, paf path)."""
     resolved = path.expanduser().resolve()
     if is_aln_file(resolved):
+        if progress is not None:
+            progress(f"Converting {resolved.name}…")
         converted = convert_aln_to_paf(resolved)
-        return parse_paf(converted), converted
-    return parse_paf(resolved), resolved
+        return (
+            parse_paf(
+                converted, progress=progress, is_cancelled=is_cancelled
+            ),
+            converted,
+        )
+    return (
+        parse_paf(resolved, progress=progress, is_cancelled=is_cancelled),
+        resolved,
+    )

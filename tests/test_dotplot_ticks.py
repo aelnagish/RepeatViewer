@@ -272,6 +272,39 @@ def test_multi_dot_identity_spans_per_sequence_block(qapp) -> None:
         DotplotResult(sequence_id="a", sequence_length=50, word_size=0)
     )
     assert self_spans == [(0.0, 0.0, 50.0, 50.0)] and self_mirror is True
+    # Pairwise two-sequence labels: names on each axis; cross has no identity.
+    canvas.set_axes(
+        [AxisEntry("query", 0, 276)],
+        [AxisEntry("target", 0, 755)],
+    )
+    cross_pair, cross_pair_mirror = canvas._identity_spans_for(
+        DotplotResult(
+            sequence_id="query vs target",
+            sequence_length=276,
+            word_size=0,
+            target_id="target",
+            target_length=755,
+        )
+    )
+    assert cross_pair == [] and cross_pair_mirror is False
+    canvas.set_axes(
+        [AxisEntry("same", 0, 100)],
+        [AxisEntry("same", 0, 100)],
+    )
+    self_pair, self_pair_mirror = canvas._identity_spans_for(
+        DotplotResult(sequence_id="same", sequence_length=100, word_size=0)
+    )
+    assert self_pair == [(0.0, 0.0, 100.0, 100.0)] and self_pair_mirror is True
+    canvas.set_axes(
+        [AxisEntry("a", 0, 100), AxisEntry("b", 100, 100)],
+        [AxisEntry("a", 0, 100), AxisEntry("b", 100, 100)],
+    )
+    canvas._length = 200
+    canvas._height = 200
+    seps = canvas._sequence_separator_segments(200.0, 200.0)
+    assert len(seps) == 2
+    assert seps[0][0].x() == 100.0 and seps[0][1].y() == 200.0
+    assert seps[1][0].y() == 100.0 and seps[1][1].x() == 200.0
     canvas.deleteLater()
 
 

@@ -693,13 +693,21 @@ def write_self_dotplot_paf(
         raise DotplotError(str(exc)) from exc
 
     lines: list[str] = []
+    used_word: int | None = int(word_size) if word_size is not None else None
     for result in results:
+        if used_word is None and result.word_size:
+            used_word = int(result.word_size)
         lines.extend(segments_to_paf_lines(result))
     if not lines:
         raise DotplotError(f"No self-dotplot matches to write for {resolved.name}.")
 
+    from repeatviewer.backends.paf_dotplot import format_paf_rv_header
+
+    header = format_paf_rv_header(
+        word_size=used_word, include_reverse=include_reverse
+    )
     try:
-        target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        target.write_text(header + "\n" + "\n".join(lines) + "\n", encoding="utf-8")
     except OSError as exc:
         raise DotplotError(f"Could not write {target.name}: {exc}") from exc
     return target
@@ -732,11 +740,15 @@ def write_pairwise_dotplot_paf(
     max_matches: int = DEFAULT_MAX_MATCHES,
     out_path: Path | None = None,
 ) -> Path:
-    """Compare each selected sequence against the others → one reopenable PAF.
+    """Compare sequences for a multi-panel dotplot → one reopenable PAF.
 
     With two or more FASTA files, every unordered file pair is compared (all
     records in A × all records in B). With a single multi-FASTA, every unordered
     record pair inside that file is compared.
+
+    With three or more sequences, each is also self-compared so the
+    All-sequences matrix has hits on the diagonal blocks. With exactly two
+    sequences only the cross-comparison is written (no A×A / B×B).
     """
     import itertools
 
@@ -774,6 +786,16 @@ def write_pairwise_dotplot_paf(
                 for b in recs_b:
                     comparisons.append((a, b))
 
+    # Unique sequences for diagonal self-comparisons (first id wins on clash).
+    self_records: list[tuple[str, str]] = []
+    seen_ids: set[str] = set()
+    for records in per_file:
+        for sid, seq in records:
+            if sid in seen_ids:
+                continue
+            seen_ids.add(sid)
+            self_records.append((sid, seq))
+
     target = (
         Path(out_path).expanduser().resolve()
         if out_path is not None
@@ -781,8 +803,27 @@ def write_pairwise_dotplot_paf(
     )
 
     lines: list[str] = []
+    used_word: int | None = int(word_size) if word_size is not None else None
+    # Two-sequence pairwise is only A vs B; self fills the diagonal when there
+    # are three or more sequences in the matrix.
+    if len(self_records) >= 3:
+        for sid, seq in self_records:
+            resolved_word = word_size or suggest_word_size(len(seq))
+            if used_word is None:
+                used_word = int(resolved_word)
+            result = compute_self_dotplot(
+                seq,
+                sequence_id=sid,
+                word_size=resolved_word,
+                include_reverse=include_reverse,
+                max_matches=max_matches,
+            )
+            lines.extend(segments_to_paf_lines(result))
+
     for (qid, qseq), (tid, tseq) in comparisons:
         resolved_word = word_size or suggest_word_size(max(len(qseq), len(tseq)))
+        if used_word is None:
+            used_word = int(resolved_word)
         result = compute_cross_dotplot(
             qseq,
             tseq,
@@ -797,8 +838,13 @@ def write_pairwise_dotplot_paf(
     if not lines:
         raise DotplotError("No pairwise matches to write for the selected sequences.")
 
+    from repeatviewer.backends.paf_dotplot import format_paf_rv_header
+
+    header = format_paf_rv_header(
+        word_size=used_word, include_reverse=include_reverse
+    )
     try:
-        target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        target.write_text(header + "\n" + "\n".join(lines) + "\n", encoding="utf-8")
     except OSError as exc:
         raise DotplotError(f"Could not write {target.name}: {exc}") from exc
     return target

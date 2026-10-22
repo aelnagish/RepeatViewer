@@ -46,9 +46,14 @@ def test_write_self_dotplot_paf_reopens(tmp_path: Path) -> None:
     out = write_self_dotplot_paf(fasta, word_size=8, include_reverse=True)
     assert out.name == "te.fa_self_dot.paf"
     assert out.is_file()
+    text = out.read_text(encoding="utf-8")
+    assert text.startswith("# RepeatViewer-dotplot")
+    assert "word_size=8" in text.splitlines()[0]
     aln = parse_paf(out)
     assert aln.records
     assert aln.query_lengths.get("te1", 0) == 300
+    assert aln.word_size == 8
+    assert aln.include_reverse is True
 
 
 def test_write_self_dotplot_paf_empty_raises(tmp_path: Path) -> None:
@@ -82,8 +87,13 @@ def test_write_pairwise_dotplot_paf_two_files(tmp_path: Path) -> None:
     assert out.is_file()
     aln = parse_paf(out)
     assert aln.records
+    assert aln.word_size == 8
+    assert aln.include_reverse is False
     names = {r[0] for r in aln.records} | {r[5] for r in aln.records}
     assert "a1" in names and "b1" in names
+    # Exactly two sequences: cross-only (no A×A / B×B).
+    self_ids = {r[0] for r in aln.records if r[0] == r[5]}
+    assert not self_ids
 
 
 def test_write_pairwise_dotplot_paf_needs_two_sequences(tmp_path: Path) -> None:
@@ -91,6 +101,19 @@ def test_write_pairwise_dotplot_paf_needs_two_sequences(tmp_path: Path) -> None:
     fasta.write_text(">only\nACGTACGTACGTACGTACGT\n", encoding="utf-8")
     with pytest.raises(DotplotError, match="two or more"):
         write_pairwise_dotplot_paf([fasta], word_size=8)
+
+
+def test_write_pairwise_dotplot_paf_three_files_includes_self(tmp_path: Path) -> None:
+    unit = "ACGTACGGTT"
+    paths = []
+    for name in ("a", "b", "c"):
+        path = tmp_path / f"{name}.fa"
+        path.write_text(f">{name}1\n{unit * 25}\n", encoding="utf-8")
+        paths.append(path)
+    out = write_pairwise_dotplot_paf(paths, word_size=8, include_reverse=False)
+    aln = parse_paf(out)
+    self_ids = {r[0] for r in aln.records if r[0] == r[5]}
+    assert self_ids == {"a1", "b1", "c1"}
 
 
 def test_result_for_all_shared_axis_order_makes_straight_diagonal(

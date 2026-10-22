@@ -631,13 +631,12 @@ class DotplotRail(QWidget):
         self.filter_len = QSpinBox(self._params_host)
         self.filter_len.setRange(0, 10_000_000)
         self.filter_len.setValue(0)
-        self.filter_len.setSingleStep(100)
+        self.filter_len.setSingleStep(1)
         self.filter_len.setGroupSeparatorShown(True)
         self._expanding_spin(self.filter_len)
         self.filter_len.setToolTip(
             "Hide alignments shorter than this, in bp.\n"
-            "0 shows everything. Raise it to strip short, noisy matches the "
-            "way a larger word size would when computing a dotplot."
+            "0 shows everything. Raise it to strip short, noisy matches."
         )
         form.addRow(self.filter_len_label, self.filter_len)
 

@@ -8590,8 +8590,11 @@ class ConsensusParamsDialog(QDialog):
 _BUILTIN_DOTPLOT_MODE_HELP = (
     "<b>Self comparison</b>: each selected FASTA is compared with itself "
     "(writes <code>*_self_dot.paf</code>, reopenable in Preview).<br><br>"
-    "<b>Pairwise comparison</b>: each selected sequence is compared with every "
-    "other (writes one <code>*_multi_dot.paf</code>). Needs two or more sequences."
+    "<b>Pairwise comparison</b>: each sequence is compared with every other "
+    "(writes one <code>*_multi_dot.paf</code>). Needs two or more sequences. "
+    "With three or more sequences, self-comparisons fill the diagonal blocks; "
+    "with exactly two, only the cross-comparison is written. Preview mirrors "
+    "each pair across the diagonal so both triangles of the matrix are filled."
 )
 _BUILTIN_DOTPLOT_INPUTS_HELP = (
     "<b>Use selected sequences</b> (default): Built-in Dotplot uses the FASTA "
