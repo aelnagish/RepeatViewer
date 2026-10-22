@@ -5,12 +5,14 @@ from __future__ import annotations
 from PySide6.QtCore import QRectF
 
 from repeatviewer.widgets.dotplot_view import (
+    _axis_entry_at,
     _axis_tick_positions,
     _ensure_min_bp_rect,
     _format_bp,
     _nice_tick_step,
     _non_overlapping_tick_labels,
     _scene_to_bp,
+    _scene_to_local_bp,
 )
 
 
@@ -241,6 +243,56 @@ def test_axis_exact_step_end_keeps_single_end() -> None:
     ticks = _axis_tick_positions(lo=0.0, hi=800.0, length=800, step=100)
     assert ticks.count(800) == 1
     assert 800 in ticks
+
+
+def test_multi_axis_local_bp_restarts_at_one() -> None:
+    """Each concatenated block reports 1-based positions from its own start."""
+    from repeatviewer.backends.paf_dotplot import AxisEntry
+
+    entries = [
+        AxisEntry("a", 0, 100),
+        AxisEntry("b", 100, 100),
+    ]
+    assert _axis_entry_at(entries, 0).name == "a"
+    assert _axis_entry_at(entries, 99).name == "a"
+    assert _axis_entry_at(entries, 100).name == "b"
+    assert _axis_entry_at(entries, 200).name == "b"
+    assert _scene_to_local_bp(0, entries) == 1
+    assert _scene_to_local_bp(50, entries) == 50
+    assert _scene_to_local_bp(100, entries) == 1
+    assert _scene_to_local_bp(150, entries) == 50
+    assert _scene_to_local_bp(200, entries) == 100
+    # Scene 0 and scene 100 (starts of a and b) both label as local 1.
+    assert _format_bp(_scene_to_local_bp(0, entries)) == "1"
+    assert _format_bp(_scene_to_local_bp(100, entries)) == "1"
+
+
+def test_multi_axes_widen_rulers_and_display_local_xy(qapp) -> None:
+    from repeatviewer.backends.paf_dotplot import AxisEntry
+    from repeatviewer.widgets.dotplot_view import (
+        DotplotCanvas,
+        _RULER_LEFT,
+        _RULER_LEFT_MULTI,
+        _RULER_TOP,
+        _RULER_TOP_MULTI,
+    )
+
+    canvas = DotplotCanvas()
+    assert canvas.ruler_top() == _RULER_TOP
+    assert canvas.ruler_left() == _RULER_LEFT
+    canvas.set_axes(
+        [AxisEntry("a", 0, 100), AxisEntry("b", 100, 100)],
+        [AxisEntry("a", 0, 100), AxisEntry("b", 100, 100)],
+    )
+    canvas._length = 200
+    canvas._height = 200
+    assert canvas.ruler_top() == _RULER_TOP_MULTI
+    assert canvas.ruler_left() == _RULER_LEFT_MULTI
+    assert canvas._display_xy(0, 100) == (1, 1)
+    assert canvas._display_xy(50, 150) == (50, 50)
+    canvas.set_axes([], [])
+    assert canvas.ruler_top() == _RULER_TOP
+    canvas.deleteLater()
 
 
 def test_multi_dot_identity_spans_per_sequence_block(qapp) -> None:

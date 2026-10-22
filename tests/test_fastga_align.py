@@ -233,14 +233,46 @@ def test_reference_index_is_removed_when_not_kept(fake_tools):
     ]
 
 
-def test_reference_mode_into_one_file_and_1aln_falls_back_to_paf(fake_tools):
+def test_reference_mode_into_one_file_writes_combined_paf(fake_tools):
     (q1, q2, ref), _log = fake_tools
-    opts = FastGaOptions(mode=FASTGA_MODE_REFERENCE, reference_fasta=str(ref),
-                         reference_combined=True, output_format=fg.FORMAT_ALN)
+    opts = FastGaOptions(
+        mode=FASTGA_MODE_REFERENCE,
+        reference_fasta=str(ref),
+        reference_combined=True,
+        output_format=fg.FORMAT_PAF,
+    )
     (out,) = fg.run_fastga_batch([q1, q2], opts)
     assert out.name == "q1.fa_multi_FastGA_vs_ref.fa.paf"
     assert out.read_text().splitlines() == ["paf q1.fa ref_fa.gix", "paf q2.fa ref_fa.gix"]
     assert not list(ref.parent.glob(".repeatviewer_fastga_part_*"))
+
+
+def test_reference_combined_1aln_writes_one_file_per_query(fake_tools):
+    """Binary .1aln cannot be joined — ignore 'into one file' and write per query."""
+    (q1, q2, ref), _log = fake_tools
+    opts = FastGaOptions(
+        mode=FASTGA_MODE_REFERENCE,
+        reference_fasta=str(ref),
+        reference_combined=True,
+        output_format=fg.FORMAT_ALN,
+    )
+    out = fg.run_fastga_batch([q1, q2], opts)
+    assert [p.name for p in out] == [
+        "q1.fa_FastGA_vs_ref.fa.1aln",
+        "q2.fa_FastGA_vs_ref.fa.1aln",
+    ]
+    assert out[0].read_text().strip().startswith("aln")
+
+
+def test_pairs_mode_1aln_writes_one_file_per_pair(fake_tools):
+    (q1, q2, _ref), _log = fake_tools
+    out = fg.run_fastga_batch(
+        [q1, q2],
+        FastGaOptions(mode=FASTGA_MODE_PAIRS, output_format=fg.FORMAT_ALN),
+    )
+    assert [p.name for p in out] == ["q1.fa_FastGA_vs_q2.fa.1aln"]
+    assert out[0].read_text().strip().startswith("aln")
+    assert not list(q1.parent.glob("*_multi_FastGA*"))
 
 
 def test_soft_mask_skips_the_prebuilt_index_and_sends_M(fake_tools):

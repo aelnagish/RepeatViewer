@@ -6,11 +6,14 @@ from pathlib import Path
 
 import pytest
 
+from repeatviewer.backends.dotplot import DotplotSegment, STRAND_FORWARD
 from repeatviewer.backends.paf_dotplot import (
     MAX_ALL_SEQUENCES,
     MAX_PAIR_COMBO_ITEMS,
+    MAX_PLOT_ALIGNMENTS,
     PafAlignments,
     PafError,
+    keep_longest_segments,
     parse_paf,
     result_for_all,
     result_for_pair,
@@ -72,6 +75,36 @@ def test_supports_all_sequences_view_limit() -> None:
         result_for_all(aln)
 
 
+def test_parse_paf_keeps_longest_not_first(tmp_path: Path) -> None:
+    """Global cap must prefer late long hits over early short ones."""
+    path = tmp_path / "long_tail.paf"
+    lines = [
+        f"early\t1000\t0\t10\t+\tearly\t1000\t0\t10\t10\t10\t60\n"
+        for _ in range(20)
+    ]
+    lines.append("late\t5000\t0\t4000\t+\tlate\t5000\t0\t4000\t4000\t4000\t60\n")
+    path.write_text("".join(lines), encoding="utf-8")
+    aln = parse_paf(path, max_records=5)
+    assert aln.truncated
+    assert any(r[0] == "late" for r in aln.records)
+    assert aln.pair_spans.get(("late", "late"), 0) >= 4000
+
+
+def test_parse_paf_pair_rescans_one_pair(tmp_path: Path) -> None:
+    from repeatviewer.backends.paf_dotplot import parse_paf_pair
+
+    path = tmp_path / "multi.paf"
+    lines = [
+        "a\t1000\t0\t100\t+\tb\t2000\t0\t100\t100\t100\t60\n",
+        "a\t1000\t10\t200\t+\tb\t2000\t50\t240\t190\t190\t60\n",
+        "c\t800\t0\t50\t+\td\t900\t0\t50\t50\t50\t60\n",
+    ]
+    path.write_text("".join(lines), encoding="utf-8")
+    pair = parse_paf_pair(path, "a", "b")
+    assert len(pair.records) == 2
+    assert all(r[0] == "a" and r[5] == "b" for r in pair.records)
+
+
 def test_parse_paf_cancel(tmp_path: Path) -> None:
     path = tmp_path / "tiny.paf"
     lines = [
@@ -131,6 +164,19 @@ def test_result_for_all_mirrors_cross_pair_triangle() -> None:
     assert result.segment_count == 2
     xs = sorted((s.x, s.y) for s in result.segments)
     assert xs[0] != xs[1]
+
+
+def test_keep_longest_segments_matches_alnplot_budget() -> None:
+    """FastGA ALNplot keeps the longest N hits so structure stays visible."""
+    segs = [
+        DotplotSegment(x=i, y=i, length=(i % 50) + 1, strand=STRAND_FORWARD)
+        for i in range(500)
+    ]
+    kept, total, capped = keep_longest_segments(segs, limit=100)
+    assert total == 500 and capped and len(kept) == 100
+    assert kept[0].length <= kept[-1].length
+    assert kept[-1].length == max(s.length for s in segs)
+    assert MAX_PLOT_ALIGNMENTS == 100_000
 
 
 def test_result_for_all_two_sequences_skips_self_hits() -> None:

@@ -21,6 +21,7 @@ with FastGA's ``ALNtoPAF`` first.
 
 from __future__ import annotations
 
+import heapq
 import re
 import subprocess
 import sys
@@ -40,9 +41,15 @@ from repeatviewer.backends.dotplot import (
 PAF_SUFFIXES = frozenset({".paf"})
 ALN_SUFFIXES = frozenset({".1aln"})
 
-# A PAF of a whole-genome comparison can hold millions of records. Past this
-# the plot is unreadable and the memory pointless, so stop and say so.
-MAX_PAF_RECORDS = 2_000_000
+# Keep at most this many alignment records in memory after a full-file scan.
+# Unlike "first N lines", we keep the *longest* hits (FastGA ALNplot style) so
+# a multi-GB PAF still shows structure instead of only early short noise.
+MAX_PAF_RECORDS = 500_000
+
+# FastGA ALNplot (-n) default: plot only the longest N alignments so short
+# noise does not bury the structural diagonals on whole-genome PAFs.
+# https://github.com/thegenemyers/FASTGA#ALNplot
+MAX_PLOT_ALIGNMENTS = 100_000
 
 # Built-in Dotplot writes this comment so Preview can show the run settings.
 # Example: ``# RepeatViewer-dotplot word_size=15 include_reverse=1``
@@ -127,13 +134,22 @@ class PafAlignments:
     query_lengths: dict[str, int] = field(default_factory=dict)
     target_lengths: dict[str, int] = field(default_factory=dict)
     truncated: bool = False
+    # Total alignment lines seen while scanning (may exceed ``len(records)``).
+    total_records_seen: int = 0
+    # Best (longest) span per pair across the whole file — used for Compare
+    # even when only the longest records are kept in ``records``.
+    pair_spans: dict[tuple[str, str], int] = field(default_factory=dict)
     # From ``# RepeatViewer-dotplot word_size=…`` when the built-in writer
     # recorded it; None for FastGA / foreign PAFs.
     word_size: int | None = None
     include_reverse: bool | None = None
+    # Source path — used to re-scan one Compare pair from a huge PAF.
+    source_path: Path | None = None
 
     def unique_pairs(self) -> set[tuple[str, str]]:
-        """Observed (query, target) pairs — one pass over records."""
+        """Observed (query, target) pairs (full-file map when available)."""
+        if self.pair_spans:
+            return set(self.pair_spans)
         return {
             (qname, tname)
             for qname, _ql, _qs, _qe, _st, tname, _tl, _ts, _te in self.records
@@ -173,21 +189,24 @@ class PafAlignments:
     ) -> tuple[list[tuple[str, str]], int]:
         """Pairs to list in the Compare menu, plus the total unique count.
 
-        Prefers self-comparisons of the longest sequences, then other pairs by
-        the longer participant. Caps the list so the dropdown stays responsive.
+        Prefers pairs with the longest alignments (then longest sequences).
+        Caps the list so the dropdown stays responsive.
         """
         pair_set = self.unique_pairs()
         total = len(pair_set)
         if total == 0:
             return [], 0
         lengths = _unified_sequence_lengths(self)
+        spans = self.pair_spans
 
         def _rank(pair: tuple[str, str]) -> tuple:
             query, target = pair
             q_len = lengths.get(query, 0)
             t_len = lengths.get(target, 0)
+            best = int(spans.get(pair, 0)) if spans else 0
             return (
                 0 if query == target else 1,
+                -best,
                 -max(q_len, t_len),
                 -min(q_len, t_len),
                 _natural_sort_key(query),
@@ -200,6 +219,8 @@ class PafAlignments:
 
     def is_single_pair(self) -> bool:
         """True when at most one (query, target) pair appears (no full sort)."""
+        if self.pair_spans:
+            return len(self.pair_spans) <= 1
         seen: set[tuple[str, str]] = set()
         for qname, _ql, _qs, _qe, _st, tname, _tl, _ts, _te in self.records:
             seen.add((qname, tname))
@@ -265,12 +286,21 @@ def parse_paf(
     Only the first 9 columns are needed; anything after them (CIGAR, tags) is
     ignored, so files from any aligner are accepted.
 
+    The whole file is scanned (with progress). Sequence lengths and pair
+    identity are recorded for every line. Alignment rows kept in memory are
+    the **longest** ``max_records`` hits — the FastGA ALNplot approach — not
+    merely the first lines of the file (which left late contig pairs empty).
+
     ``progress`` receives short status strings (percent when file size is
     known). ``is_cancelled`` is polled between lines so a Stop control can
     abort a multi-hundred-megabyte read without killing the process.
     """
     resolved = path.expanduser().resolve()
-    result = PafAlignments()
+    result = PafAlignments(source_path=resolved)
+    keep_limit = max(1, int(max_records))
+    # Min-heap of (span, seq, record) — drop the shortest when over capacity.
+    heap: list[tuple[int, int, tuple]] = []
+    seq = 0
     try:
         try:
             file_size = resolved.stat().st_size
@@ -319,13 +349,22 @@ def parse_paf(
                     tend = int(parts[8])
                 except (ValueError, IndexError):
                     continue
-                result.records.append(
-                    (qname, qlen, qstart, qend, strand, tname, tlen, tstart, tend)
-                )
+                span = min(max(0, qend - qstart), abs(tend - tstart))
+                rec = (qname, qlen, qstart, qend, strand, tname, tlen, tstart, tend)
+                result.total_records_seen += 1
                 if qlen > result.query_lengths.get(qname, 0):
                     result.query_lengths[qname] = qlen
                 if tlen > result.target_lengths.get(tname, 0):
                     result.target_lengths[tname] = tlen
+                pair = (qname, tname)
+                if span > result.pair_spans.get(pair, -1):
+                    result.pair_spans[pair] = span
+                seq += 1
+                item = (span, seq, rec)
+                if len(heap) < keep_limit:
+                    heapq.heappush(heap, item)
+                elif span > heap[0][0]:
+                    heapq.heapreplace(heap, item)
                 if (
                     progress is not None
                     and file_size > 0
@@ -334,14 +373,100 @@ def parse_paf(
                     pct = min(99, int(100 * bytes_read / file_size))
                     progress(f"Reading alignments… {pct}%")
                     next_report_at = bytes_read + report_step
-                if len(result.records) >= max_records:
-                    result.truncated = True
-                    break
     except OSError as exc:
         raise PafError(f"Could not read {resolved.name}: {exc}") from exc
 
+    result.records = [rec for _span, _seq, rec in heap]
+    if result.total_records_seen > len(result.records):
+        result.truncated = True
     if not result.records:
         raise PafError(f"No alignments found in {resolved.name}.")
+    return result
+
+
+def parse_paf_pair(
+    path: Path,
+    query: str,
+    target: str,
+    *,
+    max_records: int = MAX_PLOT_ALIGNMENTS,
+    progress: Callable[[str], None] | None = None,
+    is_cancelled: Callable[[], bool] | None = None,
+) -> PafAlignments:
+    """Re-scan a PAF for one Compare pair (FastGA selection-style).
+
+    Whole-genome PAFs only keep the global longest hits in memory; picking a
+    contig pair re-reads the file so that pair's alignments are not missing.
+    """
+    resolved = path.expanduser().resolve()
+    result = PafAlignments(source_path=resolved)
+    keep_limit = max(1, int(max_records))
+    heap: list[tuple[int, int, tuple]] = []
+    seq = 0
+    try:
+        try:
+            file_size = resolved.stat().st_size
+        except OSError:
+            file_size = 0
+        bytes_read = 0
+        next_report_at = 0
+        report_step = max(file_size // 20, 1_000_000) if file_size > 0 else 0
+        with resolved.open(encoding="utf-8", errors="replace") as handle:
+            for raw in handle:
+                if is_cancelled is not None and is_cancelled():
+                    raise PafError("Cancelled.")
+                bytes_read += len(raw)
+                line = raw.strip()
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.split("\t", 9)
+                if len(parts) < 9:
+                    continue
+                if parts[0] != query or parts[5] != target:
+                    continue
+                try:
+                    qlen = int(parts[1])
+                    qstart = int(parts[2])
+                    qend = int(parts[3])
+                    strand = parts[4]
+                    tlen = int(parts[6])
+                    tstart = int(parts[7])
+                    tend = int(parts[8])
+                except (ValueError, IndexError):
+                    continue
+                span = min(max(0, qend - qstart), abs(tend - tstart))
+                rec = (query, qlen, qstart, qend, strand, target, tlen, tstart, tend)
+                result.total_records_seen += 1
+                if qlen > result.query_lengths.get(query, 0):
+                    result.query_lengths[query] = qlen
+                if tlen > result.target_lengths.get(target, 0):
+                    result.target_lengths[target] = tlen
+                seq += 1
+                item = (span, seq, rec)
+                if len(heap) < keep_limit:
+                    heapq.heappush(heap, item)
+                elif span > heap[0][0]:
+                    heapq.heapreplace(heap, item)
+                if (
+                    progress is not None
+                    and file_size > 0
+                    and bytes_read >= next_report_at
+                ):
+                    pct = min(99, int(100 * bytes_read / file_size))
+                    progress(f"Loading {query} vs {target}… {pct}%")
+                    next_report_at = bytes_read + report_step
+    except OSError as exc:
+        raise PafError(f"Could not read {resolved.name}: {exc}") from exc
+
+    result.records = [rec for _span, _seq, rec in heap]
+    result.pair_spans[(query, target)] = max(
+        (min(max(0, r[3] - r[2]), abs(r[8] - r[7])) for r in result.records),
+        default=0,
+    )
+    if result.total_records_seen > len(result.records):
+        result.truncated = True
+    if not result.records:
+        raise PafError(f"No alignments for {query} vs {target} in {resolved.name}.")
     return result
 
 def _segment(qstart: int, qend: int, strand: str, tstart: int, tend: int,
@@ -381,6 +506,42 @@ def _transpose_segment(seg: DotplotSegment) -> DotplotSegment:
     return DotplotSegment(
         x=seg.y, y=seg.x, length=seg.length, strand=STRAND_FORWARD
     )
+
+
+def keep_longest_segments(
+    segments: list[DotplotSegment],
+    *,
+    limit: int = MAX_PLOT_ALIGNMENTS,
+) -> tuple[list[DotplotSegment], int, bool]:
+    """Keep the longest alignments for plotting (FastGA ``ALNplot -n``).
+
+    Short noisy hits drown whole-genome overviews; keeping the longest
+    ``limit`` records (default 100,000) matches FastGA's static viewer.
+    Returned segments are ordered short→long so longer diagonals paint on top.
+
+    Returns ``(kept, total_before_cap, was_capped)``.
+    """
+    import heapq
+
+    total = len(segments)
+    cap = max(0, int(limit))
+    if total <= cap or cap <= 0:
+        kept = sorted(segments, key=lambda s: int(s.length))
+        return kept, total, False
+    kept = heapq.nlargest(cap, segments, key=lambda s: int(s.length))
+    kept.sort(key=lambda s: int(s.length))
+    return kept, total, True
+
+
+def _plot_note(*, file_truncated: bool, plot_capped: bool, kept: int, total: int) -> str:
+    bits: list[str] = []
+    if plot_capped:
+        bits.append(
+            f"Showing longest {kept:,} of {total:,} hits (FastGA ALNplot-style)."
+        )
+    if file_truncated:
+        bits.append("File truncated: too many records.")
+    return " ".join(bits)
 
 
 def _intersects(seg: DotplotSegment, lo: int, hi: int) -> bool:
@@ -441,6 +602,7 @@ def result_for_pair(
             )
         segments.append(seg)
 
+    segments, total_hits, plot_capped = keep_longest_segments(segments)
     label = query if is_self else f"{query} vs {target}"
     recorded_word = int(alignments.word_size or 0)
     return DotplotResult(
@@ -449,9 +611,14 @@ def result_for_pair(
         word_size=recorded_word,
         segments=segments,
         include_reverse=True,
-        raw_match_count=len(segments),
-        truncated=alignments.truncated,
-        note="Truncated: too many records." if alignments.truncated else "",
+        raw_match_count=total_hits,
+        truncated=alignments.truncated or plot_capped,
+        note=_plot_note(
+            file_truncated=alignments.truncated,
+            plot_capped=plot_capped,
+            kept=len(segments),
+            total=total_hits,
+        ),
         coordinate_offset=shift,
         full_sequence_length=q_len,
         target_id="" if is_self else target,
@@ -517,7 +684,7 @@ def result_for_all(
     # Two-sequence pairwise matrices are cross-only (no A×A / B×B clutter).
     skip_self = n_seq == 2
 
-    segments: list[DotplotSegment] = []
+    primary: list[DotplotSegment] = []
     for qname, _ql, qstart, qend, strand, tname, _tl, tstart, tend in alignments.records:
         if skip_self and qname == tname:
             continue
@@ -527,6 +694,12 @@ def result_for_all(
         )
         if seg is None or seg.length < min_length:
             continue
+        primary.append(seg)
+
+    # Cap before mirroring so the budget matches FastGA ALNplot (-n), not 2×N.
+    primary, total_hits, plot_capped = keep_longest_segments(primary)
+    segments: list[DotplotSegment] = []
+    for seg in primary:
         segments.append(seg)
         # Pairwise files only store one triangle (and self plots often only
         # one half of the diagonal block). Reflect so the matrix looks full.
@@ -547,9 +720,14 @@ def result_for_all(
             word_size=recorded_word,
             segments=segments,
             include_reverse=True,
-            raw_match_count=len(segments),
-            truncated=alignments.truncated,
-            note="Truncated: too many records." if alignments.truncated else "",
+            raw_match_count=total_hits,
+            truncated=alignments.truncated or plot_capped,
+            note=_plot_note(
+                file_truncated=alignments.truncated,
+                plot_capped=plot_capped,
+                kept=len(primary),
+                total=total_hits,
+            ),
         ),
         x_entries,
         y_entries,

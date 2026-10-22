@@ -4372,17 +4372,20 @@ _FASTGA_REFERENCE_HELP = (
     "also among the query inputs it is skipped, so it is never compared with itself."
 )
 _FASTGA_COMBINED_HELP = (
-    "Write the alignments of all selected files into one PAF file, "
+    "Write the alignments of all selected files into one PAF/PSL file, "
     "&lt;first&gt;_multi_FastGA_vs_&lt;reference&gt;.paf, instead of one file per "
     "selected file.<br><br>"
-    "A .1aln file cannot be joined, so this always writes PAF text."
+    "Unavailable for <b>FastGA alignment (.1aln)</b> — that binary format cannot "
+    "be concatenated, so each query gets its own .1aln file."
 )
 _FASTGA_FORMAT_HELP = (
     "<b>PAF</b> is the usual text alignment format. Optional <b>Include CIGAR</b> or "
-    "<b>Include CS tag</b> add extra columns (only one at a time).<br><br>"
+    "<b>Include CS tag</b> add extra columns (only one at a time). Pairwise mode "
+    "writes one combined <code>*_multi_FastGA.paf</code>.<br><br>"
     "<b>PSL</b> is UCSC PSL text; it does not open in the dotplot view.<br><br>"
     "<b>FastGA alignment (.1aln)</b> is FastGA's binary ONEcode output; it opens in "
-    "the dotplot view."
+    "the dotplot view. Pairwise and reference runs write <b>one .1aln per "
+    "comparison</b> (binary files cannot be joined)."
 )
 _FASTGA_THREADS_HELP = "FastGA <b>-T</b>: number of threads."
 _FASTGA_IDENTITY_HELP = (
@@ -4861,6 +4864,13 @@ class FastGaPanel(QWidget):
             self._cs.setChecked(False)
             self._cigar.blockSignals(False)
             self._cs.blockSignals(False)
+        # .1aln cannot be concatenated — disable "Write all into one file".
+        aln = str(self._format.currentData()) == FASTGA_FORMAT_ALN
+        self._combined.setEnabled(not aln)
+        if aln and self._combined.isChecked():
+            self._combined.blockSignals(True)
+            self._combined.setChecked(False)
+            self._combined.blockSignals(False)
 
     def _on_format_changed(self, _index: int) -> None:
         self._update_paf_extras_enabled()

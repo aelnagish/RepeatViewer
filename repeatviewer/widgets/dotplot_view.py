@@ -66,6 +66,7 @@ from repeatviewer.backends.paf_dotplot import (
     AxisEntry,
     PafError,
     load_alignment_file,
+    parse_paf_pair,
     result_for_all,
     result_for_pair,
 )
@@ -169,6 +170,42 @@ class _PafLoadWorker(QObject):
         # user clicks another file before this worker finishes.
         self.finished.emit(alignments, source, self._path)
 
+
+class _PafPairLoadWorker(QObject):
+    """Re-scan a huge PAF for one Compare pair (FastGA selection-style)."""
+
+    progress = Signal(str)
+    finished = Signal(object, object, object)  # alignments, query, target
+    failed = Signal(str)
+
+    def __init__(self, path: Path, query: str, target: str) -> None:
+        super().__init__()
+        self._path = path
+        self._query = query
+        self._target = target
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        self._cancelled = True
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            alignments = parse_paf_pair(
+                self._path,
+                self._query,
+                self._target,
+                progress=self.progress.emit,
+                is_cancelled=lambda: self._cancelled,
+            )
+        except PafError as exc:
+            self.failed.emit(str(exc))
+            return
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(f"Could not load pair: {exc}")
+            return
+        self.finished.emit(alignments, self._query, self._target)
+
 _FORWARD_COLOR = QColor(40, 90, 180)   # direct repeats (blue)
 _REVERSE_COLOR = QColor(200, 60, 40)   # inverted repeats (red)
 # Charcoal — must stay distinct from warm reverse red and cool forward blue.
@@ -207,6 +244,9 @@ _PINCH_DELTA_PER_STEP = 0.04
 _RULER_TOP = 18
 # Left margin: room for tick labels flush against the axis (same px/base as X).
 _RULER_LEFT = 44
+# Multi-sequence All / multi_dot: room for sequence names + per-block ticks.
+_RULER_TOP_MULTI = 30
+_RULER_LEFT_MULTI = 52
 _Y_TICK_PAD = 3  # gap between label and tick mark
 _RULER_BG = QColor(250, 250, 250)
 _RULER_FG = QColor(110, 110, 110)
@@ -290,6 +330,29 @@ def _scene_to_bp(scene_coord: float | int, *, length: int, offset: int) -> int:
     if length > 0 and tick >= length:
         return length + offset
     return tick + offset
+
+
+def _axis_entry_at(entries: list, scene_coord: float):
+    """Return the ``AxisEntry`` whose block contains ``scene_coord``, if any."""
+    if not entries:
+        return None
+    x = float(scene_coord)
+    for index, entry in enumerate(entries):
+        lo = float(entry.offset)
+        hi = float(entry.offset + entry.length)
+        # Half-open [lo, hi) except the last block includes its right end.
+        if lo <= x < hi or (index == len(entries) - 1 and lo <= x <= hi):
+            return entry
+    return None
+
+
+def _scene_to_local_bp(scene_coord: float | int, entries: list) -> int | None:
+    """1-based position within the sequence block under ``scene_coord``."""
+    entry = _axis_entry_at(entries, float(scene_coord))
+    if entry is None:
+        return None
+    local = float(scene_coord) - float(entry.offset)
+    return _scene_to_bp(local, length=int(entry.length), offset=0)
 
 
 def _axis_tick_positions(
@@ -452,9 +515,10 @@ class _SegmentsItem(QGraphicsItem):
 
         forward: list[tuple[float, float, float, float]] = []
         reverse: list[tuple[float, float, float, float]] = []
-        forward_pts: list[QPointF] = []
-        reverse_pts: list[QPointF] = []
         mirror = self._mirror_symmetric
+        # On multi-Mb axes at Fit, short hits are << 1 px — stretch each
+        # stroke to a few screen pixels so sparse FastGA pairs stay visible.
+        min_draw = max(min_length, 4.0 / scale)
         for seg in self._result.segments:
             x1, y1 = float(seg.x), float(seg.y)
             x2, y2 = float(seg.end_x), float(seg.end_y)
@@ -474,15 +538,11 @@ class _SegmentsItem(QGraphicsItem):
                     )
                     if mirrored_off:
                         continue
-            if seg.length < min_length:
-                # Sub-pixel match: keep a 1-px mark so overview still shows hits.
+            if seg.length < min_draw:
                 if seg.strand == STRAND_REVERSE:
-                    reverse_pts.append(QPointF(x1, y1))
+                    x2, y2 = x1 + min_draw, y1 - min_draw
                 else:
-                    forward_pts.append(QPointF(x1, y1))
-                    if mirror:
-                        forward_pts.append(QPointF(y1, x1))  # self-symmetry
-                continue
+                    x2, y2 = x1 + min_draw, y1 + min_draw
             if seg.strand == STRAND_REVERSE:
                 reverse.append((x1, y1, x2, y2))
             else:
@@ -493,14 +553,10 @@ class _SegmentsItem(QGraphicsItem):
             painter.drawLine(QPointF(x1, y1), QPointF(x2, y2))
             if mirror:
                 painter.drawLine(QPointF(y1, x1), QPointF(y2, x2))  # self-symmetry
-        if forward_pts:
-            painter.drawPoints(forward_pts)
 
         painter.setPen(self._pen(_REVERSE_COLOR))
         for x1, y1, x2, y2 in reverse:
             painter.drawLine(QPointF(x1, y1), QPointF(x2, y2))
-        if reverse_pts:
-            painter.drawPoints(reverse_pts)
 
 
 class _Ruler(QWidget):
@@ -584,68 +640,32 @@ class _Ruler(QWidget):
                 continue
             w = metrics.horizontalAdvance(text)
             if self._horizontal:
-                painter.drawText(int(centre - w / 2), self.height() - 5, text)
+                # Outer edge of the strip (away from the plot / tick marks).
+                painter.drawText(
+                    int(centre - w / 2),
+                    metrics.ascent() + 1,
+                    text,
+                )
             else:
                 painter.save()
-                painter.translate(self.width() - 4, centre)
+                # Outer (left) edge so tick numbers can sit near the plot.
+                painter.translate(metrics.height() + 2, centre)
                 painter.rotate(-90)
                 painter.drawText(int(-w / 2), 0, text)
                 painter.restore()
 
-    def paintEvent(self, event) -> None:  # noqa: N802
-        view = self._view
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
-        painter.fillRect(self.rect(), _RULER_BG)
-        if view.plot_extent(self._horizontal) <= 0:
-            return
-
-        font = QFont(self.font())
-        font.setPointSize(8)
-        painter.setFont(font)
-
-        entries = view.axis_entries(self._horizontal)
-        if entries:
-            self._paint_sequence_axis_labels(painter, view, entries)
-            painter.setPen(QPen(_RULER_LINE))
-            if self._horizontal:
-                painter.drawLine(0, self.height() - 1, self.width(), self.height() - 1)
-            else:
-                painter.drawLine(self.width() - 1, 0, self.width() - 1, self.height())
-            return
-
-        visible = view.visible_scene_rect()
-        length = view.plot_extent(self._horizontal)
-        # Same tick interval on X and Y so equal scale is obvious (a wide
-        # viewport would otherwise pick step 100 on X and 20 on Y).
-        step = view.shared_tick_step()
-        lo = visible.left() if self._horizontal else visible.top()
-        hi = visible.right() if self._horizontal else visible.bottom()
-
-        painter.setPen(QPen(_RULER_FG))
-        metrics = painter.fontMetrics()
-        offset = view.coordinate_offset()
-        ticks = _axis_tick_positions(lo=lo, hi=hi, length=length, step=step)
-        positions = {
-            tick: view.scene_to_ruler(tick, self._horizontal) for tick in ticks
-        }
-
-        def _label_extent(pos: float, label: str) -> tuple[float, float]:
-            if self._horizontal:
-                # Horizontal labels start just right of the tick mark.
-                width = float(metrics.horizontalAdvance(label))
-                return pos + 2.0, pos + 2.0 + width
-            height = float(metrics.height())
-            return pos - height / 2.0, pos + height / 2.0
-
-        labeled = _non_overlapping_tick_labels(
-            ticks,
-            length=length,
-            offset=offset,
-            positions=positions,
-            label_extent=_label_extent,
-        )
-
+    def _paint_tick_marks(
+        self,
+        painter: QPainter,
+        view: "DotplotCanvas",
+        *,
+        ticks: list[int],
+        positions: dict[int, float],
+        labeled: set[int],
+        length: int,
+        offset: int,
+    ) -> None:
+        """Draw tick marks and labels for one axis span (scene coords)."""
         for tick in ticks:
             pos = positions[tick]
             label = _format_bp(_scene_to_bp(tick, length=length, offset=offset))
@@ -663,9 +683,7 @@ class _Ruler(QWidget):
                     painter.drawLine(self.width() - 4, int(pos), self.width(), int(pos))
                     if tick not in labeled:
                         continue
-                    # Right-align and vertically centre on the tick so the
-                    # number sits on the mark (drawText y is baseline).
-                    label_h = metrics.height()
+                    label_h = painter.fontMetrics().height()
                     text_rect = QRect(
                         0,
                         int(pos) - label_h // 2,
@@ -681,54 +699,181 @@ class _Ruler(QWidget):
                         label,
                     )
 
+    def _paint_cursor_label(
+        self,
+        painter: QPainter,
+        view: "DotplotCanvas",
+        *,
+        font: QFont,
+        length: int,
+        offset: int,
+        entries: list | None = None,
+    ) -> None:
         cursor = view.cursor_scene_pos()
-        if cursor is not None:
-            cursor_font = QFont(font)
-            cursor_font.setBold(True)
-            painter.setFont(cursor_font)
-            value = cursor.x() if self._horizontal else cursor.y()
-            pos = view.scene_to_ruler(value, self._horizontal)
+        if cursor is None:
+            return
+        cursor_font = QFont(font)
+        cursor_font.setBold(True)
+        painter.setFont(cursor_font)
+        value = cursor.x() if self._horizontal else cursor.y()
+        pos = view.scene_to_ruler(value, self._horizontal)
+        if entries:
+            local = _scene_to_local_bp(value, entries)
+            if local is None:
+                return
+            real = local
+        else:
             real = _scene_to_bp(value, length=length, offset=offset)
-            label = f"{real:,}"
-            cursor_metrics = painter.fontMetrics()
-            # Opaque pad so the bold cursor value covers any tick label underneath.
-            pad = 2
-            if self._horizontal and 0 <= pos <= self.width():
-                x0 = int(pos) + 2
-                y_base = self.height() - 6
-                tw = cursor_metrics.horizontalAdvance(label)
-                th = cursor_metrics.height()
-                bg = QRect(
-                    x0 - pad,
-                    y_base - cursor_metrics.ascent() - pad,
-                    tw + 2 * pad,
-                    th + 2 * pad,
+        label = f"{real:,}"
+        cursor_metrics = painter.fontMetrics()
+        pad = 2
+        if self._horizontal and 0 <= pos <= self.width():
+            x0 = int(pos) + 2
+            y_base = self.height() - 6
+            tw = cursor_metrics.horizontalAdvance(label)
+            th = cursor_metrics.height()
+            bg = QRect(
+                x0 - pad,
+                y_base - cursor_metrics.ascent() - pad,
+                tw + 2 * pad,
+                th + 2 * pad,
+            )
+            painter.fillRect(bg, _RULER_BG)
+            painter.setPen(QPen(QColor(40, 90, 180)))
+            painter.drawText(x0, y_base, label)
+        elif not self._horizontal and 0 <= pos <= self.height():
+            label_h = cursor_metrics.height()
+            text_rect = QRect(
+                0,
+                int(pos) - label_h // 2,
+                self.width() - 4 - _Y_TICK_PAD,
+                label_h,
+            )
+            tw = cursor_metrics.horizontalAdvance(label)
+            bg = QRect(
+                text_rect.right() - tw - pad,
+                text_rect.top() - pad,
+                tw + 2 * pad,
+                label_h + 2 * pad,
+            )
+            painter.fillRect(bg, _RULER_BG)
+            painter.setPen(QPen(QColor(40, 90, 180)))
+            painter.drawText(
+                text_rect,
+                int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter),
+                label,
+            )
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        view = self._view
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        painter.fillRect(self.rect(), _RULER_BG)
+        if view.plot_extent(self._horizontal) <= 0:
+            return
+
+        font = QFont(self.font())
+        font.setPointSize(8)
+        painter.setFont(font)
+
+        visible = view.visible_scene_rect()
+        length = view.plot_extent(self._horizontal)
+        step = view.shared_tick_step()
+        lo = visible.left() if self._horizontal else visible.top()
+        hi = visible.right() if self._horizontal else visible.bottom()
+        metrics = painter.fontMetrics()
+        offset = view.coordinate_offset()
+        entries = view.axis_entries(self._horizontal)
+
+        def _label_extent(pos: float, label: str) -> tuple[float, float]:
+            if self._horizontal:
+                width = float(metrics.horizontalAdvance(label))
+                return pos + 2.0, pos + 2.0 + width
+            height = float(metrics.height())
+            return pos - height / 2.0, pos + height / 2.0
+
+        painter.setPen(QPen(_RULER_FG))
+        if entries:
+            self._paint_sequence_axis_labels(painter, view, entries)
+            # Per-sequence local ticks (1-based within each block).
+            for index, entry in enumerate(entries):
+                block_lo = float(entry.offset)
+                block_hi = float(entry.offset + entry.length)
+                if block_hi < lo or block_lo > hi:
+                    continue
+                local_lo = max(0.0, lo - block_lo)
+                local_hi = min(float(entry.length), hi - block_lo)
+                local_ticks = _axis_tick_positions(
+                    lo=local_lo,
+                    hi=local_hi,
+                    length=int(entry.length),
+                    step=step,
                 )
-                painter.fillRect(bg, _RULER_BG)
-                painter.setPen(QPen(QColor(40, 90, 180)))
-                painter.drawText(x0, y_base, label)
-            elif not self._horizontal and 0 <= pos <= self.height():
-                label_h = cursor_metrics.height()
-                text_rect = QRect(
-                    0,
-                    int(pos) - label_h // 2,
-                    self.width() - 4 - _Y_TICK_PAD,
-                    label_h,
+                # Shared block boundary: next sequence's start (label 1) owns
+                # the tick — drop this block's end so labels do not stack.
+                if index + 1 < len(entries):
+                    local_ticks = [
+                        t for t in local_ticks if t < int(entry.length)
+                    ]
+                # Positions dict keyed by local tick for overlap logic.
+                local_positions = {
+                    tick: view.scene_to_ruler(
+                        block_lo + float(tick), self._horizontal
+                    )
+                    for tick in local_ticks
+                }
+                labeled = _non_overlapping_tick_labels(
+                    local_ticks,
+                    length=int(entry.length),
+                    offset=0,
+                    positions=local_positions,
+                    label_extent=_label_extent,
                 )
-                tw = cursor_metrics.horizontalAdvance(label)
-                bg = QRect(
-                    text_rect.right() - tw - pad,
-                    text_rect.top() - pad,
-                    tw + 2 * pad,
-                    label_h + 2 * pad,
+                self._paint_tick_marks(
+                    painter,
+                    view,
+                    ticks=local_ticks,
+                    positions=local_positions,
+                    labeled=labeled,
+                    length=int(entry.length),
+                    offset=0,
                 )
-                painter.fillRect(bg, _RULER_BG)
-                painter.setPen(QPen(QColor(40, 90, 180)))
-                painter.drawText(
-                    text_rect,
-                    int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter),
-                    label,
-                )
+            self._paint_cursor_label(
+                painter,
+                view,
+                font=font,
+                length=length,
+                offset=offset,
+                entries=entries,
+            )
+        else:
+            ticks = _axis_tick_positions(lo=lo, hi=hi, length=length, step=step)
+            positions = {
+                tick: view.scene_to_ruler(tick, self._horizontal) for tick in ticks
+            }
+            labeled = _non_overlapping_tick_labels(
+                ticks,
+                length=length,
+                offset=offset,
+                positions=positions,
+                label_extent=_label_extent,
+            )
+            self._paint_tick_marks(
+                painter,
+                view,
+                ticks=ticks,
+                positions=positions,
+                labeled=labeled,
+                length=length,
+                offset=offset,
+            )
+            self._paint_cursor_label(
+                painter,
+                view,
+                font=font,
+                length=length,
+                offset=offset,
+            )
 
         painter.setPen(QPen(_RULER_LINE))
         if self._horizontal:
@@ -882,15 +1027,48 @@ class DotplotCanvas(QGraphicsView):
     def coordinate_offset(self) -> int:
         return self._offset
 
+    def _display_xy(self, x: int, y: int) -> tuple[int, int]:
+        """1-based bp for status/cursor; local within each multi-seq block."""
+        height = self.plot_height()
+        if self._axis_x:
+            lx = _scene_to_local_bp(x, self._axis_x)
+            bx = lx if lx is not None else _scene_to_bp(
+                x, length=self._length, offset=self._offset
+            )
+        else:
+            bx = _scene_to_bp(x, length=self._length, offset=self._offset)
+        if self._axis_y:
+            ly = _scene_to_local_bp(y, self._axis_y)
+            by = ly if ly is not None else _scene_to_bp(
+                y, length=height, offset=self._offset
+            )
+        else:
+            by = _scene_to_bp(y, length=height, offset=self._offset)
+        return bx, by
+
     def set_axes(self, x_entries: list, y_entries: list) -> None:
         """Sequence layout for the concatenated view (empty for a single pair)."""
         self._axis_x = list(x_entries or [])
         self._axis_y = list(y_entries or [])
+        self._apply_ruler_margins()
         self.viewport().update()
         self._refresh_rulers()
 
     def axis_entries(self, horizontal: bool) -> list:
         return self._axis_x if horizontal else self._axis_y
+
+    def has_multi_axes(self) -> bool:
+        return bool(self._axis_x or self._axis_y)
+
+    def ruler_top(self) -> int:
+        return _RULER_TOP_MULTI if self.has_multi_axes() else _RULER_TOP
+
+    def ruler_left(self) -> int:
+        return _RULER_LEFT_MULTI if self.has_multi_axes() else _RULER_LEFT
+
+    def _apply_ruler_margins(self) -> None:
+        self.setViewportMargins(self.ruler_left(), self.ruler_top(), 0, 0)
+        self._position_rulers()
 
     def _identity_spans_for(
         self, result: DotplotResult
@@ -990,11 +1168,13 @@ class DotplotCanvas(QGraphicsView):
 
     def _position_rulers(self) -> None:
         vp = self.viewport().geometry()
+        top = self.ruler_top()
+        left = self.ruler_left()
         # Only the top-left margin corner — plot stays white.
         self._ruler_corner.setGeometry(0, 0, max(vp.x(), 1), max(vp.y(), 1))
         self._ruler_corner.raise_()
-        self._top_ruler.setGeometry(vp.x(), 0, vp.width(), _RULER_TOP)
-        self._left_ruler.setGeometry(0, vp.y(), _RULER_LEFT, vp.height())
+        self._top_ruler.setGeometry(vp.x(), 0, vp.width(), top)
+        self._left_ruler.setGeometry(0, vp.y(), left, vp.height())
         self._top_ruler.raise_()
         self._left_ruler.raise_()
         # Overlay covers the plot viewport only (child of viewport()).
@@ -1145,6 +1325,51 @@ class DotplotCanvas(QGraphicsView):
         side = max(target.width(), target.height())
         scale = min(vp.width() / side, vp.height() / side)
         scale = min(scale, _MAX_PIXELS_PER_BASE)
+        self.setTransform(QTransform.fromScale(scale, scale))
+        self.centerOn(target.center())
+        self._clamp_scroll_to_plot()
+        self._position_rulers()
+        self.viewport().update()
+        self._refresh_overlay()
+        self._refresh_rulers()
+        self.zoomChanged.emit()
+        return True
+
+    def zoom_to_hits(self, result: DotplotResult, *, pad_frac: float = 0.08) -> bool:
+        """Zoom to the bounding box of plotted hits (sparse pairs on huge axes)."""
+        segs = getattr(result, "segments", None) or []
+        if not segs or not self._length:
+            return False
+        x0 = y0 = 1e30
+        x1 = y1 = -1e30
+        for seg in segs:
+            xa, xb = float(seg.x), float(seg.end_x)
+            ya, yb = float(seg.y), float(seg.end_y)
+            x0 = min(x0, xa, xb)
+            x1 = max(x1, xa, xb)
+            y0 = min(y0, ya, yb)
+            y1 = max(y1, ya, yb)
+        if x1 <= x0 or y1 <= y0:
+            return False
+        width = float(self._length)
+        height = float(self.plot_height())
+        # Pad in scene units; keep at least ~1% of each axis so tiny boxes expand.
+        pad_x = max((x1 - x0) * pad_frac, width * 0.01, 50.0)
+        pad_y = max((y1 - y0) * pad_frac, height * 0.01, 50.0)
+        target = QRectF(x0 - pad_x, y0 - pad_y, (x1 - x0) + 2 * pad_x, (y1 - y0) + 2 * pad_y)
+        target = target.intersected(QRectF(0.0, 0.0, width, height))
+        if target.width() < 1.0 or target.height() < 1.0:
+            return False
+        # Whole-axis hits: Fit is enough.
+        if target.width() >= width * 0.85 and target.height() >= height * 0.85:
+            return False
+        vp = self.viewport().rect()
+        if vp.width() < 1 or vp.height() < 1:
+            return False
+        side = max(target.width(), target.height())
+        scale = min(vp.width() / side, vp.height() / side)
+        scale = min(scale, _MAX_PIXELS_PER_BASE)
+        self._needs_fit = False
         self.setTransform(QTransform.fromScale(scale, scale))
         self.centerOn(target.center())
         self._clamp_scroll_to_plot()
@@ -1949,10 +2174,7 @@ class DotplotCanvas(QGraphicsView):
             x, y = int(point.x()), int(point.y())
             height = self.plot_height()
             if 0 <= x <= self._length and 0 <= y <= height:
-                self.positionChanged.emit(
-                    _scene_to_bp(x, length=self._length, offset=self._offset),
-                    _scene_to_bp(y, length=height, offset=self._offset),
-                )
+                self.positionChanged.emit(*self._display_xy(x, y))
             return
         super().mouseMoveEvent(event)
         # Overlay only — do not viewport().update() (that re-paints all hits).
@@ -1961,10 +2183,7 @@ class DotplotCanvas(QGraphicsView):
         x, y = int(point.x()), int(point.y())
         height = self.plot_height()
         if 0 <= x <= self._length and 0 <= y <= height:
-            self.positionChanged.emit(
-                _scene_to_bp(x, length=self._length, offset=self._offset),
-                _scene_to_bp(y, length=height, offset=self._offset),
-            )
+            self.positionChanged.emit(*self._display_xy(x, y))
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
         if self._zoom_dragging:
@@ -2110,9 +2329,10 @@ class DotplotPanel(QWidget):
         self._coord_keep: list[int] | None = None
 
         self._thread: QThread | None = None
-        self._worker: _FastgaWorker | _PafLoadWorker | None = None
+        self._worker: _FastgaWorker | _PafLoadWorker | _PafPairLoadWorker | None = None
         self._pending_key = None
         self._paf_load_path: Path | None = None
+        self._pair_scan_key: tuple[str, str] | None = None
         # Last drag-box as 1-based inclusive (x1, x2, y1, y2), if any.
         self._selection_xy: tuple[int, int, int, int] | None = None
         # Status line without the appended x/y readout (alignment mode).
@@ -2444,13 +2664,15 @@ class DotplotPanel(QWidget):
     def load_alignment(self, path: Path) -> None:
         """Display a PAF (or .1aln, converted) instead of computing anything.
 
-        Parsing runs on a worker thread so hundred-megabyte multi-FastGA PAFs
-        do not freeze Preview. Stop cancels the read.
+        Parsing runs on a worker thread so large multi-FastGA PAFs do not freeze
+        Preview. Huge files keep the longest hits in memory (FastGA ALNplot
+        style); picking a Compare pair re-scans that pair. Stop cancels the read.
         """
         self._mode = "alignment"
         self._path = path.expanduser().resolve()
         self._loaded_for = None
         self._alignments = None
+        self._pair_scan_key = None
         self._pair_combo.blockSignals(True)
         self._pair_combo.clear()
         self._pair_combo.blockSignals(False)
@@ -2530,6 +2752,7 @@ class DotplotPanel(QWidget):
     def _apply_loaded_alignments(self, alignments, source) -> None:
         """Fill the Compare menu and plot after a successful background parse."""
         self._alignments = alignments
+        self._pair_scan_key = None
         recorded = getattr(alignments, "word_size", None)
         self._word.blockSignals(True)
         if recorded is not None and int(recorded) > 0:
@@ -2596,6 +2819,8 @@ class DotplotPanel(QWidget):
                 result, x_entries, y_entries = result_for_all(
                     self._alignments, min_length=min_len
                 )
+                zoom_hits = False
+                pending_pair_scan: tuple[str, str] | None = None
             else:
                 query, target = data[0], data[1]
                 window = None
@@ -2633,12 +2858,125 @@ class DotplotPanel(QWidget):
                         length=max(int(result.effective_target_length), 1),
                     )
                 ]
+                # Sparse hits on multi-Mb scaffolds vanish at Fit — frame them.
+                zoom_hits = True
+                # Huge PAFs only keep global longest hits in RAM. Re-scan for
+                # this Compare pair in the background (FastGA ALNplot style).
+                src = getattr(self._alignments, "source_path", None) or self._path
+                pending_pair_scan = None
+                if (
+                    self._alignments.truncated
+                    and src is not None
+                    and Path(src).is_file()
+                    and self._pair_scan_key != (query, target)
+                ):
+                    pending_pair_scan = (query, target)
         except Exception as exc:  # noqa: BLE001
             self._fail(f"Could not build the plot: {exc}")
             return
         self._canvas.set_axes(x_entries, y_entries)
         self._sync_engine_controls()
-        self._apply_result(("alignment", self._path, str(data)), result)
+        self._apply_result(
+            ("alignment", self._path, str(data)),
+            result,
+            zoom_to_hits=zoom_hits,
+        )
+        if pending_pair_scan is not None:
+            q, t = pending_pair_scan
+            src = getattr(self._alignments, "source_path", None) or self._path
+            self._start_paf_pair_load(Path(src), q, t)
+
+    def _start_paf_pair_load(self, path: Path, query: str, target: str) -> None:
+        """Background re-scan of ``path`` for one query×target pair."""
+        if self._worker is not None:
+            self._worker.cancel()
+        self._pair_scan_key = (query, target)
+        self._set_status_text(f"Loading {query} vs {target}…")
+        self._cancel_btn.show()
+        thread = QThread(self)
+        worker = _PafPairLoadWorker(path, query, target)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.progress.connect(self._set_status_text)
+        worker.finished.connect(self._on_paf_pair_finished)
+        worker.failed.connect(self._on_paf_pair_failed)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(self._on_thread_finished)
+        self._thread = thread
+        self._worker = worker
+        thread.start()
+
+    @Slot(object, object, object)
+    def _on_paf_pair_finished(self, pair_aln, query, target) -> None:
+        if self._pair_scan_key != (query, target):
+            return
+        if self._alignments is None:
+            return
+        # Merge pair hits into the cached alignments (replace same-pair rows).
+        kept = [
+            r
+            for r in self._alignments.records
+            if not (r[0] == query and r[5] == target)
+        ]
+        kept.extend(pair_aln.records)
+        self._alignments.records = kept
+        for name, n in pair_aln.query_lengths.items():
+            self._alignments.query_lengths[name] = max(
+                self._alignments.query_lengths.get(name, 0), int(n)
+            )
+        for name, n in pair_aln.target_lengths.items():
+            self._alignments.target_lengths[name] = max(
+                self._alignments.target_lengths.get(name, 0), int(n)
+            )
+        if pair_aln.pair_spans:
+            self._alignments.pair_spans.update(pair_aln.pair_spans)
+        # Build from the freshly scanned pair without triggering another scan.
+        min_len = max(int(self._filter_len.value()), 0)
+        try:
+            result = result_for_pair(
+                pair_aln, query, target, min_length=min_len
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._fail(f"Could not build the plot: {exc}")
+            return
+        x_entries = [
+            AxisEntry(
+                name=query,
+                offset=0,
+                length=max(int(result.sequence_length), 1),
+            )
+        ]
+        y_entries = [
+            AxisEntry(
+                name=target,
+                offset=0,
+                length=max(int(result.effective_target_length), 1),
+            )
+        ]
+        self._canvas.set_axes(x_entries, y_entries)
+        self._sync_engine_controls()
+        self._apply_result(
+            ("alignment", self._path, (query, target)),
+            result,
+            zoom_to_hits=True,
+        )
+
+    @Slot(str)
+    def _on_paf_pair_failed(self, message: str) -> None:
+        failed_key = self._pair_scan_key
+        self._pair_scan_key = None
+        if message.strip().lower() == "cancelled.":
+            if self._thread is None or not self._thread.isRunning():
+                self._set_status_text("Cancelled.")
+            return
+        # Keep whatever in-memory plot we already showed; report the scan miss.
+        detail = message.strip() or "Pair re-scan failed."
+        if failed_key is not None:
+            self._set_status_text(detail)
+        else:
+            self._fail(detail)
 
     def _use_fastga(self) -> bool:
         """Large sequences use FastGA (opt-in via Run FastGA), not the k-mer window."""
@@ -3127,7 +3465,9 @@ class DotplotPanel(QWidget):
         self._set_status_text(self._condense_error(message), tooltip=message)
         self.statusMessage.emit(message)
 
-    def _apply_result(self, key, result: DotplotResult) -> None:
+    def _apply_result(
+        self, key, result: DotplotResult, *, zoom_to_hits: bool = False
+    ) -> None:
         previous_length = self._sequence_length
         had_plot = self._loaded_for is not None
         self._loaded_for = key
@@ -3143,8 +3483,15 @@ class DotplotPanel(QWidget):
         self._canvas.set_title(name)
         # Keep pan/zoom when recomputing the same-length sequence (word size /
         # reverse complement). New files / region sizes still fit to view.
-        preserve = had_plot and previous_length == result.sequence_length
+        preserve = (
+            had_plot
+            and previous_length == result.sequence_length
+            and not zoom_to_hits
+        )
         self._canvas.show_result(result, preserve_view=preserve)
+        if zoom_to_hits and result.segments:
+            # Sparse hits on multi-Mb scaffolds vanish at Fit — frame them.
+            self._canvas.zoom_to_hits(result)
         if result.word_size:
             engine = f"word {result.word_size}"
         elif self._mode == "alignment":

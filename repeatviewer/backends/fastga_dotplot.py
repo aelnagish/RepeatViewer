@@ -1195,21 +1195,29 @@ def run_fastga_batch(
 
     def _run_into_combined(jobs, out_path: Path, *, keep_index: bool,
                            first_step: int, label) -> Path:
-        """Several runs streamed into one PAF/PSL text file (never .1aln)."""
-        combine_fmt = FORMAT_PAF if fmt == FORMAT_ALN else fmt
+        """Several runs streamed into one PAF/PSL text file.
+
+        Callers must not pass ``FORMAT_ALN`` — binary ``.1aln`` cannot be joined.
+        """
+        if fmt == FORMAT_ALN:
+            raise FastgaError(
+                "FastGA .1aln output cannot be combined into one file. "
+                "Use PAF/PSL for a single multi file, or leave .1aln and "
+                "write one file per comparison."
+            )
         chunks: list[str] = []
         for index, (source1, source2) in enumerate(jobs):
             _step(first_step + index)
             _log(label(index, source1, source2))
             with tempfile.NamedTemporaryFile(
                 prefix=".repeatviewer_fastga_part_",
-                suffix=output_suffix_for_format(combine_fmt),
+                suffix=output_suffix_for_format(fmt),
                 dir=str(out_path.parent),
                 delete=False,
             ) as tmp:
                 tmp_path = Path(tmp.name)
             try:
-                written = _run(source1, source2, tmp_path, combine_fmt,
+                written = _run(source1, source2, tmp_path, fmt,
                                keep_index=keep_index)
                 text = written.read_text(encoding="utf-8")
                 if text and not text.endswith("\n"):
@@ -1229,13 +1237,34 @@ def run_fastga_batch(
         pairs = resolve_pairwise_comparisons(files, options)
         if not pairs:
             raise FastgaError("No pairwise comparisons are checked.")
-        first = files[0]
-        combine_fmt = FORMAT_PAF if fmt == FORMAT_ALN else fmt
         from repeatviewer.backends.output_paths import next_numbered_path
 
+        # Binary .1aln cannot be concatenated — one file per pair (like
+        # reference mode without "Write all into one file").
+        if fmt == FORMAT_ALN:
+            created: list[Path] = []
+            for index, (source1, source2) in enumerate(pairs):
+                _step(1 + index)
+                out_path = next_numbered_path(
+                    source1.parent
+                    / f"{source1.name}_FastGA_vs_{source2.name}.1aln"
+                )
+                _log(f"Pair {index + 1}/{len(pairs)}: {source1.name} vs {source2.name}")
+                created.append(
+                    _run(
+                        source1,
+                        source2,
+                        out_path,
+                        fmt,
+                        keep_index=options.keep_index,
+                    )
+                )
+            return created
+
+        first = files[0]
         out_path = next_numbered_path(
             first.parent
-            / f"{first.name}_multi_FastGA{output_suffix_for_format(combine_fmt)}"
+            / f"{first.name}_multi_FastGA{output_suffix_for_format(fmt)}"
         )
         _run_into_combined(
             pairs, out_path, keep_index=options.keep_index, first_step=1,
@@ -1266,7 +1295,13 @@ def run_fastga_batch(
             progress=progress,
             is_cancelled=is_cancelled,
         ) as ref_source:
-            if getattr(options, "reference_combined", False) and len(queries) > 1:
+            # .1aln is binary — never join into one file; write one per query.
+            combine = (
+                bool(getattr(options, "reference_combined", False))
+                and len(queries) > 1
+                and fmt != FORMAT_ALN
+            )
+            if combine:
                 out_path = reference_combined_output_path(queries[0], reference)
                 _run_into_combined(
                     [(q, ref_source) for q in queries],
@@ -1278,7 +1313,7 @@ def run_fastga_batch(
                     ),
                 )
                 return [out_path]
-            created: list[Path] = []
+            created = []
             for index, query in enumerate(queries):
                 _step(2 + index)
                 if len(queries) > 1:
