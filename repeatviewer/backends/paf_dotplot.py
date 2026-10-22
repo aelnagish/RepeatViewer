@@ -59,9 +59,12 @@ _PAF_RV_HEADER_PREFIX = "# RepeatViewer-dotplot"
 # tick labels become unusable (and building them stalls the UI).
 MAX_ALL_SEQUENCES = 128
 
+# When All-sequences is unavailable, Compare offers an overview of this many
+# longest scaffolds (same layout, smaller subset).
+MAX_OVERVIEW_SEQUENCES = 64
+
 # Compare dropdown: filling a QComboBox with tens of thousands of pairs freezes
-# Qt. Keep the longest / self pairs; the rest stay reachable only if reopened
-# after filtering the PAF externally.
+# Qt. Cap the list; Filter searches the full pair map and refills up to this.
 MAX_PAIR_COMBO_ITEMS = 500
 
 
@@ -185,35 +188,31 @@ class PafAlignments:
         return self.sequence_count() <= MAX_ALL_SEQUENCES
 
     def pairs_for_combo(
-        self, *, max_items: int = MAX_PAIR_COMBO_ITEMS
+        self,
+        *,
+        max_items: int = MAX_PAIR_COMBO_ITEMS,
+        filter_text: str = "",
     ) -> tuple[list[tuple[str, str]], int]:
         """Pairs to list in the Compare menu, plus the total unique count.
 
-        Prefers pairs with the longest alignments (then longest sequences).
-        Caps the list so the dropdown stays responsive.
+        Order: self pairs first (natural name), then cross pairs (natural
+        query/target). Longest span / length are tie-breakers only. Caps the
+        list so the dropdown stays responsive. ``filter_text`` matches against
+        the full pair map (not only the capped default list).
         """
         pair_set = self.unique_pairs()
         total = len(pair_set)
         if total == 0:
             return [], 0
+        matched = filter_alignment_pairs(pair_set, filter_text)
+        if not matched and filter_text.strip():
+            return [], total
         lengths = _unified_sequence_lengths(self)
         spans = self.pair_spans
-
-        def _rank(pair: tuple[str, str]) -> tuple:
-            query, target = pair
-            q_len = lengths.get(query, 0)
-            t_len = lengths.get(target, 0)
-            best = int(spans.get(pair, 0)) if spans else 0
-            return (
-                0 if query == target else 1,
-                -best,
-                -max(q_len, t_len),
-                -min(q_len, t_len),
-                _natural_sort_key(query),
-                _natural_sort_key(target),
-            )
-
-        ranked = sorted(pair_set, key=_rank)
+        ranked = sorted(
+            matched,
+            key=lambda pair: _pair_combo_rank(pair, lengths=lengths, spans=spans),
+        )
         limit = max(1, int(max_items))
         return ranked[:limit], total
 
@@ -227,6 +226,51 @@ class PafAlignments:
             if len(seen) > 1:
                 return False
         return True
+
+def _pair_combo_rank(
+    pair: tuple[str, str],
+    *,
+    lengths: dict[str, int],
+    spans: dict[tuple[str, str], int],
+) -> tuple:
+    """Self first, then natural names; span/length only break ties."""
+    query, target = pair
+    q_len = lengths.get(query, 0)
+    t_len = lengths.get(target, 0)
+    best = int(spans.get(pair, 0)) if spans else 0
+    return (
+        0 if query == target else 1,
+        _natural_sort_key(query),
+        _natural_sort_key(target),
+        -best,
+        -max(q_len, t_len),
+        -min(q_len, t_len),
+    )
+
+
+def filter_alignment_pairs(
+    pairs: set[tuple[str, str]] | list[tuple[str, str]],
+    filter_text: str,
+) -> list[tuple[str, str]]:
+    """Keep pairs whose query, target, or ``q vs t`` label contains ``filter_text``.
+
+    Case-insensitive substring match. Empty filter returns all pairs (unsorted).
+    """
+    items = list(pairs)
+    needle = (filter_text or "").strip().lower()
+    if not needle:
+        return items
+    out: list[tuple[str, str]] = []
+    for query, target in items:
+        label = query if query == target else f"{query} vs {target}"
+        if (
+            needle in query.lower()
+            or needle in target.lower()
+            or needle in label.lower()
+        ):
+            out.append((query, target))
+    return out
+
 
 def is_paf_file(path: Path) -> bool:
     return path.suffix.lower() in PAF_SUFFIXES
@@ -652,6 +696,74 @@ def _unified_sequence_lengths(alignments: PafAlignments) -> dict[str, int]:
     return lengths
 
 
+def _result_for_lengths(
+    alignments: PafAlignments,
+    lengths: dict[str, int],
+    *,
+    min_length: int = 0,
+    title: str | None = None,
+) -> tuple[DotplotResult, list[AxisEntry], list[AxisEntry]]:
+    """Concatenated multi-sequence plot for a given name→length map."""
+    if not lengths:
+        raise PafError("No sequences to plot.")
+    entries, total = _axis_layout(lengths)
+    x_entries = list(entries)
+    y_entries = list(entries)
+    offset_of = {e.name: e.offset for e in entries}
+    allowed = set(offset_of)
+    n_seq = len(entries)
+    # Two-sequence pairwise matrices are cross-only (no A×A / B×B clutter).
+    skip_self = n_seq == 2
+
+    primary: list[DotplotSegment] = []
+    for qname, _ql, qstart, qend, strand, tname, _tl, tstart, tend in alignments.records:
+        if qname not in allowed or tname not in allowed:
+            continue
+        if skip_self and qname == tname:
+            continue
+        seg = _segment(
+            qstart, qend, strand, tstart, tend,
+            offset_of[qname], offset_of[tname],
+        )
+        if seg is None or seg.length < min_length:
+            continue
+        primary.append(seg)
+
+    primary, total_hits, plot_capped = keep_longest_segments(primary)
+    segments: list[DotplotSegment] = []
+    for seg in primary:
+        segments.append(seg)
+        mirrored = _transpose_segment(seg)
+        if (
+            mirrored.x != seg.x
+            or mirrored.y != seg.y
+            or mirrored.strand != seg.strand
+        ):
+            segments.append(mirrored)
+
+    n = len(entries)
+    recorded_word = int(alignments.word_size or 0)
+    return (
+        DotplotResult(
+            sequence_id=title or f"{n} x {n} sequences",
+            sequence_length=max(total, 1),
+            word_size=recorded_word,
+            segments=segments,
+            include_reverse=True,
+            raw_match_count=total_hits,
+            truncated=alignments.truncated or plot_capped,
+            note=_plot_note(
+                file_truncated=alignments.truncated,
+                plot_capped=plot_capped,
+                kept=len(primary),
+                total=total_hits,
+            ),
+        ),
+        x_entries,
+        y_entries,
+    )
+
+
 def result_for_all(
     alignments: PafAlignments,
     *,
@@ -673,64 +785,35 @@ def result_for_all(
     if n_seq > MAX_ALL_SEQUENCES:
         raise PafError(
             f"All-sequences view supports at most {MAX_ALL_SEQUENCES} "
-            f"sequences (this file has {n_seq}). Pick one pair in Compare."
+            f"sequences (this file has {n_seq}). Pick one pair in Compare, "
+            f"or use Overview (longest {MAX_OVERVIEW_SEQUENCES})."
         )
-    entries, total = _axis_layout(lengths)
-    # Same layout on both axes (copy lists so callers can mutate independently).
-    x_entries = list(entries)
-    y_entries = list(entries)
-    offset_of = {e.name: e.offset for e in entries}
+    return _result_for_lengths(alignments, lengths, min_length=min_length)
 
-    # Two-sequence pairwise matrices are cross-only (no A×A / B×B clutter).
-    skip_self = n_seq == 2
 
-    primary: list[DotplotSegment] = []
-    for qname, _ql, qstart, qend, strand, tname, _tl, tstart, tend in alignments.records:
-        if skip_self and qname == tname:
-            continue
-        seg = _segment(
-            qstart, qend, strand, tstart, tend,
-            offset_of.get(qname, 0), offset_of.get(tname, 0),
-        )
-        if seg is None or seg.length < min_length:
-            continue
-        primary.append(seg)
+def result_for_overview(
+    alignments: PafAlignments,
+    *,
+    min_length: int = 0,
+    max_sequences: int = MAX_OVERVIEW_SEQUENCES,
+) -> tuple[DotplotResult, list[AxisEntry], list[AxisEntry]]:
+    """All-sequences layout limited to the longest ``max_sequences`` scaffolds.
 
-    # Cap before mirroring so the budget matches FastGA ALNplot (-n), not 2×N.
-    primary, total_hits, plot_capped = keep_longest_segments(primary)
-    segments: list[DotplotSegment] = []
-    for seg in primary:
-        segments.append(seg)
-        # Pairwise files only store one triangle (and self plots often only
-        # one half of the diagonal block). Reflect so the matrix looks full.
-        mirrored = _transpose_segment(seg)
-        if (
-            mirrored.x != seg.x
-            or mirrored.y != seg.y
-            or mirrored.strand != seg.strand
-        ):
-            segments.append(mirrored)
-
-    n = len(entries)
-    recorded_word = int(alignments.word_size or 0)
-    return (
-        DotplotResult(
-            sequence_id=f"{n} x {n} sequences",
-            sequence_length=max(total, 1),
-            word_size=recorded_word,
-            segments=segments,
-            include_reverse=True,
-            raw_match_count=total_hits,
-            truncated=alignments.truncated or plot_capped,
-            note=_plot_note(
-                file_truncated=alignments.truncated,
-                plot_capped=plot_capped,
-                kept=len(primary),
-                total=total_hits,
-            ),
-        ),
-        x_entries,
-        y_entries,
+    Used when the full genome has too many contigs for All-sequences.
+    """
+    lengths = _unified_sequence_lengths(alignments)
+    limit = max(1, int(max_sequences))
+    if len(lengths) <= limit:
+        return _result_for_lengths(alignments, lengths, min_length=min_length)
+    top = dict(
+        sorted(lengths.items(), key=lambda kv: (-kv[1], kv[0]))[:limit]
+    )
+    n = len(top)
+    return _result_for_lengths(
+        alignments,
+        top,
+        min_length=min_length,
+        title=f"Overview: {n} longest of {len(lengths)} sequences",
     )
 
 
