@@ -73,6 +73,45 @@ def test_annotation_view_round_trip(tmp_path: Path) -> None:
     assert views[key]["ppb"] == 2.5
 
 
+def test_annotation_fit_keeps_selection(qapp: QApplication) -> None:
+    """Fit zooms to the whole sequence but must not drop a range highlight.
+
+    Dotplot → View applies a selection; Fit must leave that band visible
+    (same as selecting on the map, then Fit).
+    """
+    from repeatviewer.widgets.sequence_map_viewer import SequenceMapWidget
+
+    seq = "ACGT" * 800  # 3200 bp
+    data = SequenceMapData(
+        fasta_path=Path("/tmp/rv_fit_keep_sel.fa"),
+        sequence_id="s1",
+        sequence=seq,
+        features=[],
+        is_protein=False,
+        record_ids=["s1"],
+        features_by_id={"s1": []},
+        lengths_by_id={"s1": len(seq)},
+    )
+    widget = SequenceMapWidget()
+    widget.resize(900, 400)
+    widget.show()
+    qapp.processEvents()
+    widget.load(data, fit_after_load=False)
+    qapp.processEvents()
+    widget._pos_start.clearFocus()
+    widget._pos_end.clearFocus()
+    widget._canvas.set_selection_range(500, 800)
+    widget._sync_position_spins(500, 800)
+    qapp.processEvents()
+    assert widget.selection_range() == (500, 800)
+    widget.fit_window()
+    qapp.processEvents()
+    assert widget.selection_range() == (500, 800)
+    assert widget._pos_start.value() == 500
+    assert widget._pos_end.value() == 800
+    widget.close()
+
+
 def test_annotation_view_restore_keeps_viewport_not_selection(qapp: QApplication) -> None:
     """Reopen must restore zoom/scroll, not jump to a prior selection."""
     from repeatviewer.widgets.sequence_map_viewer import SequenceMapWidget

@@ -5690,10 +5690,18 @@ class SequenceMapWidget(QWidget):
         self._fit_retries = 0
         seq_len = len(self._data.sequence)
         ppb = self._ppb_to_fit_viewport(viewport_w, seq_len)
-        self._canvas.clear_selection()
-        self._annot_track.set_range_selection(None)
-        self._sync_position_spins(1, 1)
+        # Keep any range highlight (including one opened from Dotplot → View).
+        # Fit only changes zoom/scroll — same as Overview Fit.
+        sel = self._canvas.selection_range()
         self._apply_zoom_ppb(ppb, sync_slider=True, reset_scroll=True)
+        if sel is not None:
+            self._annot_track.set_range_selection(sel[0], sel[1])
+            self._ruler.set_region_selection(sel[0], sel[1])
+            self._sync_position_spins(sel[0], sel[1])
+        else:
+            self._annot_track.set_range_selection(None)
+            self._ruler.set_region_selection(None)
+            self._sync_position_spins(1, 1)
 
     def fit_width(self) -> None:
         """Backward-compatible alias for fit_window."""
