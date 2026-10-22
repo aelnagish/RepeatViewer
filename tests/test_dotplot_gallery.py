@@ -201,12 +201,12 @@ def test_gallery_line_width_updates_thumbs(qapp: QApplication) -> None:
         include_reverse=False,
         page_size=20,
     )
-    assert gallery.line_width_step() == 3
-    assert all(t.line_width_step() == 3 for t in gallery._thumbs)
-
-    gallery.set_line_width_step(8)
     assert gallery.line_width_step() == 8
     assert all(t.line_width_step() == 8 for t in gallery._thumbs)
+
+    gallery.set_line_width_step(12)
+    assert gallery.line_width_step() == 12
+    assert all(t.line_width_step() == 12 for t in gallery._thumbs)
     gallery.close()
 
 

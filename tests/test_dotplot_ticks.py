@@ -280,6 +280,10 @@ def test_multi_axes_widen_rulers_and_display_local_xy(qapp) -> None:
     canvas = DotplotCanvas()
     assert canvas.ruler_top() == _RULER_TOP
     assert canvas.ruler_left() == _RULER_LEFT
+    # Left margin must fit comma-formatted multi-Mb positions (was clipping
+    # "38,110,309" down to "8,110,309" on the Y ruler).
+    assert _RULER_LEFT >= 70
+    assert _RULER_LEFT_MULTI >= _RULER_LEFT
     canvas.set_axes(
         [AxisEntry("a", 0, 100), AxisEntry("b", 100, 100)],
         [AxisEntry("a", 0, 100), AxisEntry("b", 100, 100)],

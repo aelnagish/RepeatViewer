@@ -40,22 +40,16 @@ _MAX_THUMB_SIZE = 280
 _THUMB_LABEL_H = 22
 _GRID_GAP = 8
 _GRID_MARGIN = 4
-# Match DotplotPanel Single-view Line width mapping (step 1–15 → 1–4.5 px).
+# Match DotplotPanel Single-view Line width mapping (step 1–30 → 0.1–3.0 px).
 _MIN_LINE_WIDTH_STEP = 1
-_MAX_LINE_WIDTH_STEP = 15
-_DEFAULT_LINE_WIDTH_STEP = 3
-_LINE_WIDTH_PX_MIN = 1.0
-_LINE_WIDTH_PX_MAX = 4.5
+_MAX_LINE_WIDTH_STEP = 30
+_DEFAULT_LINE_WIDTH_STEP = 8
+_LINE_WIDTH_PX_PER_STEP = 0.1
 
 
 def _line_width_px(step: int) -> float:
     step = max(_MIN_LINE_WIDTH_STEP, min(_MAX_LINE_WIDTH_STEP, int(step)))
-    if _MAX_LINE_WIDTH_STEP <= _MIN_LINE_WIDTH_STEP:
-        return _LINE_WIDTH_PX_MIN
-    t = (step - _MIN_LINE_WIDTH_STEP) / (
-        _MAX_LINE_WIDTH_STEP - _MIN_LINE_WIDTH_STEP
-    )
-    return _LINE_WIDTH_PX_MIN + t * (_LINE_WIDTH_PX_MAX - _LINE_WIDTH_PX_MIN)
+    return step * _LINE_WIDTH_PX_PER_STEP
 
 
 class DotplotThumb(QFrame):

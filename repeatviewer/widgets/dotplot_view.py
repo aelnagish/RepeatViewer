@@ -19,7 +19,19 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, QRectF, Qt, QThread, Signal, Slot
+from PySide6.QtCore import (
+    QEvent,
+    QObject,
+    QPoint,
+    QPointF,
+    QRect,
+    QRectF,
+    Qt,
+    QThread,
+    QTimer,
+    Signal,
+    Slot,
+)
 from PySide6.QtGui import (
     QColor,
     QFont,
@@ -63,11 +75,13 @@ from repeatviewer.backends.dotplot import (
 )
 from repeatviewer.backends.paf_dotplot import (
     MAX_ALL_SEQUENCES,
+    MAX_OVERVIEW_SEQUENCES,
     AxisEntry,
     PafError,
     load_alignment_file,
     parse_paf_pair,
     result_for_all,
+    result_for_overview,
     result_for_pair,
 )
 from repeatviewer.backends.fastga_dotplot import (
@@ -211,23 +225,17 @@ _REVERSE_COLOR = QColor(200, 60, 40)   # inverted repeats (red)
 # Charcoal — must stay distinct from warm reverse red and cool forward blue.
 _DIAGONAL_COLOR = QColor(45, 45, 45)
 
-_DEFAULT_LINE_WIDTH_STEP = 3
+_DEFAULT_LINE_WIDTH_STEP = 8
 _MIN_LINE_WIDTH_STEP = 1
-_MAX_LINE_WIDTH_STEP = 15
-# UI steps 1…15: same fine gradient as before (≈0.25 px per step), up to ~4.5 px.
-_LINE_WIDTH_PX_MIN = 1.0
-_LINE_WIDTH_PX_MAX = 4.5
+_MAX_LINE_WIDTH_STEP = 30
+# UI steps 1…30 → 0.1, 0.2, … 3.0 screen pixels (0.1 px per step).
+_LINE_WIDTH_PX_PER_STEP = 0.1
 
 
 def _line_width_px(step: int) -> float:
-    """Map toolbar step (1–5) to cosmetic pen width in screen pixels."""
+    """Map toolbar step (1–30) to cosmetic pen width in screen pixels."""
     step = max(_MIN_LINE_WIDTH_STEP, min(_MAX_LINE_WIDTH_STEP, int(step)))
-    if _MAX_LINE_WIDTH_STEP <= _MIN_LINE_WIDTH_STEP:
-        return _LINE_WIDTH_PX_MIN
-    t = (step - _MIN_LINE_WIDTH_STEP) / (
-        _MAX_LINE_WIDTH_STEP - _MIN_LINE_WIDTH_STEP
-    )
-    return _LINE_WIDTH_PX_MIN + t * (_LINE_WIDTH_PX_MAX - _LINE_WIDTH_PX_MIN)
+    return step * _LINE_WIDTH_PX_PER_STEP
 
 
 # Zoom limits are relative to the scale that fits the whole plot, not absolute.
@@ -242,12 +250,16 @@ _DRAG_ZOOM_PIXELS_PER_STEP = 28.0
 _PINCH_DELTA_PER_STEP = 0.04
 
 _RULER_TOP = 18
-# Left margin: room for tick labels flush against the axis (same px/base as X).
-_RULER_LEFT = 44
-# Multi-sequence All / multi_dot: room for sequence names + per-block ticks.
+# Left margin: must fit 1-based positions with commas (e.g. 38,481,090). A
+# narrower strip clipped the leading digits so zoomed cursors read as 8,110,309.
+_RULER_LEFT = 78
+# Multi-sequence All / multi_dot: sequence names outside + tick labels inside.
 _RULER_TOP_MULTI = 30
-_RULER_LEFT_MULTI = 52
+# Left: packed [name | numbers] against the plot (not name far-left + gap).
+_RULER_LEFT_MULTI = 96
 _Y_TICK_PAD = 3  # gap between label and tick mark
+_Y_NAME_BAND_PAD = 2  # outer padding around rotated sequence names
+_Y_NAME_TO_TICK_GAP = 3  # space between sequence name and length numbers
 _RULER_BG = QColor(250, 250, 250)
 _RULER_FG = QColor(110, 110, 110)
 _RULER_LINE = QColor(200, 200, 200)
@@ -599,21 +611,45 @@ class _Ruler(QWidget):
         self.setToolTip("")
         super().leaveEvent(event)
 
+    @staticmethod
+    def _y_name_band_width(metrics) -> int:
+        """Pixel width of the strip that holds rotated Y sequence names."""
+        return max(14, int(metrics.height()) + _Y_NAME_BAND_PAD)
+
+    @staticmethod
+    def _y_tick_column_width(metrics) -> int:
+        """Inner band for Y length numbers, sized for comma-formatted Mb labels."""
+        return max(56, int(metrics.horizontalAdvance("00,000,000")) + 4)
+
+    def _y_axis_columns(self, metrics) -> tuple[int, int, int]:
+        """Return ``(name_left, name_width, tick_left)`` packed against the plot.
+
+        Layout: ``[ empty | name | gap | numbers | ticks ]`` so the sequence
+        name sits close to the length labels instead of on the far left.
+        """
+        name_w = self._y_name_band_width(metrics)
+        tick_w = self._y_tick_column_width(metrics)
+        tick_left = max(name_w, self.width() - 4 - _Y_TICK_PAD - tick_w)
+        name_left = max(0, tick_left - _Y_NAME_TO_TICK_GAP - name_w)
+        return name_left, name_w, tick_left
+
     def _paint_sequence_axis_labels(
         self, painter: QPainter, view: "DotplotCanvas", entries: list
     ) -> None:
         """Draw multi-sequence names, elided to each block so they do not overlap.
 
-        Full names are often longer than a panel at Fit zoom; clipping each
-        label to its sequence's pixel span keeps neighbours readable. Zoom in
-        on a block to see more of the name.
+        Each name is clipped and centered on the same pixel span as that
+        sequence's length ticks (``1`` … ``length``), so the file name lines up
+        with its number labels. Zoom in on a block to see more of the name.
         """
         painter.setPen(QPen(_RULER_FG))
         metrics = painter.fontMetrics()
         # Below this many pixels a label is just noise — skip it.
         min_px = max(14, metrics.horizontalAdvance("…") + 4)
         pad = 4.0
+        name_left, name_band, _tick_left = self._y_axis_columns(metrics)
         for entry in entries:
+            # Same scene edges as the local ``1`` and length tick marks.
             start = float(view.scene_to_ruler(float(entry.offset), self._horizontal))
             end = float(
                 view.scene_to_ruler(
@@ -629,7 +665,7 @@ class _Ruler(QWidget):
                 if centre < 0 or centre > self.width():
                     continue
             else:
-                if centre < 0 or centre > self.height():
+                if hi < 0 or lo > self.height():
                     continue
             text = metrics.elidedText(
                 str(entry.name),
@@ -647,11 +683,31 @@ class _Ruler(QWidget):
                     text,
                 )
             else:
+                # Name band packed against the tick numbers (not far-left).
                 painter.save()
-                # Outer (left) edge so tick numbers can sit near the plot.
-                painter.translate(metrics.height() + 2, centre)
+                clip = QRect(
+                    name_left,
+                    max(0, int(lo)),
+                    name_band,
+                    max(1, int(hi) - max(0, int(lo))),
+                )
+                painter.setClipRect(clip)
+                painter.translate(name_left + name_band / 2.0, centre)
                 painter.rotate(-90)
-                painter.drawText(int(-w / 2), 0, text)
+                text_rect = QRectF(
+                    -avail / 2.0,
+                    -metrics.height() / 2.0,
+                    avail,
+                    float(metrics.height()),
+                )
+                painter.drawText(
+                    text_rect,
+                    int(
+                        Qt.AlignmentFlag.AlignHCenter
+                        | Qt.AlignmentFlag.AlignVCenter
+                    ),
+                    text,
+                )
                 painter.restore()
 
     def _paint_tick_marks(
@@ -683,13 +739,23 @@ class _Ruler(QWidget):
                     painter.drawLine(self.width() - 4, int(pos), self.width(), int(pos))
                     if tick not in labeled:
                         continue
-                    label_h = painter.fontMetrics().height()
-                    text_rect = QRect(
-                        0,
-                        int(pos) - label_h // 2,
-                        self.width() - 4 - _Y_TICK_PAD,
-                        label_h,
-                    )
+                    fm = painter.fontMetrics()
+                    label_h = fm.height()
+                    if view.has_multi_axes():
+                        _name_left, _name_w, tick_left = self._y_axis_columns(fm)
+                        text_rect = QRect(
+                            tick_left,
+                            int(pos) - label_h // 2,
+                            max(1, self.width() - 4 - _Y_TICK_PAD - tick_left),
+                            label_h,
+                        )
+                    else:
+                        text_rect = QRect(
+                            0,
+                            int(pos) - label_h // 2,
+                            self.width() - 4 - _Y_TICK_PAD,
+                            label_h,
+                        )
                     painter.drawText(
                         text_rect,
                         int(
@@ -743,12 +809,23 @@ class _Ruler(QWidget):
             painter.drawText(x0, y_base, label)
         elif not self._horizontal and 0 <= pos <= self.height():
             label_h = cursor_metrics.height()
-            text_rect = QRect(
-                0,
-                int(pos) - label_h // 2,
-                self.width() - 4 - _Y_TICK_PAD,
-                label_h,
-            )
+            if entries:
+                _name_left, _name_w, tick_left = self._y_axis_columns(
+                    cursor_metrics
+                )
+                text_rect = QRect(
+                    tick_left,
+                    int(pos) - label_h // 2,
+                    max(1, self.width() - 4 - _Y_TICK_PAD - tick_left),
+                    label_h,
+                )
+            else:
+                text_rect = QRect(
+                    0,
+                    int(pos) - label_h // 2,
+                    self.width() - 4 - _Y_TICK_PAD,
+                    label_h,
+                )
             tw = cursor_metrics.horizontalAdvance(label)
             bg = QRect(
                 text_rect.right() - tw - pad,
@@ -883,7 +960,12 @@ class _Ruler(QWidget):
 
 
 class _PlotOverlay(QWidget):
-    """Draws crosshair / selection in viewport space without re-painting hits."""
+    """Transparent mouse shield over the viewport.
+
+    Crosshair and selection are painted in scene space in
+    ``DotplotCanvas.drawForeground`` so they share the hit-layer transform.
+    This widget only blocks nothing and stays for geometry / raise ordering.
+    """
 
     def __init__(self, view: "DotplotCanvas") -> None:
         super().__init__(view.viewport())
@@ -893,38 +975,7 @@ class _PlotOverlay(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
     def paintEvent(self, event) -> None:  # noqa: N802
-        view = self._view
-        if view._item is None or not view._length:
-            return
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
-
-        # Live drag is tracked in viewport pixels so the rubber band stays under
-        # the cursor after zoom (scene↔view mapping can lag or disagree).
-        rect: QRect | None = None
-        if view._drag_start_vp is not None and view._drag_now_vp is not None:
-            rect = QRect(view._drag_start_vp, view._drag_now_vp).normalized()
-        elif view._selection is not None:
-            tl = view.mapFromScene(view._selection.topLeft())
-            br = view.mapFromScene(view._selection.bottomRight())
-            rect = QRect(tl, br).normalized()
-        if rect is not None and rect.width() >= 1 and rect.height() >= 1:
-            painter.fillRect(rect, _SELECT_FILL)
-            edge = QPen(_SELECT_EDGE)
-            edge.setCosmetic(True)
-            painter.setPen(edge)
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawRect(rect)
-
-        # Crosshair from viewport mouse position — same space as the rubber band.
-        if view._cursor_vp is not None:
-            cross = QPen(QColor(90, 140, 220, 150))
-            cross.setCosmetic(True)
-            painter.setPen(cross)
-            pt = view._cursor_vp
-            painter.drawLine(pt.x(), 0, pt.x(), self.height())
-            painter.drawLine(0, pt.y(), self.width(), pt.y())
-        painter.end()
+        return
 
 
 class DotplotCanvas(QGraphicsView):
@@ -1001,8 +1052,7 @@ class DotplotCanvas(QGraphicsView):
         # Repaint the rulers whenever the view scrolls, so ticks track the plot.
         self.horizontalScrollBar().valueChanged.connect(self._refresh_rulers)
         self.verticalScrollBar().valueChanged.connect(self._refresh_rulers)
-        self.horizontalScrollBar().valueChanged.connect(self._overlay.update)
-        self.verticalScrollBar().valueChanged.connect(self._overlay.update)
+        # Scene-space crosshair remaps on the view's normal scroll repaint.
         self.viewport().setAttribute(Qt.WidgetAttribute.WA_AcceptTouchEvents, True)
 
     def set_title(self, title: str) -> None:
@@ -1123,22 +1173,35 @@ class DotplotCanvas(QGraphicsView):
         return self._title
 
     def cursor_scene_pos(self) -> QPointF | None:
-        return self._cursor_pos
+        """Scene point under the mouse; always remapped from the viewport pixel.
+
+        Caching scene coords goes stale after pan/zoom while the crosshair (drawn
+        in viewport pixels) still looks correct — rulers must map fresh each paint.
+        """
+        if self._cursor_vp is None:
+            return None
+        return self.mapToScene(self._cursor_vp)
 
     def visible_scene_rect(self) -> QRectF:
         return self.mapToScene(self.viewport().rect()).boundingRect()
 
     def scene_to_ruler(self, value: float, horizontal: bool) -> float:
-        """Scene coordinate -> position along the matching ruler widget.
+        """Scene coordinate → pixel along the matching ruler widget.
 
-        The rulers are laid out flush with the viewport on their long axis, so
-        the viewport coordinate is already the ruler coordinate.
+        ``mapFromScene`` returns viewport coordinates. Top/left rulers are laid
+        out flush with the viewport, so viewport x/y match ruler-local x/y.
+        Map through the visible band's centre on the other axis so a zoomed
+        off-diagonal view does not skew the tick position.
         """
-        point = self.mapFromScene(QPointF(value, value))
-        return point.x() if horizontal else point.y()
+        vis = self.visible_scene_rect()
+        if horizontal:
+            point = self.mapFromScene(QPointF(value, vis.center().y()))
+            return float(point.x())
+        point = self.mapFromScene(QPointF(vis.center().x(), value))
+        return float(point.y())
 
     def set_line_width_step(self, step: int) -> None:
-        """Toolbar step 1–15 maps evenly onto ~1–4.5 screen pixels."""
+        """Toolbar step 1–30 maps to 0.1–3.0 screen pixels (0.1 px per step)."""
         step = max(_MIN_LINE_WIDTH_STEP, min(_MAX_LINE_WIDTH_STEP, int(step)))
         self._line_width_step = step
         if self._item is not None:
@@ -1164,7 +1227,12 @@ class DotplotCanvas(QGraphicsView):
         self._left_ruler.update()
 
     def _refresh_overlay(self) -> None:
-        self._overlay.update()
+        """Repaint scene-space crosshair / selection (drawForeground)."""
+        self.viewport().update()
+
+    def _refresh_selection_paint(self) -> None:
+        """Repaint selection in drawForeground (scene space)."""
+        self.viewport().update()
 
     def _position_rulers(self) -> None:
         vp = self.viewport().geometry()
@@ -1421,25 +1489,24 @@ class DotplotCanvas(QGraphicsView):
         if hi <= lo:
             return
         self._selection = QRectF(lo, lo, hi - lo, hi - lo)
-        self._refresh_overlay()
+        self._refresh_selection_paint()
 
     def clear_selection(self) -> None:
         self._selection = None
         self._drag_start_vp = self._drag_now_vp = None
-        self._refresh_overlay()
+        self._refresh_selection_paint()
 
     def _viewport_event_pos(self, event) -> QPoint:
         """Mouse/wheel position in viewport coordinates for ``mapToScene``.
 
-        Events arrive through the viewport (typical) with viewport-local coords.
-        If the originating widget is the view itself, map into the viewport so
-        ruler margins are not treated as plot pixels.
+        Always map from the global cursor. ``event.position()`` is relative to
+        whichever widget got the event (view vs viewport vs child), and with
+        ruler margins that easily desyncs the overlay crosshair/rubber band
+        from the OS pointer while ``mapToScene`` on release still looks right.
         """
-        pos = event.position().toPoint()
-        widget = event.widget() if hasattr(event, "widget") else None
-        if widget is self:
-            return self.viewport().mapFrom(self, pos)
-        return pos
+        gp = event.globalPosition()
+        global_pt = gp.toPoint() if isinstance(gp, QPointF) else QPoint(gp)
+        return self.viewport().mapFromGlobal(global_pt)
 
     def _clear_drag(self) -> None:
         self._drag_start_vp = self._drag_now_vp = None
@@ -1477,6 +1544,25 @@ class DotplotCanvas(QGraphicsView):
             lines.append((QPointF(0.0, y), QPointF(width, y)))
         return lines
 
+    def _identity_diagonal_segment(
+        self, width: float, height: float
+    ) -> tuple[QPointF, QPointF] | None:
+        """Main y=x guide (self-diagonal), same role as sequence separators."""
+        side = min(float(width), float(height))
+        if side < 1.0:
+            return None
+        return (QPointF(0.0, 0.0), QPointF(side, side))
+
+    def _guide_line_segments(
+        self, width: float, height: float
+    ) -> list[tuple[QPointF, QPointF]]:
+        """Sequence grid + identity diagonal in scene coordinates."""
+        lines = self._sequence_separator_segments(width, height)
+        diag = self._identity_diagonal_segment(width, height)
+        if diag is not None:
+            lines.append(diag)
+        return lines
+
     @staticmethod
     def _paint_separator_lines(
         painter: QPainter, lines: list[tuple[QPointF, QPointF]]
@@ -1508,8 +1594,8 @@ class DotplotCanvas(QGraphicsView):
     def _separator_lines_viewport_px(
         self,
     ) -> list[tuple[QPointF, QPointF]]:
-        """Map scene separators to integer viewport pixels (uniform stroke)."""
-        scene_lines = self._sequence_separator_segments(
+        """Map scene guide lines to integer viewport pixels (uniform stroke)."""
+        scene_lines = self._guide_line_segments(
             float(self._length), float(self.plot_height())
         )
         out: list[tuple[QPointF, QPointF]] = []
@@ -1526,20 +1612,68 @@ class DotplotCanvas(QGraphicsView):
             )
         return out
 
-    def drawForeground(self, painter: QPainter, rect: QRectF) -> None:  # noqa: N802
-        """Overlays for multi-sequence separators (after hits).
+    def _live_drag_scene_rect(self) -> QRectF | None:
+        """Rubber band in scene coords from the current viewport drag corners."""
+        if self._drag_start_vp is None or self._drag_now_vp is None:
+            return None
+        a = self.mapToScene(self._drag_start_vp)
+        b = self.mapToScene(self._drag_now_vp)
+        rect = QRectF(a, b).normalized()
+        if rect.width() < 1.0 and rect.height() < 1.0:
+            return None
+        return rect
 
-        Crosshair and selection live on ``_PlotOverlay`` so mouse moves do not
-        re-rasterize the hit layer. Separators use a white halo and are painted
-        in viewport pixels so every divider has the same thickness.
+    def drawForeground(self, painter: QPainter, rect: QRectF) -> None:  # noqa: N802
+        """Scene-locked crosshair + selection, then separators.
+
+        Crosshair and rubber band use the same scene transform as the hits so
+        they cannot drift from the plot (viewport-overlay drawing did).
         """
         super().drawForeground(painter, rect)
         if self._item is None or not self._length:
             return
+
+        cursor = self.cursor_scene_pos()
+        if cursor is not None:
+            # Span the exposed region (or full plot) so lines stay visible.
+            span = rect if rect.isValid() and not rect.isEmpty() else self.visible_scene_rect()
+            left = min(span.left(), 0.0)
+            right = max(span.right(), float(self._length))
+            top = min(span.top(), 0.0)
+            bottom = max(span.bottom(), float(self.plot_height()))
+            painter.save()
+            cross = QPen(QColor(90, 140, 220, 150))
+            cross.setCosmetic(True)
+            painter.setPen(cross)
+            painter.drawLine(
+                QPointF(left, cursor.y()), QPointF(right, cursor.y())
+            )
+            painter.drawLine(
+                QPointF(cursor.x(), top), QPointF(cursor.x(), bottom)
+            )
+            painter.restore()
+
+        sel = self._live_drag_scene_rect()
+        if sel is None and self._selection is not None:
+            sel = self._selection
+        if (
+            sel is not None
+            and sel.width() >= 1.0
+            and sel.height() >= 1.0
+        ):
+            painter.save()
+            painter.setBrush(_SELECT_FILL)
+            edge = QPen(_SELECT_EDGE)
+            # Cosmetic so the border stays ~1 screen px at every zoom.
+            edge.setCosmetic(True)
+            painter.setPen(edge)
+            painter.drawRect(sel)
+            painter.restore()
+
         lines = self._separator_lines_viewport_px()
         if not lines:
             return
-        # drawForeground's painter is in scene space; paint in viewport pixels.
+        # Separators: white halo in viewport pixels for even thickness.
         painter.save()
         painter.setTransform(QTransform())
         self._paint_separator_lines(painter, lines)
@@ -1808,9 +1942,7 @@ class DotplotCanvas(QGraphicsView):
 
         export_seps = [
             (_map_pt(a), _map_pt(b))
-            for a, b in self._sequence_separator_segments(
-                float(width), float(height)
-            )
+            for a, b in self._guide_line_segments(float(width), float(height))
         ]
         self._paint_separator_lines(painter, export_seps)
         painter.restore()
@@ -2130,7 +2262,7 @@ class DotplotCanvas(QGraphicsView):
             self._drag_now_vp = pos
             self._cursor_vp = pos
             self._cursor_pos = self.mapToScene(pos)
-            self._refresh_overlay()
+            self._refresh_selection_paint()
             return
 
         super().mousePressEvent(event)
@@ -2151,6 +2283,7 @@ class DotplotCanvas(QGraphicsView):
         if self._panning and self._pan_origin is not None:
             delta = pos - self._pan_origin
             self._pan_origin = pos
+            self._cursor_vp = pos
             h = self.horizontalScrollBar()
             v = self.verticalScrollBar()
             h.setValue(h.value() - delta.x())
@@ -2177,7 +2310,7 @@ class DotplotCanvas(QGraphicsView):
                 self.positionChanged.emit(*self._display_xy(x, y))
             return
         super().mouseMoveEvent(event)
-        # Overlay only — do not viewport().update() (that re-paints all hits).
+        # Overlay + rulers only — hit layer stays cached.
         self._refresh_overlay()
         self._refresh_rulers()
         x, y = int(point.x()), int(point.y())
@@ -2205,7 +2338,7 @@ class DotplotCanvas(QGraphicsView):
                 if moved <= _CLICK_SLOP:
                     self._selection = None
                     self._clear_drag()
-                    self._refresh_overlay()
+                    self._refresh_selection_paint()
             return
         super().mouseReleaseEvent(event)
         if self._item is None or self._press_pos is None:
@@ -2219,7 +2352,7 @@ class DotplotCanvas(QGraphicsView):
             # A plain click only clears the selection; it never navigates.
             self._clear_drag()
             self._selection = None
-            self._refresh_overlay()
+            self._refresh_selection_paint()
             return
 
         if self._drag_start_vp is not None and self._drag_now_vp is not None:
@@ -2234,7 +2367,7 @@ class DotplotCanvas(QGraphicsView):
             rect = _ensure_min_bp_rect(rect.intersected(bounds), bounds)
             if rect.width() >= _MIN_SELECTION_BP and rect.height() >= _MIN_SELECTION_BP:
                 self._selection = rect
-                self._refresh_overlay()
+                self._refresh_selection_paint()
                 self.rectSelected.emit(
                     int(rect.left()) + 1 + self._offset,
                     int(rect.right()) + self._offset,
@@ -2295,6 +2428,8 @@ class DotplotPanel(QWidget):
         self._region_size_label = self._rail.region_size_label
         self._pair_combo = self._rail.pair_combo
         self._pair_label = self._rail.pair_label
+        self._pair_filter = self._rail.pair_filter
+        self._pair_filter_label = self._rail.pair_filter_label
         self._sequence_combo = self._rail.sequence_combo
         self._sequence_label = self._rail.sequence_label
         self._sequence_prev_btn = self._rail.sequence_prev_btn
@@ -2333,6 +2468,11 @@ class DotplotPanel(QWidget):
         self._pending_key = None
         self._paf_load_path: Path | None = None
         self._pair_scan_key: tuple[str, str] | None = None
+        # Compare header row: None | "all" | "overview"
+        self._pair_header_kind: str | None = None
+        self._pair_filter_timer = QTimer(self)
+        self._pair_filter_timer.setSingleShot(True)
+        self._pair_filter_timer.setInterval(150)
         # Last drag-box as 1-based inclusive (x1, x2, y1, y2), if any.
         self._selection_xy: tuple[int, int, int, int] | None = None
         # Status line without the appended x/y readout (alignment mode).
@@ -2395,6 +2535,8 @@ class DotplotPanel(QWidget):
         self._region_start.valueChanged.connect(self._recompute)
         self._region_size.valueChanged.connect(self._recompute)
         self._pair_combo.currentIndexChanged.connect(self._show_selected_pair)
+        self._pair_filter.textChanged.connect(self._on_pair_filter_edited)
+        self._pair_filter_timer.timeout.connect(self._apply_pair_filter)
         self._sequence_combo.currentIndexChanged.connect(
             self._on_sequence_choice_changed
         )
@@ -2524,23 +2666,19 @@ class DotplotPanel(QWidget):
         self._sequence_records = [(sid, self._sequence_cache.get(sid, "")) for sid in ids]
         self._ungap_for_plot = bool(ungap)
         if not same_ids:
-            # Batch model fill — much faster than addItem() × N for large MSAs.
-            model = QStandardItemModel(len(ids), 1, self._sequence_combo)
-            for index, sid in enumerate(ids):
-                item = QStandardItem(f"{index + 1}. {sid}")
-                item.setData(sid, Qt.ItemDataRole.UserRole)
-                model.setItem(index, 0, item)
+            self._pair_filter.blockSignals(True)
+            self._pair_filter.clear()
+            self._pair_filter.blockSignals(False)
+            self._refill_sequence_combo(preferred_id=preferred_id)
+        else:
+            want = str(preferred_id or "").strip()
+            idx = self._sequence_combo.findData(want) if want else -1
+            if idx < 0 and self._sequence_combo.count():
+                idx = 0
             self._sequence_combo.blockSignals(True)
-            self._sequence_combo.setModel(model)
+            if idx >= 0:
+                self._sequence_combo.setCurrentIndex(idx)
             self._sequence_combo.blockSignals(False)
-        want = str(preferred_id or "").strip()
-        idx = self._sequence_combo.findData(want) if want else -1
-        if idx < 0 and ids:
-            idx = 0
-        self._sequence_combo.blockSignals(True)
-        if idx >= 0:
-            self._sequence_combo.setCurrentIndex(idx)
-        self._sequence_combo.blockSignals(False)
         self._sync_engine_controls()
         if ids:
             sid = str(self._sequence_combo.currentData() or ids[0])
@@ -2760,19 +2898,10 @@ class DotplotPanel(QWidget):
         else:
             self._word.setValue(0)
         self._word.blockSignals(False)
-        menu_pairs, total_pairs = alignments.pairs_for_combo()
-        offer_all = (
-            total_pairs > 1 and alignments.supports_all_sequences_view()
-        )
-        self._pair_combo.blockSignals(True)
-        self._pair_combo.clear()
-        if offer_all:
-            self._pair_combo.addItem("All sequences", ("__all__", "__all__"))
-        for query, target in menu_pairs:
-            label = query if query == target else f"{query}  vs  {target}"
-            self._pair_combo.addItem(label, (query, target))
-        self._pair_combo.setCurrentIndex(0)
-        self._pair_combo.blockSignals(False)
+        self._pair_filter.blockSignals(True)
+        self._pair_filter.clear()
+        self._pair_filter.blockSignals(False)
+        menu_pairs, total_pairs = self._refill_pair_combo()
         longest = max(
             list(alignments.query_lengths.values())
             + list(alignments.target_lengths.values())
@@ -2796,12 +2925,13 @@ class DotplotPanel(QWidget):
         if total_pairs > len(menu_pairs):
             notes.append(
                 f"Compare lists {len(menu_pairs)} of {total_pairs} pairs "
-                "(longest first)."
+                "(self first; use Filter to find others)."
             )
-        if total_pairs > 1 and not offer_all:
+        if total_pairs > 1 and self._pair_header_kind == "overview":
             notes.append(
-                f"{alignments.sequence_count()} sequences — pick a pair "
-                f"(All-sequences view is limited to {MAX_ALL_SEQUENCES})."
+                f"{alignments.sequence_count()} sequences — "
+                f"Overview shows the longest {MAX_OVERVIEW_SEQUENCES} "
+                f"(All-sequences limit {MAX_ALL_SEQUENCES})."
             )
         if alignments.truncated:
             notes.append("Truncated: too many records.")
@@ -2809,18 +2939,198 @@ class DotplotPanel(QWidget):
             self._set_status_text(" · ".join(notes))
         self._show_selected_pair()
 
+    def _refill_pair_combo(self) -> tuple[list[tuple[str, str]], int]:
+        """Rebuild Compare from alignments + current Filter text.
+
+        An empty Filter shows All/Overview (when available) plus the capped
+        pair list. Non-empty Filter keeps only matching pairs in the menu —
+        that is the whole point of the field — and selects the first match.
+        """
+        alignments = self._alignments
+        if alignments is None:
+            self._pair_header_kind = None
+            self._pair_combo.blockSignals(True)
+            self._pair_combo.clear()
+            self._pair_combo.blockSignals(False)
+            return [], 0
+        filter_text = (self._pair_filter.text() or "").strip()
+        filtering = bool(filter_text)
+        menu_pairs, total_pairs = alignments.pairs_for_combo(
+            filter_text=filter_text
+        )
+        # All/Overview only when not filtering — otherwise the closed combo
+        # still says "All sequences" and the filter looks broken.
+        offer_all = (
+            not filtering
+            and total_pairs > 1
+            and alignments.supports_all_sequences_view()
+        )
+        offer_overview = (
+            not filtering and total_pairs > 1 and not offer_all
+        )
+        if offer_all:
+            self._pair_header_kind = "all"
+        elif offer_overview:
+            self._pair_header_kind = "overview"
+        else:
+            self._pair_header_kind = None
+
+        previous = self._pair_combo.currentData()
+        self._pair_combo.blockSignals(True)
+        self._pair_combo.clear()
+        if offer_all:
+            self._pair_combo.addItem("All sequences", ("__all__", "__all__"))
+        elif offer_overview:
+            self._pair_combo.addItem(
+                f"Overview (longest {MAX_OVERVIEW_SEQUENCES})",
+                ("__overview__", "__overview__"),
+            )
+        if filtering and not menu_pairs:
+            self._pair_combo.addItem("(no pairs match)", None)
+        else:
+            for query, target in menu_pairs:
+                label = query if query == target else f"{query}  vs  {target}"
+                self._pair_combo.addItem(label, (query, target))
+        # Keep the current choice when it is still in the menu. Otherwise:
+        # unfiltered → All sequences / Overview (full multi-seq view by default);
+        # filtered → first matching pair (All/Overview are hidden while filtering).
+        restore = -1
+        if previous is not None:
+            for i in range(self._pair_combo.count()):
+                if self._pair_combo.itemData(i) == previous:
+                    restore = i
+                    break
+        if restore < 0 and not filtering:
+            for i in range(self._pair_combo.count()):
+                data = self._pair_combo.itemData(i)
+                if data is not None and data[0] in ("__all__", "__overview__"):
+                    restore = i
+                    break
+        if restore < 0:
+            for i in range(self._pair_combo.count()):
+                data = self._pair_combo.itemData(i)
+                if data is not None and data[0] not in ("__all__", "__overview__"):
+                    restore = i
+                    break
+        if restore < 0:
+            restore = 0 if self._pair_combo.count() else -1
+        if restore >= 0:
+            self._pair_combo.setCurrentIndex(restore)
+        self._pair_combo.blockSignals(False)
+        return menu_pairs, total_pairs
+
+    def _filtered_sequence_ids(self) -> list[str]:
+        """Sequence ids visible under the current Filter text."""
+        needle = (self._pair_filter.text() or "").strip().lower()
+        if not needle:
+            return list(self._sequence_ids)
+        return [sid for sid in self._sequence_ids if needle in sid.lower()]
+
+    def _refill_sequence_combo(self, *, preferred_id: str | None = None) -> list[str]:
+        """Rebuild Sequence combo (and keep numbering from the full list)."""
+        ids = self._filtered_sequence_ids()
+        index_of = {sid: i for i, sid in enumerate(self._sequence_ids)}
+        model = QStandardItemModel(len(ids), 1, self._sequence_combo)
+        for row, sid in enumerate(ids):
+            n = index_of.get(sid, row) + 1
+            item = QStandardItem(f"{n}. {sid}")
+            item.setData(sid, Qt.ItemDataRole.UserRole)
+            model.setItem(row, 0, item)
+        previous = str(
+            preferred_id
+            or self._sequence_combo.currentData()
+            or self._active_sequence_id
+            or ""
+        ).strip()
+        self._sequence_combo.blockSignals(True)
+        self._sequence_combo.setModel(model)
+        restore = self._sequence_combo.findData(previous) if previous else -1
+        if restore < 0 and ids:
+            restore = 0
+        if restore >= 0:
+            self._sequence_combo.setCurrentIndex(restore)
+        self._sequence_combo.blockSignals(False)
+        return ids
+
+    @Slot(str)
+    def _on_pair_filter_edited(self, _text: str) -> None:
+        self._pair_filter_timer.start()
+
+    @Slot()
+    def _apply_pair_filter(self) -> None:
+        filter_text = (self._pair_filter.text() or "").strip()
+        if self._mode == "alignment":
+            if self._alignments is None:
+                return
+            menu_pairs, total_pairs = self._refill_pair_combo()
+            if filter_text:
+                n = len(menu_pairs)
+                if n == 0:
+                    self._set_status_text(
+                        f"Filter “{filter_text}”: no pairs match "
+                        f"(of {total_pairs} in file)."
+                    )
+                elif n < total_pairs:
+                    self._set_status_text(
+                        f"Filter “{filter_text}”: {n} pair"
+                        f"{'' if n == 1 else 's'} in Compare "
+                        f"(of {total_pairs})."
+                    )
+            self._show_selected_pair()
+            return
+        # Self-dotplot Grid / Sequence list.
+        if len(self._sequence_ids) <= 1:
+            return
+        shown = self._refill_sequence_combo()
+        total = len(self._sequence_ids)
+        if filter_text:
+            n = len(shown)
+            if n == 0:
+                self._set_status_text(
+                    f"Filter “{filter_text}”: no sequences match "
+                    f"(of {total})."
+                )
+            elif n < total:
+                self._set_status_text(
+                    f"Filter “{filter_text}”: {n} sequence"
+                    f"{'' if n == 1 else 's'} "
+                    f"(of {total})."
+                )
+            else:
+                self._set_status_text("")
+        if self._view_mode == "grid":
+            self._show_gallery(reset_page=True)
+        elif shown:
+            sid = str(self._sequence_combo.currentData() or shown[0])
+            self.set_active_sequence(
+                sid, self._sequence_for_id(sid), ungap=self._ungap_for_plot
+            )
+            self._loaded_for = None
+            self.ensure_loaded()
+        self._sync_engine_controls()
+
     def _show_selected_pair(self) -> None:
         if self._alignments is None:
             return
         data = self._pair_combo.currentData()
         try:
             min_len = max(int(self._filter_len.value()), 0)
-            if data is None or data[0] == "__all__":
+            if data is None:
+                # Empty filter match ("(no pairs match)") or unset combo.
+                self._canvas.clear_plot()
+                return
+            if data[0] == "__all__":
                 result, x_entries, y_entries = result_for_all(
                     self._alignments, min_length=min_len
                 )
                 zoom_hits = False
                 pending_pair_scan: tuple[str, str] | None = None
+            elif data[0] == "__overview__":
+                result, x_entries, y_entries = result_for_overview(
+                    self._alignments, min_length=min_len
+                )
+                zoom_hits = False
+                pending_pair_scan = None
             else:
                 query, target = data[0], data[1]
                 window = None
@@ -3003,6 +3313,15 @@ class DotplotPanel(QWidget):
             )
             self._pair_label.setVisible(multi)
             self._pair_combo.setVisible(multi)
+            self._pair_filter_label.setVisible(multi)
+            self._pair_filter.setVisible(multi)
+            if multi:
+                self._pair_filter.setPlaceholderText("Filter pairs…")
+                self._pair_filter.setToolTip(
+                    "Narrow the Compare menu to pairs whose names contain this "
+                    "text (case-insensitive). Searches every pair in the file. "
+                    "Clear to show All sequences / Overview again."
+                )
             self._sequence_label.setVisible(False)
             self._sequence_combo.setVisible(False)
             self._sequence_prev_btn.setVisible(False)
@@ -3034,6 +3353,14 @@ class DotplotPanel(QWidget):
         self._pair_label.setVisible(False)
         self._pair_combo.setVisible(False)
         multi_seq = self._mode != "alignment" and len(self._sequence_ids) > 1
+        self._pair_filter_label.setVisible(multi_seq)
+        self._pair_filter.setVisible(multi_seq)
+        if multi_seq:
+            self._pair_filter.setPlaceholderText("Filter sequences…")
+            self._pair_filter.setToolTip(
+                "Narrow the Sequence menu and Grid thumbnails to names that "
+                "contain this text (case-insensitive). Clear to show all."
+            )
         self._sequence_label.setVisible(multi_seq)
         self._sequence_combo.setVisible(multi_seq)
         self._sequence_prev_btn.setVisible(multi_seq)
@@ -3185,8 +3512,9 @@ class DotplotPanel(QWidget):
         # Keep Grid pens in sync with the shared Line width control.
         self._gallery.set_line_width_step(int(self._line_width.value()))
         focus = str(focus_sequence_id or self._gallery_return_sid or "").strip() or None
+        shown = self._filtered_sequence_ids()
         self._gallery.set_sequences(
-            self._sequence_ids,
+            shown,
             sequence_loader=self._sequence_for_id,
             ungap=self._ungap_for_plot,
             word_size=int(self._word.value()),
@@ -3232,7 +3560,7 @@ class DotplotPanel(QWidget):
         self._rail.set_gallery_page_choices(
             page=self._gallery.page(),
             page_size=self._gallery.page_size(),
-            total=len(self._sequence_ids),
+            total=len(self._filtered_sequence_ids()),
         )
 
     def open_single_for_sequence(self, sequence_id: str) -> None:

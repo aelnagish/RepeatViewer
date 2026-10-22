@@ -9,13 +9,16 @@ import pytest
 from repeatviewer.backends.dotplot import DotplotSegment, STRAND_FORWARD
 from repeatviewer.backends.paf_dotplot import (
     MAX_ALL_SEQUENCES,
+    MAX_OVERVIEW_SEQUENCES,
     MAX_PAIR_COMBO_ITEMS,
     MAX_PLOT_ALIGNMENTS,
     PafAlignments,
     PafError,
+    filter_alignment_pairs,
     keep_longest_segments,
     parse_paf,
     result_for_all,
+    result_for_overview,
     result_for_pair,
 )
 
@@ -43,7 +46,7 @@ def test_pairs_scales_with_observed_pairs_not_name_product() -> None:
     assert all(q == t for q, t in pairs)
 
 
-def test_pairs_for_combo_prefers_longest_self_and_caps() -> None:
+def test_pairs_for_combo_self_first_natural_and_caps() -> None:
     records = []
     qlen: dict[str, int] = {}
     tlen: dict[str, int] = {}
@@ -53,14 +56,83 @@ def test_pairs_for_combo_prefers_longest_self_and_caps() -> None:
         records.append(_record(name, name, qlen=length, tlen=length))
         qlen[name] = length
         tlen[name] = length
-    # One cross pair that should rank below long self-pairs.
+    # Cross pair ranks after all self pairs (natural order among selves).
     records.append(_record("ctg0", "ctg1", qlen=1000, tlen=1001))
     aln = PafAlignments(records=records, query_lengths=qlen, target_lengths=tlen)
     menu, total = aln.pairs_for_combo()
     assert total == MAX_PAIR_COMBO_ITEMS + 51
     assert len(menu) == MAX_PAIR_COMBO_ITEMS
-    assert menu[0][0] == menu[0][1]
-    assert menu[0][0] == f"ctg{MAX_PAIR_COMBO_ITEMS + 49}"
+    assert menu[0][0] == menu[0][1] == "ctg0"
+    assert all(q == t for q, t in menu)
+    # Cross pair is beyond the capped self list.
+    assert ("ctg0", "ctg1") not in menu
+
+
+def test_pairs_for_combo_filter_searches_all_pairs() -> None:
+    records = [
+        _record("chr1", "chr1", qlen=5000, tlen=5000),
+        _record("chr2", "chr2", qlen=4000, tlen=4000),
+        _record("chr1", "chr2", qlen=5000, tlen=4000),
+        _record("scaffold_9", "scaffold_10", qlen=100, tlen=100),
+    ]
+    aln = PafAlignments(
+        records=records,
+        query_lengths={"chr1": 5000, "chr2": 4000, "scaffold_9": 100},
+        target_lengths={"chr1": 5000, "chr2": 4000, "scaffold_10": 100},
+        pair_spans={
+            ("chr1", "chr1"): 100,
+            ("chr2", "chr2"): 100,
+            ("chr1", "chr2"): 80,
+            ("scaffold_9", "scaffold_10"): 50,
+        },
+    )
+    menu, total = aln.pairs_for_combo(filter_text="chr1")
+    assert total == 4
+    assert ("chr1", "chr1") in menu
+    assert ("chr1", "chr2") in menu
+    assert ("chr2", "chr2") not in menu
+    assert menu[0] == ("chr1", "chr1")  # self before cross
+
+
+def test_filter_alignment_pairs_substring() -> None:
+    pairs = {("tigA", "tigB"), ("tigC", "tigC"), ("other", "x")}
+    assert set(filter_alignment_pairs(pairs, "")) == pairs
+    assert set(filter_alignment_pairs(pairs, "tigc")) == {("tigC", "tigC")}
+    assert set(filter_alignment_pairs(pairs, "vs")) == {
+        ("tigA", "tigB"),
+        ("other", "x"),
+    }
+
+
+def test_result_for_overview_keeps_longest_only() -> None:
+    names = [f"s{i}" for i in range(MAX_OVERVIEW_SEQUENCES + 10)]
+    records = []
+    qlen: dict[str, int] = {}
+    tlen: dict[str, int] = {}
+    for i, name in enumerate(names):
+        length = 1000 + i
+        records.append(_record(name, name, qlen=length, tlen=length))
+        qlen[name] = length
+        tlen[name] = length
+    # Hit only among short scaffolds — must not appear in overview axes hits
+    # if both ends are outside the longest-N set... use a cross between two
+    # short ones and one between two long ones.
+    short_a, short_b = names[0], names[1]
+    long_a, long_b = names[-1], names[-2]
+    records.append(
+        (short_a, qlen[short_a], 0, 50, "+", short_b, tlen[short_b], 0, 50)
+    )
+    records.append(
+        (long_a, qlen[long_a], 0, 80, "+", long_b, tlen[long_b], 0, 80)
+    )
+    aln = PafAlignments(records=records, query_lengths=qlen, target_lengths=tlen)
+    result, x_entries, y_entries = result_for_overview(aln)
+    assert len(x_entries) == MAX_OVERVIEW_SEQUENCES
+    assert {e.name for e in x_entries} == set(names[-MAX_OVERVIEW_SEQUENCES:])
+    assert [e.name for e in x_entries] == [e.name for e in y_entries]
+    assert short_a not in {e.name for e in x_entries}
+    assert result.segment_count >= 1
+    assert "Overview" in result.sequence_id
 
 
 def test_supports_all_sequences_view_limit() -> None:

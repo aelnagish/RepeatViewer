@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -54,9 +55,9 @@ _COLLAPSED_RAIL_WIDTH = _RAIL_TAB_WIDTH
 _SETTINGS_GROUP = "dotplot_rail"
 _SETTINGS_COLLAPSED_KEY = "panel_collapsed"
 
-_DEFAULT_LINE_WIDTH_STEP = 3
+_DEFAULT_LINE_WIDTH_STEP = 8
 _MIN_LINE_WIDTH_STEP = 1
-_MAX_LINE_WIDTH_STEP = 15
+_MAX_LINE_WIDTH_STEP = 30
 
 def _section_label(text: str, parent: QWidget | None = None) -> QLabel:
     label = QLabel(text, parent)
@@ -467,8 +468,9 @@ class DotplotRail(QWidget):
         self.pair_combo.setMinimumContentsLength(8)
         self.pair_combo.setSizePolicy(spin_expand, QSizePolicy.Policy.Fixed)
         self.pair_combo.setToolTip(
-            "Which sequence pair to plot. 'All sequences' lays every query and "
-            "target end to end, with separators between them."
+            "Which sequence pair to plot. 'All sequences' or 'Overview' lays "
+            "scaffolds end to end. Self pairs (chr1 vs chr1) are listed first; "
+            "use Filter to find any pair by name."
         )
         form.addRow(self.pair_label, self.pair_combo)
 
@@ -512,7 +514,19 @@ class DotplotRail(QWidget):
         form.addRow(self.sequence_label, sequence_row)
         self.sync_sequence_step_buttons()
 
-        # Always directly under Sequence (Grid and Single).
+        # Below Sequence (self Grid) or Compare (when Sequence is hidden).
+        self.pair_filter_label = QLabel("Filter:", self._params_host)
+        self.pair_filter = QLineEdit(self._params_host)
+        self.pair_filter.setPlaceholderText("Filter…")
+        self.pair_filter.setClearButtonEnabled(True)
+        self.pair_filter.setSizePolicy(spin_expand, QSizePolicy.Policy.Fixed)
+        self.pair_filter.setToolTip(
+            "Narrow Compare pairs or Grid sequences by name "
+            "(case-insensitive substring)."
+        )
+        form.addRow(self.pair_filter_label, self.pair_filter)
+
+        # Always directly under Filter / Sequence (Grid and Single).
         self.word_label = QLabel("Word size:", self._params_host)
         self.word = QSpinBox(self._params_host)
         self.word.setRange(MIN_WORD_SIZE, MAX_WORD_SIZE)
@@ -532,7 +546,7 @@ class DotplotRail(QWidget):
         self.line_width.setToolTip(
             "Match and self-diagonal thickness for Grid thumbnails and "
             "the Single plot.\n"
-            "Steps 1–15 use a fine gradient (1–4.5 screen pixels)."
+            "Steps 1–30 = 0.1–3.0 screen pixels (0.1 px per step)."
         )
         form.addRow(self.line_width_label, self.line_width)
 
