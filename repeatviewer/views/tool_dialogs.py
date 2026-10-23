@@ -9676,8 +9676,10 @@ _TE_ANN_FEATURE_DETECTION_HELP = (
     "<b>ORF</b>: open reading frames.<br>"
     "<b>TSD</b>: target site duplications near putative TE boundaries "
     "(MSA only; writes features to the annotation JSON for Overview).<br>"
-    "<b>All</b>: select or clear every detector.<br><br>"
-    "Thresholds (lengths, similarity, TSD boundaries, …) are under "
+    "<b>PBS</b>: primer binding site inside the 5′ LTR (Neumann 2019 motifs + "
+    "blastn; requires two LTR features).<br>"
+    "<b>All</b>: select or clear every detector (except TSD and PBS).<br><br>"
+    "Thresholds (lengths, similarity, TSD / PBS settings, …) are under "
     "<b>Advanced Settings</b> → Feature detection settings. Threads are under "
     "<b>Settings</b> on this page (shared with Similarity annotation). The "
     "process window is under <b>Options</b>. Tools → TSD search also writes a "
@@ -9938,6 +9940,7 @@ class TeAnnotationDialog(QDialog):
             ("Tandem", AutoAnnotationMode.TANDEM),
             ("ORF", AutoAnnotationMode.ORF),
             ("TSD", AutoAnnotationMode.TSD),
+            ("PBS", AutoAnnotationMode.PBS),
         ):
             check = QCheckBox(label, feature_section)
             check.setChecked(mode.value in selected_modes)
@@ -9946,6 +9949,12 @@ class TeAnnotationDialog(QDialog):
                     "Target site duplications near putative TE boundaries "
                     "(MSA only). Configure boundaries under Advanced → "
                     "Feature detection settings / Tools → TSD search."
+                )
+            elif mode == AutoAnnotationMode.PBS:
+                check.setToolTip(
+                    "Primer binding site inside the 5′ LTR (Neumann 2019 "
+                    "motifs + blastn). Requires two LTR features. Configure "
+                    "under Advanced → Feature detection settings."
                 )
             check.toggled.connect(self._on_auto_check_toggled)
             self._auto_ann_checks[mode] = check
@@ -10032,6 +10041,7 @@ class TeAnnotationDialog(QDialog):
             ),
         )
         auto_box_layout.addWidget(self._tsd_settings_panel)
+        auto_box_layout.addWidget(self._auto_settings_panel.pbs_section_widget())
 
         sim_box = QGroupBox("Similarity annotation settings", self)
         sim_box_layout = QVBoxLayout(sim_box)
@@ -10511,13 +10521,14 @@ class TeAnnotationDialog(QDialog):
         self._sync_auto_all_check()
 
     def _sync_auto_all_check(self) -> None:
-        # "All" covers LTR/TIR/Tandem/ORF; TSD is optional (MSA-only) and independent.
+        # "All" covers LTR/TIR/Tandem/ORF; TSD (MSA-only) and PBS (needs LTR +
+        # BLAST) stay independent and off by default.
         from repeatviewer.backends.auto_annotation import AutoAnnotationMode
 
         checks = [
             check
             for mode, check in self._auto_ann_checks.items()
-            if mode != AutoAnnotationMode.TSD
+            if mode not in {AutoAnnotationMode.TSD, AutoAnnotationMode.PBS}
         ]
         if not checks:
             return
@@ -10533,7 +10544,7 @@ class TeAnnotationDialog(QDialog):
 
         self._auto_all_updating = True
         for mode, check in self._auto_ann_checks.items():
-            if mode == AutoAnnotationMode.TSD:
+            if mode in {AutoAnnotationMode.TSD, AutoAnnotationMode.PBS}:
                 continue
             check.setChecked(checked)
         self._auto_all_updating = False
@@ -10606,11 +10617,17 @@ class TeAnnotationDialog(QDialog):
             SimilarityAnnotationSettings(), parent_sim, include_run_controls=False
         )
         new_tsd = TsdSearchSettingsPanel(parent_auto, initial=TsdSearchOptions())
+        new_pbs = new_auto.pbs_section_widget()
         if parent_auto is not None:
             layout = parent_auto.layout()
             if layout is not None:
                 layout.replaceWidget(self._auto_settings_panel, new_auto)
                 layout.replaceWidget(self._tsd_settings_panel, new_tsd)
+                # PBS lives after TSD; drop the old section then append the new one.
+                old_pbs = self._auto_settings_panel.pbs_section_widget()
+                layout.removeWidget(old_pbs)
+                old_pbs.deleteLater()
+                layout.addWidget(new_pbs)
         self._auto_settings_panel.deleteLater()
         self._auto_settings_panel = new_auto
         self._tsd_settings_panel.deleteLater()

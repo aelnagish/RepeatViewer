@@ -1,18 +1,22 @@
-"""Dispatch auto-annotation jobs (LTR, TIR, tandem repeat, ORF, TSD)."""
+"""Dispatch auto-annotation jobs (LTR, TIR, tandem repeat, ORF, TSD, PBS)."""
 
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
 from Bio import SeqIO
 
-from repeatviewer.backends.auto_annotation_settings import AutoAnnotationSettings
+from repeatviewer.backends.auto_annotation_settings import (
+    AutoAnnotationSettings,
+    PbsSettings,
+)
 from repeatviewer.backends.job_cancel import JobCancellation
 from repeatviewer.backends.orf_detect import detect_orf_features
+from repeatviewer.backends.pbs_detect import PBSSettings, auto_annotate_pbs
 from repeatviewer.backends.sequence_features import (
     REPEATVIEWER_INTERNAL_SOURCE,
     SequenceFeature,
@@ -27,10 +31,12 @@ class AutoAnnotationMode(str, Enum):
     TANDEM = "tandem repeat"
     ORF = "ORF"
     TSD = "TSD"
+    PBS = "PBS"
 
 
 _AUTO_ORF_NAME = re.compile(r"^ORF\d+$")
 _AUTO_TSD_NAME = re.compile(r"^TSD_")
+_AUTO_PBS_NAME = re.compile(r"^PBS_")
 
 
 @dataclass(frozen=True)
@@ -107,6 +113,12 @@ def _is_auto_generated_tsd(feat: SequenceFeature) -> bool:
     return not _is_curated_or_imported_source(str(feat.source or ""))
 
 
+def _is_auto_generated_pbs(feat: SequenceFeature) -> bool:
+    if feat.feature_type != "PBS" or not _AUTO_PBS_NAME.match(feat.name or ""):
+        return False
+    return not _is_curated_or_imported_source(str(feat.source or ""))
+
+
 def _remove_features_for_auto_rerun(
     features: list[SequenceFeature],
     mode: AutoAnnotationMode,
@@ -115,6 +127,8 @@ def _remove_features_for_auto_rerun(
         return [feat for feat in features if not _is_auto_generated_orf(feat)]
     if mode == AutoAnnotationMode.TSD:
         return [feat for feat in features if not _is_auto_generated_tsd(feat)]
+    if mode == AutoAnnotationMode.PBS:
+        return [feat for feat in features if not _is_auto_generated_pbs(feat)]
     feature_type = _auto_mode_feature_type(mode)
     has_manual = any(feat.track == 0 for feat in _features_for_mode(features, mode))
     if has_manual:
@@ -149,6 +163,14 @@ def _target_track_for_auto_rerun(
         if manual_existing:
             return _next_track(features)
         return next_track
+    if mode == AutoAnnotationMode.PBS:
+        auto_existing = [feat for feat in existing if _is_auto_generated_pbs(feat)]
+        manual_existing = [feat for feat in existing if not _is_auto_generated_pbs(feat)]
+        if auto_existing:
+            return min(feat.track for feat in auto_existing)
+        if manual_existing:
+            return _next_track(features)
+        return next_track
     has_manual = any(feat.track == 0 for feat in existing)
     if has_manual:
         auto_existing = [feat for feat in existing if feat.track != 0]
@@ -158,6 +180,18 @@ def _target_track_for_auto_rerun(
     if existing:
         return min(feat.track for feat in existing)
     return next_track
+
+
+def _pbs_runtime_settings(cfg: AutoAnnotationSettings) -> PBSSettings:
+    pbs = cfg.pbs or PbsSettings()
+    return PBSSettings(
+        window=pbs.window,
+        min_length=pbs.min_length,
+        min_identity=pbs.min_identity,
+        min_coverage=pbs.min_coverage,
+        orientation=pbs.orientation,
+        num_threads=max(1, int(cfg.num_threads)),
+    )
 
 
 def _stamp_track(
@@ -197,7 +231,17 @@ def run_auto_annotations(
     MSA rows with gaps are ungapped for detection; coordinates are projected
     back to alignment columns in the returned features.
     """
-    ordered = tuple(modes)
+    # Keep LTR before PBS so the same run can feed newly found LTRs into PBS.
+    preferred = (
+        AutoAnnotationMode.LTR,
+        AutoAnnotationMode.TIR,
+        AutoAnnotationMode.TANDEM,
+        AutoAnnotationMode.ORF,
+        AutoAnnotationMode.TSD,
+        AutoAnnotationMode.PBS,
+    )
+    rank = {mode: index for index, mode in enumerate(preferred)}
+    ordered = tuple(sorted(modes, key=lambda mode: rank.get(mode, 99)))
     if not ordered:
         return MultiAutoAnnotationResult((), (), "No auto-annotation modules selected.")
 
@@ -232,6 +276,7 @@ def run_auto_annotations(
                 cancel=cancel,
                 settings=cfg,
                 num_threads=threads,
+                existing_features=tuple(features),
             )
             if progress is not None:
                 progress(f"{index}/{total} {mode.value}")
@@ -291,6 +336,7 @@ def run_auto_annotation(
     cancel: JobCancellation | None = None,
     settings: AutoAnnotationSettings | None = None,
     num_threads: int | None = None,
+    existing_features: Iterable[SequenceFeature] | None = None,
 ) -> AutoAnnotationResult:
     """Run the selected auto-annotation module on a single-sequence FASTA."""
     fasta_path = fasta_path.expanduser().resolve()
@@ -332,6 +378,41 @@ def run_auto_annotation(
             features=(),
             mode=mode,
             message="TSD detection runs on the full MSA (see batch annotation).",
+        )
+
+    if mode == AutoAnnotationMode.PBS:
+        pbs_cfg = cfg.pbs or PbsSettings()
+        motif = Path(pbs_cfg.motif_database).expanduser() if pbs_cfg.motif_database else None
+        if motif is not None and not motif.is_file():
+            motif = None
+        # Prefer LTRs already found in this run / on the map; otherwise load sidecar.
+        ltr_source: Iterable[SequenceFeature]
+        if existing_features is not None:
+            ltr_source = existing_features
+        else:
+            from repeatviewer.backends.sequence_features import load_sequence_map_data
+
+            ltr_source = load_sequence_map_data(fasta_path).features
+        runtime = _pbs_runtime_settings(cfg)
+        runtime = PBSSettings(
+            window=runtime.window,
+            min_length=runtime.min_length,
+            min_identity=runtime.min_identity,
+            min_coverage=runtime.min_coverage,
+            orientation=runtime.orientation,
+            num_threads=threads,
+        )
+        pbs = auto_annotate_pbs(
+            fasta_path,
+            ltr_source,
+            motif_database=motif,
+            settings=runtime,
+            cancel=cancel,
+        )
+        return AutoAnnotationResult(
+            features=pbs.features,
+            mode=mode,
+            message=pbs.message,
         )
 
     terminal = auto_annotate_terminal_repeats(

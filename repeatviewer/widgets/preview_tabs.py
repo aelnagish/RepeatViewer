@@ -2651,6 +2651,8 @@ class PreviewTabWidget(QTabWidget):
     dotplotRegionSelected = Signal(dict)  # payload from window.__flexidotLastClick
     fileWritten = Signal(object)  # Path of a file written from a preview (e.g. tree export)
     openFileRequested = Signal(object)  # Path a preview asks to open (contig view → Results)
+    # Active preview file path (``Path``) or ``None`` when no tab is open.
+    currentPathChanged = Signal(object)
 
     def __init__(
         self,
@@ -2724,6 +2726,28 @@ class PreviewTabWidget(QTabWidget):
         self._apply_zoom_to_current_tab()
         self._install_annotation_delete_shortcuts()
         self._sync_tab_bar_visible()
+        self._last_emitted_current_path: Path | None = None
+
+    def current_preview_path(self) -> Path | None:
+        """Path of the file shown in the active Preview tab, if any."""
+        widget = self.currentWidget()
+        if isinstance(widget, FilePreviewPage):
+            path = getattr(widget, "path", None)
+            if isinstance(path, Path):
+                return path
+        return None
+
+    def _emit_current_path_changed(self) -> None:
+        path = self.current_preview_path()
+        if path is not None:
+            try:
+                path = path.expanduser().resolve()
+            except OSError:
+                path = path.expanduser()
+        if path == getattr(self, "_last_emitted_current_path", None):
+            return
+        self._last_emitted_current_path = path
+        self.currentPathChanged.emit(path)
 
     def persist_session_view_state(self) -> None:
         """Save annotation viewport for the active preview tab (session restore)."""
@@ -2969,6 +2993,7 @@ class PreviewTabWidget(QTabWidget):
             finally:
                 self._tab_bar_sync_guard = False
         self._sync_zoom_bar_enabled(index)
+        self._emit_current_path_changed()
 
     def teardown_all_html_previews(self) -> None:
         for index in range(self.count()):
@@ -3456,6 +3481,7 @@ class PreviewTabWidget(QTabWidget):
                 self.setCurrentIndex(existing)
                 self._apply_zoom_to_current_tab()
                 self._sync_tab_bar_visible()
+                self._emit_current_path_changed()
                 return True
             del self._path_to_index[key]
 
@@ -3470,6 +3496,8 @@ class PreviewTabWidget(QTabWidget):
             self.setCurrentIndex(target)
             self._apply_zoom_to_current_tab()
             self._sync_tab_bar_visible()
+            # Same tab index: currentChanged may not fire after replace.
+            self._emit_current_path_changed()
             return True
 
         page = FilePreviewPage(resolved)
@@ -3480,6 +3508,7 @@ class PreviewTabWidget(QTabWidget):
         page.show()
         self._apply_zoom_to_current_tab()
         self._sync_tab_bar_visible()
+        self._emit_current_path_changed()
         return True
 
     def open_files_in_tabs(self, paths: list[Path]) -> None:
@@ -3530,6 +3559,7 @@ class PreviewTabWidget(QTabWidget):
         self._path_to_index.clear()
         self._lru_order.clear()
         self._sync_tab_bar_visible()
+        self._emit_current_path_changed()
 
     def close_other_tabs(self, keep_index: int) -> None:
         """Close every tab except ``keep_index``."""
@@ -3582,6 +3612,7 @@ class PreviewTabWidget(QTabWidget):
             widget.deleteLater()
         self._rebuild_path_index()
         self._sync_tab_bar_visible()
+        self._emit_current_path_changed()
 
     def _rebuild_path_index(self) -> None:
         self._path_to_index.clear()

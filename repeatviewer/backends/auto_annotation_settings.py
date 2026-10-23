@@ -117,12 +117,44 @@ class OrfSettings:
         self.frames = normalize_orf_frames(self.frames)
 
 
+DEFAULT_PBS_WINDOW = 100
+DEFAULT_PBS_MIN_LENGTH = 15
+DEFAULT_PBS_MIN_IDENTITY = 90.0
+DEFAULT_PBS_MIN_COVERAGE = 0.85
+DEFAULT_PBS_ORIENTATION = "auto"
+
+
+@dataclass
+class PbsSettings:
+    """LTR-guided PBS search (Neumann 2019 motifs + blastn)."""
+
+    window: int = DEFAULT_PBS_WINDOW
+    min_length: int = DEFAULT_PBS_MIN_LENGTH
+    min_identity: float = DEFAULT_PBS_MIN_IDENTITY  # percent
+    min_coverage: float = DEFAULT_PBS_MIN_COVERAGE
+    orientation: str = DEFAULT_PBS_ORIENTATION  # auto, +, -
+    # Empty → bundled ``PBS_unique_motifs_Neumann2019.fasta``.
+    motif_database: str = ""
+
+    def __post_init__(self) -> None:
+        self.window = max(1, int(self.window))
+        self.min_length = max(1, int(self.min_length))
+        self.min_identity = max(0.0, min(100.0, float(self.min_identity)))
+        self.min_coverage = max(0.0, min(1.0, float(self.min_coverage)))
+        orient = str(self.orientation or DEFAULT_PBS_ORIENTATION).strip().lower()
+        if orient not in {"auto", "+", "-"}:
+            orient = DEFAULT_PBS_ORIENTATION
+        self.orientation = orient
+        self.motif_database = str(self.motif_database or "").strip()
+
+
 @dataclass
 class AutoAnnotationSettings:
     ltr: TerminalRepeatSettings | None = None
     tir: TerminalRepeatSettings | None = None
     tandem: TandemRepeatSettings | None = None
     orf: OrfSettings | None = None
+    pbs: PbsSettings | None = None
     # CPU threads inside each sequence job (like BLAST Threads).
     num_threads: int = field(default_factory=default_annotation_threads)
     show_process_window: bool = True
@@ -152,6 +184,8 @@ class AutoAnnotationSettings:
             self.tandem = TandemRepeatSettings()
         if self.orf is None:
             self.orf = OrfSettings()
+        if self.pbs is None:
+            self.pbs = PbsSettings()
 
 
 def default_auto_annotation_settings() -> AutoAnnotationSettings:
@@ -308,12 +342,27 @@ def load_auto_annotation_settings() -> AutoAnnotationSettings:
         alternative_start_codons=str(s.value(f"{prefix}orf_alt_starts", "") or ""),
         frames=normalize_orf_frames(s.value(f"{prefix}orf_frames", "")),
     )
+    pbs = PbsSettings(
+        window=_get_int(s, f"{prefix}pbs_window", DEFAULT_PBS_WINDOW),
+        min_length=_get_int(s, f"{prefix}pbs_min_length", DEFAULT_PBS_MIN_LENGTH),
+        min_identity=_get_float(
+            s, f"{prefix}pbs_min_identity", DEFAULT_PBS_MIN_IDENTITY
+        ),
+        min_coverage=_get_float(
+            s, f"{prefix}pbs_min_coverage", DEFAULT_PBS_MIN_COVERAGE
+        ),
+        orientation=str(
+            s.value(f"{prefix}pbs_orientation", DEFAULT_PBS_ORIENTATION) or ""
+        ),
+        motif_database=str(s.value(f"{prefix}pbs_motif_database", "") or ""),
+    )
     threads, show, close = load_annotation_run_options()
     return AutoAnnotationSettings(
         ltr=ltr,
         tir=tir,
         tandem=tandem,
         orf=orf,
+        pbs=pbs,
         num_threads=threads,
         show_process_window=show,
         close_process_window_when_finished=close,
@@ -332,6 +381,7 @@ def save_auto_annotation_settings(settings: AutoAnnotationSettings) -> None:
     )
     tandem = settings.tandem or TandemRepeatSettings()
     orf = settings.orf or OrfSettings()
+    pbs = settings.pbs or PbsSettings()
     s.setValue(f"{prefix}ltr_min_length", ltr.min_length)
     s.setValue(f"{prefix}ltr_max_length", ltr.max_length)
     s.setValue(f"{prefix}ltr_min_pair_distance", ltr.min_pair_distance)
@@ -364,6 +414,12 @@ def save_auto_annotation_settings(settings: AutoAnnotationSettings) -> None:
         f"{prefix}orf_frames",
         ",".join(str(frame) for frame in normalize_orf_frames(orf.frames)),
     )
+    s.setValue(f"{prefix}pbs_window", pbs.window)
+    s.setValue(f"{prefix}pbs_min_length", pbs.min_length)
+    s.setValue(f"{prefix}pbs_min_identity", pbs.min_identity)
+    s.setValue(f"{prefix}pbs_min_coverage", pbs.min_coverage)
+    s.setValue(f"{prefix}pbs_orientation", pbs.orientation)
+    s.setValue(f"{prefix}pbs_motif_database", pbs.motif_database)
     save_annotation_run_options(
         num_threads=settings.num_threads,
         show_process_window=settings.show_process_window,

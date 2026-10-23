@@ -2578,6 +2578,12 @@ class MainWindow(QMainWindow):
         )
         self._status_file_link.setMinimumWidth(0)
         self._status_file_link.linkActivated.connect(self._on_status_file_link_activated)
+        self._status_file_link.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu
+        )
+        self._status_file_link.customContextMenuRequested.connect(
+            self._on_status_file_link_context_menu
+        )
         self._status_file_link.hide()
         # Left-side temporary widget: replaces status text when a file is selected.
         status.addWidget(self._status_file_link, 0)
@@ -3284,7 +3290,11 @@ class MainWindow(QMainWindow):
         )
         safe_name = elided.replace("&", "&amp;").replace("<", "&lt;")
         self._status_file_link.setText(f'<a href="reveal">{safe_name}</a>')
-        self._status_file_link.setToolTip(f"Show in file manager\n{path}")
+        self._status_file_link.setToolTip(
+            "Click: show in file manager\n"
+            "Right-click: locate in Files panel\n"
+            f"{path}"
+        )
 
     def _set_status_file_link(self, path: Path | None) -> None:
         """Replace the left status text with a clickable filename (Finder link)."""
@@ -3323,6 +3333,61 @@ class MainWindow(QMainWindow):
     def _on_status_file_link_activated(self, _href: str) -> None:
         if self._status_linked_file is not None:
             reveal_in_file_manager(self._status_linked_file)
+
+    def _on_status_file_link_context_menu(self, pos) -> None:
+        """Right-click the status filename: locate in Files / reveal / copy path."""
+        path = self._status_linked_file
+        if path is None:
+            return
+        menu = QMenu(self._status_file_link)
+        menu.addAction(
+            "Locate in Files panel",
+            lambda: self._locate_status_file_in_files_panel(path),
+        )
+        reveal_label = (
+            "Reveal in Finder"
+            if platform.system() == "Darwin"
+            else "Show in File Manager"
+        )
+        menu.addAction(reveal_label, lambda: reveal_in_file_manager(path))
+        menu.addSeparator()
+        menu.addAction(
+            "Copy Path",
+            lambda: QApplication.clipboard().setText(str(path)),
+        )
+        menu.exec(self._status_file_link.mapToGlobal(pos))
+
+    def _locate_status_file_in_files_panel(self, path: Path) -> None:
+        """Select ``path`` in the Files list, switching folder if needed."""
+        try:
+            resolved = path.expanduser().resolve()
+        except OSError:
+            resolved = path.expanduser()
+        if not resolved.is_file():
+            self._set_status_message(
+                f"File no longer exists: {resolved.name}",
+                5000,
+                override_file_link=True,
+            )
+            return
+        parent = resolved.parent
+        try:
+            current = (
+                self._current_folder.expanduser().resolve()
+                if self._current_folder is not None
+                else None
+            )
+        except OSError:
+            current = self._current_folder
+        if current != parent:
+            self._navigate_to_folder(
+                parent,
+                record_history=True,
+                open_preview=False,
+            )
+        self._select_path_in_file_list(resolved)
+        # Re-show the Preview file link after folder navigation may clear the bar.
+        self._sync_status_file_link_from_preview()
 
     def resizeEvent(self, event) -> None:  # noqa: N802 (Qt API)
         super().resizeEvent(event)
@@ -3604,6 +3669,9 @@ class MainWindow(QMainWindow):
         self._preview_tabs.fileWritten.connect(self._on_preview_file_written)
         self._preview_tabs.openFileRequested.connect(self._on_preview_open_requested)
         self._preview_tabs.dotplotRegionSelected.connect(self._on_dotplot_region_selected)
+        self._preview_tabs.currentPathChanged.connect(
+            self._on_preview_current_path_changed
+        )
         preview_layout.addWidget(self._preview_tabs, stretch=1)
         self._preview_host.setMinimumHeight(120)
         self._preview_host.setMinimumWidth(200)
@@ -9285,7 +9353,8 @@ class MainWindow(QMainWindow):
                 if open_preview:
                     self._open_file_in_preview(path)
                 else:
-                    self._set_status_file_link(path)
+                    # Status link follows Preview, not Files selection.
+                    self._sync_status_file_link_from_preview()
         if scroll is not None:
             vsb = self._file_list.verticalScrollBar()
             vsb.setValue(min(int(scroll), vsb.maximum()))
@@ -9867,7 +9936,7 @@ class MainWindow(QMainWindow):
 
     def _open_file_in_preview(self, path: Path) -> None:
         self._open_preview_tab(path, replace=True)
-        self._set_status_file_link(path)
+        # Status link updates via PreviewTabWidget.currentPathChanged.
         # Record last-used file for Folders ◀ / ▶ (skip while navigating
         # that history so back/forward does not re-append).
         if (
@@ -9880,6 +9949,25 @@ class MainWindow(QMainWindow):
                     self._folder_nav.set_file(path, record_history=True)
             except OSError:
                 pass
+
+    def _on_preview_current_path_changed(self, path: object) -> None:
+        """Keep the bottom-left status link equal to the active Preview file."""
+        if path is None:
+            self._set_status_file_link(None)
+            return
+        if isinstance(path, Path):
+            self._set_status_file_link(path)
+            return
+        try:
+            self._set_status_file_link(Path(str(path)))
+        except (TypeError, ValueError, OSError):
+            self._set_status_file_link(None)
+
+    def _sync_status_file_link_from_preview(self) -> None:
+        if self._preview_tabs is None:
+            self._set_status_file_link(None)
+            return
+        self._set_status_file_link(self._preview_tabs.current_preview_path())
 
     def _on_file_list_drag_started(self) -> None:
         """Cancel a Preview open queued by selecting a row just to drag it."""
@@ -9897,7 +9985,8 @@ class MainWindow(QMainWindow):
         if path is None:
             self._pending_preview_selection = None
             self._preview_selection_timer.stop()
-            self._set_status_file_link(None)
+            # Keep showing the Preview file; Files selection may be empty.
+            self._sync_status_file_link_from_preview()
             return
         # Keyboard / selection change: end Transfer when leaving this FASTA.
         # Click-to-fill Source is handled in itemClicked (fills first).
@@ -11404,7 +11493,7 @@ class MainWindow(QMainWindow):
                 8000,
                 override_file_link=True,
             )
-            self._set_status_file_link(fasta)
+            self._sync_status_file_link_from_preview()
         finally:
             dialog.deleteLater()
 
@@ -15269,7 +15358,6 @@ class MainWindow(QMainWindow):
             return
         path = paths[0].expanduser().resolve()
         self._open_preview_tab(path, replace=True)
-        self._set_status_file_link(path)
         self._set_status_message(f"Opened in Preview: {path.name}", 5000)
 
     def _open_files_in_preview_tabs(self, paths: list[Path]) -> None:
