@@ -191,6 +191,47 @@ def test_ensure_annotation_kinds_visible_after_run(qapp: QApplication) -> None:
     rail.close()
 
 
+def test_annotation_kinds_more_overflow(qapp: QApplication) -> None:
+    """Tall type lists stay capped; extras are reachable from More."""
+    from repeatviewer.widgets.sequence_annotation_rail import (
+        SequenceAnnotationRail,
+        _ANNOTATION_KINDS_FLOW_MAX_HEIGHT,
+    )
+
+    rail = SequenceAnnotationRail()
+    rail.show()
+    rail._stack.setCurrentIndex(0)
+    rail._tracks_section.set_expanded(True)
+    qapp.processEvents()
+
+    feats = [
+        SequenceFeature(1, 10, "a", feature_type="LTR"),
+        SequenceFeature(1, 10, "b", feature_type="TIR"),
+        SequenceFeature(1, 10, "c", feature_type="ORF"),
+        SequenceFeature(1, 10, "d", feature_type="TSD"),
+        SequenceFeature(1, 10, "e", feature_type="PBS"),
+        SequenceFeature(1, 10, "f", feature_type="extracted region"),
+        SequenceFeature(1, 10, "g", feature_type="primer_binding_site"),
+        SequenceFeature(1, 10, "h", feature_type="protein_domain"),
+    ]
+    rail.set_available_annotation_kinds(feats)
+    rail._annotation_kinds_flow_host.setFixedWidth(200)
+    rail._sync_annotation_kinds_overflow()
+    qapp.processEvents()
+
+    assert rail._annotation_kinds_flow_host.maximumHeight() == (
+        _ANNOTATION_KINDS_FLOW_MAX_HEIGHT
+    )
+    assert rail._annotation_kinds_overflow_keys
+    assert not rail._annotation_kinds_more_btn.isHidden()
+    assert "More" in rail._annotation_kinds_more_btn.text()
+    for key in rail._annotation_kinds_overflow_keys:
+        assert rail.annotation_kind_checks[key].isHidden()
+    # Overflow types still participate in visibility filtering.
+    assert "extracted region" in rail.visible_annotation_kinds()
+    rail.close()
+
+
 def test_bars_filter_packed_tracks(qapp: QApplication) -> None:
     from repeatviewer.widgets.multi_sequence_overview import _BarsCanvas
 

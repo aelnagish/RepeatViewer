@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QPoint, QRect, QRectF, QSettings, QSize, Qt, Signal
+from PySide6.QtCore import QEvent, QPoint, QRect, QRectF, QSettings, QSize, QTimer, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPalette, QPen
 from PySide6.QtWidgets import (
     QButtonGroup,
@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QLayout,
     QLayoutItem,
     QLineEdit,
+    QMenu,
     QPushButton,
     QRadioButton,
     QScrollArea,
@@ -115,6 +116,8 @@ _SETTINGS_TAB_KEY = "last_tab"
 _SETTINGS_SECTIONS_KEY = "expanded_sections"
 _SETTINGS_COLLAPSED_KEY = "panel_collapsed"
 _SETTINGS_HIDDEN_ANN_KINDS_KEY = "hidden_annotation_kinds"
+# Displayed annotations type chips: keep ~2 wrap rows; overflow goes under More.
+_ANNOTATION_KINDS_FLOW_MAX_HEIGHT = 80
 # Default first open: Annotation tab with all sections collapsed.
 _DEFAULT_TAB_INDEX = 1
 _COLLAPSED_RAIL_WIDTH = _RAIL_TAB_WIDTH
@@ -866,6 +869,7 @@ class SequenceAnnotationRail(QWidget):
         if not self._panel_collapsed:
             self.setFixedWidth(self._expanded_rail_width())
         self._refresh_similarity_db_labels()
+        self._schedule_annotation_kinds_overflow_sync()
 
     def _refresh_similarity_db_labels(self) -> None:
         host = getattr(self, "similarity_db_host", None)
@@ -1088,7 +1092,8 @@ class SequenceAnnotationRail(QWidget):
         self.displayed_annotations_label.setToolTip(
             "Choose which annotation types appear on the sequence map "
             "(and under each sequence in Overview / MSA). Only types that "
-            "exist on the current sequence(s) are listed."
+            "exist on the current sequence(s) are listed. Types that do not "
+            "fit in the short list are under More."
         )
         tracks_section.add_widget(self.displayed_annotations_label)
 
@@ -1097,7 +1102,8 @@ class SequenceAnnotationRail(QWidget):
         self.show_annotation_track.hide()
         self.show_annotation_track.setChecked(True)
 
-        # Type filters: All on its own row, then present types in a flow.
+        # Type filters: All on its own row, then present types in a flow
+        # capped to ~2 rows; extras open from the More menu.
         self._annotation_kinds_host = QWidget(tracks_section)
         self._annotation_kinds_host.setMinimumWidth(0)
         self._annotation_kinds_host.setSizePolicy(
@@ -1107,6 +1113,7 @@ class SequenceAnnotationRail(QWidget):
         kinds_outer.setContentsMargins(0, 0, 0, 2)
         kinds_outer.setSpacing(4)
         self.annotation_kind_checks: dict[str, QCheckBox] = {}
+        self._annotation_kinds_overflow_keys: list[str] = []
         self.annotation_kinds_all_check = QCheckBox("All", self._annotation_kinds_host)
         self.annotation_kinds_all_check.setToolTip(
             "Select or clear all annotation types"
@@ -1121,11 +1128,29 @@ class SequenceAnnotationRail(QWidget):
         self._annotation_kinds_flow_host.setSizePolicy(
             QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
         )
+        self._annotation_kinds_flow_host.setMaximumHeight(
+            _ANNOTATION_KINDS_FLOW_MAX_HEIGHT
+        )
         self._annotation_kinds_flow = _FlowLayout(
             self._annotation_kinds_flow_host, spacing=6
         )
         self._annotation_kinds_flow_host.setLayout(self._annotation_kinds_flow)
+        self._annotation_kinds_flow_host.installEventFilter(self)
         kinds_outer.addWidget(self._annotation_kinds_flow_host)
+        self._annotation_kinds_more_btn = QPushButton("More", self._annotation_kinds_host)
+        self._annotation_kinds_more_btn.setToolTip(
+            "Show annotation types that did not fit above."
+        )
+        self._annotation_kinds_more_btn.setSizePolicy(
+            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
+        )
+        self._annotation_kinds_more_btn.clicked.connect(
+            self._on_annotation_kinds_more_clicked
+        )
+        self._annotation_kinds_more_btn.hide()
+        kinds_outer.addWidget(
+            self._annotation_kinds_more_btn, 0, Qt.AlignmentFlag.AlignLeft
+        )
         self._hidden_annotation_kinds = self._load_hidden_annotation_kinds()
         self._rebuild_annotation_kind_checks([])
         self._sync_displayed_annotations_section_visible()
@@ -2131,6 +2156,7 @@ class SequenceAnnotationRail(QWidget):
         """
         self._clear_annotation_kind_flow()
         self.annotation_kind_checks = {}
+        self._annotation_kinds_overflow_keys = []
         host = getattr(self, "_annotation_kinds_flow_host", None)
         flow = getattr(self, "_annotation_kinds_flow", None)
         if host is None or flow is None:
@@ -2163,6 +2189,91 @@ class SequenceAnnotationRail(QWidget):
             self._annotation_kinds_all_updating = False
         self._sync_annotation_kinds_all_check()
         self._sync_show_annotation_track_from_kinds()
+        self._schedule_annotation_kinds_overflow_sync()
+
+    def _schedule_annotation_kinds_overflow_sync(self) -> None:
+        """Defer until the flow host has a real width after rebuild/resize."""
+        QTimer.singleShot(0, self._sync_annotation_kinds_overflow)
+
+    def eventFilter(self, watched: QWidget, event: QEvent) -> bool:  # noqa: N802
+        if (
+            watched is getattr(self, "_annotation_kinds_flow_host", None)
+            and event.type() == QEvent.Type.Resize
+        ):
+            self._schedule_annotation_kinds_overflow_sync()
+        return super().eventFilter(watched, event)
+
+    def _annotation_kinds_cut_index(self, width: int) -> int:
+        """First type-chip index that does not fit in the max flow height."""
+        max_h = _ANNOTATION_KINDS_FLOW_MAX_HEIGHT
+        space = 6
+        x = 0
+        y = 0
+        line_height = 0
+        avail = max(40, int(width))
+        for index, check in enumerate(self.annotation_kind_checks.values()):
+            hint = check.sizeHint()
+            next_x = x + hint.width() + space
+            if line_height and next_x - space > avail:
+                x = 0
+                y += line_height + space
+                next_x = x + hint.width() + space
+                line_height = 0
+            bottom = y + max(line_height, hint.height())
+            if bottom > max_h:
+                return index
+            x = next_x
+            line_height = max(line_height, hint.height())
+        return len(self.annotation_kind_checks)
+
+    def _sync_annotation_kinds_overflow(self) -> None:
+        """Hide chips past the max height; expose them via the More menu."""
+        more_btn = getattr(self, "_annotation_kinds_more_btn", None)
+        host = getattr(self, "_annotation_kinds_flow_host", None)
+        if more_btn is None or host is None:
+            return
+        keys = list(self.annotation_kind_checks.keys())
+        if not keys:
+            self._annotation_kinds_overflow_keys = []
+            more_btn.hide()
+            return
+        for check in self.annotation_kind_checks.values():
+            check.setVisible(True)
+        width = host.width()
+        if width <= 1:
+            width = max(40, int(self._module_width) - 24)
+        cut = self._annotation_kinds_cut_index(width)
+        overflow = keys[cut:]
+        self._annotation_kinds_overflow_keys = overflow
+        for index, key in enumerate(keys):
+            check = self.annotation_kind_checks[key]
+            check.setVisible(index < cut)
+        host.setMaximumHeight(_ANNOTATION_KINDS_FLOW_MAX_HEIGHT)
+        if overflow:
+            more_btn.setText(f"More ({len(overflow)})")
+            more_btn.show()
+        else:
+            more_btn.hide()
+
+    def _on_annotation_kinds_more_clicked(self) -> None:
+        overflow = list(getattr(self, "_annotation_kinds_overflow_keys", []) or [])
+        if not overflow:
+            return
+        menu = QMenu(self._annotation_kinds_more_btn)
+        for key in overflow:
+            check = self.annotation_kind_checks.get(key)
+            if check is None:
+                continue
+            label = annotation_visibility_label(key)
+            action = menu.addAction(label)
+            action.setCheckable(True)
+            action.setChecked(check.isChecked())
+            action.toggled.connect(check.setChecked)
+        menu.exec(
+            self._annotation_kinds_more_btn.mapToGlobal(
+                QPoint(0, self._annotation_kinds_more_btn.height())
+            )
+        )
 
     def _sync_displayed_annotations_section_visible(self) -> None:
         """Show Displayed annotations only when at least one type is present."""
@@ -2173,6 +2284,11 @@ class SequenceAnnotationRail(QWidget):
         kinds_host = getattr(self, "_annotation_kinds_host", None)
         if kinds_host is not None:
             kinds_host.setVisible(has_kinds)
+        if not has_kinds:
+            more_btn = getattr(self, "_annotation_kinds_more_btn", None)
+            if more_btn is not None:
+                more_btn.hide()
+            self._annotation_kinds_overflow_keys = []
 
     def set_available_annotation_kinds(
         self,
