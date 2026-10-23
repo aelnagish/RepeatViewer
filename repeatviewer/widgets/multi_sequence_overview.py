@@ -134,6 +134,7 @@ _AUTO_ANNOTATION_MODES: tuple[tuple[str, AutoAnnotationMode], ...] = (
     ("Tandem", AutoAnnotationMode.TANDEM),
     ("ORF", AutoAnnotationMode.ORF),
     ("TSD", AutoAnnotationMode.TSD),
+    ("PBS", AutoAnnotationMode.PBS),
 )
 
 _BAR_HEIGHT = 7
@@ -6742,11 +6743,12 @@ class MultiSequenceOverviewPanel(QWidget):
                     win._set_job_actions_enabled(True)
 
     def _sync_auto_annotation_all_check(self) -> None:
-        # "All" covers LTR/TIR/Tandem/ORF; TSD is optional (MSA-only) and independent.
+        # "All" covers LTR/TIR/Tandem/ORF; TSD (MSA-only) and PBS (needs LTR +
+        # BLAST) stay independent and off by default.
         checks = [
             check
             for mode, check in self._auto_ann_checks.items()
-            if mode != AutoAnnotationMode.TSD
+            if mode not in {AutoAnnotationMode.TSD, AutoAnnotationMode.PBS}
         ]
         if not checks:
             return
@@ -6766,7 +6768,7 @@ class MultiSequenceOverviewPanel(QWidget):
         self._auto_all_updating = True
         try:
             for mode, check in self._auto_ann_checks.items():
-                if mode == AutoAnnotationMode.TSD:
+                if mode in {AutoAnnotationMode.TSD, AutoAnnotationMode.PBS}:
                     continue
                 check.setChecked(checked)
         finally:

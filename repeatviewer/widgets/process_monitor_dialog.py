@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping, Sequence
 
 from PySide6.QtCore import QObject, Qt, Signal, Slot
 from PySide6.QtGui import QFont
@@ -21,11 +22,93 @@ from PySide6.QtWidgets import (
 _HIT_COUNT_RE = re.compile(r"(\d+)\s+(?:\S+\s+)*hit\(s\)", re.IGNORECASE)
 
 
+def format_annotation_run_summary(
+    *,
+    n_sequences: int,
+    counts_by_type: Mapping[str, int] | None = None,
+    preferred_types: Sequence[str] | None = None,
+    total_new: int | None = None,
+) -> list[str]:
+    """Plain-language end-of-job lines for Feature / Similarity annotation.
+
+    Example::
+
+        Finished annotating 15 sequences.
+        Found 20 new features (LTR 5, PBS 15).
+    """
+    n_sequences = max(0, int(n_sequences))
+    counts = {
+        str(key).strip(): max(0, int(value))
+        for key, value in dict(counts_by_type or {}).items()
+        if str(key).strip()
+    }
+    if total_new is None:
+        total = sum(counts.values())
+    else:
+        total = max(0, int(total_new))
+
+    lines: list[str] = []
+    if n_sequences <= 0:
+        lines.append("Finished annotation.")
+    elif n_sequences == 1:
+        lines.append("Finished annotating 1 sequence.")
+    else:
+        lines.append(f"Finished annotating {n_sequences} sequences.")
+
+    preferred = [str(t).strip() for t in (preferred_types or ()) if str(t).strip()]
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for key in preferred:
+        if key in seen:
+            continue
+        seen.add(key)
+        ordered.append(key)
+    for key in sorted(counts):
+        if key in seen:
+            continue
+        if counts[key] <= 0 and key not in preferred:
+            continue
+        seen.add(key)
+        ordered.append(key)
+
+    # Drop preferred types that were never selected and have no hits.
+    ordered = [key for key in ordered if counts.get(key, 0) > 0 or key in preferred]
+
+    if total <= 0 and not ordered:
+        lines.append("Found no new features.")
+        return lines
+    if total <= 0:
+        # Selected types ran but none produced new features.
+        zero_parts = [f"{key} 0" for key in ordered]
+        if zero_parts:
+            lines.append(
+                "Found no new features"
+                + (f" ({', '.join(zero_parts)})." if len(zero_parts) > 1 else ".")
+            )
+        else:
+            lines.append("Found no new features.")
+        return lines
+
+    parts = [f"{key} {counts.get(key, 0)}" for key in ordered if counts.get(key, 0) > 0]
+    # Include explicit zeros for selected types that found nothing when several ran.
+    if len(preferred) > 1:
+        parts = [f"{key} {counts.get(key, 0)}" for key in ordered]
+
+    feat_word = "feature" if total == 1 else "features"
+    if not parts:
+        lines.append(f"Found {total} new {feat_word}.")
+    elif len(parts) == 1 and counts.get(ordered[0], 0) == total:
+        lines.append(f"Found {total} new {feat_word} ({parts[0]}).")
+    else:
+        lines.append(f"Found {total} new {feat_word} ({', '.join(parts)}).")
+    return lines
+
+
 def annotation_job_summary_lines(result: object) -> list[str]:
     """Lines to append when Feature / Similarity / Transfer jobs finish.
 
-    Prefer the job ``message`` (already includes per-module counts) and add a
-    clear ``Identified features: N`` total when it can be derived.
+    Prefer the job ``message`` (module detail) and add a plain-language
+    sequence / per-type feature summary when it can be derived.
     """
     if result is None:
         return []
@@ -41,26 +124,63 @@ def annotation_job_summary_lines(result: object) -> list[str]:
             if text:
                 lines.append(text)
 
-    identified: int | None = None
     type_name = type(result).__name__
 
+    if type_name == "TeAnnotationBatchResult":
+        # Full plain summary is already streamed via emit_process_log in the batch.
+        return []
+
     if type_name == "AutoAnnotationResult":
-        features = getattr(result, "features", None)
-        if features is not None:
-            identified = len(features)
-    elif type_name == "MultiAutoAnnotationResult":
+        features = getattr(result, "features", None) or ()
+        mode = getattr(result, "mode", None)
+        mode_name = str(getattr(mode, "value", mode) or "").strip()
+        counts = {}
+        for feat in features:
+            key = str(getattr(feat, "feature_type", "") or "").strip() or "others"
+            counts[key] = counts.get(key, 0) + 1
+        preferred = [mode_name] if mode_name else list(counts)
+        summary = format_annotation_run_summary(
+            n_sequences=1,
+            counts_by_type=counts,
+            preferred_types=preferred,
+            total_new=len(features),
+        )
+        for line in summary:
+            if line not in lines:
+                lines.append(line)
+        return lines
+
+    if type_name == "MultiAutoAnnotationResult":
         features = getattr(result, "features", None) or ()
         modes = getattr(result, "modes", None) or ()
-        type_names = {str(getattr(mode, "value", mode)) for mode in modes}
-        if type_names:
-            identified = sum(
-                1
-                for feat in features
-                if str(getattr(feat, "feature_type", "")) in type_names
-            )
-        else:
-            identified = len(features)
-    elif type_name == "SimilarityAnnotationResult":
+        preferred = [
+            str(getattr(mode, "value", mode) or "").strip()
+            for mode in modes
+            if str(getattr(mode, "value", mode) or "").strip()
+        ]
+        type_names = set(preferred)
+        counts: dict[str, int] = {key: 0 for key in preferred}
+        matched = 0
+        for feat in features:
+            key = str(getattr(feat, "feature_type", "") or "").strip()
+            if type_names and key not in type_names:
+                continue
+            if not key:
+                key = "others"
+            counts[key] = counts.get(key, 0) + 1
+            matched += 1
+        summary = format_annotation_run_summary(
+            n_sequences=1,
+            counts_by_type=counts,
+            preferred_types=preferred,
+            total_new=matched if type_names else len(features),
+        )
+        for line in summary:
+            if line not in lines:
+                lines.append(line)
+        return lines
+
+    if type_name == "SimilarityAnnotationResult":
         total_hits = 0
         found = False
         for line in lines:
@@ -69,26 +189,32 @@ def annotation_job_summary_lines(result: object) -> list[str]:
                 total_hits += int(match.group(1))
                 found = True
         if found:
-            identified = total_hits
-    elif type_name == "AnnotationTransferResult":
+            summary = format_annotation_run_summary(
+                n_sequences=1,
+                counts_by_type={"similarity hit": total_hits},
+                preferred_types=("similarity hit",),
+                total_new=total_hits,
+            )
+            for line in summary:
+                if line not in lines:
+                    lines.append(line)
+        return lines
+
+    if type_name == "AnnotationTransferResult":
         # Detailed transfer message is already streamed via progress.
         lines.clear()
         lifted = getattr(result, "lifted", None) or []
         identified = sum(
             1 for item in lifted if getattr(item, "feature", None) is not None
         )
-    elif type_name == "TeAnnotationBatchResult":
-        # ``Identified features: N`` is already streamed via emit_process_log
-        # during the batch; only add the sequence count here.
-        n_seq = len(getattr(result, "record_ids", None) or ())
-        if n_seq:
-            lines.append(f"Annotated sequences: {n_seq}")
-        return lines
+        summary = format_annotation_run_summary(
+            n_sequences=1,
+            counts_by_type={"transferred": identified},
+            preferred_types=("transferred",),
+            total_new=identified,
+        )
+        return summary
 
-    if identified is not None:
-        summary = f"Identified features: {identified}"
-        if summary not in lines:
-            lines.append(summary)
     return lines
 
 

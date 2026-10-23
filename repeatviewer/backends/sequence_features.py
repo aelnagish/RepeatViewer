@@ -56,7 +56,7 @@ def export_seqid(seq_id: str, *, seqid_map: dict[str, str] | None = None) -> str
 FEATURE_TYPE_COLORS: dict[str, str] = {
     "LTR": "#c0392b",
     "TIR": "#8e44ad",
-    "PBS": "#d35400",
+    "PBS": "#0984e3",
     "PPT": "#e67e22",
     "ORF": "#27ae60",
     "TSD": "#16a085",
@@ -80,8 +80,14 @@ DEFAULT_FEATURE_TYPES = (
     "others",
 )
 
-# Always offered under Display → Tracks → Displayed annotations.
-ALWAYS_ANNOTATION_VISIBILITY_KINDS: tuple[str, ...] = ("LTR", "TIR", "ORF", "TSD")
+# Preferred order under Display → Tracks → Displayed annotations when present.
+ALWAYS_ANNOTATION_VISIBILITY_KINDS: tuple[str, ...] = (
+    "LTR",
+    "TIR",
+    "ORF",
+    "TSD",
+    "PBS",
+)
 
 # Strip trailing "(E=…)", "(85%)", etc. from domain track labels.
 _DOMAIN_KIND_SUFFIX_RE = re.compile(r"\s*\([^)]*\)\s*$")
@@ -138,11 +144,16 @@ def annotation_visibility_label(key: str) -> str:
 def collect_annotation_visibility_keys(
     features: Iterable[SequenceFeature],
 ) -> list[str]:
-    """Ordered visibility keys: LTR/TIR/ORF, other types present, then domains."""
+    """Ordered visibility keys for types actually present on the sequence(s).
+
+    Preferred structural types (LTR, TIR, ORF, TSD, PBS) come first when
+    present, then other feature types, then domain database groups.
+    """
     present = {annotation_visibility_key(feat) for feat in features}
     ordered: list[str] = []
     for key in ALWAYS_ANNOTATION_VISIBILITY_KINDS:
-        ordered.append(key)
+        if key in present:
+            ordered.append(key)
     other_types = sorted(
         key
         for key in present

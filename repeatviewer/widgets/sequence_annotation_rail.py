@@ -51,6 +51,7 @@ _FEATURE_DETECT_TYPE_BY_LABEL: dict[str, str] = {
     "Tandem": "tandem repeat",
     "ORF": "ORF",
     "TSD": "TSD",
+    "PBS": "PBS",
 }
 from repeatviewer.backends.genetic_codes import (
     genetic_code_choices,
@@ -1041,59 +1042,6 @@ class SequenceAnnotationRail(QWidget):
         self.show_blast_coverage_row.setVisible(False)
         tracks_section.add_widget(self.show_blast_coverage_row)
 
-        self.displayed_annotations_label = QLabel(
-            "Displayed annotations", tracks_section
-        )
-        self.displayed_annotations_label.setToolTip(
-            "Choose which annotation types appear under each sequence "
-            "(including MSA residue rows). Use All or the type checkboxes "
-            "for LTR, TIR, ORF, TSD, and each protein domain. Extra types "
-            "wrap onto new rows as needed."
-        )
-        tracks_section.add_widget(self.displayed_annotations_label)
-
-        # Hidden compat toggle: True when at least one type checkbox is on.
-        self.show_annotation_track = QCheckBox(tracks_section)
-        self.show_annotation_track.hide()
-        self.show_annotation_track.setChecked(True)
-
-        # Type filters: All on its own row (like Feature detection), then
-        # LTR / TIR / ORF / TSD / domains in a wrapping flow below.
-        self._annotation_kinds_host = QWidget(tracks_section)
-        self._annotation_kinds_host.setMinimumWidth(0)
-        self._annotation_kinds_host.setSizePolicy(
-            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
-        )
-        kinds_outer = QVBoxLayout(self._annotation_kinds_host)
-        kinds_outer.setContentsMargins(0, 0, 0, 2)
-        kinds_outer.setSpacing(4)
-        self.annotation_kind_checks: dict[str, QCheckBox] = {}
-        self.annotation_kinds_all_check = QCheckBox("All", self._annotation_kinds_host)
-        self.annotation_kinds_all_check.setToolTip(
-            "Select or clear all annotation types"
-        )
-        self._annotation_kinds_all_updating = False
-        self.annotation_kinds_all_check.toggled.connect(
-            self._on_annotation_kinds_all_toggled
-        )
-        kinds_outer.addWidget(self.annotation_kinds_all_check, 0, Qt.AlignmentFlag.AlignLeft)
-        self._annotation_kinds_flow_host = QWidget(self._annotation_kinds_host)
-        self._annotation_kinds_flow_host.setMinimumWidth(0)
-        self._annotation_kinds_flow_host.setSizePolicy(
-            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
-        )
-        self._annotation_kinds_flow = _FlowLayout(
-            self._annotation_kinds_flow_host, spacing=6
-        )
-        self._annotation_kinds_flow_host.setLayout(self._annotation_kinds_flow)
-        kinds_outer.addWidget(self._annotation_kinds_flow_host)
-        self._hidden_annotation_kinds = self._load_hidden_annotation_kinds()
-        self._rebuild_annotation_kind_checks(list(ALWAYS_ANNOTATION_VISIBILITY_KINDS))
-        # Type filters apply to multi/MSA overview only (wired there).
-        self._annotation_kinds_host.setVisible(False)
-        self.displayed_annotations_label.setVisible(False)
-        tracks_section.add_widget(self._annotation_kinds_host)
-
         self.show_complement = QCheckBox("Show complement", tracks_section)
         self.show_complement.setToolTip(
             "Show the complementary strand under the forward sequence "
@@ -1131,6 +1079,57 @@ class SequenceAnnotationRail(QWidget):
             self.splitTracksBySourceChanged.emit
         )
         tracks_section.add_widget(self.split_tracks_by_source)
+
+        # Displayed annotations sit below Split-by-source; only types present
+        # on the loaded sequence(s) are listed (see set_available_annotation_kinds).
+        self.displayed_annotations_label = QLabel(
+            "Displayed annotations", tracks_section
+        )
+        self.displayed_annotations_label.setToolTip(
+            "Choose which annotation types appear on the sequence map "
+            "(and under each sequence in Overview / MSA). Only types that "
+            "exist on the current sequence(s) are listed."
+        )
+        tracks_section.add_widget(self.displayed_annotations_label)
+
+        # Hidden compat toggle: True when at least one type checkbox is on.
+        self.show_annotation_track = QCheckBox(tracks_section)
+        self.show_annotation_track.hide()
+        self.show_annotation_track.setChecked(True)
+
+        # Type filters: All on its own row, then present types in a flow.
+        self._annotation_kinds_host = QWidget(tracks_section)
+        self._annotation_kinds_host.setMinimumWidth(0)
+        self._annotation_kinds_host.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
+        )
+        kinds_outer = QVBoxLayout(self._annotation_kinds_host)
+        kinds_outer.setContentsMargins(0, 0, 0, 2)
+        kinds_outer.setSpacing(4)
+        self.annotation_kind_checks: dict[str, QCheckBox] = {}
+        self.annotation_kinds_all_check = QCheckBox("All", self._annotation_kinds_host)
+        self.annotation_kinds_all_check.setToolTip(
+            "Select or clear all annotation types"
+        )
+        self._annotation_kinds_all_updating = False
+        self.annotation_kinds_all_check.toggled.connect(
+            self._on_annotation_kinds_all_toggled
+        )
+        kinds_outer.addWidget(self.annotation_kinds_all_check, 0, Qt.AlignmentFlag.AlignLeft)
+        self._annotation_kinds_flow_host = QWidget(self._annotation_kinds_host)
+        self._annotation_kinds_flow_host.setMinimumWidth(0)
+        self._annotation_kinds_flow_host.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
+        )
+        self._annotation_kinds_flow = _FlowLayout(
+            self._annotation_kinds_flow_host, spacing=6
+        )
+        self._annotation_kinds_flow_host.setLayout(self._annotation_kinds_flow)
+        kinds_outer.addWidget(self._annotation_kinds_flow_host)
+        self._hidden_annotation_kinds = self._load_hidden_annotation_kinds()
+        self._rebuild_annotation_kind_checks([])
+        self._sync_displayed_annotations_section_visible()
+        tracks_section.add_widget(self._annotation_kinds_host)
 
         self.translation_more_btn = QPushButton("Setting", tracks_section)
         self.translation_more_btn.setEnabled(False)
@@ -1623,15 +1622,22 @@ class SequenceAnnotationRail(QWidget):
         auto_host.setMinimumWidth(0)
         auto_flow = _FlowLayout(auto_host, spacing=6)
         auto_host.setLayout(auto_flow)
-        for label in ("LTR", "TIR", "Tandem", "ORF", "TSD"):
+        for label in ("LTR", "TIR", "Tandem", "ORF", "TSD", "PBS"):
             check = QCheckBox(label, auto_host)
             # TSD needs an MSA (≥2 sequences); leave off by default.
-            check.setChecked(label != "TSD")
+            # PBS needs a prior LTR pair + BLAST+; leave off by default.
+            check.setChecked(label not in {"TSD", "PBS"})
             check.setMinimumWidth(0)
             if label == "TSD":
                 check.setToolTip(
                     "Target site duplications near putative TE boundaries "
                     "(MSA only; set boundaries under Setting)."
+                )
+            elif label == "PBS":
+                check.setToolTip(
+                    "Primer binding site inside the 5′ LTR (Neumann 2019 "
+                    "motifs + blastn). Requires two LTR features; run LTR "
+                    "first or keep existing LTR annotations."
                 )
             auto_flow.addWidget(check)
             # Keys filled by SequenceMapPanel with AutoAnnotationMode enums.
@@ -2158,22 +2164,48 @@ class SequenceAnnotationRail(QWidget):
         self._sync_annotation_kinds_all_check()
         self._sync_show_annotation_track_from_kinds()
 
+    def _sync_displayed_annotations_section_visible(self) -> None:
+        """Show Displayed annotations only when at least one type is present."""
+        has_kinds = bool(self.annotation_kind_checks)
+        label = getattr(self, "displayed_annotations_label", None)
+        if label is not None:
+            label.setVisible(has_kinds)
+        kinds_host = getattr(self, "_annotation_kinds_host", None)
+        if kinds_host is not None:
+            kinds_host.setVisible(has_kinds)
+
     def set_available_annotation_kinds(
         self,
         features: list[SequenceFeature] | None = None,
         *,
         keys: list[str] | None = None,
     ) -> None:
-        """Refresh type checkboxes from current features (or an explicit key list)."""
+        """Refresh type checkboxes from types present on the current features."""
         if keys is None:
-            keys = collect_annotation_visibility_keys(features or [])
-        always = list(ALWAYS_ANNOTATION_VISIBILITY_KINDS)
-        rest = [key for key in keys if key not in ALWAYS_ANNOTATION_VISIBILITY_KINDS]
-        ordered = always + rest
+            ordered = collect_annotation_visibility_keys(features or [])
+        else:
+            # Keep preferred structural order when an explicit list is passed.
+            present = {str(k) for k in keys if str(k or "").strip()}
+            ordered = [
+                key for key in ALWAYS_ANNOTATION_VISIBILITY_KINDS if key in present
+            ]
+            ordered.extend(
+                sorted(
+                    key
+                    for key in present
+                    if key not in ALWAYS_ANNOTATION_VISIBILITY_KINDS
+                    and not key.startswith("domain::")
+                )
+            )
+            ordered.extend(
+                sorted(key for key in present if key.startswith("domain::"))
+            )
         current = list(self.annotation_kind_checks.keys())
         if current == ordered:
+            self._sync_displayed_annotations_section_visible()
             return
         self._rebuild_annotation_kind_checks(ordered)
+        self._sync_displayed_annotations_section_visible()
         self._emit_annotation_track_kinds()
 
     def _on_annotation_kind_toggled(self, key: str, checked: bool) -> None:
@@ -2225,6 +2257,7 @@ class SequenceAnnotationRail(QWidget):
         if missing:
             ordered = list(self.annotation_kind_checks.keys()) + missing
             self._rebuild_annotation_kind_checks(ordered)
+            self._sync_displayed_annotations_section_visible()
             changed = True
 
         self._annotation_kinds_all_updating = True
@@ -2483,16 +2516,11 @@ class SequenceAnnotationRail(QWidget):
         self.column_distance.setVisible(False)
         self._sequence_distance_label.setVisible(overview)
         self.sequence_distance.setVisible(overview)
-        # Keep Tracks section + Displayed annotations filters in overview.
+        # Tracks + Displayed annotations: single-sequence map and overview.
         self._tracks_divider.setVisible(True)
         self._tracks_section.setVisible(True)
         self.show_annotation_track.setVisible(False)
-        label = getattr(self, "displayed_annotations_label", None)
-        if label is not None:
-            label.setVisible(overview)
-        kinds_host = getattr(self, "_annotation_kinds_host", None)
-        if kinds_host is not None:
-            kinds_host.setVisible(overview)
+        self._sync_displayed_annotations_section_visible()
         msa_overview = overview and bool(getattr(self, "_msa_display_mode", False))
         std_bounds = getattr(self, "show_standard_boundaries", None)
         if std_bounds is not None:

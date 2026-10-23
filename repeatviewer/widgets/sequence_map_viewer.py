@@ -109,17 +109,26 @@ from repeatviewer.backends.auto_annotation import (
 from repeatviewer.backends.auto_annotation_settings import (
     AutoAnnotationSettings,
     DEFAULT_MAX_TERMINAL_PAIRS,
+    DEFAULT_PBS_MIN_COVERAGE,
+    DEFAULT_PBS_MIN_IDENTITY,
+    DEFAULT_PBS_MIN_LENGTH,
+    DEFAULT_PBS_ORIENTATION,
+    DEFAULT_PBS_WINDOW,
     DEFAULT_TIR_MAX_LENGTH,
     DEFAULT_TIR_MIN_LENGTH,
     DEFAULT_TIR_MIN_PAIR_DISTANCE,
     DEFAULT_TIR_SIMILARITY_THRESHOLD,
     MAX_TERMINAL_PAIRS_LIMIT,
     OrfSettings,
+    PbsSettings,
     TerminalRepeatSettings,
     TandemRepeatSettings,
     load_auto_annotation_settings,
     save_auto_annotation_settings,
 )
+from repeatviewer.backends.pbs_detect import default_motif_fasta
+from repeatviewer.widgets.combo_boxes import NoWheelComboBox
+from repeatviewer.widgets.path_browse import PathBrowseRow
 from repeatviewer.branding import APP_DISPLAY_NAME
 from repeatviewer.backends.job_cancel import JobCancellation
 from repeatviewer.backends.annotation_colors import (
@@ -135,6 +144,7 @@ from repeatviewer.backends.sequence_features import (
     SequenceMapData,
     SingleSequenceSummary,
     REPEATVIEWER_INTERNAL_SOURCE,
+    annotation_visibility_key,
     features_gff_path,
     format_single_sequence_summary_parts,
     format_single_sequence_summary_text,
@@ -280,12 +290,15 @@ _AUTO_ANNOTATION_MODES: tuple[tuple[str, AutoAnnotationMode], ...] = (
     ("Tandem", AutoAnnotationMode.TANDEM),
     ("ORF", AutoAnnotationMode.ORF),
     ("TSD", AutoAnnotationMode.TSD),
+    ("PBS", AutoAnnotationMode.PBS),
 )
 _AUTO_MODE_LABEL = {
     AutoAnnotationMode.LTR: "LTR",
     AutoAnnotationMode.TIR: "TIR",
     AutoAnnotationMode.TANDEM: "Tandem",
     AutoAnnotationMode.ORF: "ORF",
+    AutoAnnotationMode.TSD: "TSD",
+    AutoAnnotationMode.PBS: "PBS",
 }
 # Shared column indices for Add feature / Auto annotation alignment.
 _ANNOTATION_FEATURE_COLUMN = {
@@ -4424,6 +4437,8 @@ class SequenceMapWidget(QWidget):
         self._show_similarity_database_name = True
         self._split_tracks_by_source = _load_split_tracks_by_source()
         self._show_online_blast = _load_show_online_blast()
+        # None = no type filter; frozenset = Displayed annotations checkboxes.
+        self._visible_annotation_kinds: frozenset[str] | None = None
         # Maps AnnotationTrackWidget indices → full ``_data.features`` indices.
         self._annot_display_to_full: list[int] = []
         self._transfer_preview_overlay: list[tuple[SequenceFeature, int]] = []
@@ -5135,6 +5150,52 @@ class SequenceMapWidget(QWidget):
         )
         self._sync_sequence_block_layout()
 
+    def _filter_display_by_annotation_kinds(
+        self,
+        display: list[SequenceFeature],
+        mapping: list[int],
+    ) -> tuple[list[SequenceFeature], list[int]]:
+        """Apply Displayed annotations type filter (None = show all kinds)."""
+        visible = self._visible_annotation_kinds
+        if visible is None:
+            return display, mapping
+        kept_features: list[SequenceFeature] = []
+        kept_mapping: list[int] = []
+        for feat, full_idx in zip(display, mapping):
+            if annotation_visibility_key(feat) in visible:
+                kept_features.append(feat)
+                kept_mapping.append(full_idx)
+        return kept_features, kept_mapping
+
+    def set_visible_annotation_kinds(
+        self, keys: frozenset[str] | set[str] | None
+    ) -> None:
+        """Limit painted tracks to these visibility keys (None = all kinds)."""
+        if keys is None:
+            new_keys: frozenset[str] | None = None
+        else:
+            new_keys = frozenset(str(k) for k in keys)
+        if new_keys == self._visible_annotation_kinds:
+            return
+        self._visible_annotation_kinds = new_keys
+        if self._data is None:
+            return
+        display, mapping, display_selected, _alphas = self._annotation_display_bundle()
+        # Nucleotide strip: real features only (no transfer-preview rows).
+        canvas_features = [
+            feat for feat, full_idx in zip(display, mapping) if full_idx >= 0
+        ]
+        self._canvas.set_sequence(
+            self._data.sequence,
+            canvas_features,
+            is_protein=self._data.is_protein,
+        )
+        self._canvas.set_selected_features(display_selected)
+        self._sync_overview()
+
+    def visible_annotation_kinds(self) -> frozenset[str] | None:
+        return self._visible_annotation_kinds
+
     def _annotation_display_bundle(
         self,
     ) -> tuple[list[SequenceFeature], list[int], set[int], list[int]]:
@@ -5144,10 +5205,10 @@ class SequenceMapWidget(QWidget):
             full,
             show_online_blast=self._show_online_blast,
         )
+        display, mapping = self._filter_display_by_annotation_kinds(display, mapping)
         alphas = [255] * len(display)
         preview = list(self._transfer_preview_overlay)
         if preview:
-            base_len = len(display)
             for feat, alpha in preview:
                 display.append(feat)
                 mapping.append(-1)
@@ -5179,19 +5240,24 @@ class SequenceMapWidget(QWidget):
         self,
         display_features: list[SequenceFeature],
     ) -> list[SequenceFeature]:
-        """Recombine a track-edited display list with hidden Online BLAST features."""
+        """Recombine a track-edited display list with features hidden from view."""
         from repeatviewer.backends.ncbi_blast_online import ONLINE_BLAST_SOURCE
 
         if self._data is None:
             return list(display_features)
-        if self._show_online_blast:
-            return list(display_features)
-        online = [
-            feat
-            for feat in self._data.features
-            if str(feat.source or "") == ONLINE_BLAST_SOURCE
-        ]
-        return list(display_features) + online
+        visible = self._visible_annotation_kinds
+        hidden: list[SequenceFeature] = []
+        for feat in self._data.features:
+            source = str(feat.source or "")
+            if not self._show_online_blast and source == ONLINE_BLAST_SOURCE:
+                hidden.append(feat)
+                continue
+            if (
+                visible is not None
+                and annotation_visibility_key(feat) not in visible
+            ):
+                hidden.append(feat)
+        return list(display_features) + hidden
 
     def _sync_sequence_block_layout(self) -> None:
         # Canvas row is exactly the nucleotide strip — scrollbar sits below it.
@@ -5452,10 +5518,12 @@ class SequenceMapWidget(QWidget):
         if self._data is None:
             return
         self._data.features = list(features)
-        display, _mapping = filter_features_for_online_blast_display(
+        display, mapping = filter_features_for_online_blast_display(
             self._data.features,
             show_online_blast=self._show_online_blast,
         )
+        display, mapping = self._filter_display_by_annotation_kinds(display, mapping)
+        self._annot_display_to_full = mapping
         self._canvas.set_sequence(
             self._data.sequence,
             display,
@@ -5474,10 +5542,14 @@ class SequenceMapWidget(QWidget):
         self._show_online_blast = enabled
         _save_show_online_blast(enabled)
         if self._data is not None:
-            display, _mapping = filter_features_for_online_blast_display(
+            display, mapping = filter_features_for_online_blast_display(
                 self._data.features,
                 show_online_blast=self._show_online_blast,
             )
+            display, mapping = self._filter_display_by_annotation_kinds(
+                display, mapping
+            )
+            self._annot_display_to_full = mapping
             self._canvas.set_sequence(
                 self._data.sequence,
                 display,
@@ -6484,6 +6556,15 @@ class AutoAnnotationSettingsPanel(QWidget):
 
         layout.addWidget(self._section_title("ORF (orfipy)"))
         layout.addLayout(self._orf_form(settings.orf or OrfSettings()))
+        # PBS section is built here but inserted after TSD by the host dialog /
+        # Sequence Annotation Advanced panel (see ``pbs_section_widget``).
+        self._pbs_section = QWidget(self)
+        pbs_layout = QVBoxLayout(self._pbs_section)
+        pbs_layout.setContentsMargins(0, 0, 0, 0)
+        pbs_layout.setSpacing(8)
+        pbs_layout.addWidget(_settings_separator())
+        pbs_layout.addWidget(self._section_title("PBS"))
+        pbs_layout.addLayout(self._pbs_form(settings.pbs or PbsSettings()))
         if self._include_run_controls:
             layout.addWidget(_settings_separator())
             layout.addWidget(self._section_title("Others"))
@@ -6497,6 +6578,11 @@ class AutoAnnotationSettingsPanel(QWidget):
         self._tir_fields = self._terminal_fields[1]
         self._tandem_fields = self._tandem_field_list
         self._orf_fields = self._orf_field_list
+        self._pbs_fields = self._pbs_field_list
+
+    def pbs_section_widget(self) -> QWidget:
+        """PBS parameters; place after the TSD panel in host layouts."""
+        return self._pbs_section
 
     def _section_title(self, text: str) -> QLabel:
         title = QLabel(text)
@@ -6827,6 +6913,101 @@ class AutoAnnotationSettingsPanel(QWidget):
         self._orf_field_list = (min_len, max_len, alt_starts)
         return form
 
+    def _pbs_form(self, cfg: PbsSettings) -> QFormLayout:
+        form = self._settings_form()
+        window = QSpinBox(self)
+        window.setRange(1, 10_000)
+        window.setValue(cfg.window)
+        min_len = QSpinBox(self)
+        min_len.setRange(1, 500)
+        min_len.setValue(cfg.min_length)
+        min_ident = QDoubleSpinBox(self)
+        min_ident.setRange(0.0, 100.0)
+        min_ident.setDecimals(1)
+        min_ident.setSingleStep(1.0)
+        min_ident.setValue(cfg.min_identity)
+        min_cov = QDoubleSpinBox(self)
+        min_cov.setRange(0.0, 1.0)
+        min_cov.setDecimals(2)
+        min_cov.setSingleStep(0.05)
+        min_cov.setValue(cfg.min_coverage)
+        orient = NoWheelComboBox(self)
+        orient.addItem("Auto (both strands)", "auto")
+        orient.addItem("Plus (+)", "+")
+        orient.addItem("Minus (−)", "-")
+        orient_idx = orient.findData(cfg.orientation or DEFAULT_PBS_ORIENTATION)
+        orient.setCurrentIndex(orient_idx if orient_idx >= 0 else 0)
+        motif = PathBrowseRow(
+            self,
+            mode="file",
+            file_filter="FASTA (*.fa *.fasta *.fna);;All files (*)",
+            browse_title="Choose PBS motif FASTA",
+            placeholder="Bundled Neumann 2019 motifs (default)",
+            minimum_width=_SETTINGS_FIELD_WIDTH,
+        )
+        motif.set_path(cfg.motif_database)
+        if not cfg.motif_database:
+            bundled = default_motif_fasta()
+            if bundled.is_file():
+                motif.setToolTip(f"Default: {bundled}")
+
+        form.addRow(
+            self._form_label("Search window (bp):"),
+            self._field_help(
+                self._sized_spin(window),
+                "PBS search window",
+                "Bases immediately inside the 5′ LTR to search for a PBS "
+                f"(default {DEFAULT_PBS_WINDOW}).",
+            ),
+        )
+        form.addRow(
+            self._form_label("Min alignment length:"),
+            self._field_help(
+                self._sized_spin(min_len),
+                "Min PBS alignment length",
+                f"Minimum blastn alignment length (default {DEFAULT_PBS_MIN_LENGTH}).",
+            ),
+        )
+        form.addRow(
+            self._form_label("Min identity (%):"),
+            self._field_help(
+                self._sized_spin(min_ident),
+                "Min PBS identity",
+                f"Minimum percent identity (default {DEFAULT_PBS_MIN_IDENTITY:g}).",
+            ),
+        )
+        form.addRow(
+            self._form_label("Min motif coverage:"),
+            self._field_help(
+                self._sized_spin(min_cov),
+                "Min PBS motif coverage",
+                "Fraction of the motif that must align "
+                f"(default {DEFAULT_PBS_MIN_COVERAGE:g}).",
+            ),
+        )
+        form.addRow(
+            self._form_label("Orientation:"),
+            self._field_help(
+                orient,
+                "PBS orientation",
+                "Auto tries both sides of the LTR pair; + searches after the "
+                "left LTR; − searches before the right LTR.",
+            ),
+        )
+        form.addRow(
+            self._form_label("Motif FASTA:"),
+            self._field_help(
+                motif,
+                "PBS motif database",
+                "Optional custom FASTA of PBS motifs. Leave empty to use the "
+                "bundled Neumann et al. 2019 unique motifs.",
+            ),
+        )
+        self._pbs_orient = orient
+        self._pbs_motif = motif
+        self._pbs_field_list = (window, min_len, min_ident, min_cov)
+        return form
+
     def _others_form(self, settings: AutoAnnotationSettings) -> QFormLayout:
         form = self._settings_form()
         threads = QSpinBox(self)
@@ -6921,6 +7102,16 @@ class AutoAnnotationSettingsPanel(QWidget):
             alternative_start_codons=alt_starts.text().strip(),
             frames=self._selected_orf_frames(),
         )
+        window, pbs_min_len, pbs_ident, pbs_cov = self._pbs_fields
+        orient_data = self._pbs_orient.currentData()
+        pbs = PbsSettings(
+            window=int(window.value()),
+            min_length=int(pbs_min_len.value()),
+            min_identity=float(pbs_ident.value()),
+            min_coverage=float(pbs_cov.value()),
+            orientation=str(orient_data or DEFAULT_PBS_ORIENTATION),
+            motif_database=str(self._pbs_motif.path() or "").strip(),
+        )
         if self._include_run_controls and self._num_threads is not None:
             threads = max(1, int(self._num_threads.value()))
             show = bool(self._show_process_window.isChecked())
@@ -6936,6 +7127,7 @@ class AutoAnnotationSettingsPanel(QWidget):
             tir=tir,
             tandem=tandem,
             orf=orf,
+            pbs=pbs,
             num_threads=threads,
             show_process_window=show,
             close_process_window_when_finished=close,
@@ -7099,7 +7291,7 @@ class TsdSearchSettingsPanel(QWidget):
 
 
 class AutoAnnotationSettingsDialog(QDialog):
-    """Configure LTR, TIR, tandem-repeat, ORF, and TSD auto-annotation parameters."""
+    """Configure LTR, TIR, tandem-repeat, ORF, PBS, and TSD parameters."""
 
     def __init__(
         self,
@@ -7117,6 +7309,7 @@ class AutoAnnotationSettingsDialog(QDialog):
         body_layout.setSpacing(12)
         body_layout.addWidget(self._panel)
         body_layout.addWidget(self._tsd_panel)
+        body_layout.addWidget(self._panel.pbs_section_widget())
         scroll = QScrollArea(self)
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -7751,6 +7944,7 @@ class SequenceMapPanel(QWidget):
             )
         self._rail.findRequested.connect(self._on_rail_find_requested)
         self._rail.panelCollapsedChanged.connect(self._on_rail_panel_collapsed_changed)
+        self._map.featuresChanged.connect(self._sync_annotation_kind_filters)
         self._find_items: list = []
         self._find_index: int = -1
         self._find_key: object | None = None
@@ -7803,6 +7997,9 @@ class SequenceMapPanel(QWidget):
         rail.sequenceNameSizeChanged.connect(self._on_sequence_name_size_changed)
         rail.baseNumberSizeChanged.connect(self._map.set_base_number_size)
         rail.splitTracksBySourceChanged.connect(self._on_split_tracks_by_source_changed)
+        rail.annotationTrackKindsChanged.connect(
+            self._on_annotation_track_kinds_changed
+        )
         for signal in (
             rail.showComplementChanged,
             rail.showTranslationChanged,
@@ -7844,6 +8041,19 @@ class SequenceMapPanel(QWidget):
     def _on_split_tracks_by_source_changed(self, enabled: bool) -> None:
         _save_split_tracks_by_source(bool(enabled))
         self._map.set_split_tracks_by_source(bool(enabled))
+
+    def _on_annotation_track_kinds_changed(self, keys: object) -> None:
+        if keys is None:
+            visible: frozenset[str] | None = None
+        else:
+            visible = frozenset(str(k) for k in keys)
+        self._map.set_visible_annotation_kinds(visible)
+
+    def _sync_annotation_kind_filters(self) -> None:
+        """Refresh Displayed annotations checkboxes and apply them to the map."""
+        features = self._map.features()
+        self._rail.set_available_annotation_kinds(features)
+        self._map.set_visible_annotation_kinds(self._rail.visible_annotation_kinds())
 
     def _on_sequence_name_size_changed(self, point_size: int) -> None:
         self._rail.set_sequence_name_font_point_size(point_size)
@@ -8019,11 +8229,12 @@ class SequenceMapPanel(QWidget):
         self._sync_auto_annotation_all_check()
 
     def _sync_auto_annotation_all_check(self) -> None:
-        # "All" covers LTR/TIR/Tandem/ORF; TSD is optional (MSA-only) and independent.
+        # "All" covers LTR/TIR/Tandem/ORF; TSD (MSA-only) and PBS (needs LTR +
+        # BLAST) stay independent and off by default.
         checks = [
             check
             for mode, check in self._auto_ann_checks.items()
-            if mode != AutoAnnotationMode.TSD
+            if mode not in {AutoAnnotationMode.TSD, AutoAnnotationMode.PBS}
         ]
         if not checks:
             return
@@ -8037,7 +8248,7 @@ class SequenceMapPanel(QWidget):
             return
         self._auto_all_updating = True
         for mode, check in self._auto_ann_checks.items():
-            if mode == AutoAnnotationMode.TSD:
+            if mode in {AutoAnnotationMode.TSD, AutoAnnotationMode.PBS}:
                 continue
             check.setChecked(checked)
         self._auto_all_updating = False
@@ -8586,6 +8797,7 @@ class SequenceMapPanel(QWidget):
         fit = fit_after_load and saved_view is None
         self._map.load(data, fit_after_load=fit)
         self._rail.set_sequence_kind(bool(data.is_protein))
+        self._sync_annotation_kind_filters()
         if saved_view is not None:
             self._map.restore_view_state_for_session(saved_view)
         self._feature_undo_stack.clear()
@@ -10568,6 +10780,7 @@ class SequenceMapPanel(QWidget):
         ensure = getattr(self._rail, "ensure_annotation_kinds_visible", None)
         if callable(ensure):
             ensure(keys)
+        self._map.set_visible_annotation_kinds(self._rail.visible_annotation_kinds())
 
     def _on_similarity_annotation_finished(self, result: object) -> None:
         if not isinstance(result, SimilarityAnnotationResult):

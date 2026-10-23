@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from repeatviewer.widgets.process_monitor_dialog import annotation_job_summary_lines
+from repeatviewer.widgets.process_monitor_dialog import (
+    annotation_job_summary_lines,
+    format_annotation_run_summary,
+)
 
 
 @dataclass(frozen=True)
@@ -48,6 +51,43 @@ class TeAnnotationBatchResult:
     features_by_id: dict
     record_ids: list
     identified_count: int = 0
+    identified_by_type: dict | None = None
+    annotated_sequence_count: int = 0
+
+
+def test_format_summary_plain_sentences_and_per_type() -> None:
+    lines = format_annotation_run_summary(
+        n_sequences=15,
+        counts_by_type={"LTR": 5, "PBS": 15},
+        preferred_types=("LTR", "TIR", "PBS"),
+    )
+    assert lines[0] == "Finished annotating 15 sequences."
+    assert lines[1] == "Found 20 new features (LTR 5, TIR 0, PBS 15)."
+
+
+def test_format_summary_zero_features() -> None:
+    lines = format_annotation_run_summary(
+        n_sequences=15,
+        counts_by_type={},
+        preferred_types=("PBS",),
+        total_new=0,
+    )
+    assert lines == [
+        "Finished annotating 15 sequences.",
+        "Found no new features.",
+    ]
+
+
+def test_format_summary_single_type() -> None:
+    lines = format_annotation_run_summary(
+        n_sequences=1,
+        counts_by_type={"PBS": 1},
+        preferred_types=("PBS",),
+    )
+    assert lines == [
+        "Finished annotating 1 sequence.",
+        "Found 1 new feature (PBS 1).",
+    ]
 
 
 def test_auto_annotation_summary_includes_count() -> None:
@@ -58,7 +98,8 @@ def test_auto_annotation_summary_includes_count() -> None:
     )
     lines = annotation_job_summary_lines(result)
     assert "Detected 3 ORF(s) with orfipy." in lines
-    assert "Identified features: 3" in lines
+    assert "Finished annotating 1 sequence." in lines
+    assert "Found 3 new features (ORF 3)." in lines
 
 
 def test_multi_auto_counts_only_selected_modes() -> None:
@@ -77,7 +118,8 @@ def test_multi_auto_counts_only_selected_modes() -> None:
         message="Detected 2 ORF(s).\nLTR: 1 pair.",
     )
     lines = annotation_job_summary_lines(result)
-    assert "Identified features: 3" in lines
+    assert "Finished annotating 1 sequence." in lines
+    assert "Found 3 new features (ORF 2, LTR 1)." in lines
 
 
 def test_similarity_sums_hit_counts() -> None:
@@ -89,7 +131,7 @@ def test_similarity_sums_hit_counts() -> None:
         ),
     )
     lines = annotation_job_summary_lines(result)
-    assert "Identified features: 6" in lines
+    assert "Found 6 new features (similarity hit 6)." in lines
 
 
 def test_transfer_counts_placed_features() -> None:
@@ -99,7 +141,10 @@ def test_transfer_counts_placed_features() -> None:
     )
     lines = annotation_job_summary_lines(result)
     # Message is streamed live during transfer; summary is the count only.
-    assert lines == ["Identified features: 2"]
+    assert lines == [
+        "Finished annotating 1 sequence.",
+        "Found 2 new features (transferred 2).",
+    ]
 
 
 def test_transfer_tuple_payload() -> None:
@@ -109,14 +154,16 @@ def test_transfer_tuple_payload() -> None:
         "seq",
         None,
     )
-    assert "Identified features: 1" in annotation_job_summary_lines(result)
+    lines = annotation_job_summary_lines(result)
+    assert "Found 1 new feature (transferred 1)." in lines
 
 
-def test_batch_adds_sequence_count_only() -> None:
+def test_batch_summary_already_streamed() -> None:
     result = TeAnnotationBatchResult(
         features_by_id={"a": [1, 2], "b": [3]},
         record_ids=["a", "b"],
         identified_count=5,
+        annotated_sequence_count=2,
     )
-    lines = annotation_job_summary_lines(result)
-    assert lines == ["Annotated sequences: 2"]
+    # Batch emits the plain summary during the job; do not repeat it here.
+    assert annotation_job_summary_lines(result) == []

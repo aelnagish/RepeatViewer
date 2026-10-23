@@ -5,9 +5,10 @@ from __future__ import annotations
 import logging
 import tempfile
 import threading
+from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from Bio import SeqIO
@@ -85,6 +86,10 @@ class TeAnnotationBatchResult:
     skipped_sequences: tuple[tuple[str, str], ...] = ()
     # Features newly present after this run (not in the pre-job baseline).
     identified_count: int = 0
+    # New-feature counts by ``feature_type`` (e.g. LTR, PBS, domain).
+    identified_by_type: dict[str, int] = field(default_factory=dict)
+    # How many sequences were actually annotated in this job.
+    annotated_sequence_count: int = 0
 
     @property
     def output_paths(self) -> list[Path]:
@@ -546,16 +551,34 @@ def run_te_annotation_on_fasta(
         for rid in annotate_ids
     }
     identified_count = 0
+    identified_by_type: Counter[str] = Counter()
     for rid in annotate_ids:
         before = baseline_sigs.get(rid) or set()
         for feat in features_by_id.get(rid) or []:
             if _feature_signature(feat) not in before:
                 identified_count += 1
+                ftype = str(getattr(feat, "feature_type", "") or "").strip() or "others"
+                identified_by_type[ftype] += 1
+
+    preferred_types = [
+        str(mode.value) for mode in options.auto_modes if str(mode.value or "").strip()
+    ]
+    # Similarity hits are usually ``domain`` (or similar); include when that ran.
+    if options.similarity_databases and "domain" not in preferred_types:
+        if identified_by_type.get("domain", 0) or options.similarity_databases:
+            preferred_types.append("domain")
 
     # Stream into the process monitor (Worker.log_line / FunctionWorker.log_line).
     from repeatviewer.external_process import emit_process_log
+    from repeatviewer.widgets.process_monitor_dialog import format_annotation_run_summary
 
-    emit_process_log(f"Identified features: {identified_count}")
+    for line in format_annotation_run_summary(
+        n_sequences=len(annotate_ids),
+        counts_by_type=dict(identified_by_type),
+        preferred_types=preferred_types,
+        total_new=identified_count,
+    ):
+        emit_process_log(line)
 
     json_path: Path | None = None
     gff_path: Path | None = None
@@ -578,4 +601,6 @@ def run_te_annotation_on_fasta(
         gff_path=gff_path,
         skipped_sequences=tuple(skipped),
         identified_count=identified_count,
+        identified_by_type=dict(identified_by_type),
+        annotated_sequence_count=len(annotate_ids),
     )

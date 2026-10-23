@@ -43,9 +43,13 @@ def test_annotation_visibility_keys_group_pfam() -> None:
     assert annotation_visibility_key(feats[2]) == "domain::Pfam"
     assert annotation_visibility_label("domain::Pfam") == "Pfam"
     keys = collect_annotation_visibility_keys(feats)
-    assert keys[:4] == ["LTR", "TIR", "ORF", "TSD"]
+    # Only types present on the features (not empty TIR/TSD/PBS placeholders).
+    assert keys == ["LTR", "ORF", "domain::Pfam"]
     assert keys.count("domain::Pfam") == 1
     assert "domain::Pfam: RVT_1" not in keys
+    assert "TIR" not in keys
+    assert "TSD" not in keys
+    assert "PBS" not in keys
 
 
 def test_filter_features_by_annotation_visibility() -> None:
@@ -72,10 +76,11 @@ def test_rail_nested_kind_checks(qapp: QApplication) -> None:
     qapp.processEvents()
     rail.set_overview_display_mode(True)
     assert rail.show_annotation_track.isHidden()
-    assert not rail.displayed_annotations_label.isHidden()
-    assert not rail._annotation_kinds_host.isHidden()
-    assert not rail.annotation_kinds_all_check.isHidden()
-    # All sits on its own row above the wrapping LTR / TIR / … flow.
+    # Empty until features are provided — no placeholder LTR/TIR/…
+    assert rail.displayed_annotations_label.isHidden()
+    assert rail._annotation_kinds_host.isHidden()
+    assert rail.annotation_kind_checks == {}
+    # All sits on its own row above the wrapping type flow.
     assert rail._annotation_kinds_flow.indexOf(rail.annotation_kinds_all_check) < 0
     assert rail.annotation_kinds_all_check.parentWidget() is rail._annotation_kinds_host
     assert rail.show_standard_boundaries.text() == "Show reference boundaries"
@@ -95,10 +100,6 @@ def test_rail_nested_kind_checks(qapp: QApplication) -> None:
     assert "project genome" not in tip
     assert "Define Genome" not in tip
     assert "Reading the plot" not in tip
-    assert "LTR" in rail.annotation_kind_checks
-    assert "TIR" in rail.annotation_kind_checks
-    assert "ORF" in rail.annotation_kind_checks
-    assert "TSD" in rail.annotation_kind_checks
 
     feats = [
         SequenceFeature(1, 10, "left", feature_type="LTR"),
@@ -107,21 +108,36 @@ def test_rail_nested_kind_checks(qapp: QApplication) -> None:
         SequenceFeature(90, 100, "tandem", feature_type="tandem repeat"),
     ]
     rail._hidden_annotation_kinds.clear()
-    rail._rebuild_annotation_kind_checks(
-        [
-            "LTR",
-            "TIR",
-            "ORF",
-            "TSD",
-            "tandem repeat",
-            "domain::Pfam",
-        ]
-    )
+    rail.set_available_annotation_kinds(feats)
+    assert not rail.displayed_annotations_label.isHidden()
+    assert not rail._annotation_kinds_host.isHidden()
+    assert list(rail.annotation_kind_checks) == [
+        "LTR",
+        "tandem repeat",
+        "domain::Pfam",
+    ]
+    assert "TIR" not in rail.annotation_kind_checks
+    assert "ORF" not in rail.annotation_kind_checks
+    assert "TSD" not in rail.annotation_kind_checks
+    assert "PBS" not in rail.annotation_kind_checks
     assert "domain::Pfam" in rail.annotation_kind_checks
     assert "domain::Pfam: RVT_1" not in rail.annotation_kind_checks
-    assert "tandem repeat" in rail.annotation_kind_checks
     assert rail.annotation_kind_checks["domain::Pfam"].text() == "Pfam"
     assert rail.annotation_kinds_all_check.isChecked()
+
+    # Displayed annotations sits below Split annotation by source in the Tracks
+    # section widget order.
+    tracks_layout = rail._tracks_section._body_layout
+    split_idx = -1
+    label_idx = -1
+    for i in range(tracks_layout.count()):
+        item = tracks_layout.itemAt(i)
+        w = item.widget() if item is not None else None
+        if w is rail.split_tracks_by_source:
+            split_idx = i
+        if w is rail.displayed_annotations_label:
+            label_idx = i
+    assert split_idx >= 0 and label_idx > split_idx
 
     rail.annotation_kind_checks["LTR"].setChecked(False)
     visible = rail.visible_annotation_kinds()
