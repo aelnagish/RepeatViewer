@@ -3,6 +3,16 @@
 RepeatViewer is a cross-platform desktop application for **inspecting, annotating, curating, and visualizing** 
 repetitive DNAs, especially transposable elements (TEs). It works on Linux, macOS, and Windows.
 
+<p align="center">
+  <a href="https://aelnagish.github.io/RepeatViewer/"><b>Website</b></a> ·
+  <a href="#installation"><b>Install</b></a> ·
+  <a href="docs/MANUAL.md"><b>User manual</b></a>
+</p>
+
+<p align="center">
+  <img src="docs/assets/shots/main-window.webp" width="900" alt="RepeatViewer main window with folders, files and an annotated overview of sugar beet retrotransposons">
+</p>
+
 ---
 
 **Main features**
