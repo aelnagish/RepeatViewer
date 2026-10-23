@@ -164,11 +164,14 @@ h3 { font-size: 21px; line-height: 1.25; letter-spacing: -.01em; margin: 0 0 8px
 /* Screenshot slot */
 .shot { margin: 0; }
 .shot-frame { position: relative; aspect-ratio: 16 / 10; border-radius: 14px; overflow: hidden; background: var(--sky-soft); border: 1px solid var(--rule); box-shadow: 0 30px 60px -44px rgba(20, 37, 64, .55); }
-.shot-frame img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; object-position: top left; z-index: 1; background: var(--surface); }
-.shot-empty { position: absolute; inset: 14px; border: 2px dashed var(--sky); border-radius: 10px; display: grid; place-content: center; text-align: center; gap: 6px; padding: 16px; color: var(--muted); font-size: 15px; }
-.shot-empty strong { color: var(--ink); font-size: 16px; }
-.shot-empty code { font-size: 12.5px; color: var(--brand); }
+.shot-frame { background: #fff; }
+.shot-frame img, .shot-frame video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; object-position: top left; }
 .shot figcaption { font-size: 14px; color: var(--muted); margin-top: 10px; }
+.shot-frame { cursor: zoom-in; }
+.zoom { border: 0; padding: 0; background: transparent; max-width: min(96vw, 1800px); max-height: 94vh; width: 100%; }
+.zoom::backdrop { background: rgba(8, 19, 35, .82); }
+.zoom img, .zoom video { width: 100%; height: auto; max-height: 90vh; object-fit: contain; display: block; border-radius: 10px; background: #fff; }
+.zoom button { position: absolute; top: 8px; right: 8px; font: 600 14px var(--font); color: #fff; background: rgba(8,19,35,.75); border: 1px solid rgba(255,255,255,.3); border-radius: 8px; padding: 6px 12px; cursor: pointer; }
 
 /* Pair blocks */
 .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 48px; padding: 48px 0 0; border-top: 1px solid var(--rule); }
@@ -318,10 +321,10 @@ h3 { font-size: 21px; line-height: 1.25; letter-spacing: -.01em; margin: 0 0 8px
       <li><strong>Pick up the output</strong><span>The result appears in the same folder, highlighted, and becomes the input for the next tool.</span></li>
     </ol>
     <figure class="shot">
-      <div class="shot-frame">
-        <img src="assets/shots/main-window.png" alt="RepeatViewer main window with the Folders, Files and Preview panels" onerror="this.remove()">
-        <div class="shot-empty"><strong>Screenshot slot</strong><span>Main window: Folders, Files and Preview panels with a FASTA open</span><code>docs/assets/shots/main-window.png</code></div>
+      <div class="shot-frame" style="aspect-ratio:1800/1021">
+        <img src="assets/shots/main-window.webp" alt="RepeatViewer main window: folders on the left, files at the top, and an overview of annotated sugar beet retrotransposons in the Preview" loading="lazy">
       </div>
+      <figcaption>Folders on the left, files at the top, Preview below. Here, annotated Ty3 retrotransposons from a sugar beet library.</figcaption>
     </figure>
   </div>
 </section>
@@ -340,35 +343,71 @@ h3 { font-size: 21px; line-height: 1.25; letter-spacing: -.01em; margin: 0 0 8px
         </ul>
       </div>
       <figure class="shot">
-        <div class="shot-frame">
-          <img src="assets/shots/annotation.png" alt="Annotation tab showing LTR, ORF and domain features along a TE sequence" onerror="this.remove()">
-          <div class="shot-empty"><strong>Screenshot slot</strong><span>Annotation tab with LTRs, ORFs and protein domains</span><code>docs/assets/shots/annotation.png</code></div>
+        <div class="shot-frame" style="aspect-ratio:1800/1020">
+          <img src="assets/shots/annotation.webp" alt="Annotation tab of a Ty1 copia element showing both LTRs, two ORFs and Pfam domains" loading="lazy">
         </div>
+        <figcaption>A Ty1/copia element with both LTRs, its ORFs and Pfam domains.</figcaption>
       </figure>
     </div>
 
     <div class="feature flip">
       <div class="feature-text">
-        <h2>Find the copies, then clean the alignment</h2>
-        <p>Search the genome for copies of a candidate, extend them past the current ends, align them and remove the rows that do not belong. The consensus rebuilds from what is left.</p>
+        <h2>Copy annotation to related sequences</h2>
+        <p>Curated one element by hand? Transfer its features to every related sequence. You set the identity and coverage cut-offs, and the matches are drawn as soon as they are found.</p>
         <ul>
-          <li>BLAST against a genome or a pan-genome list</li>
-          <li>Align with MAFFT or MUSCLE, then MSA Clean and MSA Extend</li>
-          <li>Consensus in one click, or with your own thresholds</li>
+          <li>Pick any annotated file as the source</li>
+          <li>Tune identity, coverage and strand</li>
+          <li>Keep, edit or delete what was transferred</li>
         </ul>
       </div>
       <figure class="shot">
-        <div class="shot-frame">
-          <img src="assets/shots/msa.png" alt="Multiple sequence alignment overview of TE copies with the consensus" onerror="this.remove()">
-          <div class="shot-empty"><strong>Screenshot slot</strong><span>MSA Overview of aligned copies with the consensus row</span><code>docs/assets/shots/msa.png</code></div>
+        <div class="shot-frame" style="aspect-ratio:1600/906">
+          <video poster="assets/shots/transfer.webp" autoplay muted loop playsinline preload="metadata" aria-label="Annotation transfer from one retrotransposon to another"><source src="assets/shots/transfer.mp4" type="video/mp4"><source src="assets/shots/transfer.webm" type="video/webm"></video>
         </div>
+        <figcaption>Features from one Retrofit element transferred to a relative.</figcaption>
       </figure>
     </div>
 
     <div class="feature">
       <div class="feature-text">
-        <h2>Dotplots you can click</h2>
-        <p>Every sequence has a dotplot tab. Compare one element with itself, or lay several side by side in a gallery to spot shared structure across a family.</p>
+        <h2>Find the copies, clean the alignment, in one run</h2>
+        <p>Save a chain of tools as a workflow and run it on any candidate. The built-in BEEA workflow runs BLAST, MSA Extend, MAFFT, MSA Clean, Consensus and TE-Aid in a row, and every intermediate file stays in the folder.</p>
+        <ul>
+          <li>BLAST against a genome or a pan-genome list</li>
+          <li>Align with MAFFT or MUSCLE, then clean and extend</li>
+          <li>Keep or drop each intermediate result</li>
+        </ul>
+      </div>
+      <figure class="shot">
+        <div class="shot-frame" style="aspect-ratio:1600/910">
+          <video poster="assets/shots/curate.webp" autoplay muted loop playsinline preload="metadata" aria-label="Running the Blast-Extract-Extend-Align workflow on one TE candidate"><source src="assets/shots/curate.mp4" type="video/mp4"><source src="assets/shots/curate.webm" type="video/webm"></video>
+        </div>
+        <figcaption>One click on a candidate, six tools later the TE-Aid report is open.</figcaption>
+      </figure>
+    </div>
+
+    <div class="feature flip">
+      <div class="feature-text">
+        <h2>Large alignments, with the annotation on top</h2>
+        <p>Scroll through alignments with tens of thousands of columns without opening another program. Annotation features and a coverage track sit on the alignment, so the real boundaries are easy to see.</p>
+        <ul>
+          <li>Color by nucleotide, conservation or divergence</li>
+          <li>Select a region and trim, clean or build a consensus from it</li>
+          <li>Coverage track above the rows</li>
+        </ul>
+      </div>
+      <figure class="shot">
+        <div class="shot-frame" style="aspect-ratio:1800/984">
+          <img src="assets/shots/msa.webp" alt="A 16 kb multiple sequence alignment of 84 copies with LTR features and a coverage track" loading="lazy">
+        </div>
+        <figcaption>A 16 kb alignment of 84 copies with the LTRs marked on every row.</figcaption>
+      </figure>
+    </div>
+
+    <div class="feature">
+      <div class="feature-text">
+        <h2>A dotplot for every sequence</h2>
+        <p>Every sequence has a dotplot tab. Open an alignment and get one dotplot per copy, side by side, to spot the truncated and rearranged ones at a glance.</p>
         <ul>
           <li>Built-in dotplot for single and multiple sequences</li>
           <li>Interactive Flexidot plots that jump to the matching annotation</li>
@@ -376,17 +415,35 @@ h3 { font-size: 21px; line-height: 1.25; letter-spacing: -.01em; margin: 0 0 8px
         </ul>
       </div>
       <figure class="shot">
-        <div class="shot-frame">
-          <img src="assets/shots/dotplot.png" alt="Dotplot gallery comparing several TE sequences" onerror="this.remove()">
-          <div class="shot-empty"><strong>Screenshot slot</strong><span>Dotplot tab or the multiple-sequence dotplot gallery</span><code>docs/assets/shots/dotplot.png</code></div>
+        <div class="shot-frame" style="aspect-ratio:1800/985">
+          <img src="assets/shots/dotplot.webp" alt="Gallery of self dotplots, one per sequence of an alignment" loading="lazy">
         </div>
+        <figcaption>Self dotplots of all 84 copies in the alignment above.</figcaption>
       </figure>
     </div>
 
     <div class="feature flip">
       <div class="feature-text">
+        <h2>Open almost anything in the Preview</h2>
+        <p>Alignments, PDFs, HTML reports, GFF files, images and plain text all open in the same panel. No more switching between an alignment viewer, a PDF reader, a browser and a text editor.</p>
+        <ul>
+          <li>FASTA, alignments and GFF annotation</li>
+          <li>PDF and image files</li>
+          <li>TE-Aid and other HTML reports</li>
+        </ul>
+      </div>
+      <figure class="shot">
+        <div class="shot-frame" style="aspect-ratio:1600/898">
+          <video poster="assets/shots/preview.webp" autoplay muted loop playsinline preload="metadata" aria-label="Clicking through an alignment, a PDF, a TE-Aid report and a GFF file in the Preview"><source src="assets/shots/preview.mp4" type="video/mp4"><source src="assets/shots/preview.webm" type="video/webm"></video>
+        </div>
+        <figcaption>An alignment PDF, a TE-Aid report and a GFF file, all in the Preview.</figcaption>
+      </figure>
+    </div>
+
+    <div class="feature">
+      <div class="feature-text">
         <h2>From one element to the whole genome</h2>
-        <p>When a library is ready, see where it sits in the genome and how old it is. Plots open in the Preview panel and are saved next to the library.</p>
+        <p>When a library is ready, see where it sits in the genome and how old it is. Turn TE types on and off, and save the figure as SVG or PDF.</p>
         <ul>
           <li>TE density along chromosomes, divergence landscapes and abundance</li>
           <li>Repeat Quantify with RepeatMasker or BLASTn</li>
@@ -394,10 +451,28 @@ h3 { font-size: 21px; line-height: 1.25; letter-spacing: -.01em; margin: 0 0 8px
         </ul>
       </div>
       <figure class="shot">
-        <div class="shot-frame">
-          <img src="assets/shots/genome-plots.png" alt="TE density and divergence plots" onerror="this.remove()">
-          <div class="shot-empty"><strong>Screenshot slot</strong><span>TE density map or divergence landscape</span><code>docs/assets/shots/genome-plots.png</code></div>
+        <div class="shot-frame" style="aspect-ratio:1600/792">
+          <video poster="assets/shots/genome.webp" autoplay muted loop playsinline preload="metadata" aria-label="Genome-wide TE density and divergence plots with the LTR class switched off"><source src="assets/shots/genome.mp4" type="video/mp4"><source src="assets/shots/genome.webm" type="video/webm"></video>
         </div>
+        <figcaption>TE density and divergence in sugar beet, with and without LTR retrotransposons.</figcaption>
+      </figure>
+    </div>
+
+    <div class="feature flip">
+      <div class="feature-text">
+        <h2>Your parameters, and a record of every run</h2>
+        <p>Every tool opens with its settings, each explained with a help button. Change them, save them as your defaults, or restore the originals. Every command RepeatViewer runs is written to a log you can open from Preferences.</p>
+        <ul>
+          <li>Parameters for BLAST, MAFFT, MUSCLE, FastGA and the rest</li>
+          <li>Help text next to each option</li>
+          <li>Full command lines in the log</li>
+        </ul>
+      </div>
+      <figure class="shot">
+        <div class="shot-frame" style="aspect-ratio:1600/908">
+          <video poster="assets/shots/params.webp" autoplay muted loop playsinline preload="metadata" aria-label="BLAST and MAFFT parameter dialogs"><source src="assets/shots/params.mp4" type="video/mp4"><source src="assets/shots/params.webm" type="video/webm"></video>
+        </div>
+        <figcaption>The BLAST and alignment dialogs.</figcaption>
       </figure>
     </div>
 
@@ -408,8 +483,8 @@ h3 { font-size: 21px; line-height: 1.25; letter-spacing: -.01em; margin: 0 0 8px
         <ul class="chips"><li>Pfam</li><li>Dfam</li><li>REXdb</li><li>Repbase</li><li>CDD</li><li>Your own FASTA</li></ul>
       </div>
       <div>
-        <h3>Chain tools into workflows</h3>
-        <p>Save a run of tools as a workflow and replay it on the next candidate. Wrap any command-line program as a tool, or write a plugin in Python for anything bigger.</p>
+        <h3>Add your own tools</h3>
+        <p>Wrap any command-line program as a tool with its own parameter dialog, or write a plugin in Python for anything bigger. Your tools can join workflows like the built-in ones.</p>
         <p><a href="https://github.com/qjiangzhao/RepeatViewer/blob/main/docs/PLUGINS.md">Read the plugin guide</a></p>
       </div>
     </div>
@@ -589,6 +664,8 @@ pip install -e .</pre></li>
 </section>
 </main>
 
+<dialog class="zoom" id="zoom" aria-label="Enlarged screenshot"><button type="button" id="zoom-close">Close</button><div id="zoom-body"></div></dialog>
+
 <footer class="site-foot">
   <div class="wrap">
     <span>RepeatViewer, Chair of Molecular Botany, RWTH Aachen University</span>
@@ -677,6 +754,44 @@ pip install -e .</pre></li>
     });
     pre.appendChild(btn);
   });
+
+  // Clips: honour reduced motion, and only play while on screen
+  var vids = Array.prototype.slice.call(document.querySelectorAll(".shot video"));
+  var still = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  vids.forEach(function (v) {
+    if (still) { v.removeAttribute("autoplay"); v.pause(); v.controls = true; }
+  });
+  if (!still && "IntersectionObserver" in window) {
+    var io = new IntersectionObserver(function (entries) {
+      entries.forEach(function (e) {
+        if (e.isIntersecting) { var p = e.target.play(); if (p && p.catch) p.catch(function () {}); }
+        else e.target.pause();
+      });
+    }, { threshold: 0.25 });
+    vids.forEach(function (v) { io.observe(v); });
+  }
+
+  // Click a screenshot or clip to see it full size
+  var zoom = document.getElementById("zoom"), zbody = document.getElementById("zoom-body");
+  if (zoom && zoom.showModal) {
+    document.querySelectorAll(".shot-frame").forEach(function (f) {
+      f.tabIndex = 0;
+      f.setAttribute("role", "button");
+      f.setAttribute("aria-label", "Enlarge");
+      function open() {
+        var m = f.querySelector("img, video").cloneNode(true);
+        m.removeAttribute("loading");
+        if (m.tagName === "VIDEO") { m.controls = true; m.autoplay = !still; m.muted = true; }
+        zbody.innerHTML = ""; zbody.appendChild(m); zoom.showModal();
+        if (m.tagName === "VIDEO" && !still) m.play().catch(function () {});
+      }
+      f.addEventListener("click", open);
+      f.addEventListener("keydown", function (e) { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } });
+    });
+    document.getElementById("zoom-close").addEventListener("click", function () { zoom.close(); });
+    zoom.addEventListener("click", function (e) { if (e.target === zoom) zoom.close(); });
+    zoom.addEventListener("close", function () { zbody.innerHTML = ""; });
+  }
 
   // Install tabs
   var tabs = Array.prototype.slice.call(document.querySelectorAll('[role="tab"]'));
