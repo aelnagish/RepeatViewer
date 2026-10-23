@@ -120,19 +120,16 @@ p code, li code, dd code { background: var(--sky-soft); padding: .1em .35em; bor
 .legend i.tick { width: 3px; height: 12px; border-radius: 1px; }
 .axis text { font-family: var(--mono); font-size: 10px; fill: var(--muted); }
 .axis line, .axis path, .axis rect { stroke: var(--rule); }
-.dp-main { stroke: var(--plot-dot); stroke-width: 1.6; stroke-linecap: round; }
-.dp-hit { stroke: var(--plot-dot); stroke-width: 1.5; stroke-linecap: round; }
-.dp-rev { stroke: var(--tsd); stroke-width: 1.5; stroke-linecap: round; }
-.rail text { font-family: var(--font); font-size: 9px; font-weight: 700; fill: #fff; }
+.dp-diag { stroke-width: 2.2; stroke-linecap: round; }
+.dp-off { stroke-width: 2; stroke-linecap: round; }
+.rail text { font-family: var(--font); font-size: 9.5px; font-weight: 700; fill: #fff; }
 .rail .bb { stroke: var(--muted); stroke-width: 1; }
 
 @media (prefers-reduced-motion: no-preference) {
-  .dp-main { stroke-dasharray: 1; stroke-dashoffset: 1; animation: draw 1.4s .2s cubic-bezier(.6,.1,.3,1) forwards; }
-  .dp-late { opacity: 0; animation: show .5s forwards; }
-  .dp-late.l1 { animation-delay: 1.5s; }
-  .dp-late.l2 { animation-delay: 1.9s; }
-  @keyframes draw { to { stroke-dashoffset: 0; } }
-  @keyframes show { to { opacity: 1; } }
+  .dp-draw { stroke-dasharray: 1; stroke-dashoffset: 1; animation-name: draw; animation-timing-function: linear; animation-fill-mode: both; }
+  .dp-pop { animation-name: pop; animation-timing-function: cubic-bezier(.3,1.4,.6,1); animation-fill-mode: both; transform-box: fill-box; transform-origin: left center; }
+  @keyframes draw { from { stroke-dashoffset: 1; } to { stroke-dashoffset: 0; } }
+  @keyframes pop { from { opacity: 0; transform: scaleX(.2); } to { opacity: 1; transform: none; } }
 }
 
 /* Sections */
@@ -282,131 +279,136 @@ h3 { font-size: 21px; line-height: 1.25; letter-spacing: -.01em; margin: 0 0 8px
     </div>
 
     <figure class="plot-card" style="margin:0">
-      <svg id="dotplot" viewBox="0 0 408 388" role="img" aria-labelledby="dp-title dp-desc">
+      <svg id="dotplot" viewBox="0 0 384 394" role="img" aria-labelledby="dp-title dp-desc">
 <title id="dp-title">Self dotplot of a modeled Ty1/copia LTR retrotransposon</title>
-<desc id="dp-desc">Exact 14-mer matches of a 5,201 bp element against itself. Besides the main diagonal, two short parallel lines in the corners show that the two LTRs are near-identical, and a block of stripes beside the diagonal shows a tandem array. Annotation tracks run along both axes.</desc>
+<desc id="dp-desc">Exact 14-mer matches of a 5,201 bp element against itself, coloured by the feature each match falls in. The diagonal is the element against itself; the lines in the corners show that the two LTRs are near-identical; the stripes beside the diagonal are a tandem array. The annotation track runs under the plot.</desc>
 <g class="axis">
-<rect x="44" y="24" width="330" height="330" fill="none"/>
-<line x1="44.0" y1="24" x2="44.0" y2="20"/><line x1="44" y1="24.0" x2="40" y2="24.0"/>
-<text x="44.0" y="16" text-anchor="middle">0</text>
-<line x1="107.4" y1="24" x2="107.4" y2="20"/><line x1="44" y1="87.4" x2="40" y2="87.4"/>
-<text x="107.4" y="16" text-anchor="middle">1 kb</text>
-<text x="37" y="90.4" text-anchor="end">1</text>
-<line x1="170.9" y1="24" x2="170.9" y2="20"/><line x1="44" y1="150.9" x2="40" y2="150.9"/>
-<text x="170.9" y="16" text-anchor="middle">2 kb</text>
-<text x="37" y="153.9" text-anchor="end">2</text>
-<line x1="234.3" y1="24" x2="234.3" y2="20"/><line x1="44" y1="214.3" x2="40" y2="214.3"/>
-<text x="234.3" y="16" text-anchor="middle">3 kb</text>
-<text x="37" y="217.3" text-anchor="end">3</text>
-<line x1="297.8" y1="24" x2="297.8" y2="20"/><line x1="44" y1="277.8" x2="40" y2="277.8"/>
-<text x="297.8" y="16" text-anchor="middle">4 kb</text>
-<text x="37" y="280.8" text-anchor="end">4</text>
-<line x1="361.2" y1="24" x2="361.2" y2="20"/><line x1="44" y1="341.2" x2="40" y2="341.2"/>
-<text x="361.2" y="16" text-anchor="middle">5 kb</text>
-<text x="37" y="344.2" text-anchor="end">5</text>
+<rect x="30" y="24" width="340" height="340" fill="none"/>
+<line x1="30.0" y1="24" x2="30.0" y2="20"/><line x1="30" y1="24.0" x2="26" y2="24.0"/>
+<text x="30.0" y="16" text-anchor="middle">0</text>
+<line x1="95.4" y1="24" x2="95.4" y2="20"/><line x1="30" y1="89.4" x2="26" y2="89.4"/>
+<text x="95.4" y="16" text-anchor="middle">1 kb</text>
+<text x="23" y="92.4" text-anchor="end">1</text>
+<line x1="160.7" y1="24" x2="160.7" y2="20"/><line x1="30" y1="154.7" x2="26" y2="154.7"/>
+<text x="160.7" y="16" text-anchor="middle">2 kb</text>
+<text x="23" y="157.7" text-anchor="end">2</text>
+<line x1="226.1" y1="24" x2="226.1" y2="20"/><line x1="30" y1="220.1" x2="26" y2="220.1"/>
+<text x="226.1" y="16" text-anchor="middle">3 kb</text>
+<text x="23" y="223.1" text-anchor="end">3</text>
+<line x1="291.5" y1="24" x2="291.5" y2="20"/><line x1="30" y1="285.5" x2="26" y2="285.5"/>
+<text x="291.5" y="16" text-anchor="middle">4 kb</text>
+<text x="23" y="288.5" text-anchor="end">4</text>
+<line x1="356.9" y1="24" x2="356.9" y2="20"/><line x1="30" y1="350.9" x2="26" y2="350.9"/>
+<text x="356.9" y="16" text-anchor="middle">5 kb</text>
+<text x="23" y="353.9" text-anchor="end">5</text>
 </g>
-<line class="dp-main" pathLength="1" x1="44" y1="24" x2="374" y2="354"/>
-<g class="dp-late l1">
-<line class="dp-hit" x1="41.5" y1="319.8" x2="43.4" y2="321.7"/>
-<line class="dp-hit" x1="44.3" y1="322.6" x2="45.1" y2="323.4"/>
-<line class="dp-hit" x1="45.2" y1="323.5" x2="48.5" y2="326.8"/>
-<line class="dp-hit" x1="49.1" y1="327.7" x2="50.5" y2="329.0"/>
-<line class="dp-hit" x1="50.7" y1="329.3" x2="54.4" y2="333.0"/>
-<line class="dp-hit" x1="54.5" y1="333.1" x2="56.7" y2="335.2"/>
-<line class="dp-hit" x1="57.5" y1="336.1" x2="58.9" y2="337.5"/>
-<line class="dp-hit" x1="59.4" y1="337.9" x2="61.9" y2="340.5"/>
-<line class="dp-hit" x1="63.7" y1="342.2" x2="66.8" y2="345.4"/>
-<line class="dp-hit" x1="66.9" y1="345.5" x2="68.4" y2="346.9"/>
-<line class="dp-hit" x1="69.3" y1="347.7" x2="73.3" y2="351.7"/>
-<line class="dp-hit" x1="307.1" y1="294.2" x2="308.5" y2="295.5"/>
-<line class="dp-hit" x1="307.1" y1="299.3" x2="310.3" y2="302.4"/>
-<line class="dp-hit" x1="307.1" y1="304.3" x2="308.0" y2="305.2"/>
-<line class="dp-hit" x1="307.1" y1="309.4" x2="311.6" y2="313.9"/>
-<line class="dp-hit" x1="308.1" y1="305.3" x2="311.8" y2="309.0"/>
-<line class="dp-hit" x1="308.5" y1="295.6" x2="310.1" y2="297.2"/>
-<line class="dp-hit" x1="310.2" y1="297.2" x2="313.5" y2="300.6"/>
-<line class="dp-hit" x1="310.4" y1="302.5" x2="311.2" y2="303.4"/>
-<line class="dp-hit" x1="312.2" y1="289.1" x2="313.5" y2="290.5"/>
-<line class="dp-hit" x1="312.2" y1="304.3" x2="313.1" y2="305.2"/>
-<line class="dp-hit" x1="312.2" y1="309.4" x2="313.5" y2="310.8"/>
-<line class="dp-hit" x1="313.6" y1="290.5" x2="315.2" y2="292.1"/>
-<line class="dp-hit" x1="313.6" y1="300.7" x2="315.2" y2="302.3"/>
-<line class="dp-hit" x1="313.6" y1="305.7" x2="315.2" y2="307.3"/>
-<line class="dp-hit" x1="313.6" y1="310.8" x2="315.2" y2="312.4"/>
-<line class="dp-hit" x1="315.2" y1="292.2" x2="318.6" y2="295.5"/>
-<line class="dp-hit" x1="315.2" y1="307.4" x2="316.8" y2="309.0"/>
-<line class="dp-hit" x1="315.2" y1="312.5" x2="316.6" y2="313.9"/>
-<line class="dp-hit" x1="315.4" y1="302.5" x2="316.3" y2="303.4"/>
-<line class="dp-hit" x1="317.3" y1="289.1" x2="320.4" y2="292.3"/>
-<line class="dp-hit" x1="317.3" y1="304.3" x2="318.2" y2="305.2"/>
-<line class="dp-hit" x1="317.3" y1="309.4" x2="320.4" y2="312.6"/>
-<line class="dp-hit" x1="318.2" y1="305.3" x2="320.4" y2="307.5"/>
-<line class="dp-hit" x1="318.7" y1="295.6" x2="320.3" y2="297.2"/>
-<line class="dp-hit" x1="320.5" y1="292.4" x2="321.4" y2="293.2"/>
-<line class="dp-hit" x1="320.5" y1="297.4" x2="321.4" y2="298.3"/>
-<line class="dp-hit" x1="320.5" y1="307.6" x2="321.4" y2="308.5"/>
-<line class="dp-hit" x1="320.5" y1="312.7" x2="321.4" y2="313.5"/>
-<line class="dp-hit" x1="322.3" y1="289.1" x2="323.2" y2="290.0"/>
-<line class="dp-hit" x1="322.3" y1="294.2" x2="323.2" y2="295.1"/>
-<line class="dp-hit" x1="322.3" y1="299.3" x2="323.2" y2="300.2"/>
-<line class="dp-hit" x1="322.3" y1="309.4" x2="323.2" y2="310.3"/>
-<line class="dp-hit" x1="323.3" y1="290.1" x2="327.0" y2="293.8"/>
-<line class="dp-hit" x1="323.3" y1="300.2" x2="325.5" y2="302.4"/>
-<line class="dp-hit" x1="323.3" y1="310.4" x2="326.8" y2="313.9"/>
-<line class="dp-hit" x1="323.7" y1="295.6" x2="325.3" y2="297.2"/>
-<line class="dp-hit" x1="325.4" y1="297.2" x2="327.0" y2="298.8"/>
-<line class="dp-hit" x1="325.6" y1="302.5" x2="326.5" y2="303.4"/>
-<line class="dp-hit" x1="327.4" y1="289.1" x2="331.9" y2="293.6"/>
-<line class="dp-hit" x1="327.4" y1="294.2" x2="328.8" y2="295.5"/>
-<line class="dp-hit" x1="327.4" y1="299.3" x2="330.6" y2="302.4"/>
-<line class="dp-hit" x1="327.4" y1="304.3" x2="328.3" y2="305.2"/>
-<line class="dp-hit" x1="328.4" y1="305.3" x2="331.9" y2="308.8"/>
-<line class="dp-hit" x1="328.8" y1="295.6" x2="330.4" y2="297.2"/>
-<line class="dp-hit" x1="330.5" y1="297.2" x2="331.9" y2="298.6"/>
-<line class="dp-hit" x1="330.7" y1="302.5" x2="331.5" y2="303.4"/>
-<line class="dp-hit" x1="337.8" y1="23.5" x2="339.7" y2="25.4"/>
-<line class="dp-hit" x1="340.6" y1="26.3" x2="341.4" y2="27.1"/>
-<line class="dp-hit" x1="341.5" y1="27.2" x2="344.8" y2="30.5"/>
-<line class="dp-hit" x1="345.7" y1="31.1" x2="347.0" y2="32.5"/>
-<line class="dp-hit" x1="347.3" y1="32.7" x2="351.0" y2="36.4"/>
-<line class="dp-hit" x1="351.1" y1="36.5" x2="353.2" y2="38.7"/>
-<line class="dp-hit" x1="354.1" y1="39.5" x2="355.5" y2="40.9"/>
-<line class="dp-hit" x1="355.9" y1="41.4" x2="358.5" y2="43.9"/>
-<line class="dp-hit" x1="360.2" y1="45.7" x2="363.4" y2="48.8"/>
-<line class="dp-hit" x1="363.5" y1="48.9" x2="364.9" y2="50.4"/>
-<line class="dp-hit" x1="365.7" y1="51.3" x2="369.7" y2="55.3"/>
-</g>
-<g class="rail dp-late l2">
-<line class="bb" x1="44" y1="371.0" x2="374" y2="371.0"/>
-<line class="bb" x1="391.0" y1="24" x2="391.0" y2="354"/>
-<rect x="44.0" y="361" width="1.6" height="20" fill="var(--muted)"/>
-<rect x="381" y="24.0" width="20" height="1.6" fill="var(--muted)"/>
-<polygon points="44.3,363 71.3,363 77.3,371.0 71.3,379 44.3,379" fill="var(--ltr)"/><text x="57.8" y="374.6" text-anchor="middle">LTR</text>
-<polygon points="383,24.3 399,24.3 399,51.3 391.0,57.3 383,51.3" fill="var(--ltr)"/>
-<rect x="77.7" y="361" width="1.6" height="20" fill="var(--tsd)"/>
-<rect x="381" y="57.7" width="20" height="1.6" fill="var(--tsd)"/>
-<polygon points="88.4,363 120.4,363 126.4,371.0 120.4,379 88.4,379" fill="var(--gag)"/><text x="104.4" y="374.6" text-anchor="middle">GAG</text>
-<polygon points="383,68.4 399,68.4 399,100.4 391.0,106.4 383,100.4" fill="var(--gag)"/>
-<polygon points="129.0,363 140.1,363 146.1,371.0 140.1,379 129.0,379" fill="var(--pol-1)"/><text x="134.5" y="374.6" text-anchor="middle">AP</text>
-<polygon points="383,109.0 399,109.0 399,120.1 391.0,126.1 383,120.1" fill="var(--pol-1)"/>
-<polygon points="153.1,363 200.4,363 206.4,371.0 200.4,379 153.1,379" fill="var(--pol-2)"/><text x="176.7" y="374.6" text-anchor="middle">INT</text>
-<polygon points="383,133.1 399,133.1 399,180.4 391.0,186.4 383,180.4" fill="var(--pol-2)"/>
-<polygon points="222.9,363 268.9,363 274.9,371.0 268.9,379 222.9,379" fill="var(--pol-3)"/><text x="245.9" y="374.6" text-anchor="middle">RT</text>
-<polygon points="383,202.9 399,202.9 399,248.9 391.0,254.9 383,248.9" fill="var(--pol-3)"/>
-<polygon points="276.8,363 297.4,363 303.4,371.0 297.4,379 276.8,379" fill="var(--pol-4)"/><text x="287.1" y="374.6" text-anchor="middle">RH</text>
-<polygon points="383,256.8 399,256.8 399,277.4 391.0,283.4 383,277.4" fill="var(--pol-4)"/>
-<rect x="310.4" y="365" width="25.4" height="12" rx="2" fill="var(--tandem)"/>
-<rect x="385" y="290.4" width="12" height="25.4" rx="2" fill="var(--tandem)"/>
-<rect x="339.6" y="361" width="1.6" height="20" fill="var(--tsd)"/>
-<rect x="381" y="319.6" width="20" height="1.6" fill="var(--tsd)"/>
-<polygon points="340.6,363 367.7,363 373.7,371.0 367.7,379 340.6,379" fill="var(--ltr)"/><text x="354.2" y="374.6" text-anchor="middle">LTR</text>
-<polygon points="383,320.6 399,320.6 399,347.7 391.0,353.7 383,347.7" fill="var(--ltr)"/>
-<rect x="373.7" y="361" width="1.6" height="20" fill="var(--muted)"/>
-<rect x="381" y="353.7" width="20" height="1.6" fill="var(--muted)"/>
+<line class="dp-draw dp-diag" pathLength="1" x1="30.0" y1="24.0" x2="30.3" y2="24.3" stroke="var(--plot-dot)" style="animation-delay:0.30s;animation-duration:0.05s"/>
+<line class="dp-draw dp-diag" pathLength="1" x1="30.3" y1="24.3" x2="64.3" y2="58.3" stroke="var(--ltr)" style="animation-delay:0.30s;animation-duration:0.26s"/>
+<line class="dp-draw dp-diag" pathLength="1" x1="64.3" y1="58.3" x2="64.7" y2="58.7" stroke="var(--plot-dot)" style="animation-delay:0.56s;animation-duration:0.05s"/>
+<line class="dp-draw dp-diag" pathLength="1" x1="64.7" y1="58.7" x2="65.9" y2="59.9" stroke="var(--plot-dot)" style="animation-delay:0.57s;animation-duration:0.05s"/>
+<line class="dp-draw dp-diag" pathLength="1" x1="65.9" y1="59.9" x2="75.7" y2="69.7" stroke="var(--plot-dot)" style="animation-delay:0.57s;animation-duration:0.07s"/>
+<line class="dp-draw dp-diag" pathLength="1" x1="75.7" y1="69.7" x2="114.9" y2="108.9" stroke="var(--gag)" style="animation-delay:0.65s;animation-duration:0.30s"/>
+<line class="dp-draw dp-diag" pathLength="1" x1="114.9" y1="108.9" x2="117.5" y2="111.5" stroke="var(--plot-dot)" style="animation-delay:0.95s;animation-duration:0.05s"/>
+<line class="dp-draw dp-diag" pathLength="1" x1="117.5" y1="111.5" x2="135.2" y2="129.2" stroke="var(--pol-1)" style="animation-delay:0.97s;animation-duration:0.13s"/>
+<line class="dp-draw dp-diag" pathLength="1" x1="135.2" y1="129.2" x2="142.4" y2="136.4" stroke="var(--plot-dot)" style="animation-delay:1.10s;animation-duration:0.05s"/>
+<line class="dp-draw dp-diag" pathLength="1" x1="142.4" y1="136.4" x2="197.3" y2="191.3" stroke="var(--pol-2)" style="animation-delay:1.16s;animation-duration:0.42s"/>
+<line class="dp-draw dp-diag" pathLength="1" x1="197.3" y1="191.3" x2="214.3" y2="208.3" stroke="var(--plot-dot)" style="animation-delay:1.58s;animation-duration:0.13s"/>
+<line class="dp-draw dp-diag" pathLength="1" x1="214.3" y1="208.3" x2="267.9" y2="261.9" stroke="var(--pol-3)" style="animation-delay:1.71s;animation-duration:0.41s"/>
+<line class="dp-draw dp-diag" pathLength="1" x1="267.9" y1="261.9" x2="269.9" y2="263.9" stroke="var(--plot-dot)" style="animation-delay:2.12s;animation-duration:0.05s"/>
+<line class="dp-draw dp-diag" pathLength="1" x1="269.9" y1="263.9" x2="297.3" y2="291.3" stroke="var(--pol-4)" style="animation-delay:2.13s;animation-duration:0.21s"/>
+<line class="dp-draw dp-diag" pathLength="1" x1="297.3" y1="291.3" x2="304.5" y2="298.5" stroke="var(--plot-dot)" style="animation-delay:2.34s;animation-duration:0.05s"/>
+<line class="dp-draw dp-diag" pathLength="1" x1="304.5" y1="298.5" x2="330.6" y2="324.6" stroke="var(--tandem)" style="animation-delay:2.40s;animation-duration:0.20s"/>
+<line class="dp-draw dp-diag" pathLength="1" x1="330.6" y1="324.6" x2="334.6" y2="328.6" stroke="var(--plot-dot)" style="animation-delay:2.60s;animation-duration:0.05s"/>
+<line class="dp-draw dp-diag" pathLength="1" x1="334.6" y1="328.6" x2="335.4" y2="329.4" stroke="var(--plot-dot)" style="animation-delay:2.63s;animation-duration:0.05s"/>
+<line class="dp-draw dp-diag" pathLength="1" x1="335.4" y1="329.4" x2="335.6" y2="329.6" stroke="var(--plot-dot)" style="animation-delay:2.64s;animation-duration:0.05s"/>
+<line class="dp-draw dp-diag" pathLength="1" x1="335.6" y1="329.6" x2="369.7" y2="363.7" stroke="var(--ltr)" style="animation-delay:2.64s;animation-duration:0.26s"/>
+<line class="dp-draw dp-diag" pathLength="1" x1="369.7" y1="363.7" x2="370.0" y2="364.0" stroke="var(--plot-dot)" style="animation-delay:2.90s;animation-duration:0.05s"/>
+<line class="dp-draw dp-off" pathLength="1" x1="31.5" y1="330.8" x2="33.5" y2="332.8" stroke="var(--ltr)" style="animation-delay:2.65s;animation-duration:0.05s"/>
+<line class="dp-draw dp-off" pathLength="1" x1="34.4" y1="333.7" x2="35.3" y2="334.6" stroke="var(--ltr)" style="animation-delay:2.67s;animation-duration:0.05s"/>
+<line class="dp-draw dp-off" pathLength="1" x1="35.4" y1="334.6" x2="38.8" y2="338.0" stroke="var(--ltr)" style="animation-delay:2.68s;animation-duration:0.05s"/>
+<line class="dp-draw dp-off" pathLength="1" x1="39.4" y1="339.0" x2="40.8" y2="340.3" stroke="var(--ltr)" style="animation-delay:2.71s;animation-duration:0.05s"/>
+<line class="dp-draw dp-off" pathLength="1" x1="41.0" y1="340.6" x2="44.8" y2="344.4" stroke="var(--ltr)" style="animation-delay:2.72s;animation-duration:0.05s"/>
+<line class="dp-draw dp-off" pathLength="1" x1="45.0" y1="344.5" x2="47.2" y2="346.7" stroke="var(--ltr)" style="animation-delay:2.75s;animation-duration:0.05s"/>
+<line class="dp-draw dp-off" pathLength="1" x1="48.0" y1="347.6" x2="49.5" y2="349.0" stroke="var(--ltr)" style="animation-delay:2.77s;animation-duration:0.05s"/>
+<line class="dp-draw dp-off" pathLength="1" x1="49.9" y1="349.5" x2="52.6" y2="352.1" stroke="var(--ltr)" style="animation-delay:2.79s;animation-duration:0.05s"/>
+<line class="dp-draw dp-off" pathLength="1" x1="54.4" y1="353.9" x2="57.7" y2="357.2" stroke="var(--ltr)" style="animation-delay:2.82s;animation-duration:0.05s"/>
+<line class="dp-draw dp-off" pathLength="1" x1="57.7" y1="357.3" x2="59.2" y2="358.8" stroke="var(--ltr)" style="animation-delay:2.85s;animation-duration:0.05s"/>
+<line class="dp-draw dp-off" pathLength="1" x1="60.2" y1="359.6" x2="64.3" y2="363.7" stroke="var(--ltr)" style="animation-delay:2.87s;animation-duration:0.05s"/>
+<line class="dp-draw dp-off" pathLength="1" x1="305.2" y1="304.4" x2="306.6" y2="305.8" stroke="var(--tandem)" style="animation-delay:2.44s;animation-duration:0.05s"/>
+<line class="dp-draw dp-off" pathLength="1" x1="305.2" y1="309.7" x2="308.5" y2="312.9" stroke="var(--tandem)" style="animation-delay:2.48s;animation-duration:0.05s"/>
+<line class="dp-draw dp-off" pathLength="1" x1="305.2" y1="314.9" x2="306.1" y2="315.8" stroke="var(--tandem)" style="animation-delay:2.52s;animation-duration:0.05s"/>
+<line class="dp-draw dp-off" pathLength="1" x1="305.2" y1="320.1" x2="309.8" y2="324.7" stroke="var(--tandem)" style="animation-delay:2.56s;animation-duration:0.05s"/>
+<line class="dp-draw dp-off" pathLength="1" x1="306.2" y1="315.9" x2="310.0" y2="319.7" stroke="var(--tandem)" style="animation-delay:2.53s;animation-duration:0.05s"/>
+<line class="dp-draw dp-off" pathLength="1" x1="306.7" y1="305.9" x2="308.3" y2="307.5" stroke="var(--tandem)" style="animation-delay:2.46s;animation-duration:0.05s"/>
+<line class="dp-draw dp-off" pathLength="1" x1="308.4" y1="307.6" x2="311.8" y2="311.0" stroke="var(--tandem)" style="animation-delay:2.47s;animation-duration:0.05s"/>
+<line class="dp-draw dp-off" pathLength="1" x1="308.6" y1="313.0" x2="309.5" y2="313.9" stroke="var(--tandem)" style="animation-delay:2.51s;animation-duration:0.05s"/>
+<line class="dp-draw dp-off" pathLength="1" x1="310.4" y1="299.2" x2="311.8" y2="300.6" stroke="var(--tandem)" style="animation-delay:2.44s;animation-duration:0.05s"/>
+<line class="dp-draw dp-off" pathLength="1" x1="310.4" y1="314.9" x2="311.4" y2="315.8" stroke="var(--tandem)" style="animation-delay:2.52s;animation-duration:0.05s"/>
+<line class="dp-draw dp-off" pathLength="1" x1="310.4" y1="320.1" x2="311.8" y2="321.5" stroke="var(--tandem)" style="animation-delay:2.56s;animation-duration:0.05s"/>
+<line class="dp-draw dp-off" pathLength="1" x1="311.9" y1="300.7" x2="313.5" y2="302.3" stroke="var(--tandem)" style="animation-delay:2.46s;animation-duration:0.05s"/>
+<line class="dp-draw dp-off" pathLength="1" x1="311.9" y1="311.1" x2="313.5" y2="312.7" stroke="var(--tandem)" style="animation-delay:2.50s;animation-duration:0.05s"/>
+<line class="dp-draw dp-off" pathLength="1" x1="311.9" y1="316.3" x2="313.5" y2="318.0" stroke="var(--tandem)" style="animation-delay:2.54s;animation-duration:0.05s"/>
+<line class="dp-draw dp-off" pathLength="1" x1="311.9" y1="321.6" x2="313.5" y2="323.2" stroke="var(--tandem)" style="animation-delay:2.58s;animation-duration:0.05s"/>
+<line class="dp-draw dp-off" pathLength="1" x1="313.6" y1="302.4" x2="317.0" y2="305.8" stroke="var(--tandem)" style="animation-delay:2.47s;animation-duration:0.05s"/>
+<line class="dp-draw dp-off" pathLength="1" x1="313.6" y1="318.0" x2="315.2" y2="319.7" stroke="var(--tandem)" style="animation-delay:2.55s;animation-duration:0.05s"/>
+<line class="dp-draw dp-off" pathLength="1" x1="313.6" y1="323.3" x2="315.0" y2="324.7" stroke="var(--tandem)" style="animation-delay:2.59s;animation-duration:0.05s"/>
+<line class="dp-draw dp-off" pathLength="1" x1="313.8" y1="313.0" x2="314.7" y2="313.9" stroke="var(--tandem)" style="animation-delay:2.51s;animation-duration:0.05s"/>
+<line class="dp-draw dp-off" pathLength="1" x1="315.7" y1="299.2" x2="318.9" y2="302.5" stroke="var(--tandem)" style="animation-delay:2.48s;animation-duration:0.05s"/>
+<line class="dp-draw dp-off" pathLength="1" x1="315.7" y1="314.9" x2="316.6" y2="315.8" stroke="var(--tandem)" style="animation-delay:2.52s;animation-duration:0.05s"/>
+<line class="dp-draw dp-off" pathLength="1" x1="315.7" y1="320.1" x2="318.9" y2="323.4" stroke="var(--tandem)" style="animation-delay:2.56s;animation-duration:0.05s"/>
+<line class="dp-draw dp-off" pathLength="1" x1="316.7" y1="315.9" x2="318.9" y2="318.2" stroke="var(--tandem)" style="animation-delay:2.53s;animation-duration:0.05s"/>
+<line class="dp-draw dp-off" pathLength="1" x1="317.1" y1="305.9" x2="318.7" y2="307.5" stroke="var(--tandem)" style="animation-delay:2.50s;animation-duration:0.05s"/>
+<line class="dp-draw dp-off" pathLength="1" x1="319.0" y1="302.6" x2="319.9" y2="303.5" stroke="var(--tandem)" style="animation-delay:2.51s;animation-duration:0.05s"/>
+<line class="dp-draw dp-off" pathLength="1" x1="319.0" y1="307.8" x2="319.9" y2="308.7" stroke="var(--tandem)" style="animation-delay:2.51s;animation-duration:0.05s"/>
+<line class="dp-draw dp-off" pathLength="1" x1="319.0" y1="318.2" x2="319.9" y2="319.2" stroke="var(--tandem)" style="animation-delay:2.55s;animation-duration:0.05s"/>
+<line class="dp-draw dp-off" pathLength="1" x1="319.0" y1="323.5" x2="319.9" y2="324.4" stroke="var(--tandem)" style="animation-delay:2.59s;animation-duration:0.05s"/>
+<line class="dp-draw dp-off" pathLength="1" x1="320.9" y1="299.2" x2="321.8" y2="300.1" stroke="var(--tandem)" style="animation-delay:2.52s;animation-duration:0.05s"/>
+<line class="dp-draw dp-off" pathLength="1" x1="320.9" y1="304.4" x2="321.8" y2="305.4" stroke="var(--tandem)" style="animation-delay:2.52s;animation-duration:0.05s"/>
+<line class="dp-draw dp-off" pathLength="1" x1="320.9" y1="309.7" x2="321.8" y2="310.6" stroke="var(--tandem)" style="animation-delay:2.52s;animation-duration:0.05s"/>
+<line class="dp-draw dp-off" pathLength="1" x1="320.9" y1="320.1" x2="321.8" y2="321.1" stroke="var(--tandem)" style="animation-delay:2.56s;animation-duration:0.05s"/>
+<line class="dp-draw dp-off" pathLength="1" x1="321.9" y1="300.2" x2="325.7" y2="304.0" stroke="var(--tandem)" style="animation-delay:2.53s;animation-duration:0.05s"/>
+<line class="dp-draw dp-off" pathLength="1" x1="321.9" y1="310.7" x2="324.2" y2="312.9" stroke="var(--tandem)" style="animation-delay:2.53s;animation-duration:0.05s"/>
+<line class="dp-draw dp-off" pathLength="1" x1="321.9" y1="321.1" x2="325.5" y2="324.7" stroke="var(--tandem)" style="animation-delay:2.57s;animation-duration:0.05s"/>
+<line class="dp-draw dp-off" pathLength="1" x1="322.3" y1="305.9" x2="324.0" y2="307.5" stroke="var(--tandem)" style="animation-delay:2.54s;animation-duration:0.05s"/>
+<line class="dp-draw dp-off" pathLength="1" x1="324.0" y1="307.6" x2="325.7" y2="309.2" stroke="var(--tandem)" style="animation-delay:2.55s;animation-duration:0.05s"/>
+<line class="dp-draw dp-off" pathLength="1" x1="324.2" y1="313.0" x2="325.2" y2="313.9" stroke="var(--tandem)" style="animation-delay:2.55s;animation-duration:0.05s"/>
+<line class="dp-draw dp-off" pathLength="1" x1="326.1" y1="299.2" x2="330.7" y2="303.8" stroke="var(--tandem)" style="animation-delay:2.56s;animation-duration:0.05s"/>
+<line class="dp-draw dp-off" pathLength="1" x1="326.1" y1="304.4" x2="327.5" y2="305.8" stroke="var(--tandem)" style="animation-delay:2.56s;animation-duration:0.05s"/>
+<line class="dp-draw dp-off" pathLength="1" x1="326.1" y1="309.7" x2="329.4" y2="312.9" stroke="var(--tandem)" style="animation-delay:2.56s;animation-duration:0.05s"/>
+<line class="dp-draw dp-off" pathLength="1" x1="326.1" y1="314.9" x2="327.1" y2="315.8" stroke="var(--tandem)" style="animation-delay:2.56s;animation-duration:0.05s"/>
+<line class="dp-draw dp-off" pathLength="1" x1="327.1" y1="315.9" x2="330.7" y2="319.5" stroke="var(--tandem)" style="animation-delay:2.57s;animation-duration:0.05s"/>
+<line class="dp-draw dp-off" pathLength="1" x1="327.6" y1="305.9" x2="329.2" y2="307.5" stroke="var(--tandem)" style="animation-delay:2.58s;animation-duration:0.05s"/>
+<line class="dp-draw dp-off" pathLength="1" x1="329.3" y1="307.6" x2="330.7" y2="309.0" stroke="var(--tandem)" style="animation-delay:2.59s;animation-duration:0.05s"/>
+<line class="dp-draw dp-off" pathLength="1" x1="329.5" y1="313.0" x2="330.4" y2="313.9" stroke="var(--tandem)" style="animation-delay:2.59s;animation-duration:0.05s"/>
+<line class="dp-draw dp-off" pathLength="1" x1="336.8" y1="25.5" x2="338.8" y2="27.5" stroke="var(--ltr)" style="animation-delay:2.65s;animation-duration:0.05s"/>
+<line class="dp-draw dp-off" pathLength="1" x1="339.7" y1="28.4" x2="340.6" y2="29.3" stroke="var(--ltr)" style="animation-delay:2.67s;animation-duration:0.05s"/>
+<line class="dp-draw dp-off" pathLength="1" x1="340.6" y1="29.4" x2="344.0" y2="32.8" stroke="var(--ltr)" style="animation-delay:2.68s;animation-duration:0.05s"/>
+<line class="dp-draw dp-off" pathLength="1" x1="345.0" y1="33.4" x2="346.3" y2="34.8" stroke="var(--ltr)" style="animation-delay:2.71s;animation-duration:0.05s"/>
+<line class="dp-draw dp-off" pathLength="1" x1="346.6" y1="35.0" x2="350.4" y2="38.8" stroke="var(--ltr)" style="animation-delay:2.72s;animation-duration:0.05s"/>
+<line class="dp-draw dp-off" pathLength="1" x1="350.5" y1="39.0" x2="352.7" y2="41.2" stroke="var(--ltr)" style="animation-delay:2.75s;animation-duration:0.05s"/>
+<line class="dp-draw dp-off" pathLength="1" x1="353.6" y1="42.0" x2="355.0" y2="43.5" stroke="var(--ltr)" style="animation-delay:2.77s;animation-duration:0.05s"/>
+<line class="dp-draw dp-off" pathLength="1" x1="355.5" y1="43.9" x2="358.1" y2="46.6" stroke="var(--ltr)" style="animation-delay:2.79s;animation-duration:0.05s"/>
+<line class="dp-draw dp-off" pathLength="1" x1="359.9" y1="48.4" x2="363.2" y2="51.7" stroke="var(--ltr)" style="animation-delay:2.82s;animation-duration:0.05s"/>
+<line class="dp-draw dp-off" pathLength="1" x1="363.3" y1="51.7" x2="364.8" y2="53.2" stroke="var(--ltr)" style="animation-delay:2.85s;animation-duration:0.05s"/>
+<line class="dp-draw dp-off" pathLength="1" x1="365.6" y1="54.2" x2="369.7" y2="58.3" stroke="var(--ltr)" style="animation-delay:2.87s;animation-duration:0.05s"/>
+<g class="rail">
+<line class="bb" x1="30" y1="381.5" x2="370" y2="381.5"/>
+<rect class="dp-pop" x="30.0" y="371" width="1.8" height="21" fill="var(--muted)" style="animation-delay:0.30s;animation-duration:0.35s"/>
+<g class="dp-pop" style="animation-delay:0.30s;animation-duration:0.35s"><polygon points="30.3,373 58.3,373 64.3,381.5 58.3,390 30.3,390" fill="var(--ltr)"/><text x="44.3" y="385.1" text-anchor="middle">LTR</text></g>
+<rect class="dp-pop" x="64.7" y="371" width="1.8" height="21" fill="var(--tsd)" style="animation-delay:0.57s;animation-duration:0.35s"/>
+<g class="dp-pop" style="animation-delay:0.65s;animation-duration:0.35s"><polygon points="75.7,373 108.9,373 114.9,381.5 108.9,390 75.7,390" fill="var(--gag)"/><text x="92.3" y="385.1" text-anchor="middle">GAG</text></g>
+<g class="dp-pop" style="animation-delay:0.97s;animation-duration:0.35s"><polygon points="117.5,373 129.2,373 135.2,381.5 129.2,390 117.5,390" fill="var(--pol-1)"/><text x="123.4" y="385.1" text-anchor="middle">AP</text></g>
+<g class="dp-pop" style="animation-delay:1.16s;animation-duration:0.35s"><polygon points="142.4,373 191.3,373 197.3,381.5 191.3,390 142.4,390" fill="var(--pol-2)"/><text x="166.8" y="385.1" text-anchor="middle">INT</text></g>
+<g class="dp-pop" style="animation-delay:1.71s;animation-duration:0.35s"><polygon points="214.3,373 261.9,373 267.9,381.5 261.9,390 214.3,390" fill="var(--pol-3)"/><text x="238.1" y="385.1" text-anchor="middle">RT</text></g>
+<g class="dp-pop" style="animation-delay:2.13s;animation-duration:0.35s"><polygon points="269.9,373 291.3,373 297.3,381.5 291.3,390 269.9,390" fill="var(--pol-4)"/><text x="280.6" y="385.1" text-anchor="middle">RH</text></g>
+<rect class="dp-pop" x="304.5" y="375" width="26.1" height="13" rx="2" fill="var(--tandem)" style="animation-delay:2.40s;animation-duration:0.35s"/>
+<rect class="dp-pop" x="334.6" y="371" width="1.8" height="21" fill="var(--tsd)" style="animation-delay:2.63s;animation-duration:0.35s"/>
+<g class="dp-pop" style="animation-delay:2.64s;animation-duration:0.35s"><polygon points="335.6,373 363.7,373 369.7,381.5 363.7,390 335.6,390" fill="var(--ltr)"/><text x="349.6" y="385.1" text-anchor="middle">LTR</text></g>
+<rect class="dp-pop" x="369.7" y="371" width="1.8" height="21" fill="var(--muted)" style="animation-delay:2.90s;animation-duration:0.35s"/>
 </g>
 </svg>
       <figcaption>
-        Self dotplot of a modeled 5.2 kb Ty1/copia element, computed from exact 14-mer matches. The lines in the corners are its two LTRs (95% identical); the stripes next to the diagonal are a 5 × 80 bp tandem array.
+        Self dotplot of a modeled 5.2 kb Ty1/copia element, computed from exact 14-mer matches and coloured by feature. The lines in the corners are its two LTRs (95% identical); the stripes beside the diagonal are a 5 &times; 80 bp tandem array.
         <ul class="legend" aria-hidden="true">
           <li><i style="background:var(--ltr)"></i>LTR</li>
           <li><i style="background:var(--gag)"></i>GAG</li>
@@ -791,6 +793,14 @@ pip install -e .</pre></li>
 
 <script>
 (function () {
+  // Always open at the top, unless the link points at a section (#install, #faq)
+  try { if ("scrollRestoration" in history) history.scrollRestoration = "manual"; } catch (e) {}
+  if (!location.hash) {
+    window.scrollTo(0, 0);
+    window.addEventListener("load", function () { window.scrollTo(0, 0); });
+    window.addEventListener("pageshow", function (e) { if (e.persisted) window.scrollTo(0, 0); });
+  }
+
   // Copy buttons
   document.querySelectorAll("pre.code").forEach(function (pre) {
     var btn = document.createElement("button");
