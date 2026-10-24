@@ -53,7 +53,7 @@ def test_batch_skips_failed_sequence_and_continues(tmp_path: Path, monkeypatch) 
             raise RuntimeError(
                 "makeblastdb failed while building the self-BLAST database."
             )
-        return []
+        return [], {}, {}, {}
 
     monkeypatch.setattr(
         "repeatviewer.backends.te_annotation_batch._annotate_one_record_fasta",

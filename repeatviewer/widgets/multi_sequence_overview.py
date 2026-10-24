@@ -9260,6 +9260,82 @@ class MultiSequenceOverviewPanel(QWidget):
                 return self._record_ids[row]
         return None
 
+    def linked_viewport_row_anchor(self) -> tuple[int, float] | None:
+        """Row at the viewport top and fraction into that row (0–1).
+
+        Used by Split Preview so vertical sync follows sequence identity even
+        when left/right zoom (and therefore row heights) differ.
+        """
+        tops = self._bars.row_tops()
+        heights = self._bars.row_heights()
+        if not tops or not heights:
+            return None
+        scroll = int(self._bars_scroll.verticalScrollBar().value())
+        for index, (top, height) in enumerate(zip(tops, heights)):
+            bottom = int(top) + max(1, int(height))
+            if bottom > scroll:
+                frac = (scroll - int(top)) / float(max(1, int(height)))
+                return index, max(0.0, min(1.0, float(frac)))
+        last = len(tops) - 1
+        return last, 1.0
+
+    def apply_linked_viewport_row_anchor(
+        self, row: int, row_fraction: float
+    ) -> None:
+        """Scroll so ``row`` sits at the same viewport-top relationship as peer."""
+        tops = self._bars.row_tops()
+        heights = self._bars.row_heights()
+        if not (0 <= int(row) < len(tops)):
+            return
+        if self._syncing_scroll:
+            return
+        frac = max(0.0, min(1.0, float(row_fraction)))
+        target = int(tops[int(row)] + frac * max(1, int(heights[int(row)])))
+        self._syncing_scroll = True
+        try:
+            self._bars_scroll.verticalScrollBar().setValue(max(0, target))
+            self._names_scroll.verticalScrollBar().setValue(max(0, target))
+        finally:
+            self._syncing_scroll = False
+
+    def linked_row_viewport_fraction(self, row: int) -> float | None:
+        """Where the top of ``row`` sits in the viewport (0 = top edge)."""
+        tops = self._bars.row_tops()
+        if not (0 <= int(row) < len(tops)):
+            return None
+        scroll = int(self._bars_scroll.verticalScrollBar().value())
+        vp_h = max(1, int(self._bars_scroll.viewport().height()))
+        return (float(tops[int(row)]) - float(scroll)) / float(vp_h)
+
+    def apply_linked_row_at_viewport_fraction(
+        self, row: int, viewport_fraction: float
+    ) -> None:
+        """Scroll so the top of ``row`` is at ``viewport_fraction`` of the view."""
+        tops = self._bars.row_tops()
+        if not (0 <= int(row) < len(tops)):
+            return
+        if self._syncing_scroll:
+            return
+        vp_h = max(1, int(self._bars_scroll.viewport().height()))
+        target = int(tops[int(row)] - float(viewport_fraction) * float(vp_h))
+        self._syncing_scroll = True
+        try:
+            self._bars_scroll.verticalScrollBar().setValue(max(0, target))
+            self._names_scroll.verticalScrollBar().setValue(max(0, target))
+        finally:
+            self._syncing_scroll = False
+
+    def apply_linked_selected_rows(self, rows: list[int] | set[int]) -> None:
+        """Mirror sequence-row selection from the other Split Preview pane."""
+        self._bars.set_selected_rows(rows)
+        self._sync_names_column()
+
+    def apply_linked_annotation_kinds(self, keys: frozenset[str] | set[str]) -> None:
+        """Mirror Displayed annotations from the other Split Preview pane."""
+        self._rail.apply_visible_annotation_kinds(frozenset(keys))
+        self._bars.set_visible_annotation_kinds(self._rail.visible_annotation_kinds())
+        self._sync_names_column()
+
     def record_ids_for_dotplot(self) -> list[str]:
         """Sequence ids in Overview display order (current Sorting)."""
         return list(self._bars.record_ids())

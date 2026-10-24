@@ -56,7 +56,8 @@ def export_seqid(seq_id: str, *, seqid_map: dict[str, str] | None = None) -> str
 FEATURE_TYPE_COLORS: dict[str, str] = {
     "LTR": "#c0392b",
     "TIR": "#8e44ad",
-    "PBS": "#0984e3",
+    # Magenta — distinct from domain/Pfam blue (#2980b9).
+    "PBS": "#c2185b",
     "PPT": "#e67e22",
     "ORF": "#27ae60",
     "TSD": "#16a085",
@@ -316,7 +317,8 @@ def feature_hover_detail_text(feat: SequenceFeature, *, primary: str = "") -> st
     if label:
         lines.append(label)
     source = str(getattr(feat, "source", "") or "").strip()
-    if source:
+    # Hide the internal pipeline stamp; show file / motif / Transfer sources.
+    if source and source != "repeatviewer_internal":
         lines.append(f"Source: {source}")
     try:
         src_start = int(getattr(feat, "source_start", 0) or 0)
@@ -348,7 +350,8 @@ def feature_hover_detail_text(feat: SequenceFeature, *, primary: str = "") -> st
 
 def feature_has_hover_meta(feat: SequenceFeature) -> bool:
     """True when hover should show source / identity / coverage extras."""
-    if str(getattr(feat, "source", "") or "").strip():
+    source = str(getattr(feat, "source", "") or "").strip()
+    if source and source != "repeatviewer_internal":
         return True
     if str(getattr(feat, "subject_id", "") or "").strip():
         return True

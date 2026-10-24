@@ -733,6 +733,9 @@ class SequenceAnnotationRail(QWidget):
     annotationTrackKindsChanged = Signal(object)
     showStandardBoundariesChanged = Signal(bool)
     showBlastCoverageChanged = Signal(bool)
+    # Split Preview: link vertical scroll, selection, and annotation filters
+    # (horizontal columns stay independent).
+    syncSplitViewsChanged = Signal(bool)
     sequenceSortChanged = Signal(str)  # original | name | selected_columns
     showComplementChanged = Signal(bool)
     showTranslationChanged = Signal(bool)
@@ -1045,6 +1048,19 @@ class SequenceAnnotationRail(QWidget):
         )
         self.show_blast_coverage_row.setVisible(False)
         tracks_section.add_widget(self.show_blast_coverage_row)
+
+        self.sync_split_views = QCheckBox("Sync left and right view", tracks_section)
+        self.sync_split_views.setChecked(False)
+        self.sync_split_views.setToolTip(
+            "In Split Preview, keep both panes aligned by sequence row "
+            "(same sequence at the same vertical level even at different zoom), "
+            "Displayed annotations, and selection. Horizontal position / columns "
+            "stay independent so each pane can show a different region."
+        )
+        self.sync_split_views.toggled.connect(self.syncSplitViewsChanged.emit)
+        self.sync_split_views.setVisible(False)
+        self._split_sync_available = False
+        tracks_section.add_widget(self.sync_split_views)
 
         self.show_complement = QCheckBox("Show complement", tracks_section)
         self.show_complement.setToolTip(
@@ -2344,6 +2360,44 @@ class SequenceAnnotationRail(QWidget):
             if check.isChecked()
         )
 
+    def set_split_sync_available(self, available: bool) -> None:
+        """Show the Split Preview link checkbox when this rail is in a split pane."""
+        self._split_sync_available = bool(available)
+        self._sync_split_views_visibility()
+
+    def _sync_split_views_visibility(self) -> None:
+        check = getattr(self, "sync_split_views", None)
+        if check is None:
+            return
+        overview = bool(getattr(self, "_overview_mode", False))
+        check.setVisible(overview and bool(getattr(self, "_split_sync_available", False)))
+
+    def apply_visible_annotation_kinds(self, keys: frozenset[str] | set[str]) -> None:
+        """Set Displayed annotations checkboxes to ``keys`` (Split Preview sync)."""
+        wanted = {str(k).strip() for k in keys if str(k).strip()}
+        if not self.annotation_kind_checks:
+            return
+        changed = False
+        self._annotation_kinds_all_updating = True
+        try:
+            for key, check in self.annotation_kind_checks.items():
+                on = key in wanted
+                if check.isChecked() != on:
+                    check.setChecked(on)
+                    changed = True
+                if on:
+                    self._hidden_annotation_kinds.discard(key)
+                else:
+                    self._hidden_annotation_kinds.add(key)
+        finally:
+            self._annotation_kinds_all_updating = False
+        if not changed:
+            return
+        self._save_hidden_annotation_kinds()
+        self._sync_annotation_kinds_all_check()
+        self._sync_show_annotation_track_from_kinds()
+        self._emit_annotation_track_kinds()
+
     def ensure_annotation_kinds_visible(self, keys: list[str] | tuple[str, ...] | set[str]) -> None:
         """Tick Displayed annotations for ``keys`` after a prediction run.
 
@@ -2646,6 +2700,7 @@ class SequenceAnnotationRail(QWidget):
             blast_cov_row.setVisible(msa_overview)
         elif getattr(self, "show_blast_coverage", None) is not None:
             self.show_blast_coverage.setVisible(msa_overview)
+        self._sync_split_views_visibility()
         self.sequence_sort_row.setVisible(overview)
         if overview:
             self._populate_sequence_sort_options(
@@ -2716,6 +2771,7 @@ class SequenceAnnotationRail(QWidget):
                 blast_cov_row.setVisible(self._msa_display_mode)
             elif getattr(self, "show_blast_coverage", None) is not None:
                 self.show_blast_coverage.setVisible(self._msa_display_mode)
+            self._sync_split_views_visibility()
             self.set_nucleotide_color_context(
                 "msa" if self._msa_display_mode else "multi"
             )

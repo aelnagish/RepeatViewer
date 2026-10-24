@@ -45,7 +45,7 @@ def test_te_annotation_emits_per_sequence_progress(tmp_path: Path, monkeypatch) 
 
     monkeypatch.setattr(
         "repeatviewer.backends.te_annotation_batch._annotate_one_record_fasta",
-        lambda *_args, **_kwargs: [],
+        lambda *_args, **_kwargs: ([], {}, {}, {}),
     )
     monkeypatch.setattr(
         "repeatviewer.backends.te_annotation_batch.save_annotations_multi",

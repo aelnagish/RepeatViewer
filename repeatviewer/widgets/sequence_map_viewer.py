@@ -109,6 +109,7 @@ from repeatviewer.backends.auto_annotation import (
 from repeatviewer.backends.auto_annotation_settings import (
     AutoAnnotationSettings,
     DEFAULT_MAX_TERMINAL_PAIRS,
+    DEFAULT_PBS_MAX_DISTANCE,
     DEFAULT_PBS_MIN_COVERAGE,
     DEFAULT_PBS_MIN_IDENTITY,
     DEFAULT_PBS_MIN_LENGTH,
@@ -6931,6 +6932,9 @@ class AutoAnnotationSettingsPanel(QWidget):
         min_cov.setDecimals(2)
         min_cov.setSingleStep(0.05)
         min_cov.setValue(cfg.min_coverage)
+        max_dist = QSpinBox(self)
+        max_dist.setRange(0, 10_000)
+        max_dist.setValue(cfg.max_distance_from_ltr5_nt)
         orient = NoWheelComboBox(self)
         orient.addItem("Auto (both strands)", "auto")
         orient.addItem("Plus (+)", "+")
@@ -6957,7 +6961,8 @@ class AutoAnnotationSettingsPanel(QWidget):
                 self._sized_spin(window),
                 "PBS search window",
                 "Bases immediately inside the 5′ LTR to search for a PBS "
-                f"(default {DEFAULT_PBS_WINDOW}).",
+                f"(default {DEFAULT_PBS_WINDOW}). "
+                "Max distance from LTR5 further limits accepted hits.",
             ),
         )
         form.addRow(
@@ -6965,7 +6970,8 @@ class AutoAnnotationSettingsPanel(QWidget):
             self._field_help(
                 self._sized_spin(min_len),
                 "Min PBS alignment length",
-                f"Minimum blastn alignment length (default {DEFAULT_PBS_MIN_LENGTH}).",
+                "Minimum ungapped blastn alignment length "
+                f"(default {DEFAULT_PBS_MIN_LENGTH}).",
             ),
         )
         form.addRow(
@@ -6983,6 +6989,15 @@ class AutoAnnotationSettingsPanel(QWidget):
                 "Min PBS motif coverage",
                 "Fraction of the motif that must align "
                 f"(default {DEFAULT_PBS_MIN_COVERAGE:g}).",
+            ),
+        )
+        form.addRow(
+            self._form_label("Max distance from LTR5:"),
+            self._field_help(
+                self._sized_spin(max_dist),
+                "Max PBS distance from LTR5",
+                "Maximum gap (nt) between the biological 5′ LTR and the PBS "
+                f"(default {DEFAULT_PBS_MAX_DISTANCE}).",
             ),
         )
         form.addRow(
@@ -7005,7 +7020,7 @@ class AutoAnnotationSettingsPanel(QWidget):
         )
         self._pbs_orient = orient
         self._pbs_motif = motif
-        self._pbs_field_list = (window, min_len, min_ident, min_cov)
+        self._pbs_field_list = (window, min_len, min_ident, min_cov, max_dist)
         return form
 
     def _others_form(self, settings: AutoAnnotationSettings) -> QFormLayout:
@@ -7102,13 +7117,14 @@ class AutoAnnotationSettingsPanel(QWidget):
             alternative_start_codons=alt_starts.text().strip(),
             frames=self._selected_orf_frames(),
         )
-        window, pbs_min_len, pbs_ident, pbs_cov = self._pbs_fields
+        window, pbs_min_len, pbs_ident, pbs_cov, pbs_max_dist = self._pbs_fields
         orient_data = self._pbs_orient.currentData()
         pbs = PbsSettings(
             window=int(window.value()),
             min_length=int(pbs_min_len.value()),
             min_identity=float(pbs_ident.value()),
             min_coverage=float(pbs_cov.value()),
+            max_distance_from_ltr5_nt=int(pbs_max_dist.value()),
             orientation=str(orient_data or DEFAULT_PBS_ORIENTATION),
             motif_database=str(self._pbs_motif.path() or "").strip(),
         )

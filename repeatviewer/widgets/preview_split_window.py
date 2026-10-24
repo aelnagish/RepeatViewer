@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from PySide6.QtCore import QSize, Qt, QTimer, Slot
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
@@ -22,6 +24,9 @@ from repeatviewer.widgets.preview_controls import (
 )
 from repeatviewer.widgets.preview_tabs import FilePreviewPage, PreviewTabWidget
 from repeatviewer.widgets.task_progress import TaskProgressPanel
+
+if TYPE_CHECKING:
+    from repeatviewer.widgets.multi_sequence_overview import MultiSequenceOverviewPanel
 
 # Narrow enough for free splitter ratios; toolbar overflow hides controls.
 _PANE_MIN_WIDTH = 120
@@ -287,11 +292,27 @@ class _SplitPreviewPane(QWidget):
         if self._stop_btn is not None:
             self._stop_btn.setEnabled(False)
 
+    def overview_panel(self) -> MultiSequenceOverviewPanel | None:
+        """Multi-FASTA Overview panel for this pane, if loaded."""
+        page = self._tabs.currentWidget()
+        if not isinstance(page, FilePreviewPage):
+            return None
+        overview = getattr(page, "_annotation_overview", None)
+        if overview is None:
+            return None
+        if not page.is_annotation_preview_active():
+            return None
+        return overview
+
 
 class PreviewSplitWindow(QWidget):
     """Floating Preview with two independent left/right panes of the same file.
 
     Parented to the main window as a Tool window (not global always-on-top).
+    Optional ``Sync left and right view`` links vertical position by sequence
+    row (so the same sequence stays on the same screen level even at different
+    zoom), Displayed annotations, and sequence-row selection. Horizontal
+    position stays independent so each pane can show different columns.
     """
 
     _WINDOW_FLAGS = (
@@ -343,10 +364,155 @@ class PreviewSplitWindow(QWidget):
         self._splitter.setSizes([1000, 1000])
         layout.addWidget(self._splitter, stretch=1)
 
+        self._link_enabled = False
+        self._link_applying = False
+        self._link_wired = False
+
         self._size_to_screen()
         # Equal halves after the window has a real width.
         QTimer.singleShot(0, self._apply_equal_split)
+        # Overview panels finish loading asynchronously after open.
+        QTimer.singleShot(0, self._setup_view_link)
+        QTimer.singleShot(80, self._setup_view_link)
+        QTimer.singleShot(250, self._setup_view_link)
         ensure_widget_on_screen(self)
+
+    def _setup_view_link(self) -> None:
+        """Expose Sync checkboxes and wire left↔right once overviews exist."""
+        left = self._left.overview_panel()
+        right = self._right.overview_panel()
+        if left is None or right is None:
+            return
+        for overview in (left, right):
+            rail = getattr(overview, "_rail", None)
+            if rail is not None and hasattr(rail, "set_split_sync_available"):
+                rail.set_split_sync_available(True)
+        if self._link_wired:
+            return
+        self._link_wired = True
+
+        for overview in (left, right):
+            rail = overview._rail
+            rail.syncSplitViewsChanged.connect(self._on_sync_toggled)
+            rail.annotationTrackKindsChanged.connect(
+                lambda keys, src=overview: self._on_linked_annotation_kinds(src, keys)
+            )
+            overview._bars.selectionChanged.connect(
+                lambda src=overview: self._on_linked_selection(src)
+            )
+            overview._bars_scroll.verticalScrollBar().valueChanged.connect(
+                lambda _v, src=overview: self._on_linked_vertical_scroll(src)
+            )
+
+    def _peer_overview(
+        self, source: MultiSequenceOverviewPanel
+    ) -> MultiSequenceOverviewPanel | None:
+        left = self._left.overview_panel()
+        right = self._right.overview_panel()
+        if source is left:
+            return right
+        if source is right:
+            return left
+        return None
+
+    def _on_sync_toggled(self, enabled: bool) -> None:
+        self._link_enabled = bool(enabled)
+        left = self._left.overview_panel()
+        right = self._right.overview_panel()
+        for overview in (left, right):
+            if overview is None:
+                continue
+            check = overview._rail.sync_split_views
+            check.blockSignals(True)
+            check.setChecked(self._link_enabled)
+            check.blockSignals(False)
+        if self._link_enabled and left is not None and right is not None:
+            self._mirror_all(left, right)
+
+    def _mirror_all(
+        self,
+        source: MultiSequenceOverviewPanel,
+        target: MultiSequenceOverviewPanel,
+    ) -> None:
+        if self._link_applying:
+            return
+        self._link_applying = True
+        try:
+            anchor = source.linked_viewport_row_anchor()
+            if anchor is not None:
+                target.apply_linked_viewport_row_anchor(*anchor)
+            target.apply_linked_annotation_kinds(
+                source._rail.visible_annotation_kinds()
+            )
+            rows = source._bars.selected_rows()
+            target.apply_linked_selected_rows(rows)
+            self._align_peer_to_selected_row(source, target, rows)
+        finally:
+            self._link_applying = False
+
+    @staticmethod
+    def _align_peer_to_selected_row(
+        source: MultiSequenceOverviewPanel,
+        target: MultiSequenceOverviewPanel,
+        rows: list[int],
+    ) -> None:
+        """Keep the selected sequence on the same vertical screen level."""
+        if not rows:
+            return
+        row = int(rows[0])
+        frac = source.linked_row_viewport_fraction(row)
+        if frac is None:
+            return
+        target.apply_linked_row_at_viewport_fraction(row, frac)
+
+    def _on_linked_vertical_scroll(
+        self, source: MultiSequenceOverviewPanel
+    ) -> None:
+        if not self._link_enabled or self._link_applying:
+            return
+        target = self._peer_overview(source)
+        if target is None:
+            return
+        anchor = source.linked_viewport_row_anchor()
+        if anchor is None:
+            return
+        self._link_applying = True
+        try:
+            target.apply_linked_viewport_row_anchor(*anchor)
+        finally:
+            self._link_applying = False
+
+    def _on_linked_selection(self, source: MultiSequenceOverviewPanel) -> None:
+        if not self._link_enabled or self._link_applying:
+            return
+        target = self._peer_overview(source)
+        if target is None:
+            return
+        rows = source._bars.selected_rows()
+        self._link_applying = True
+        try:
+            target.apply_linked_selected_rows(rows)
+            self._align_peer_to_selected_row(source, target, rows)
+        finally:
+            self._link_applying = False
+
+    def _on_linked_annotation_kinds(
+        self, source: MultiSequenceOverviewPanel, keys: object
+    ) -> None:
+        if not self._link_enabled or self._link_applying:
+            return
+        target = self._peer_overview(source)
+        if target is None:
+            return
+        if keys is None:
+            visible = source._rail.visible_annotation_kinds()
+        else:
+            visible = frozenset(str(k) for k in keys)
+        self._link_applying = True
+        try:
+            target.apply_linked_annotation_kinds(visible)
+        finally:
+            self._link_applying = False
 
     def minimumSizeHint(self) -> QSize:  # noqa: N802
         return QSize(_WINDOW_MIN_WIDTH, _WINDOW_MIN_HEIGHT)
