@@ -1206,6 +1206,8 @@ class _BarsCanvas(QWidget):
     residueEditRequested = Signal(str)
     # MSA / multi-seq reload — clear top-of-MSA BLAST coverage on the panel.
     blastCoverageInvalidated = Signal()
+    # Boundary prediction guides dropped because the MSA residues changed.
+    predictedBoundariesCleared = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1232,6 +1234,8 @@ class _BarsCanvas(QWidget):
         self._msa_diff_standard_id: str | None = None
         # Tracks → Standard boundaries (vertical dashed extent guides).
         self._show_msa_standard_boundaries = True
+        # Boundary prediction guides: (column edge, color, solid) on MSA columns.
+        self._predicted_boundaries: list[tuple[int, QColor, bool]] = []
         # Apply default track height → overview band pixels.
         self._apply_track_height_to_residue_band()
         self._sequence_row_gap = 0  # pixels between sequences (Others → Sequence distance)
@@ -1622,6 +1626,9 @@ class _BarsCanvas(QWidget):
         if len(record_ids) != len(sequences):
             raise ValueError("record_ids and sequences length mismatch")
         self._msa_mode = True
+        if self._predicted_boundaries and list(sequences) != self._msa_seqs:
+            self._predicted_boundaries = []
+            self.predictedBoundariesCleared.emit()
         self._msa_seqs = list(sequences)
         self._msa_protein = _guess_msa_is_protein(self._msa_seqs)
         self._msa_colors = (
@@ -4158,6 +4165,47 @@ class _BarsCanvas(QWidget):
             painter.drawLine(QPointF(x1, y0), QPointF(x1, y1))
         painter.setPen(Qt.PenStyle.NoPen)
 
+    def set_predicted_boundaries(
+        self, guides: list[tuple[int, QColor, bool]] | None
+    ) -> None:
+        """Column-edge guides from Boundary prediction (``[]`` clears)."""
+        self._predicted_boundaries = list(guides or [])
+        self.update()
+
+    def _paint_msa_predicted_boundaries(
+        self,
+        painter: QPainter,
+        clip: QRect,
+    ) -> None:
+        """Full-height guides at predicted boundary column edges.
+
+        Method guides are dashed; the final boundary is solid and drawn last.
+        """
+        if not self._msa_mode or not self._predicted_boundaries:
+            return
+        ppb = max(self._ppb, 1e-12)
+        y0 = float(clip.top())
+        y1 = float(clip.bottom()) + 1.0
+        clip_left = float(clip.left()) - 1.0
+        clip_right = float(clip.right()) + 1.0
+        letters = self._msa_shows_letters()
+        for edge, color, solid in sorted(
+            self._predicted_boundaries, key=lambda g: bool(g[2])
+        ):
+            x = float(self._bar_pad) + float(edge) * ppb
+            if not (clip_left <= x <= clip_right):
+                continue
+            width = (3.0 if letters else 2.0) + (1.0 if solid else 0.0)
+            pen = QPen(
+                color,
+                width,
+                Qt.PenStyle.SolidLine if solid else Qt.PenStyle.DashLine,
+            )
+            pen.setCosmetic(True)
+            painter.setPen(pen)
+            painter.drawLine(QPointF(x, y0), QPointF(x, y1))
+        painter.setPen(Qt.PenStyle.NoPen)
+
     def _paint_msa_rows_pixel_sample(
         self,
         painter: QPainter,
@@ -4239,6 +4287,7 @@ class _BarsCanvas(QWidget):
                 clip=clip,
             )
         self._paint_msa_standard_boundaries(painter, clip)
+        self._paint_msa_predicted_boundaries(painter, clip)
 
     def _paint_msa_rows(
         self,
@@ -4460,6 +4509,7 @@ class _BarsCanvas(QWidget):
                 clip=clip,
             )
         self._paint_msa_standard_boundaries(painter, clip)
+        self._paint_msa_predicted_boundaries(painter, clip)
         # Selection chrome lives entirely on ``_chrome`` (see _sync_selection_chrome).
 
     def _paint_bar_rows(self, painter: QPainter, clip: QRect) -> None:
@@ -5637,6 +5687,10 @@ class MultiSequenceOverviewPanel(QWidget):
         self._cov_cancel = JobCancellation()
         self._cov_thread: QThread | None = None
         self._cov_worker: Worker | None = None
+        self._boundary_cancel = JobCancellation()
+        self._boundary_thread: QThread | None = None
+        self._boundary_worker: Worker | None = None
+        self._boundary_input: list[str] = []
         self._wire_overview_annotation_rail()
         self._bars.set_show_annotation_track(
             bool(self._rail.show_annotation_track.isChecked())
@@ -6158,6 +6212,10 @@ class MultiSequenceOverviewPanel(QWidget):
         rail.auto_ann_all_check.toggled.connect(self._on_auto_annotation_all_toggled)
         rail.similarity_ann_all_check.toggled.connect(
             self._on_similarity_annotation_all_toggled
+        )
+        rail.boundaryPredictClicked.connect(self._run_boundary_prediction)
+        self._bars.predictedBoundariesCleared.connect(
+            lambda: self._rail.set_boundary_prediction_text("")
         )
         rail.featureDetectClicked.connect(self._on_auto_run_clicked)
         rail.featureDetectSettingsClicked.connect(self._open_auto_annotation_settings)
@@ -7072,6 +7130,13 @@ class MultiSequenceOverviewPanel(QWidget):
         if not self._annotation_running() or self._ann_job_kind != "auto":
             return False
         self._stop_annotation_job()
+        return True
+
+    def cancel_boundary_prediction(self) -> bool:
+        """Request cancellation of a running Boundary prediction job."""
+        if not self._boundary_running():
+            return False
+        self._boundary_cancel.request()
         return True
 
     def cancel_similarity_annotation(self) -> bool:
@@ -8692,6 +8757,193 @@ class MultiSequenceOverviewPanel(QWidget):
     def _clear_msa_coverage_thread(self) -> None:
         self._cov_thread = None
         self._cov_worker = None
+        self._end_window_job_progress()
+
+    def _boundary_running(self) -> bool:
+        return self._boundary_thread is not None and self._boundary_thread.isRunning()
+
+    def _run_boundary_prediction(self) -> None:
+        """TEtrimmer column clean → MSA identity / BLAST coverage / LTR-TIR boundaries."""
+        title = "Boundary prediction"
+        if self._boundary_running():
+            self._boundary_cancel.request()
+            self.statusMessage.emit("Stopping boundary prediction…")
+            return
+        if not self.is_msa_mode():
+            QMessageBox.information(
+                self, title, "Boundary prediction is only available for aligned MSAs."
+            )
+            return
+        if (
+            self._annotation_running()
+            or self._coverage_running()
+            or (self._transfer_thread is not None and self._transfer_thread.isRunning())
+        ):
+            QMessageBox.information(
+                self, title, "Wait for the current annotation job to finish."
+            )
+            return
+        main = self._main_window_for_job_progress()
+        if main is not None and hasattr(main, "_any_background_job_running"):
+            if main._any_background_job_running():
+                QMessageBox.information(
+                    self, title, "Another background job is already running."
+                )
+                return
+        genome = self._resolve_project_genome()
+        if genome is None:
+            answer = QMessageBox.question(
+                self,
+                title,
+                "No project genome is set, so BLAST coverage and the final "
+                "boundary will be skipped. Run MSA identity and LTR/TIR only?",
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        sequences = list(self._bars.msa_sequences())
+        record_ids = list(self._record_ids)
+        if not sequences:
+            QMessageBox.information(self, title, "No MSA sequences are loaded.")
+            return
+        from repeatviewer.job_options import load_teaid_options
+        from repeatviewer.backends.boundary_predict import predict_boundaries
+
+        te_type = self._rail.boundary_te_type_combo.currentText()
+        num_threads = max(1, int(load_teaid_options().num_threads))
+        self._boundary_cancel = JobCancellation()
+        cancel = self._boundary_cancel
+        self._boundary_input = sequences
+        total = 5
+        self._begin_window_job_progress(title, total)
+        self._rail.boundary_run_btn.setText("Stop")
+        self.statusMessage.emit("Boundary prediction: cleaning MSA…")
+
+        def _job(progress=None):
+            def _prog(completed: int, detail: str) -> None:
+                if progress is not None:
+                    progress(f"{int(completed)}/{total} {detail}")
+
+            return predict_boundaries(
+                record_ids,
+                sequences,
+                genome_path=genome,
+                te_type=te_type,
+                num_threads=num_threads,
+                cancel=cancel,
+                progress=_prog,
+            )
+
+        worker = Worker(_job, progress=True)
+        thread = QThread(self)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.signals.progress.connect(self._on_boundary_progress)
+        worker.signals.finished.connect(self._on_boundary_finished)
+        worker.signals.error.connect(self._on_boundary_error)
+        worker.signals.finished.connect(thread.quit)
+        worker.signals.error.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._clear_boundary_thread)
+        self._boundary_worker = worker
+        self._boundary_thread = thread
+        thread.start()
+
+    @Slot(str)
+    def _on_boundary_progress(self, message: str) -> None:
+        text = str(message or "").strip()
+        match = re.match(r"^(\d+)\s*/\s*(\d+)\s+(.+)$", text)
+        if match is None:
+            self.statusMessage.emit(text)
+            return
+        completed = int(match.group(1))
+        detail = match.group(3).strip()
+        self.statusMessage.emit(
+            f"Boundary prediction {completed}/{match.group(2)}: {detail}"
+        )
+        self._update_window_job_progress(completed, detail)
+
+    @Slot(object)
+    def _on_boundary_finished(self, result: object) -> None:
+        from repeatviewer.backends.boundary_predict import BoundaryPrediction
+
+        if not isinstance(result, BoundaryPrediction):
+            self.statusMessage.emit("Boundary prediction finished with an unexpected result.")
+            return
+        if list(self._bars.msa_sequences()) != self._boundary_input:
+            self.statusMessage.emit(
+                "Boundary prediction discarded: the MSA changed while it ran."
+            )
+            return
+        # (label, span, color, solid); spans are 0-based start / exclusive end.
+        methods = [
+            ("MSA identity", result.msa_identity, "#1f77b4"),
+            ("BLAST coverage", result.blast_coverage, "#2ca02c"),
+            (result.terminal_repeat_type or "LTR/TIR", result.terminal_repeat, "#ff7f0e"),
+        ]
+        guides: list[tuple[int, QColor, bool]] = []
+        lines: list[str] = []
+        for label, span, color in methods:
+            if span is None:
+                lines.append(f"<span style='color:{color}'>┆</span> {label}: none")
+                continue
+            guides.extend([(span[0], QColor(color), False), (span[1], QColor(color), False)])
+            lines.append(
+                f"<span style='color:{color}'>┆</span> {label}: "
+                f"{span[0] + 1:,}–{span[1]:,}"
+            )
+        if result.poly_a_end is not None:
+            guides.append((result.poly_a_end, QColor("#9467bd"), False))
+            lines.append(
+                f"<span style='color:#9467bd'>┆</span> poly-A end: {result.poly_a_end:,}"
+            )
+        final_color = "#d62728"
+        if result.final is not None:
+            guides.extend(
+                [(result.final[0], QColor(final_color), True),
+                 (result.final[1], QColor(final_color), True)]
+            )
+            head = (
+                f"<b><span style='color:{final_color}'>│</span> Final: "
+                f"{result.final[0] + 1:,}–{result.final[1]:,} "
+                f"({result.final[1] - result.final[0]:,} columns)</b><br>"
+                f"Evaluation: <b>{result.evaluation}</b> · "
+                f"{result.full_length_hits} full-length hits"
+            )
+        else:
+            head = "<b>Final: not defined</b>"
+        detail = (
+            f"{result.sequence_count} sequences · "
+            f"{result.cleaned_columns:,} columns after cleaning"
+        )
+        notes = "".join(f"<br><i>{n}</i>" for n in result.notes)
+        self._rail.set_boundary_prediction_text(
+            head + "<br>" + "<br>".join(lines) + f"<br>{detail}{notes}"
+        )
+        self._bars.set_predicted_boundaries(guides)
+        if result.final is not None:
+            self.statusMessage.emit(
+                f"Boundary prediction · {result.evaluation} · columns "
+                f"{result.final[0] + 1:,}–{result.final[1]:,}"
+            )
+        else:
+            self.statusMessage.emit("Boundary prediction finished without a final boundary.")
+
+    @Slot(str)
+    def _on_boundary_error(self, message: str) -> None:
+        lower = str(message or "").lower()
+        if "stopped by user" in lower or "job stopped" in lower:
+            self.statusMessage.emit("Boundary prediction stopped.")
+            return
+        QMessageBox.warning(self, "Boundary prediction failed", str(message))
+        self.statusMessage.emit(f"Boundary prediction failed: {message}")
+
+    @Slot()
+    def _clear_boundary_thread(self) -> None:
+        self._boundary_thread = None
+        self._boundary_worker = None
+        self._boundary_input = []
+        self._rail.boundary_run_btn.setText("Run")
         self._end_window_job_progress()
 
     def _slider_ppb_bounds(self) -> tuple[float, float]:

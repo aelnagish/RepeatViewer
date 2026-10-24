@@ -54,6 +54,7 @@ _FEATURE_DETECT_TYPE_BY_LABEL: dict[str, str] = {
     "TSD": "TSD",
     "PBS": "PBS",
 }
+from repeatviewer.backends.boundary_predict import TE_TYPE_CHOICES
 from repeatviewer.backends.genetic_codes import (
     genetic_code_choices,
     normalize_genetic_code_id,
@@ -715,6 +716,7 @@ class SequenceAnnotationRail(QWidget):
     residueColorsChanged = Signal()  # quick nucleotide / protein scheme applied
     msaColoringModeChanged = Signal(str)  # MSA residue paint mode id
     msaDivergenceChanged = Signal(float)  # conserved-letter frequency threshold 0–1
+    boundaryPredictClicked = Signal()  # MSA only: TEtrimmer boundary prediction
     featureDetectClicked = Signal()
     featureDetectSettingsClicked = Signal()
     similarityAnnotateClicked = Signal()
@@ -1652,6 +1654,55 @@ class SequenceAnnotationRail(QWidget):
         # grey status text in this rail.
         self.annotation_job_status = QLabel("", page)
         self.annotation_job_status.hide()
+
+        # Boundary prediction (MSA only): TEtrimmer column clean + boundaries.
+        self.boundary_section = _CollapsibleSection(
+            "Boundary prediction", page, expanded=False
+        )
+        boundary_type_row = QWidget(self.boundary_section)
+        boundary_type_row.setMinimumWidth(0)
+        boundary_type_layout = QHBoxLayout(boundary_type_row)
+        boundary_type_layout.setContentsMargins(0, 0, 0, 0)
+        boundary_type_layout.setSpacing(6)
+        boundary_type_layout.addWidget(QLabel("TE type:", boundary_type_row), 0)
+        self.boundary_te_type_combo = QComboBox(boundary_type_row)
+        self.boundary_te_type_combo.addItems(list(TE_TYPE_CHOICES))
+        self.boundary_te_type_combo.setToolTip(
+            "LINE crops divergent ends by gaps and uses the cropped 0.7 "
+            "consensus for BLAST coverage. LINE and SINE also look for a "
+            "poly-A 3′ end. Other types follow TEtrimmer's default path."
+        )
+        boundary_type_layout.addWidget(self.boundary_te_type_combo, 0)
+        boundary_type_layout.addStretch(1)
+        self.boundary_section.add_widget(boundary_type_row)
+        boundary_btn_row = QWidget(self.boundary_section)
+        boundary_btn_layout = QHBoxLayout(boundary_btn_row)
+        boundary_btn_layout.setContentsMargins(0, 0, 0, 0)
+        boundary_btn_layout.setSpacing(6)
+        self.boundary_run_btn = QPushButton("Run", boundary_btn_row)
+        self.boundary_run_btn.setFixedWidth(52)
+        self.boundary_run_btn.setToolTip(
+            "Clean the MSA with TEtrimmer's column rules, then predict the TE "
+            "boundary from MSA identity, BLAST coverage (project genome) and "
+            "LTR/TIR. Results are drawn as dashed column guides."
+        )
+        self.boundary_run_btn.clicked.connect(self.boundaryPredictClicked.emit)
+        boundary_btn_layout.addWidget(self.boundary_run_btn, 0)
+        boundary_btn_layout.addStretch(1)
+        self.boundary_section.add_widget(boundary_btn_row)
+        self.boundary_result_label = QLabel("", self.boundary_section)
+        self.boundary_result_label.setWordWrap(True)
+        self.boundary_result_label.setTextFormat(Qt.TextFormat.RichText)
+        self.boundary_result_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self.boundary_result_label.hide()
+        self.boundary_section.add_widget(self.boundary_result_label)
+        layout.addWidget(self.boundary_section)
+        self._boundary_divider = _h_divider(page)
+        layout.addWidget(self._boundary_divider)
+        self.boundary_section.setVisible(False)
+        self._boundary_divider.setVisible(False)
 
         feature_section = _CollapsibleSection(
             "Feature detection", page, expanded=False
@@ -2748,6 +2799,11 @@ class SequenceAnnotationRail(QWidget):
         self._module_width = _MODULE_WIDTH
         self._apply_module_geometry()
 
+    def set_boundary_prediction_text(self, html: str) -> None:
+        """Show (or clear with "") the Boundary prediction summary."""
+        self.boundary_result_label.setText(html)
+        self.boundary_result_label.setVisible(bool(html))
+
     def set_msa_display_mode(self, enabled: bool) -> None:
         """Toggle controls that apply only to aligned residue columns."""
         self._msa_display_mode = bool(enabled)
@@ -2756,6 +2812,8 @@ class SequenceAnnotationRail(QWidget):
         self.msa_coloring_header.setVisible(visible)
         self.msa_coloring_mode_host.setVisible(visible)
         self.msa_divergence_row.setVisible(visible)
+        self.boundary_section.setVisible(visible)
+        self._boundary_divider.setVisible(visible)
         self._column_distance_label.setVisible(False)
         self.column_distance.setVisible(False)
         self.color_multi_sequence_background.setVisible(

@@ -17010,7 +17010,11 @@ class MainWindow(QMainWindow):
                 return
 
         for panel in self.findChildren(MultiSequenceOverviewPanel):
-            if panel.cancel_auto_annotation() or panel.cancel_similarity_annotation():
+            if (
+                panel.cancel_auto_annotation()
+                or panel.cancel_similarity_annotation()
+                or panel.cancel_boundary_prediction()
+            ):
                 self._set_status_message("Stopping…", 8000)
                 if self._stop_btn is not None:
                     self._stop_btn.setEnabled(False)
