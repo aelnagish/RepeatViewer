@@ -2523,6 +2523,7 @@ class MainWindow(QMainWindow):
         self._file_list.open_in_preview_requested.connect(self._open_files_in_preview)
         self._file_list.open_in_preview_tab_requested.connect(self._open_files_in_preview_tabs)
         self._file_list.open_in_text_editor_requested.connect(self._open_selected_in_text_editor)
+        self._file_list.find_in_document_requested.connect(self._find_in_file_from_panel)
         self._file_list.delete_files_requested.connect(self._delete_selected_files)
         self._file_list.cut_files_requested.connect(self._cut_files_to_clipboard)
         self._file_list.copy_files_requested.connect(self._copy_files_to_clipboard)
@@ -6106,7 +6107,7 @@ class MainWindow(QMainWindow):
 
         add("clear_highlights", "Clear Highlights", self._clear_job_file_highlights)
         menu.addSeparator()
-        add("find", "Find in Current Document…", self._edit_find, std.Find)
+        add("find", "Find in this document…", self._edit_find, std.Find)
         add("find_next", "Find Next", lambda: self._find_from_menu(1), Qt.Key.Key_F3)
         self._edit_actions["find_next"].setShortcuts(
             [QKeySequence(Qt.Key.Key_F3), QKeySequence("Ctrl+G")]
@@ -6493,6 +6494,21 @@ class MainWindow(QMainWindow):
             self._focus_browser_filter()
             return
         self._open_find_dialog()
+
+    def _find_in_file_from_panel(self, path: Path) -> None:
+        """Files right-click → Find in this document…: show the FASTA, then Find."""
+        target = Path(path).expanduser().resolve()
+        self._file_list.clear_suppress_selection_preview()
+        self._open_file_in_preview(target)
+
+        def _open_find() -> None:
+            page = self._find_page()
+            # Cancel at an unsaved-changes prompt keeps the old file: no Find then.
+            if page is None or str(getattr(page, "path", "")) != str(target):
+                return
+            self._open_find_dialog()
+
+        QTimer.singleShot(0, _open_find)
 
     def _find_page(self):
         """The current Preview page, if it is a FASTA that Find can search."""

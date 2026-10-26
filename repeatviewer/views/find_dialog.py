@@ -1,4 +1,4 @@
-"""Edit > Find in current document: the Find window and its background worker.
+"""Edit > Find in this document: the Find window and its background worker.
 
 The window only collects options and shows results; the main window runs the
 search (``repeatviewer.backends.find_in_file``) and moves the Annotation view
@@ -152,7 +152,7 @@ class FindDialog(QDialog):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Find in current document")
+        self.setWindowTitle("Find in this document")
         self.setModal(False)
         self.setWindowModality(Qt.WindowModality.NonModal)
         self._items: list[FoundItem] = []
@@ -185,7 +185,7 @@ class FindDialog(QDialog):
         form.setVerticalSpacing(6)
         form.addWidget(QLabel("Find:", self), 0, 0)
         form.addWidget(
-            _with_help(self._query, "Find in current document", QUERY_HELP, self),
+            _with_help(self._query, "Find in this document", QUERY_HELP, self),
             0,
             1,
         )
