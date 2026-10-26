@@ -452,8 +452,48 @@ class ContigCanvas(QAbstractScrollArea):
             self.one_per_row = len(model.reads) <= ONE_PER_ROW_LIMIT
             self._apply_filters()
             self._relayout()
-            self.fit()
+            self._frame_pending = True
+            self._frame_if_ready()
         self.viewport().update()
+
+    def _frame_if_ready(self) -> None:
+        """Opening view (whole reference, or the region the reads cover). Waits
+        until the view has its real width: framing a 100 px wide widget left the
+        result squeezed to one pixel column."""
+        if not getattr(self, "_frame_pending", False) or self.model is None:
+            return
+        if not self.isVisible() or self.viewport().width() < LABEL_W + 80:
+            return
+        self._frame_pending = False
+        self.fit()
+        self.fit_to_reads()
+
+    def reads_span(self) -> tuple[int, int] | None:
+        """[start, end) covered by the shown placements, or None."""
+        m = self.model
+        shown = [r for r in (m.reads if m else []) if not r.hidden]
+        if not shown:
+            return None
+        return min(r.start for r in shown), max(r.end for r in shown)
+
+    def fit_to_reads(self) -> None:
+        """Open on the part of the reference the sequences cover (Geneious-like):
+        a 455 bp read on a 3 kb reference fills the view instead of a thin strip.
+        Nothing changes when the reads already cover most of the reference."""
+        m = self.model
+        span = self.reads_span()
+        if m is None or span is None:
+            return
+        s0, e0 = span
+        if e0 - s0 >= 0.6 * m.length:
+            return
+        pad = max(5, int((e0 - s0) * 0.03))
+        s0, e0 = max(0, s0 - pad), min(m.length, e0 + pad)
+        self.ppb = min(MAX_PPB, max(1e-6, (self._data_w() - 12) / max(1, e0 - s0)))
+        self._update_scrollbars()
+        self.horizontalScrollBar().setValue(int(s0 * self.ppb))
+        self.viewport().update()
+        self.viewChanged.emit()
 
     def set_one_per_row(self, on: bool) -> None:
         self.one_per_row = on
@@ -567,6 +607,11 @@ class ContigCanvas(QAbstractScrollArea):
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
         self._update_scrollbars()
+        self._frame_if_ready()
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        self._frame_if_ready()
 
     def x_of(self, bp: float) -> float:
         return LABEL_W + bp * self.ppb - self.horizontalScrollBar().value()
