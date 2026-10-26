@@ -11419,6 +11419,24 @@ class TeaAidParamsDialog(QDialog):
         self._teaid_basic.updateGeometry()
         self._resize_for_teaid_advanced(self._advanced_settings_btn.isChecked())
 
+    def _schedule_teaid_refit(self) -> None:
+        """Refit the Parameters tab after rows appear/disappear.
+
+        Also while Advanced Settings is open: the tab height is pinned, so
+        without a refit the new rows (Pangenome list, Define inputs) get
+        squeezed into the old height and their buttons overlap.
+        Deferred so the form's new sizeHint is ready.
+        """
+        self._teaid_compact_size = None
+
+        def _refit() -> None:
+            if not self.isVisible() or self._tabs.currentWidget() is not self._params_tab:
+                return
+            self._teaid_basic.updateGeometry()
+            self._resize_for_teaid_advanced(self._advanced_settings_btn.isChecked())
+
+        QTimer.singleShot(0, _refit)
+
     def _sync_teaid_mode(self, *, resize: bool = True) -> None:
         pan = self._mode_pan.isChecked()
         form = self._teaid_basic.layout()
@@ -11439,9 +11457,8 @@ class TeaAidParamsDialog(QDialog):
         self._pan_list.updateGeometry()
         self._teaid_basic.updateGeometry()
         self._sync_field_column()
-        if resize and self.isVisible() and not self._advanced_settings_btn.isChecked():
-            self._teaid_compact_size = None
-            self._resize_for_teaid_advanced(False)
+        if resize and self.isVisible():
+            self._schedule_teaid_refit()
 
     def input_source(self) -> str:
         if self._input_define.isChecked():
@@ -11493,14 +11510,8 @@ class TeaAidParamsDialog(QDialog):
         self._define_inputs.updateGeometry()
         self._teaid_basic.updateGeometry()
         self._sync_field_column()
-        if (
-            resize
-            and self.isVisible()
-            and not self._advanced_settings_btn.isChecked()
-            and self._tabs.currentWidget() is self._params_tab
-        ):
-            self._teaid_compact_size = None
-            self._resize_for_teaid_advanced(False)
+        if resize and self.isVisible():
+            self._schedule_teaid_refit()
 
     def _sync_field_column(self) -> None:
         if not hasattr(self, "_inputs_radios_label"):
@@ -11627,7 +11638,7 @@ class TeaAidParamsDialog(QDialog):
 
         extra = max(0, adv.sizeHint().height())
         page_h = compact_h + extra
-        base = self._teaid_compact_size or self.size()
+        base = self._teaid_compact_size or QSize(width, chrome + compact_h)
         height = min(base.height() + extra + 12, max_h)
         height = max(height, min(chrome + page_h, max_h))
         pin_tool_tabs_height(self._tabs, page_h)
