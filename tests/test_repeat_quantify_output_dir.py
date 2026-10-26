@@ -32,7 +32,7 @@ def test_run_stamp_format():
 def test_default_folder_is_next_to_the_genome(tmp_path):
     genome = tmp_path / "data" / "Csat_v1.fa"
     assert repeat_quant_output_dir(genome, STAMP) == (
-        tmp_path / "data" / f"Csat_v1_repeat_quant_{STAMP}"
+        tmp_path / "data" / f"Csat_v1.fa_repeat_quant_{STAMP}"
     )
 
 
@@ -40,7 +40,7 @@ def test_chosen_folder_gets_the_run_folder_inside(tmp_path):
     genome = tmp_path / "data" / "Csat_v1.fa"
     base = tmp_path / "results"
     assert repeat_quant_output_dir(genome, STAMP, base) == (
-        base / f"Csat_v1_repeat_quant_{STAMP}"
+        base / f"Csat_v1.fa_repeat_quant_{STAMP}"
     )
 
 
@@ -50,9 +50,9 @@ def test_create_makes_missing_parents_and_never_reuses_a_folder(tmp_path):
     first = create_repeat_quant_output_dir(genome, STAMP, base)
     second = create_repeat_quant_output_dir(genome, STAMP, base)
     third = create_repeat_quant_output_dir(genome, STAMP, base)
-    assert first.name == f"Csat_v1_repeat_quant_{STAMP}"
-    assert second.name == f"Csat_v1_repeat_quant_{STAMP}_2"
-    assert third.name == f"Csat_v1_repeat_quant_{STAMP}_3"
+    assert first.name == f"Csat_v1.fa_repeat_quant_{STAMP}"
+    assert second.name == f"Csat_v1.fa_repeat_quant_{STAMP}_2"
+    assert third.name == f"Csat_v1.fa_repeat_quant_{STAMP}_3"
     assert all(p.is_dir() for p in (first, second, third))
 
 

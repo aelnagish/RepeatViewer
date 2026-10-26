@@ -128,6 +128,69 @@ class _DuplicateSeqidDialog(QDialog):
         return mapping
 
 
+def ask_export_seqid_map(
+    parent: QWidget | None, record_ids: list[str]
+) -> dict[str, str] | None:
+    """Ask for unique export names when FASTA headers collide.
+
+    Returns None when no names collide. Raises ``RuntimeError("cancelled")``
+    on Cancel and ``ValueError`` for invalid edits.
+    """
+    from repeatviewer.backends.sequence_features import strip_duplicate_uniquifier
+
+    ids = list(record_ids)
+    originals = [strip_duplicate_uniquifier(rid, sibling_ids=ids) for rid in ids]
+    dups = duplicate_original_sequence_ids(originals)
+    if not dups:
+        return None
+    suggestions = suggest_unique_export_ids(ids)
+    dialog = _DuplicateSeqidDialog(ids, suggestions, dups, parent=parent)
+    if dialog.exec() != QDialog.DialogCode.Accepted:
+        raise RuntimeError("cancelled")
+    return dialog.seqid_map()
+
+
+def write_annotation_export(
+    parent: QWidget | None,
+    fasta: Path,
+    fmt: str,
+    out: Path,
+    *,
+    record_ids: list[str],
+    features_by_id: dict,
+    lengths_by_id: dict,
+    title: str = "Export annotation",
+) -> bool:
+    """Write GFF3 / GTF / BED to ``out`` (already conflict-checked). True on success."""
+    if not features_by_id or not any(features_by_id.values()):
+        QMessageBox.information(parent, title, "No features to export.")
+        return False
+    try:
+        seqid_map = ask_export_seqid_map(parent, record_ids)
+    except RuntimeError:
+        return False
+    except ValueError as exc:
+        QMessageBox.warning(parent, title, str(exc))
+        return False
+    writer = {
+        "gff3": export_features_gff_multi,
+        "gtf": export_features_gtf_multi,
+        "bed": export_features_bed_multi,
+    }[fmt]
+    try:
+        writer(
+            fasta,
+            features_by_id=features_by_id,
+            lengths_by_id=lengths_by_id,
+            output_path=out,
+            seqid_map=seqid_map,
+        )
+    except OSError as exc:
+        QMessageBox.critical(parent, title, str(exc))
+        return False
+    return True
+
+
 class ExportAnnotationDialog(QDialog):
     """Type + File (Browse) layout matching Add annotation; conflict prompt on OK."""
 
@@ -267,24 +330,6 @@ class ExportAnnotationDialog(QDialog):
             path = path.with_suffix(suffix)
         return path
 
-    def _resolve_seqid_map(self) -> dict[str, str] | None:
-        from repeatviewer.backends.sequence_features import strip_duplicate_uniquifier
-
-        originals = [
-            strip_duplicate_uniquifier(rid, sibling_ids=self._record_ids)
-            for rid in self._record_ids
-        ]
-        dups = duplicate_original_sequence_ids(originals)
-        if not dups:
-            return None
-        suggestions = suggest_unique_export_ids(self._record_ids)
-        dialog = _DuplicateSeqidDialog(
-            self._record_ids, suggestions, dups, parent=self
-        )
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            raise RuntimeError("cancelled")
-        return dialog.seqid_map()
-
     def _accept(self) -> None:
         if not self._features_by_id or not any(self._features_by_id.values()):
             QMessageBox.information(
@@ -295,7 +340,6 @@ class ExportAnnotationDialog(QDialog):
         if out is None:
             return
         fmt = self._current_fmt()
-        suffix = _FORMAT_SUFFIX[fmt]
         confirmed = confirm_existing_file_path(
             self,
             out,
@@ -303,44 +347,19 @@ class ExportAnnotationDialog(QDialog):
             informative=(
                 "Overwrite the existing file, or save under a different name?"
             ),
-            required_suffix=suffix,
+            required_suffix=_FORMAT_SUFFIX[fmt],
         )
         if confirmed is None:
             return
-        try:
-            seqid_map = self._resolve_seqid_map()
-        except RuntimeError:
-            return
-        except ValueError as exc:
-            QMessageBox.warning(self, "Export annotation", str(exc))
-            return
-        try:
-            if fmt == "gff3":
-                export_features_gff_multi(
-                    self._fasta,
-                    features_by_id=self._features_by_id,
-                    lengths_by_id=self._lengths_by_id,
-                    output_path=confirmed,
-                    seqid_map=seqid_map,
-                )
-            elif fmt == "gtf":
-                export_features_gtf_multi(
-                    self._fasta,
-                    features_by_id=self._features_by_id,
-                    lengths_by_id=self._lengths_by_id,
-                    output_path=confirmed,
-                    seqid_map=seqid_map,
-                )
-            else:
-                export_features_bed_multi(
-                    self._fasta,
-                    features_by_id=self._features_by_id,
-                    lengths_by_id=self._lengths_by_id,
-                    output_path=confirmed,
-                    seqid_map=seqid_map,
-                )
-        except OSError as exc:
-            QMessageBox.critical(self, "Export annotation", str(exc))
+        if not write_annotation_export(
+            self,
+            self._fasta,
+            fmt,
+            confirmed,
+            record_ids=self._record_ids,
+            features_by_id=self._features_by_id,
+            lengths_by_id=self._lengths_by_id,
+        ):
             return
         self._written = confirmed
         self.accept()

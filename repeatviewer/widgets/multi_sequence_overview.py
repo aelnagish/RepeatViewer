@@ -1319,6 +1319,9 @@ class _BarsCanvas(QWidget):
         self._msa_layer_cache_origin = QPoint(0, 0)
         self._msa_layer_cache_rect = QRect()
         self._msa_layer_serial = 0
+        # Set by export_annotation_view_dialog.vector_export(): paint residues
+        # live so PDF/SVG exports get vectors, not the screen pixmap cache.
+        self._vector_export = False
 
     def _invalidate_msa_layer_cache(self) -> None:
         """Drop the MSA residue pixmap (zoom/data — not selection)."""
@@ -3921,7 +3924,11 @@ class _BarsCanvas(QWidget):
         # row edge dirties must not recompose the whole selection span.
         region = event.region()
         rects = list(region) if not region.isEmpty() else [event.rect()]
-        use_cache = self._msa_mode and self._ensure_msa_layer_cache()
+        use_cache = (
+            self._msa_mode
+            and not self._vector_export
+            and self._ensure_msa_layer_cache()
+        )
         cache = self._msa_layer_cache if use_cache else None
         cache_origin = self._msa_layer_cache_origin if use_cache else QPoint()
         cache_rect = self._msa_layer_cache_rect if use_cache else QRect()
@@ -8007,23 +8014,36 @@ class MultiSequenceOverviewPanel(QWidget):
 
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(resolved)))
 
+    def _annotations_for_export(self) -> tuple[list[str], dict, dict]:
+        """Features as shown now (incl. unsaved results) for GFF3/GTF/BED export."""
+        features = {rid: list(feats) for rid, feats in self._features.items()}
+        return list(self._record_ids), features, dict(self._lengths)
+
     def _export_overview_view(self) -> None:
         """Export the names + tracks overview (same formats as single-seq Export)."""
         from repeatviewer.views.export_annotation_view_dialog import (
             ExportAnnotationViewDialog,
+            vector_export,
+            write_view_vector_pdf,
         )
 
         dialog = ExportAnnotationViewDialog(
             source_path=self._path,
-            title="Export overview",
+            title="Export",
             name_tag="overview",
             default_format="pdf",
+            annotation_provider=self._annotations_for_export,
             parent=self,
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         out_path = dialog.chosen_path()
         if out_path is None:
+            return
+        if dialog.wrote_annotation_file():
+            self.statusMessage.emit(f"Exported annotations → {out_path.name}")
+            # Shows the new GFF3/GTF/BED in Files without leaving this preview.
+            self.annotationsSaved.emit(out_path)
             return
         dpi = max(50, min(600, int(dialog.dpi())))
         scale = max(1.0, float(dpi) / 96.0)
@@ -8078,9 +8098,24 @@ class MultiSequenceOverviewPanel(QWidget):
             gen.setResolution(dpi)
             painter = QPainter(gen)
             try:
-                _paint_overview(painter)
+                with vector_export(self):
+                    _paint_overview(painter)
             finally:
                 painter.end()
+            self.statusMessage.emit(f"Exported overview → {out_path.name}")
+            self._open_exported_file(out_path)
+            return
+
+        if suffix == ".pdf":
+            # Vector PDF: paint the widgets straight onto the page (no bitmap).
+            with vector_export(self):
+                write_view_vector_pdf(
+                    out_path,
+                    _paint_overview,
+                    width=width,
+                    height=height,
+                    logical_dpi=float(self.logicalDpiY()),
+                )
             self.statusMessage.emit(f"Exported overview → {out_path.name}")
             self._open_exported_file(out_path)
             return
@@ -8108,22 +8143,6 @@ class MultiSequenceOverviewPanel(QWidget):
             self._open_exported_file(out_path)
             return
 
-        if suffix == ".pdf":
-            from repeatviewer.views.export_annotation_view_dialog import (
-                write_view_image_pdf,
-            )
-
-            write_view_image_pdf(
-                out_path,
-                img,
-                dpi=dpi,
-                content_width=width,
-                content_height=height,
-            )
-            self.statusMessage.emit(f"Exported overview → {out_path.name}")
-            self._open_exported_file(out_path)
-            return
-
         QMessageBox.warning(
             self,
             "Export",
@@ -8133,6 +8152,40 @@ class MultiSequenceOverviewPanel(QWidget):
     def is_dirty(self) -> bool:
         """True when feature detection / similarity results are not yet saved."""
         return bool(self._annotations_dirty)
+
+    # Every write of the flag also refreshes "Save •" on the rail.
+    @property
+    def _annotations_dirty(self) -> bool:
+        return bool(self.__dict__.get("_annotations_dirty_value", False))
+
+    @_annotations_dirty.setter
+    def _annotations_dirty(self, value: bool) -> None:
+        self.__dict__["_annotations_dirty_value"] = bool(value)
+        self._sync_save_marker()
+
+    def has_unsaved_annotation_changes(self) -> bool:
+        return self.is_dirty()
+
+    def discard_annotation_changes(self) -> None:
+        """Don't Save at the leave-file prompt; the file reloads from JSON next time."""
+        self._annotations_dirty = False
+
+    def _sync_save_marker(self) -> None:
+        rail = self.__dict__.get("_rail")
+        button = getattr(rail, "save_btn", None) if rail is not None else None
+        if button is None:
+            return
+        try:
+            dirty = self.is_dirty()
+            button.setText("Save \u2022" if dirty else "Save")
+            button.setToolTip(
+                "Unsaved annotation changes. Save writes them to the "
+                ".seqmap_RV.json next to the FASTA."
+                if dirty
+                else "Save annotations to the .seqmap_RV.json next to the FASTA."
+            )
+        except RuntimeError:
+            return
 
     def _save_overview_annotations(self) -> None:
         if not self._record_ids:
@@ -8148,8 +8201,20 @@ class MultiSequenceOverviewPanel(QWidget):
             QMessageBox.warning(self, "Save annotations", str(exc))
             return
         self._annotations_dirty = False
-        self.statusMessage.emit(f"Saved annotations · {json_path.name}")
+        count = sum(len(v) for v in self._features.values())
+        noun = "annotation" if count == 1 else "annotations"
+        if _gff is not None:
+            self.statusMessage.emit(
+                f"Saved {count:,} {noun} to {json_path.name} and {_gff.name}"
+            )
+        else:
+            self.statusMessage.emit(
+                f"Saved {count:,} {noun} to {json_path.name}. "
+                "To get a GFF3: Export → GFF3"
+            )
         self.annotationsSaved.emit(self._path)
+        if _gff is not None:
+            self.annotationsSaved.emit(_gff)
 
     def load_path(self, path: Path, *, msa_mode: bool | None = None) -> None:
         """Load multi-FASTA overview.
@@ -9776,6 +9841,8 @@ class MultiSequenceOverviewPanel(QWidget):
         self._sync_names_column()
         self._update_scale()
         self.annotationsSaved.emit(json_path)
+        if _gff is not None:
+            self.annotationsSaved.emit(_gff)
         return True
 
     def _current_region_for_add(self) -> tuple[int, int] | None:

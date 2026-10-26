@@ -170,6 +170,7 @@ class FileListTableWidget(QTableWidget):
     open_in_preview_requested = Signal(list)
     open_in_preview_tab_requested = Signal(list)
     open_in_text_editor_requested = Signal(list)
+    find_in_document_requested = Signal(Path)
     delete_files_requested = Signal(list)
     duplicate_files_requested = Signal(list)
     cut_files_requested = Signal(list)
@@ -1312,6 +1313,11 @@ class FileListTableWidget(QTableWidget):
                         "Open in Text Editor",
                         lambda: self.open_in_text_editor_requested.emit(paths),
                     )
+                    if path.suffix.lower() in _FASTA_SUFFIXES:
+                        menu.addAction(
+                            "Find in this document…",
+                            lambda p=path: self.find_in_document_requested.emit(p),
+                        )
                     menu.addAction("Rename", lambda: self.rename_file_requested.emit(path))
                     if path.suffix.lower() in _FASTA_SUFFIXES:
                         menu.addAction(

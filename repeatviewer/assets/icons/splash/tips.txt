@@ -9,7 +9,6 @@ Undo tree edits with Cmd+Z (macOS) or Ctrl+Z.
 Colour tree tips by chromosome, array or methylation: Trait table → Create or update.
 Satellite monomers start at random positions: "Rotate satellite monomers to a common start" fixes that before the tree is built.
 "Methylation check" builds a second tree without CG/CHG sites and tells you which groupings depend on them.
-RT-domain tree: choose your REXdb in the Tree window and set Sequences to "RT domain from DNA".
 Select several FASTA files together to build one combined tree.
 In the alignment window, "Differences only" shows a dot wherever a base matches the consensus.
 Every tree run writes a methods paragraph with references, ready for your paper, in its details folder.

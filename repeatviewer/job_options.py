@@ -2112,6 +2112,14 @@ def save_msa_plot_options(opts: MsaPlotJobOptions) -> None:
 
 REPEAT_QUANTIFY_ENGINES = ("blastn", "repeatmasker", "both")
 REPEAT_QUANTIFY_SENSITIVITIES = ("sensitive", "default", "quick")
+# Right-click on the Repeat Quantify button: open the window, or run again on
+# the library and genomes of the last run in this session (never saved).
+REPEAT_QUANTIFY_RIGHT_CLICK_DIALOG = "dialog"
+REPEAT_QUANTIFY_RIGHT_CLICK_RERUN = "rerun"
+REPEAT_QUANTIFY_RIGHT_CLICK_ACTIONS = (
+    REPEAT_QUANTIFY_RIGHT_CLICK_DIALOG,
+    REPEAT_QUANTIFY_RIGHT_CLICK_RERUN,
+)
 
 
 @dataclass
@@ -2130,9 +2138,15 @@ class RepeatQuantifyOptions:
     # Save a genome's BLAST index as a named database (Add/Manage databases)
     # so later runs and other tools reuse it. Not a quantify_library keyword.
     blast_save_index: bool = True
+    # CPU threads for BLASTn and RepeatMasker (passed as ``threads``).
+    threads: int = 4
+    # Options tab.
+    right_click_action: str = REPEAT_QUANTIFY_RIGHT_CLICK_DIALOG
+    show_process_window: bool = DEFAULT_SHOW_PROCESS_WINDOW
+    close_process_window_when_finished: bool = DEFAULT_CLOSE_PROCESS_WINDOW_WHEN_FINISHED
 
     def params(self) -> dict:
-        """Keyword arguments for ``quantify_library`` (everything but engine)."""
+        """Keyword arguments for ``quantify_library`` (everything but engine/threads)."""
         return {
             "blast_word_size": self.blast_word_size,
             "blast_evalue": self.blast_evalue,
@@ -2156,6 +2170,7 @@ def load_repeat_quantify_options() -> RepeatQuantifyOptions:
     d = RepeatQuantifyOptions()
     engine = str(v.get("engine", d.engine))
     sensitivity = str(v.get("rm_sensitivity", d.rm_sensitivity))
+    right_click = str(v.get("right_click_action", d.right_click_action))
     return RepeatQuantifyOptions(
         engine=engine if engine in REPEAT_QUANTIFY_ENGINES else d.engine,
         blast_word_size=_clamped(
@@ -2181,6 +2196,22 @@ def load_repeat_quantify_options() -> RepeatQuantifyOptions:
         blast_save_index=_setting_bool(
             v.get("blast_save_index", d.blast_save_index), d.blast_save_index
         ),
+        threads=_clamped(v.get("threads", d.threads), int, d.threads, 1, 256),
+        right_click_action=(
+            right_click if right_click in REPEAT_QUANTIFY_RIGHT_CLICK_ACTIONS
+            else d.right_click_action
+        ),
+        show_process_window=_setting_bool(
+            v.get("show_process_window", d.show_process_window),
+            d.show_process_window,
+        ),
+        close_process_window_when_finished=_setting_bool(
+            v.get(
+                "close_process_window_when_finished",
+                d.close_process_window_when_finished,
+            ),
+            d.close_process_window_when_finished,
+        ),
     )
 
 
@@ -2203,6 +2234,12 @@ def save_repeat_quantify_options(opts: RepeatQuantifyOptions) -> None:
             "engine": opts.engine,
             **opts.params(),
             "blast_save_index": bool(opts.blast_save_index),
+            "threads": int(opts.threads),
+            "right_click_action": opts.right_click_action,
+            "show_process_window": bool(opts.show_process_window),
+            "close_process_window_when_finished": bool(
+                opts.close_process_window_when_finished
+            ),
         },
     )
 
@@ -2530,11 +2567,6 @@ TREE_RIGHT_CLICK_DIALOG = "dialog"
 TREE_RIGHT_CLICK_ACTIONS = (TREE_RIGHT_CLICK_RUN, TREE_RIGHT_CLICK_DIALOG)
 
 
-TREE_SEQ_AS_IS = "as_is"
-TREE_SEQ_RT = "rt_domain"
-TREE_SEQ_MODES = (TREE_SEQ_AS_IS, TREE_SEQ_RT)
-
-
 @dataclass
 class TreeOptions:
     """Phylogenetic tree building (Tools → Tree).
@@ -2549,10 +2581,6 @@ class TreeOptions:
     mafft_strategy: str = "choose"     # L-INS-i up to 200 sequences, else FFT-NS-2
     adjust_direction: bool = True
     rotate_monomers: bool = False      # satellite monomers: common start before aligning
-    # Sequences: TREE_SEQ_AS_IS, or TREE_SEQ_RT = RT domain found in the DNA (REXdb)
-    sequence_mode: str = TREE_SEQ_AS_IS
-    rexdb_fasta: str = ""              # user's REXdb protein FASTA (.classification beside it)
-    rexdb_references: int = 3          # REXdb RTs added per lineage (0 = none)
     mafft_gap_open: float = 1.53
     mafft_offset: float = 0.0
     min_coverage: float = 0.7          # fraction of the reference length; 0 = off
@@ -2613,9 +2641,6 @@ def load_tree_options() -> TreeOptions:
         adjust_direction=_to_bool(v.get("adjust_direction"), d.adjust_direction),
         rotate_monomers=_to_bool(v.get("rotate_monomers"), d.rotate_monomers),
         methylation_mask=_pick("methylation_mask", ("", "CG", "CG_CHG"), d.methylation_mask),
-        sequence_mode=_pick("sequence_mode", TREE_SEQ_MODES, d.sequence_mode),
-        rexdb_fasta=str(v.get("rexdb_fasta", d.rexdb_fasta) or ""),
-        rexdb_references=_num("rexdb_references", d.rexdb_references, int, 0, 50),
         mafft_gap_open=_num("mafft_gap_open", d.mafft_gap_open, float, 0.0, 20.0),
         mafft_offset=_num("mafft_offset", d.mafft_offset, float, 0.0, 10.0),
         min_coverage=_num("min_coverage", d.min_coverage, float, 0.0, 1.0),
@@ -2661,9 +2686,6 @@ def save_tree_options(opts: TreeOptions) -> None:
             "adjust_direction": opts.adjust_direction,
             "rotate_monomers": opts.rotate_monomers,
             "methylation_mask": opts.methylation_mask,
-            "sequence_mode": opts.sequence_mode,
-            "rexdb_fasta": opts.rexdb_fasta,
-            "rexdb_references": opts.rexdb_references,
             "mafft_gap_open": opts.mafft_gap_open,
             "mafft_offset": opts.mafft_offset,
             "min_coverage": opts.min_coverage,

@@ -386,6 +386,7 @@ from repeatviewer.job_options import (
     load_te_divergence_plot_options,
     load_msa_plot_options,
     load_repeat_quantify_options,
+    REPEAT_QUANTIFY_RIGHT_CLICK_RERUN,
     load_te_confusion_matrix_benchmark_options,
     load_te_library_benchmark_options,
     load_tsd_search_options,
@@ -1012,6 +1013,8 @@ class RepeatQuantifyWorker(QObject):
     """Quantify a repeat library across target sequences off the UI thread."""
 
     progress = Signal(int, str)
+    # Command lines and tool messages for the process window (Options tab).
+    log_line = Signal(str)
     finished = Signal(object)
     failed = Signal(str)
     # A new saved BLAST database (BlastDatabase) built for a genome; the main
@@ -1048,6 +1051,15 @@ class RepeatQuantifyWorker(QObject):
 
     @Slot()
     def run(self) -> None:
+        from repeatviewer.external_process import process_log_sink
+
+        def _log(message: str) -> None:
+            self.log_line.emit(str(message))
+
+        with process_log_sink(_log):
+            self._run()
+
+    def _run(self) -> None:
         from datetime import datetime
 
         from repeatviewer.backends.repeat_quantify import (
@@ -2511,6 +2523,7 @@ class MainWindow(QMainWindow):
         self._file_list.open_in_preview_requested.connect(self._open_files_in_preview)
         self._file_list.open_in_preview_tab_requested.connect(self._open_files_in_preview_tabs)
         self._file_list.open_in_text_editor_requested.connect(self._open_selected_in_text_editor)
+        self._file_list.find_in_document_requested.connect(self._find_in_file_from_panel)
         self._file_list.delete_files_requested.connect(self._delete_selected_files)
         self._file_list.cut_files_requested.connect(self._cut_files_to_clipboard)
         self._file_list.copy_files_requested.connect(self._copy_files_to_clipboard)
@@ -4835,21 +4848,6 @@ class MainWindow(QMainWindow):
         menu.addAction(
             "Change Tree parameters", lambda: self._open_tree_dialog(require_selection=False)
         )
-        menu.addSeparator()
-        menu.addAction(
-            "Methylation-masked sensitivity run (CG and CHG)", self._run_tree_methylation_masked
-        )
-        menu.addAction("RT-domain tree (REXdb lineages)", self._run_tree_rt_domains)
-
-    def _run_tree_methylation_masked(self) -> None:
-        """Saved settings, plus a second tree without CG/CHG columns, compared in the report."""
-        from dataclasses import replace
-
-        from repeatviewer.backends.methylation_mask import MASK_CG_CHG
-
-        files = self._selected_files_for_tree()
-        if files:
-            self._start_tree_job(files, replace(self._tree_options, methylation_mask=MASK_CG_CHG))
 
     def _tree_candidate_files(self) -> list[Path]:
         """Selected FASTA files (several files are combined into one tree). No UI."""
@@ -4904,56 +4902,31 @@ class MainWindow(QMainWindow):
             if not d.should_run():
                 self._set_status_message("Tree settings saved", 4000)
                 return
-            # Non-modal: Files clicks can change the selection after open; when
-            # nothing was selected at open, re-read the panel. Prefer the files
-            # chosen when the dialog opened otherwise.
-            run_files = [
-                p for p in (files or self._tree_candidate_files())
-                if str(p) != self._tree_options.rexdb_fasta
-            ]
-            if not run_files:
-                self._selected_files_for_tree()  # warning: select FASTA first
-                return
+            from repeatviewer.job_options import ALIGN_INPUT_DEFINE
+
+            if d.input_source() == ALIGN_INPUT_DEFINE:
+                run_files = list(d.run_files())
+                if not run_files:
+                    QMessageBox.information(
+                        self,
+                        "Tree",
+                        "Add at least one FASTA file under Define inputs "
+                        "(click it in the Files panel, or use Browse).",
+                    )
+                    return
+            else:
+                # Non-modal: Files clicks can change the selection after open;
+                # when nothing was selected at open, re-read the panel. Prefer
+                # the files chosen when the dialog opened otherwise.
+                run_files = list(files or self._tree_candidate_files())
+                if not run_files:
+                    self._selected_files_for_tree()  # warning: select FASTA first
+                    return
             self._start_tree_job(run_files, self._tree_options)
 
         # Non-modal so Files clicks can update the selection after open.
         self._present_te_viz_dialog(dialog, _accepted)
 
-    def _run_tree_rt_domains(self) -> None:
-        """Saved settings, with the sequences replaced by their RT domains (REXdb)."""
-        from PySide6.QtWidgets import QFileDialog
-
-        from repeatviewer.backends.rt_domains import looks_like_rexdb
-        from repeatviewer.job_options import TREE_SEQ_RT, save_tree_options
-
-        rexdb = self._tree_options.rexdb_fasta
-        if not rexdb or not looks_like_rexdb(Path(rexdb)):
-            chosen, _filter = QFileDialog.getOpenFileName(
-                self,
-                "Choose the REXdb protein FASTA",
-                "",
-                "FASTA (*.fasta *.fa *.faa);;All files (*)",
-            )
-            if not chosen:
-                return
-            path = Path(chosen)
-            if not looks_like_rexdb(path):
-                QMessageBox.warning(
-                    self,
-                    "RT-domain tree",
-                    f"{path.name} needs its .classification table in the same folder.\n\n"
-                    "Download Viridiplantae_v4.0.fasta and "
-                    "Viridiplantae_v4.0.classification from "
-                    "github.com/repeatexplorer/rexdb into one folder.",
-                )
-                return
-            self._tree_options = replace(self._tree_options, rexdb_fasta=str(path))
-            save_tree_options(self._tree_options)
-        files = self._selected_files_for_tree()
-        if files:
-            self._start_tree_job(
-                files, replace(self._tree_options, sequence_mode=TREE_SEQ_RT)
-            )
     def _start_tree_job(self, files: list[Path], options) -> None:
         title = (f"Tree ({files[0].name})" if len(files) == 1
                  else f"Tree ({len(files)} files combined)")
@@ -5595,65 +5568,58 @@ class MainWindow(QMainWindow):
             body += f"\n\n{install_hint()}"
         QMessageBox.warning(self, "FastGA failed", body)
 
+    def _quick_repeat_quantify_right_click(self) -> None:
+        """Right-click: open the window, or rerun on the last inputs (Options tab)."""
+        opts = load_repeat_quantify_options()
+        last = getattr(self, "_repeat_quant_last_inputs", None)
+        if opts.right_click_action != REPEAT_QUANTIFY_RIGHT_CLICK_RERUN or last is None:
+            if opts.right_click_action == REPEAT_QUANTIFY_RIGHT_CLICK_RERUN:
+                self._set_status_message(
+                    "Repeat Quantify: no earlier run in this session, "
+                    "choose the library and genomes first",
+                    6000,
+                )
+            self._open_repeat_quantify()
+            return
+        library, targets, output_base = last
+        missing = [p for p in [library, *targets] if not Path(p).is_file()]
+        if missing:
+            self._set_status_message(
+                f"Repeat Quantify: {Path(missing[0]).name} no longer exists", 6000
+            )
+            self._open_repeat_quantify()
+            return
+        from repeatviewer.backends.repeat_quantify import run_stamp
+
+        self._start_repeat_quantify_job(
+            library, targets, opts, output_base=output_base, stamp=run_stamp()
+        )
+
     def _open_repeat_quantify(self) -> None:
-        """Quantify a tandem-repeat / satellite library across a target FASTA."""
+        """Quantify a tandem-repeat / satellite library across genome FASTAs."""
         from repeatviewer.views.tool_dialogs import RepeatQuantifyDialog
 
         start_dir = str(self._current_folder) if self._current_folder else ""
 
         def _on_accept(dialog: RepeatQuantifyDialog) -> None:
-            save_repeat_quantify_options(dialog.options())
+            opts = dialog.options()
+            save_repeat_quantify_options(opts)
+            # Same BLAST+ PATH setting as the BLAST window.
+            self._project.use_system_blast = dialog.use_system_blast()
+            self._persist_workspace()
             if not dialog.should_run():
-                self._set_status_message("Repeat quantify settings saved", 4000)
+                self._set_status_message("Repeat Quantify settings saved", 4000)
                 return
             library = dialog.library()
             targets = dialog.targets()
-            engine = dialog.engine()
-            params = dialog.params()
             if library is None or not targets:
                 return
-            if engine in ("both", "repeatmasker"):
-                from repeatviewer.backends.repeat_quantify import (
-                    repeatmasker_executable_available,
-                )
-
-                if not repeatmasker_executable_available():
-                    QMessageBox.warning(
-                        self,
-                        "RepeatMasker not found",
-                        "RepeatMasker is not on PATH. Install it, or choose the "
-                        "BLASTn engine instead.",
-                    )
-                    return
-            from repeatviewer.app_preferences import load_blast_db_base_dir
-            from repeatviewer.database_settings import (
-                reload_blast_databases_into_project,
-            )
-
-            worker = RepeatQuantifyWorker(
+            self._start_repeat_quantify_job(
                 Path(library),
                 targets,
-                engine=engine,
-                threads=self._project.batch_workers,
-                params=params,
-                cancel=self._job_cancel,
+                opts,
                 output_base=dialog.output_dir(),
                 stamp=dialog.run_stamp(),
-                blast_databases=reload_blast_databases_into_project(self._project),
-                save_blast_index=dialog.save_blast_index(),
-                blast_db_base_dir=load_blast_db_base_dir(),
-                use_system_blast=self._project.use_system_blast,
-            )
-            worker.database_created.connect(self._register_blast_database)
-            self._start_background_job(
-                worker,
-                job_title="Repeat quantify",
-                # 1 = the app's plain "Repeat quantify… <genome>" status line; a
-                # count > 1 would switch the status bar to the batch progress bar.
-                total_steps=1,
-                source_files=targets,
-                on_finished=self._on_repeat_quantify_finished,
-                on_failed=self._on_repeat_quantify_failed,
             )
 
         from repeatviewer.database_settings import reload_blast_databases_into_project
@@ -5662,11 +5628,76 @@ class MainWindow(QMainWindow):
             start_dir=start_dir,
             initial=load_repeat_quantify_options(),
             blast_databases=reload_blast_databases_into_project(self._project),
+            use_system_blast=self._project.use_system_blast,
             parent=self,
         )
         # Same non-modal presentation as the TE visualization dialogs, so the
         # Folders and Files panels stay clickable while it is open.
         self._present_te_viz_dialog(dialog, _on_accept)
+
+    def _start_repeat_quantify_job(
+        self,
+        library: Path,
+        targets: list[Path],
+        opts,
+        *,
+        output_base: Path | None,
+        stamp: str,
+    ) -> None:
+        engine = opts.engine
+        if engine in ("both", "repeatmasker"):
+            from repeatviewer.backends.repeat_quantify import (
+                repeatmasker_executable_available,
+            )
+
+            if not repeatmasker_executable_available():
+                QMessageBox.warning(
+                    self,
+                    "RepeatMasker not found",
+                    "RepeatMasker is not on PATH. Install it, or choose the "
+                    "BLASTn tab instead.",
+                )
+                return
+        from repeatviewer.app_preferences import load_blast_db_base_dir
+        from repeatviewer.database_settings import (
+            reload_blast_databases_into_project,
+        )
+
+        # Remembered for right-click "run again" (this session only, never saved).
+        self._repeat_quant_last_inputs = (Path(library), list(targets), output_base)
+        worker = RepeatQuantifyWorker(
+            Path(library),
+            targets,
+            engine=engine,
+            threads=max(1, int(opts.threads)),
+            params=opts.params(),
+            cancel=self._job_cancel,
+            output_base=output_base,
+            stamp=stamp,
+            blast_databases=reload_blast_databases_into_project(self._project),
+            save_blast_index=bool(opts.blast_save_index),
+            blast_db_base_dir=load_blast_db_base_dir(),
+            use_system_blast=self._project.use_system_blast,
+        )
+        worker.database_created.connect(self._register_blast_database)
+        self._attach_process_monitor(
+            worker,
+            title="Repeat Quantify",
+            enabled=bool(opts.show_process_window),
+            tool_key="repeat_quantify",
+            mirror_progress=True,
+            close_when_finished=bool(opts.close_process_window_when_finished),
+        )
+        self._start_background_job(
+            worker,
+            job_title="Repeat Quantify",
+            # 1 = the app's plain "Repeat Quantify… <genome>" status line; a
+            # count > 1 would switch the status bar to the batch progress bar.
+            total_steps=1,
+            source_files=targets,
+            on_finished=self._on_repeat_quantify_finished,
+            on_failed=self._on_repeat_quantify_failed,
+        )
 
     @Slot(object)
     def _register_blast_database(self, db) -> None:
@@ -5698,7 +5729,7 @@ class MainWindow(QMainWindow):
         for index, path in enumerate(paths):
             self._open_preview_tab(path, replace=(index == 0))
         self._set_status_message(
-            f"Repeat quantify — {len(paths)} report(s) written",
+            f"Repeat Quantify: {len(paths)} report(s) written",
             12000,
             override_file_link=True,
         )
@@ -5706,7 +5737,7 @@ class MainWindow(QMainWindow):
     @Slot(str)
     def _on_repeat_quantify_failed(self, error: str) -> None:
         QMessageBox.warning(
-            self, "Repeat quantify failed", error.strip() or "Unknown error."
+            self, "Repeat Quantify failed", error.strip() or "Unknown error."
         )
 
     def _populate_blast_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
@@ -6020,7 +6051,7 @@ class MainWindow(QMainWindow):
 
         add("clear_highlights", "Clear Highlights", self._clear_job_file_highlights)
         menu.addSeparator()
-        add("find", "Find in Current Document…", self._edit_find, std.Find)
+        add("find", "Find in this document…", self._edit_find, std.Find)
         add("find_next", "Find Next", lambda: self._find_from_menu(1), Qt.Key.Key_F3)
         self._edit_actions["find_next"].setShortcuts(
             [QKeySequence(Qt.Key.Key_F3), QKeySequence("Ctrl+G")]
@@ -6407,6 +6438,21 @@ class MainWindow(QMainWindow):
             self._focus_browser_filter()
             return
         self._open_find_dialog()
+
+    def _find_in_file_from_panel(self, path: Path) -> None:
+        """Files right-click → Find in this document…: show the FASTA, then Find."""
+        target = Path(path).expanduser().resolve()
+        self._file_list.clear_suppress_selection_preview()
+        self._open_file_in_preview(target)
+
+        def _open_find() -> None:
+            page = self._find_page()
+            # Cancel at an unsaved-changes prompt keeps the old file: no Find then.
+            if page is None or str(getattr(page, "path", "")) != str(target):
+                return
+            self._open_find_dialog()
+
+        QTimer.singleShot(0, _open_find)
 
     def _find_page(self):
         """The current Preview page, if it is a FASTA that Find can search."""
@@ -7421,11 +7467,16 @@ class MainWindow(QMainWindow):
                 right_click_slot=self._quick_map_right_click,
             )
         elif tool_id == "repeat_quantify":
-            self._add_toolbar_text_action(
+            self._add_toolbar_action_button(
                 bar,
                 "Repeat Quantify",
                 self._open_repeat_quantify,
-                tooltip="Quantify a repeat / satellite library across a genome.",
+                tooltip=(
+                    "Click: set parameters and run.\n"
+                    "Right-click: action chosen in the Options tab "
+                    "(default: open this window)."
+                ),
+                right_click_slot=self._quick_repeat_quantify_right_click,
             )
         elif tool_id == "blast":
             self._add_toolbar_action_button(
@@ -10304,6 +10355,8 @@ class MainWindow(QMainWindow):
 
     def _raise_open_tool_dialogs(self) -> None:
         """Stack open tool dialogs above the main window without stealing focus."""
+        from repeatviewer.views.manage_references_dialog import ManageReferencesDialog
+
         for dialog in self._iter_open_tool_dialogs():
             try:
                 dialog.raise_()
@@ -10312,6 +10365,12 @@ class MainWindow(QMainWindow):
                 raise_add = getattr(dialog, "raise_add_dialog_if_open", None)
                 if callable(raise_add):
                     raise_add()
+                # TE-Aid / BLAST open their own Manage Database as a child;
+                # raising the params dialog alone buries Manage and Add under it.
+                for manager in dialog.findChildren(ManageReferencesDialog):
+                    if manager.isVisible():
+                        manager.raise_()
+                        manager.raise_add_dialog_if_open()
             except RuntimeError:
                 continue
         self._raise_preview_duplicate_windows()
