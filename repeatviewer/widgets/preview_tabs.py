@@ -1228,10 +1228,11 @@ class FilePreviewPage(QWidget):
 
     def reload_from_disk(self) -> None:
         """Refresh the current view after the file on disk changed."""
-        if self.has_unsaved_text():
-            # Never drop unsaved Edit-text changes on a silent reload (same file
-            # clicked again, folder watcher, tab switch). Leaving the file on
-            # purpose goes through PreviewTabWidget.confirm_leave_page().
+        if self.has_unsaved_changes():
+            # Never drop unsaved Edit-text or annotation changes on a silent
+            # reload (same file clicked again, folder watcher, tab switch).
+            # Leaving the file on purpose goes through
+            # PreviewTabWidget.confirm_leave_page().
             return
         suffix = self.path.suffix.lower()
         if suffix in {".png", ".jpg", ".jpeg", ".svg", ".gif", ".bmp", ".webp"}:
@@ -2588,6 +2589,49 @@ class FilePreviewPage(QWidget):
         except RuntimeError:
             return True
 
+    def _annotation_views(self) -> list:
+        views = []
+        for view in (self._annotation_panel, self._annotation_overview):
+            if view is not None and hasattr(view, "has_unsaved_annotation_changes"):
+                views.append(view)
+        return views
+
+    def has_unsaved_annotations(self) -> bool:
+        """Annotation edits (added / edited / deleted features) not saved yet."""
+        for view in self._annotation_views():
+            try:
+                if view.has_unsaved_annotation_changes():
+                    return True
+            except RuntimeError:
+                continue
+        return False
+
+    def has_unsaved_changes(self) -> bool:
+        return self.has_unsaved_text() or self.has_unsaved_annotations()
+
+    def save_annotations_now(self) -> bool:
+        """Save button behaviour for the leave-file prompt. True when nothing is left unsaved."""
+        for view in self._annotation_views():
+            try:
+                if not view.has_unsaved_annotation_changes():
+                    continue
+                if hasattr(view, "save_annotations"):
+                    view.save_annotations(silent=True)
+                else:
+                    view._save_overview_annotations()
+                if view.has_unsaved_annotation_changes():
+                    return False
+            except RuntimeError:
+                continue
+        return True
+
+    def discard_annotation_changes(self) -> None:
+        for view in self._annotation_views():
+            try:
+                view.discard_annotation_changes()
+            except RuntimeError:
+                continue
+
     def can_undo_unsaved_text(self) -> bool:
         """Unsaved typing that Edit > Undo can take back."""
         if not self.has_unsaved_text():
@@ -3417,17 +3461,21 @@ class PreviewTabWidget(QTabWidget):
         pages = []
         for index in range(self.count()):
             widget = self.widget(index)
-            if isinstance(widget, FilePreviewPage) and widget.has_unsaved_text():
+            if isinstance(widget, FilePreviewPage) and widget.has_unsaved_changes():
                 pages.append(widget)
         return pages
 
     def confirm_leave_page(self, page: object) -> bool:
-        """Unsaved Edit-text changes: ask Save / Don't Save / Cancel.
+        """Unsaved Edit-text or annotation changes: ask Save / Don't Save / Cancel.
 
         Returns True when it is fine to leave the page (saved, or the user chose
         not to save), False to stay (Cancel, or saving failed).
         """
-        if not isinstance(page, FilePreviewPage) or not page.has_unsaved_text():
+        if not isinstance(page, FilePreviewPage):
+            return True
+        text_dirty = page.has_unsaved_text()
+        annot_dirty = page.has_unsaved_annotations()
+        if not (text_dirty or annot_dirty):
             return True
         index = self.indexOf(page)
         if index >= 0 and index != self.currentIndex():
@@ -3436,7 +3484,6 @@ class PreviewTabWidget(QTabWidget):
         box.setIcon(QMessageBox.Icon.Warning)
         box.setWindowTitle("Unsaved Changes")
         box.setText(f'Save changes to "{page.path.name}"?')
-        box.setInformativeText("Your edits will be lost if you don't save them.")
         box.setStandardButtons(
             QMessageBox.StandardButton.Save
             | QMessageBox.StandardButton.Discard
@@ -3452,12 +3499,17 @@ class PreviewTabWidget(QTabWidget):
             else QMessageBox.StandardButton.Cancel
         )
         if answer == QMessageBox.StandardButton.Save:
-            if not page.save_text():
+            if text_dirty and not page.save_text():
+                return False
+            if annot_dirty and not page.save_annotations_now():
                 return False
             self._sync_text_tool_actions()
             return True
         if answer == QMessageBox.StandardButton.Discard:
-            page._exit_text_edit_mode(clear_dirty=True)
+            if text_dirty:
+                page._exit_text_edit_mode(clear_dirty=True)
+            if annot_dirty:
+                page.discard_annotation_changes()
             self._sync_text_tool_actions()
             return True
         return False

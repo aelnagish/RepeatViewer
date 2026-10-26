@@ -8828,6 +8828,10 @@ class MainWindow(QMainWindow):
         # Update/highlight the written GFF in Files, but keep the current FASTA
         # selection so the Annotation preview tab stays open after edits/deletes.
         self._sync_sidecar_in_file_list(path, select=False)
+        # A first Save creates the .seqmap_RV.json: tick the FASTA's 🏷 column.
+        refresh = getattr(self._file_list, "refresh_annotation_marks", None)
+        if callable(refresh):
+            refresh()
 
     def _on_preview_sequence_extracted(self, path: object) -> None:
         """Replace Preview with the extracted FASTA; ◀ returns to the source.

@@ -2843,6 +2843,9 @@ class SequenceMapCanvas(QWidget):
         self._selection_emit_timer.setInterval(33)  # ~30 Hz spin/status updates
         self._selection_emit_timer.timeout.connect(self._flush_pending_selection_emit)
         self._seq_layer_cache: QPixmap | None = None
+        # Set by export_annotation_view_dialog.vector_export(): paint live so
+        # PDF/SVG get vector letters instead of the screen pixmap cache.
+        self._vector_export = False
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -3941,8 +3944,10 @@ class SequenceMapCanvas(QWidget):
         painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
 
         # Blit cached sequence layer; rebuild only after zoom/scroll/etc.
-        self._ensure_seq_layer_cache()
-        if self._seq_layer_cache is not None:
+        vector = self._vector_export
+        if not vector:
+            self._ensure_seq_layer_cache()
+        if not vector and self._seq_layer_cache is not None:
             # IMPORTANT: do not pass event.rect() as the source on a HiDPI
             # QPixmap. Qt/PySide treats that source in *device* pixels, so only
             # the top half of the letter cache was stretched into the strip
@@ -7933,7 +7938,7 @@ class SequenceMapPanel(QWidget):
         )
         self._rail.deleteClicked.connect(lambda: self._delete_feature(confirm_empty=True))
         self._rail.restoreClicked.connect(self._restore_features)
-        self._rail.saveClicked.connect(lambda: self._save_annotations(silent=True))
+        self._rail.saveClicked.connect(self._save_annotations_from_button)
         self._rail.exportClicked.connect(self._export_annotation_view)
         self._rail.colorsClicked.connect(self._open_annotation_settings_dialog)
         self._rail.residueColorsChanged.connect(self._on_residue_colors_changed)
@@ -7961,6 +7966,8 @@ class SequenceMapPanel(QWidget):
         self._rail.findRequested.connect(self._on_rail_find_requested)
         self._rail.panelCollapsedChanged.connect(self._on_rail_panel_collapsed_changed)
         self._map.featuresChanged.connect(self._sync_annotation_kind_filters)
+        # "Save •" while annotation edits are not saved yet.
+        self._map.featuresChanged.connect(self._sync_save_marker)
         self._find_items: list = []
         self._find_index: int = -1
         self._find_key: object | None = None
@@ -8778,6 +8785,7 @@ class SequenceMapPanel(QWidget):
                 status="Transfer stopped (file changed)."
             )
         self._path = resolved
+        QTimer.singleShot(0, self._sync_save_marker)
         try:
             data = load_sequence_map_data(self._path)
         except (OSError, ValueError) as exc:
@@ -9179,6 +9187,51 @@ class SequenceMapPanel(QWidget):
     def save_annotations(self, *, silent: bool = False) -> bool:
         return self._save_annotations(silent=silent)
 
+    def has_unsaved_annotation_changes(self) -> bool:
+        """Edits made in this view that Save has not written yet.
+
+        Unlike ``_annotation_changes_pending`` this ignores "features loaded
+        from a GFF but no JSON yet", which is not an edit and must not trigger
+        the leave-file prompt.
+        """
+        try:
+            if self._map.data() is None:
+                return False
+            return bool(
+                self._map.is_dirty() or self._visible_transfer_prediction_count() > 0
+            )
+        except RuntimeError:
+            return False
+
+    def discard_annotation_changes(self) -> None:
+        """Don't Save at the leave-file prompt: forget the unsaved edits.
+
+        The next time this file is shown it is reloaded from the JSON on disk.
+        """
+        try:
+            self._clear_transfer_preview_state()
+        except Exception:  # noqa: BLE001 - discarding must not fail
+            pass
+        self._map.mark_clean()
+        self._sync_save_marker()
+
+    def _sync_save_marker(self) -> None:
+        rail = getattr(self, "_rail", None)
+        button = getattr(rail, "save_btn", None) if rail is not None else None
+        if button is None:
+            return
+        try:
+            dirty = self.has_unsaved_annotation_changes()
+            button.setText("Save \u2022" if dirty else "Save")
+            button.setToolTip(
+                "Unsaved annotation changes. Save writes them to the "
+                ".seqmap_RV.json next to the FASTA."
+                if dirty
+                else "Save annotations to the .seqmap_RV.json next to the FASTA."
+            )
+        except RuntimeError:
+            return
+
     def _annotation_changes_pending(self) -> bool:
         if self._map.is_dirty():
             return True
@@ -9208,7 +9261,8 @@ class SequenceMapPanel(QWidget):
                 self,
                 "Saved",
                 f"Annotations saved to:\n{sidecar_path(self._path).name}\n\n"
-                "Use Export annotation… (file list right-click) to write GFF3 / GTF / BED.",
+                "To get a GFF3 / GTF / BED file, use Export in the Annotations "
+                "panel (or right-click the FASTA → Export Annotation…).",
             )
         return True
 
@@ -9248,10 +9302,42 @@ class SequenceMapPanel(QWidget):
         if self._loaded_data is not None:
             self._populate_sequence_combo(self._loaded_data)
             self._sync_too_long_controls()
+        self._last_saved_json = json_path
+        self._last_saved_gff = _gff_path
+        self._sync_save_marker()
         if show_message:
             self.statusMessage.emit(f"Saved annotations: {json_path.name}")
         self.annotationsSaved.emit(json_path)
+        if _gff_path is not None:
+            self.annotationsSaved.emit(_gff_path)
         return True
+
+    def _save_annotations_from_button(self) -> None:
+        """Panel Save: write the JSON (and GFF3 if enabled) and say where."""
+        self._last_saved_json = None
+        self._last_saved_gff = None
+        if not self._save_annotations(silent=True):
+            return
+        json_path = getattr(self, "_last_saved_json", None)
+        if json_path is None:
+            self.statusMessage.emit("No annotation changes to save.")
+            return
+        data = self._loaded_data if self._loaded_data is not None else self._map.data()
+        count = 0
+        if data is not None:
+            count = sum(len(v) for v in data.features_by_id.values()) or len(
+                self._map.features()
+            )
+        noun = "annotation" if count == 1 else "annotations"
+        gff = getattr(self, "_last_saved_gff", None)
+        if gff is not None:
+            text = f"Saved {count:,} {noun} to {json_path.name} and {gff.name}"
+        else:
+            text = (
+                f"Saved {count:,} {noun} to {json_path.name}. "
+                "To get a GFF3: Export → GFF3"
+            )
+        self.statusMessage.emit(text)
 
 
     def _on_add_feature_clicked(self) -> None:
@@ -11078,6 +11164,11 @@ class SequenceMapPanel(QWidget):
         dpi: int = 400,
     ) -> bool:
         """Export the current SequenceMapWidget view to disk. Return True on success."""
+        from repeatviewer.views.export_annotation_view_dialog import (
+            vector_export,
+            write_view_vector_pdf,
+        )
+
         widget = self._map
         (
             header,
@@ -11132,12 +11223,25 @@ class SequenceMapPanel(QWidget):
             gen.setResolution(dpi)
             painter = QPainter(gen)
             try:
-                _paint_view(painter)
+                with vector_export(self):
+                    _paint_view(painter)
             finally:
                 painter.end()
             return True
 
-        # Render at DPI scale for PNG/PDF sharpness.
+        if suffix == ".pdf":
+            # Vector PDF: paint the widgets straight onto the page (no bitmap).
+            with vector_export(self):
+                write_view_vector_pdf(
+                    out_path,
+                    _paint_view,
+                    width=width,
+                    height=height,
+                    logical_dpi=float(widget.logicalDpiY()),
+                )
+            return True
+
+        # PNG: render at DPI scale.
         pixel = QSize(
             max(1, int(round(size.width() * scale))),
             max(1, int(round(size.height() * scale))),
@@ -11159,26 +11263,29 @@ class SequenceMapPanel(QWidget):
                 return False
             return True
 
-        if suffix == ".pdf":
-            from repeatviewer.views.export_annotation_view_dialog import (
-                write_view_image_pdf,
-            )
-
-            write_view_image_pdf(
-                out_path,
-                img,
-                dpi=dpi,
-                content_width=size.width(),
-                content_height=size.height(),
-            )
-            return True
-
         QMessageBox.warning(
             self,
             "Export",
             f"Unsupported export format: {suffix!r}. Use .svg, .png, or .pdf.",
         )
         return False
+
+    def _annotations_for_export(self) -> tuple[list[str], dict, dict]:
+        """Features as shown now (incl. unsaved edits) for GFF3/GTF/BED export."""
+        data = self._loaded_data if self._loaded_data is not None else self._map.data()
+        if data is None:
+            return [], {}, {}
+        data.sync_active_features(self._map.features())
+        lengths = dict(data.lengths_by_id)
+        if data.sequence_id:
+            lengths.setdefault(data.sequence_id, data.length)
+        features = {
+            rid: list(feats) for rid, feats in data.features_by_id.items()
+        }
+        if data.sequence_id and data.sequence_id not in features:
+            features[data.sequence_id] = list(self._map.features())
+        record_ids = list(data.record_ids) or list(features.keys())
+        return record_ids, features, lengths
 
     def _export_annotation_view(self) -> None:
         from repeatviewer.views.export_annotation_view_dialog import (
@@ -11187,15 +11294,22 @@ class SequenceMapPanel(QWidget):
 
         dialog = ExportAnnotationViewDialog(
             source_path=self._path,
-            title="Export annotation view",
+            title="Export",
             name_tag="annotation",
             default_format="pdf",
+            annotation_provider=self._annotations_for_export,
             parent=self,
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         out = dialog.chosen_path()
         if out is None:
+            return
+        if dialog.wrote_annotation_file():
+            self.statusMessage.emit(f"Exported annotations → {out.name}")
+            # Shows the new GFF3/GTF/BED in Files without leaving this preview.
+            self.annotationsSaved.emit(out)
+            QTimer.singleShot(0, self._map.setFocus)
             return
         if self._export_annotation_view_to_file(out, dpi=dialog.dpi()):
             self.statusMessage.emit(f"Exported annotation view → {out.name}")

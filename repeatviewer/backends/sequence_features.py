@@ -1778,12 +1778,13 @@ def save_annotations_multi(
     lengths_by_id: dict[str, int],
     record_ids: list[str] | None = None,
 ) -> tuple[Path, Path | None]:
-    """Persist multi-sequence annotations to JSON only.
+    """Persist multi-sequence annotations to the JSON sidecar.
 
-    Returns ``(json_path, None)``. Write GFF3/GTF/BED via the export helpers
-    when the user explicitly requests them.
+    Returns ``(json_path, gff_path)``. ``gff_path`` is None unless the
+    "Also write GFF3 on every Save" setting is on (see
+    ``auto_gff3_on_save_enabled``); otherwise GFF3/GTF/BED are written only
+    by Export.
     """
-    del lengths_by_id  # kept for call-site compatibility
     ordered = list(record_ids) if record_ids else list(features_by_id.keys())
     non_empty = {sid: list(feats) for sid, feats in features_by_id.items() if feats}
     if len(ordered) <= 1 and len(non_empty) <= 1:
@@ -1798,7 +1799,66 @@ def save_annotations_multi(
             path, features_by_id, record_ids=ordered
         )
     _cleanup_legacy_sidecars(path)
-    return json_path, None
+    gff_path: Path | None = None
+    if auto_gff3_on_save_enabled():
+        try:
+            gff_path = write_auto_gff3(
+                path,
+                features_by_id=features_by_id,
+                lengths_by_id=lengths_by_id,
+                record_ids=ordered,
+            )
+        except (OSError, ValueError):
+            # The JSON is the source of truth; a failed GFF3 must not fail Save.
+            gff_path = None
+    return json_path, gff_path
+
+
+AUTO_GFF3_ON_SAVE_KEY = "annotations/write_gff3_on_save"
+
+
+def auto_gff3_on_save_enabled() -> bool:
+    """True when every annotation Save should also write ``{fasta.name}_RV.gff3``."""
+    try:
+        from PySide6.QtCore import QSettings
+
+        value = QSettings().value(AUTO_GFF3_ON_SAVE_KEY, False)
+    except Exception:  # noqa: BLE001 - no Qt / settings: feature is off
+        return False
+    return str(value).strip().lower() in {"1", "true", "yes"}
+
+
+def set_auto_gff3_on_save(enabled: bool) -> None:
+    from PySide6.QtCore import QSettings
+
+    QSettings().setValue(AUTO_GFF3_ON_SAVE_KEY, bool(enabled))
+
+
+def auto_export_seqid_map(record_ids: list[str]) -> dict[str, str] | None:
+    """Unique export names when FASTA headers collide (no dialog), else None."""
+    ids = list(record_ids)
+    originals = [strip_duplicate_uniquifier(rid, sibling_ids=ids) for rid in ids]
+    if not duplicate_original_sequence_ids(originals):
+        return None
+    return dict(zip(ids, suggest_unique_export_ids(ids), strict=True))
+
+
+def write_auto_gff3(
+    path: Path,
+    *,
+    features_by_id: dict[str, list[SequenceFeature]],
+    lengths_by_id: dict[str, int] | None,
+    record_ids: list[str] | None = None,
+) -> Path:
+    """Write ``{fasta.name}_RV.gff3`` (same name as Export) from in-memory features."""
+    ids = list(record_ids) if record_ids else list(features_by_id.keys())
+    return export_features_gff_multi(
+        path,
+        features_by_id=features_by_id,
+        lengths_by_id=dict(lengths_by_id or {}),
+        output_path=export_annotation_path(path, "gff3"),
+        seqid_map=auto_export_seqid_map(ids),
+    )
 
 
 def _gff_rows_to_sequence_features(
