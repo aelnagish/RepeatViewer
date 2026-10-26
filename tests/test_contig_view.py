@@ -137,3 +137,40 @@ def test_difference_positions_from_variants():
     variants = [[50, "C", "A", 1, 1, "CG", ""], [52, "G", "C", 1, 1, "", ""],
                 [50, "C", "T", 1, 1, "CG", ""]]
     assert cv.difference_positions(variants) == [49, 51]
+
+
+def test_read_passes_filters():
+    d = {"mapq": 30, "kind": "primary"}
+    assert cv.read_passes(d, 0.95)
+    assert not cv.read_passes(d, 0.85, min_identity=0.9)
+    assert not cv.read_passes(d, 0.99, min_mapq=40)
+    assert cv.read_passes({"mapq": -1}, 0.99, min_mapq=40)       # no MAPQ reported: kept
+    assert not cv.read_passes({"kind": "secondary"}, 1.0, hide_secondary=True)
+    assert cv.read_passes({"kind": "secondary"}, 1.0)
+
+
+def test_sort_order_keys():
+    reads = [
+        cv.ReadView({}, "b", 50, 90, "-", 0.97),
+        cv.ReadView({}, "a", 10, 60, "+", 0.90),
+        cv.ReadView({}, "c", 30, 80, "+", 1.00),
+    ]
+    assert cv.sort_order(reads, cv.SORT_START) == [1, 2, 0]
+    assert cv.sort_order(reads, cv.SORT_STRAND) == [1, 2, 0]
+    assert cv.sort_order(reads, cv.SORT_IDENTITY) == [2, 0, 1]
+    assert cv.sort_order(reads, cv.SORT_NAME) == [1, 0, 2]
+
+
+def test_read_color_hex_modes():
+    assert cv.read_color_hex("+", 1.0, 60, cv.COLOR_STRAND) != cv.read_color_hex(
+        "-", 1.0, 60, cv.COLOR_STRAND)
+    assert cv.read_color_hex("+", 1.0, None, cv.COLOR_IDENTITY) == "#5fae66"
+    assert cv.read_color_hex("+", 0.5, None, cv.COLOR_IDENTITY) == "#d0574a"
+    assert cv.read_color_hex("+", 1.0, -1, cv.COLOR_MAPQ) == "#cfcfcf"
+
+
+def test_feature_status_text():
+    assert cv.feature_status_text({"intact": 7}) == "intact"
+    assert cv.feature_status_text({"changed": 2}) == "changed"
+    assert cv.feature_status_text({"intact": 3, "partial": 4}) == "3/7 intact"
+    assert cv.feature_status_text({}) == ""

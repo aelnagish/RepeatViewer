@@ -176,6 +176,72 @@ def step_difference(positions: list[int], current: int | None, direction: int) -
     return positions[k] if k >= 0 else positions[-1]
 
 
+SORT_START = "start"
+SORT_STRAND = "strand"
+SORT_IDENTITY = "identity"
+SORT_NAME = "name"
+COLOR_STRAND = "strand"
+COLOR_IDENTITY = "identity"
+COLOR_MAPQ = "mapq"
+
+
+def read_passes(data: dict, identity: float, *, min_identity: float = 0.0,
+                min_mapq: int = 0, hide_secondary: bool = False) -> bool:
+    """Whether a placement is shown under the current filters. MAPQ < 0 (not
+    reported by the mapper) never fails the MAPQ filter."""
+    if identity < min_identity:
+        return False
+    mapq = data.get("mapq", -1)
+    if min_mapq > 0 and mapq is not None and mapq >= 0 and mapq < min_mapq:
+        return False
+    if hide_secondary and str(data.get("kind", "primary")) != "primary":
+        return False
+    return True
+
+
+def sort_order(reads: list, key: str) -> list[int]:
+    """Indices of ``reads`` in display order for one-per-row layout."""
+    idx = list(range(len(reads)))
+    if key == SORT_STRAND:
+        return sorted(idx, key=lambda i: (reads[i].strand == "-", reads[i].start, reads[i].end))
+    if key == SORT_IDENTITY:
+        return sorted(idx, key=lambda i: (-reads[i].identity, reads[i].start))
+    if key == SORT_NAME:
+        return sorted(idx, key=lambda i: (reads[i].name.lower(), reads[i].start))
+    return sorted(idx, key=lambda i: (reads[i].start, reads[i].end))
+
+
+def _mix(a: tuple[int, int, int], b: tuple[int, int, int], t: float) -> str:
+    t = min(1.0, max(0.0, t))
+    return "#{:02x}{:02x}{:02x}".format(*(round(x + (y - x) * t) for x, y in zip(a, b)))
+
+
+def read_color_hex(strand: str, identity: float, mapq: int | None, mode: str) -> str:
+    """Bar colour of a placement when zoomed out."""
+    if mode == COLOR_IDENTITY:
+        # 80 % or lower = red, 100 % = green
+        return _mix((208, 87, 74), (95, 174, 102), (identity - 0.8) / 0.2)
+    if mode == COLOR_MAPQ:
+        if mapq is None or mapq < 0:
+            return "#cfcfcf"
+        return _mix((224, 180, 58), (63, 120, 201), mapq / 60.0)
+    return "#a98bd6" if strand == "-" else "#8fb3e6"
+
+
+def feature_status_text(summary: dict) -> str:
+    """Short status for a reference feature over all placements:
+    "intact", "changed", "3/7 intact"…"""
+    counts = {k: int(summary.get(k, 0) or 0) for k in
+              (mr.STATUS_INTACT, mr.STATUS_CHANGED, mr.STATUS_PARTIAL, mr.STATUS_LOST)}
+    total = sum(counts.values())
+    if total == 0:
+        return ""
+    for status, n in counts.items():
+        if n == total:
+            return status
+    return f"{counts[mr.STATUS_INTACT]}/{total} intact"
+
+
 def difference_marks(row: str, start: int, reference: str) -> tuple[list[int], list[str],
                                                                    list[tuple[int, int]]]:
     """(mismatch positions, their bases, deletion runs [s, e)) of a placed row."""
@@ -243,6 +309,7 @@ class ReadView:
     del_runs: list[tuple[int, int]] = field(default_factory=list)
     ins_pos: list[int] = field(default_factory=list)
     lane: int = 0
+    hidden: bool = False    # filtered out (identity / MAPQ / secondary)
 
     @property
     def label(self) -> str:
@@ -341,6 +408,7 @@ _FALLBACK = (QColor("#dddddd"), QColor("#000000"))
 
 class ContigCanvas(QAbstractScrollArea):
     readClicked = Signal(int)
+    viewChanged = Signal()       # zoom or scroll (the overview strip follows)
 
     HIGHLIGHT_DIFF = "diff"
     HIGHLIGHT_ALL = "all"
@@ -354,6 +422,11 @@ class ContigCanvas(QAbstractScrollArea):
         self.one_per_row = True
         self.selected = -1
         self.mark_bp: int | None = None     # current difference column (0-based)
+        self.sort_key = SORT_START
+        self.color_by = COLOR_STRAND
+        self.min_identity = 0.0
+        self.min_mapq = 0
+        self.hide_secondary = False
         self._lane_count = 0
         self._feature_rows: list[int] = []
         self._feature_row_count = 0
@@ -361,6 +434,8 @@ class ContigCanvas(QAbstractScrollArea):
         self.viewport().setMouseTracking(True)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
         self.horizontalScrollBar().valueChanged.connect(self.viewport().update)
+        self.horizontalScrollBar().valueChanged.connect(lambda _v: self.viewChanged.emit())
+        self.horizontalScrollBar().rangeChanged.connect(lambda _a, _b: self.viewChanged.emit())
         self.verticalScrollBar().valueChanged.connect(self.viewport().update)
         self.setMinimumHeight(220)
 
@@ -375,6 +450,7 @@ class ContigCanvas(QAbstractScrollArea):
 
             self._feature_rows, self._feature_row_count = _pack_feature_rows(model.features)
             self.one_per_row = len(model.reads) <= ONE_PER_ROW_LIMIT
+            self._apply_filters()
             self._relayout()
             self.fit()
         self.viewport().update()
@@ -384,20 +460,60 @@ class ContigCanvas(QAbstractScrollArea):
         self._relayout()
         self.viewport().update()
 
+    def set_sort(self, key: str) -> None:
+        self.sort_key = key
+        self._relayout()
+        self.viewport().update()
+
+    def set_color_by(self, mode: str) -> None:
+        self.color_by = mode
+        self.viewport().update()
+
+    def set_filters(self, *, min_identity: float, min_mapq: int, hide_secondary: bool) -> None:
+        self.min_identity = float(min_identity)
+        self.min_mapq = int(min_mapq)
+        self.hide_secondary = bool(hide_secondary)
+        self._apply_filters()
+        self._relayout()
+        self.viewport().update()
+
+    def hidden_count(self) -> int:
+        return sum(1 for r in self.model.reads if r.hidden) if self.model else 0
+
+    def _apply_filters(self) -> None:
+        m = self.model
+        if m is None:
+            return
+        for i, r in enumerate(m.reads):
+            r.hidden = not read_passes(r.data, r.identity, min_identity=self.min_identity,
+                                       min_mapq=self.min_mapq,
+                                       hide_secondary=self.hide_secondary)
+            if r.hidden and i == self.selected:
+                self.selected = -1
+
     def _relayout(self) -> None:
         m = self.model
         if m is None:
             return
+        shown = [i for i, r in enumerate(m.reads) if not r.hidden]
+        for r in m.reads:
+            r.lane = -1
         if self.one_per_row:
-            order = sorted(range(len(m.reads)), key=lambda i: (m.reads[i].start, m.reads[i].end))
-            for lane, i in enumerate(order):
-                m.reads[i].lane = lane
-            self._lane_count = len(m.reads)
+            order = sort_order([m.reads[i] for i in shown], self.sort_key)
+            for lane, k in enumerate(order):
+                m.reads[shown[k]].lane = lane
+            self._lane_count = len(shown)
         else:
-            lanes, self._lane_count = pack_lanes([(r.start, r.end) for r in m.reads])
-            for r, lane in zip(m.reads, lanes):
-                r.lane = lane
+            lanes, self._lane_count = pack_lanes([(m.reads[i].start, m.reads[i].end)
+                                                  for i in shown])
+            for i, lane in zip(shown, lanes):
+                m.reads[i].lane = lane
         self._update_scrollbars()
+
+    def _read_fill(self, r: ReadView) -> QColor:
+        mapq = r.data.get("mapq", -1)
+        return QColor(read_color_hex(r.strand, r.identity,
+                                     None if mapq is None else int(mapq), self.color_by))
 
     # ---------------------------------------------------------------- geometry
 
@@ -467,6 +583,7 @@ class ContigCanvas(QAbstractScrollArea):
         self._update_scrollbars()
         self.horizontalScrollBar().setValue(0)
         self.viewport().update()
+        self.viewChanged.emit()
 
     def zoom(self, factor: float, anchor_x: float | None = None) -> None:
         if self.model is None:
@@ -478,6 +595,7 @@ class ContigCanvas(QAbstractScrollArea):
         self._update_scrollbars()
         self.horizontalScrollBar().setValue(int(bp * self.ppb - (anchor_x - LABEL_W)))
         self.viewport().update()
+        self.viewChanged.emit()
 
     def show_base(self, bp: int, *, zoom_to_letters: bool = False, mark: bool = False) -> None:
         if mark:
@@ -487,12 +605,15 @@ class ContigCanvas(QAbstractScrollArea):
             self._update_scrollbars()
         self.horizontalScrollBar().setValue(int(bp * self.ppb - self._data_w() / 2))
         self.viewport().update()
+        self.viewChanged.emit()
 
     def show_read(self, index: int) -> None:
         m = self.model
         if m is None or not 0 <= index < len(m.reads):
             return
         r = m.reads[index]
+        if r.hidden:
+            return
         self.selected = index
         span = (r.end - r.start) * self.ppb
         if span > self._data_w():
@@ -535,6 +656,8 @@ class ContigCanvas(QAbstractScrollArea):
         lane = int(y // self.read_h())
         bp = self.bp_at(pos.x())
         for i, r in enumerate(m.reads):
+            if r.hidden:
+                continue
             if r.lane == lane and r.start <= bp < r.end:
                 return i
             if r.lane == lane and self.one_per_row and pos.x() < LABEL_W:
@@ -692,6 +815,8 @@ class ContigCanvas(QAbstractScrollArea):
             off = ys["reads"] - self.verticalScrollBar().value()
             fm = QFontMetrics(label_font)
             for i, r in enumerate(m.reads):
+                if r.hidden:
+                    continue
                 y = off + r.lane * rh
                 if y < header - rh or y > h:
                     continue
@@ -704,8 +829,9 @@ class ContigCanvas(QAbstractScrollArea):
                            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
                            fm.elidedText(r.label, Qt.TextElideMode.ElideRight, LABEL_W - 12))
         else:
-            label(ys["reads"], f"{len(m.reads):,} of {m.n_reads:,} shown"
-                  if len(m.reads) < m.n_reads else f"{m.n_reads:,} sequences")
+            shown = len(m.reads) - self.hidden_count()
+            label(ys["reads"], f"{shown:,} of {m.n_reads:,} shown"
+                  if shown < m.n_reads else f"{m.n_reads:,} sequences")
 
     def _paint_ruler(self, p: QPainter, bp0: int, bp1: int, fg: QColor, mid: QColor) -> None:
         step = nice_step(1.0 / self.ppb)
@@ -725,13 +851,16 @@ class ContigCanvas(QAbstractScrollArea):
         from repeatviewer.widgets.sequence_map_viewer import _draw_directed_feature
 
         m = self.model
-        for f, row in zip(m.features, self._feature_rows):
+        summary = m.feature_summary
+        for k, (f, row) in enumerate(zip(m.features, self._feature_rows)):
             if f.end < bp0 or f.start - 1 > bp1:
                 continue
             x0, x1 = self.x_of(f.start - 1), self.x_of(f.end)
             rect = QRectF(x0, y0 + row * FEATURE_ROW_H + 1, max(2.0, x1 - x0), FEATURE_ROW_H - 3)
+            status = feature_status_text(summary[k]) if k < len(summary) else ""
             _draw_directed_feature(p, rect, QColor(f.color or "#888888"),
-                                   forward=f.is_forward(), label=f.name)
+                                   forward=f.is_forward(),
+                                   label=f"{f.name} · {status}" if status else f.name)
 
     def _hatch(self, p: QPainter, rect: QRectF) -> None:
         """No coverage: light diagonal hatching, never a difference colour."""
@@ -886,6 +1015,8 @@ class ContigCanvas(QAbstractScrollArea):
         font = _mono(int(min(11, max(7, self.ppb * 0.85))))
         dot_color = QColor("#9a9a96")
         for i, r in enumerate(m.reads):
+            if r.hidden:
+                continue
             y = off + r.lane * rh
             if y + rh < header or y > h:
                 continue
@@ -897,8 +1028,12 @@ class ContigCanvas(QAbstractScrollArea):
             if not letters:
                 rect = QRectF(self.x_of(r.start), y + 1, max(2.0, (r.end - r.start) * self.ppb),
                               rh - 3)
-                _draw_directed_feature(p, rect, _READ_FILL_SEL if sel else _READ_FILL,
+                _draw_directed_feature(p, rect, _READ_FILL_SEL if sel else self._read_fill(r),
                                        forward=r.strand != "-")
+                if sel:
+                    p.setPen(QPen(QColor("#1d1d1f"), 1.5))
+                    p.setBrush(Qt.BrushStyle.NoBrush)
+                    p.drawRect(rect.adjusted(-1, -1, 1, 1))
                 if self.highlight != self.HIGHLIGHT_NONE:
                     lo = bisect.bisect_left(r.mism_pos, bp0)
                     hi = bisect.bisect_right(r.mism_pos, bp1)
@@ -958,6 +1093,89 @@ class ContigCanvas(QAbstractScrollArea):
             for k in range(lo, hi):
                 x = self.x_of(r.ins_pos[k])
                 p.drawLine(QPointF(x, y), QPointF(x, y + rh - 2))
+
+
+class ContigOverview(QWidget):
+    """Whole reference in one strip: coverage (amber where sequences differ) and a
+    box for the part shown below. Click or drag to move the view."""
+
+    HEIGHT = 30
+
+    def __init__(self, canvas: ContigCanvas, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.canvas = canvas
+        self.setFixedHeight(self.HEIGHT)
+        self.setMouseTracking(True)
+        self.setToolTip("Whole reference. Click or drag to move the view.")
+        canvas.viewChanged.connect(self.update)
+
+    def _x0(self) -> float:
+        return float(LABEL_W)
+
+    def _scale(self) -> float:
+        m = self.canvas.model
+        return max(1.0, self.width() - LABEL_W - 8) / max(1, m.length if m else 1)
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        import math
+
+        p = QPainter(self)
+        pal = self.palette()
+        p.fillRect(self.rect(), pal.color(pal.ColorRole.Window))
+        m = self.canvas.model
+        if m is None:
+            return
+        p.setPen(pal.color(pal.ColorRole.Text))
+        f = QFont(p.font())
+        f.setPointSize(8)
+        p.setFont(f)
+        p.drawText(QRectF(6, 0, LABEL_W - 10, self.HEIGHT),
+                   Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                   f"Whole reference · {m.length:,} bp")
+        x0, sc = self._x0(), self._scale()
+        track = QRectF(x0, 4, m.length * sc, self.HEIGHT - 8)
+        p.fillRect(track, QColor("#ececea"))
+        cov = np.asarray(m.coverage, dtype=float)
+        if cov.size:
+            top = math.log1p(max(4.0, float(cov.max())))
+            n_px = max(1, int(track.width()))
+            edges = np.linspace(0, m.length, n_px + 1).astype(np.int64)
+            diff = m.diff_count if m.diff_count.size else None
+            ok, amber = QColor("#9dbbe6"), QColor("#e0a020")
+            for k in range(n_px):
+                a, b = int(edges[k]), max(int(edges[k]) + 1, int(edges[k + 1]))
+                ia, ib = a // max(1, m.bin_size), max(a // max(1, m.bin_size) + 1,
+                                                       b // max(1, m.bin_size))
+                v = float(cov[ia:ib].max(initial=0))
+                if v <= 0:
+                    continue
+                hgt = max(2.0, math.log1p(v) / top * track.height())
+                differs = diff is not None and bool(diff[a:b].max(initial=0))
+                p.fillRect(QRectF(x0 + k, track.bottom() - hgt, 1.0, hgt),
+                           amber if differs else ok)
+        c = self.canvas
+        if c.ppb > 0:
+            vis0 = max(0, c.bp_at(LABEL_W))
+            vis1 = min(m.length, c.bp_at(c.viewport().width()))
+            box = QRectF(x0 + vis0 * sc, 2, max(4.0, (vis1 - vis0) * sc), self.HEIGHT - 4)
+            p.setPen(QPen(_MARK_EDGE, 2))
+            p.setBrush(QColor(31, 95, 191, 26))
+            p.drawRoundedRect(box, 3, 3)
+        p.end()
+
+    def _jump(self, x: float) -> None:
+        m = self.canvas.model
+        if m is None:
+            return
+        bp = int((x - self._x0()) / self._scale())
+        self.canvas.show_base(min(max(0, bp), m.length - 1))
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        self._jump(event.position().x())
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        if event.buttons() & Qt.MouseButton.LeftButton:
+            self._jump(event.position().x())
 
 
 def pal_base(widget: QWidget) -> QColor:
@@ -1056,6 +1274,7 @@ class ContigViewPanel(QWidget):
         self._data: dict = {}
         self._contig_models: dict[str, ContigModel] = {}
         self.canvas = ContigCanvas(self)
+        self.overview = ContigOverview(self.canvas, self)
         self._title = QLabel(self)
         self._title.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self._contig = QComboBox(self)
@@ -1110,6 +1329,58 @@ class ContigViewPanel(QWidget):
         bl.addStretch(1)
         bl.addWidget(self._files_btn)
 
+        # second row: how reads are ordered, coloured and filtered
+        from repeatviewer.widgets.combo_boxes import NoWheelComboBox
+        from repeatviewer.widgets.spin_boxes import NoWheelDoubleSpinBox, NoWheelSpinBox
+        from PySide6.QtWidgets import QCheckBox
+
+        self._sort = NoWheelComboBox(self)
+        for text, key in (("Start", SORT_START), ("Strand", SORT_STRAND),
+                          ("Identity", SORT_IDENTITY), ("Name", SORT_NAME)):
+            self._sort.addItem(text, key)
+        self._sort.setToolTip("Order of the sequences in One sequence per row")
+        self._sort.currentIndexChanged.connect(
+            lambda _i: self.canvas.set_sort(str(self._sort.currentData())))
+        self._color_by = NoWheelComboBox(self)
+        for text, key in (("Strand", COLOR_STRAND), ("Identity", COLOR_IDENTITY),
+                          ("MAPQ", COLOR_MAPQ)):
+            self._color_by.addItem(text, key)
+        self._color_by.setToolTip("Colour of the sequence bars when zoomed out: forward blue / "
+                                  "reverse purple, identity red (80 %) to green (100 %), or "
+                                  "MAPQ amber (0) to blue (60)")
+        self._color_by.currentIndexChanged.connect(
+            lambda _i: self.canvas.set_color_by(str(self._color_by.currentData())))
+        self._min_identity = NoWheelDoubleSpinBox(self)
+        self._min_identity.setRange(0.0, 100.0)
+        self._min_identity.setDecimals(0)
+        self._min_identity.setSingleStep(5.0)
+        self._min_identity.setSuffix(" %")
+        self._min_identity.setToolTip("Hide sequences placed with a lower identity")
+        self._min_mapq = NoWheelSpinBox(self)
+        self._min_mapq.setRange(0, 60)
+        self._min_mapq.setToolTip("Hide placements with a lower mapping quality "
+                                  "(placements without a MAPQ are kept)")
+        self._hide_secondary = QCheckBox("Hide secondary placements", self)
+        self._hide_secondary.setToolTip("Show only each sequence's primary placement")
+        self._hidden_label = QLabel(self)
+        for w_ in (self._min_identity, self._min_mapq):
+            w_.valueChanged.connect(lambda _v: self._apply_filters())
+        self._hide_secondary.toggled.connect(lambda _on: self._apply_filters())
+
+        bar2 = QWidget(self)
+        b2 = QHBoxLayout(bar2)
+        b2.setContentsMargins(6, 0, 6, 4)
+        b2.setSpacing(6)
+        for text, wdg in (("Sort", self._sort), ("Colour by", self._color_by),
+                          ("Min identity", self._min_identity), ("Min MAPQ", self._min_mapq)):
+            b2.addWidget(QLabel(text, self))
+            b2.addWidget(wdg)
+            b2.addSpacing(6)
+        b2.addWidget(self._hide_secondary)
+        b2.addSpacing(8)
+        b2.addWidget(self._hidden_label)
+        b2.addStretch(1)
+
         self._tabs = QTabWidget(self)
         self._reads_view = _table(self)
         self._features_view = _table(self)
@@ -1124,8 +1395,14 @@ class ContigViewPanel(QWidget):
         self._variants_view.clicked.connect(self._on_variant_row)
         self.canvas.readClicked.connect(self._select_read_row)
 
+        top = QWidget(self)
+        tl = QVBoxLayout(top)
+        tl.setContentsMargins(0, 0, 0, 0)
+        tl.setSpacing(0)
+        tl.addWidget(self.overview)
+        tl.addWidget(self.canvas, 1)
         split = QSplitter(Qt.Orientation.Vertical, self)
-        split.addWidget(self.canvas)
+        split.addWidget(top)
         split.addWidget(self._tabs)
         split.setStretchFactor(0, 3)
         split.setStretchFactor(1, 2)
@@ -1134,6 +1411,7 @@ class ContigViewPanel(QWidget):
         lay.setSpacing(0)
         lay.addWidget(self._title)
         lay.addWidget(bar)
+        lay.addWidget(bar2)
         lay.addWidget(split, 1)
         self._title.setContentsMargins(8, 6, 8, 0)
         if path is not None:
@@ -1194,6 +1472,7 @@ class ContigViewPanel(QWidget):
             model = ContigModel.from_json(entry)
             self._contig_models[ref_id] = model
         self.canvas.set_model(model)
+        self._apply_filters()
         self._layout_mode.blockSignals(True)
         self._layout_mode.setCurrentIndex(0 if self.canvas.one_per_row else 1)
         self._layout_mode.blockSignals(False)
@@ -1318,6 +1597,14 @@ class ContigViewPanel(QWidget):
         if pos:
             self.canvas.show_base(int(pos) - 1, zoom_to_letters=True, mark=True)
             self._sync_difference_label()
+
+    def _apply_filters(self) -> None:
+        self.canvas.set_filters(min_identity=self._min_identity.value() / 100.0,
+                                min_mapq=self._min_mapq.value(),
+                                hide_secondary=self._hide_secondary.isChecked())
+        n = self.canvas.hidden_count()
+        self._hidden_label.setText(f"{n:,} hidden by filters" if n else "")
+        self.overview.update()
 
     # ---------------------------------------------------------------- differences
 
