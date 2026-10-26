@@ -10395,6 +10395,8 @@ class MainWindow(QMainWindow):
 
     def _raise_open_tool_dialogs(self) -> None:
         """Stack open tool dialogs above the main window without stealing focus."""
+        from repeatviewer.views.manage_references_dialog import ManageReferencesDialog
+
         for dialog in self._iter_open_tool_dialogs():
             try:
                 dialog.raise_()
@@ -10403,6 +10405,12 @@ class MainWindow(QMainWindow):
                 raise_add = getattr(dialog, "raise_add_dialog_if_open", None)
                 if callable(raise_add):
                     raise_add()
+                # TE-Aid / BLAST open their own Manage Database as a child;
+                # raising the params dialog alone buries Manage and Add under it.
+                for manager in dialog.findChildren(ManageReferencesDialog):
+                    if manager.isVisible():
+                        manager.raise_()
+                        manager.raise_add_dialog_if_open()
             except RuntimeError:
                 continue
         self._raise_preview_duplicate_windows()
