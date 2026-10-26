@@ -15,8 +15,9 @@ from pathlib import Path
 
 SELECTION_PREVIEW_MIN_FILES = 2
 SELECTION_PREVIEW_MAX_FILES = 100
-SELECTION_PREVIEW_MAX_BYTES = 50 * 1024 * 1024
-_KEEP_CACHED = 20
+SELECTION_PREVIEW_MAX_BYTES = 200 * 1024 * 1024
+# Newest combined copies kept on disk (at most about 1 GB at the size limit).
+_KEEP_CACHED = 5
 _MANIFEST_NAME = "selection_preview.json"
 
 
