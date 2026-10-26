@@ -48,7 +48,6 @@ _COL_MODIFIED = 7
 _COL_SIZE = 8
 _COL_COLOR = 9
 _COL_IMAGES = 10
-_COL_ANNOTATIONS = 11
 
 # Public aliases for column visibility settings.
 COL_CHECK = _COL_CHECK
@@ -62,7 +61,6 @@ COL_MODIFIED = _COL_MODIFIED
 COL_SIZE = _COL_SIZE
 COL_COLOR = _COL_COLOR
 COL_IMAGES = _COL_IMAGES
-COL_ANNOTATIONS = _COL_ANNOTATIONS
 
 _HEADERS = (
     "",
@@ -76,7 +74,6 @@ _HEADERS = (
     "Size",
     "Color",
     "\U0001F52C",  # microscope: sequences with cytogenetic images
-    "\U0001F3F7",  # label: FASTA with saved annotations (.seqmap_RV.json)
 )
 _CHECKBOX_COLUMN_WIDTH = 22
 _DEFAULT_COLUMN_WIDTHS = {
@@ -90,11 +87,7 @@ _DEFAULT_COLUMN_WIDTHS = {
     _COL_SIZE: 72,
     _COL_COLOR: 80,
     _COL_IMAGES: 34,
-    _COL_ANNOTATIONS: 34,
 }
-_ANNOTATIONS_HEADER_TIP = (
-    "Saved annotations (click a tick to export GFF3 / GTF / BED)"
-)
 _LEFT_ALIGN = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
 
 
@@ -279,7 +272,6 @@ class FileListTableWidget(QTableWidget):
         self.apply_visible_columns(load_visible_file_columns())
         self._restore_column_layout()
         self._place_images_column_once()
-        self._place_annotations_column_once()
 
     def _schedule_save_column_layout(self, *_args) -> None:
         if self._restoring_column_layout:
@@ -329,29 +321,6 @@ class FileListTableWidget(QTableWidget):
             header.blockSignals(False)
             self._restoring_column_layout = False
 
-    def _place_annotations_column_once(self) -> None:
-        """First run with the annotations column: put it right after the images tick."""
-        from PySide6.QtCore import QSettings
-
-        from repeatviewer.widgets.file_list_columns import FILES_SETTINGS_GROUP
-
-        key = "annotations_column_placed_v1"
-        s = QSettings()
-        s.beginGroup(FILES_SETTINGS_GROUP)
-        done = str(s.value(key, False)).lower() in {"1", "true"}
-        s.endGroup()
-        if done:
-            return
-        header = self.horizontalHeader()
-        target = header.visualIndex(_COL_IMAGES) + 1
-        current = header.visualIndex(_COL_ANNOTATIONS)
-        if current >= 0 and target > 0 and current != target:
-            header.moveSection(current, target)
-        s = QSettings()
-        s.beginGroup(FILES_SETTINGS_GROUP)
-        s.setValue(key, True)
-        s.endGroup()
-
     def _place_images_column_once(self) -> None:
         """First run with the images column: put it right after Name, where it is seen.
 
@@ -399,9 +368,6 @@ class FileListTableWidget(QTableWidget):
             images_header = self.horizontalHeaderItem(_COL_IMAGES)
             if images_header is not None:
                 images_header.setToolTip("Cytogenetic images attached (click a tick to open)")
-            annot_header = self.horizontalHeaderItem(_COL_ANNOTATIONS)
-            if annot_header is not None:
-                annot_header.setToolTip(_ANNOTATIONS_HEADER_TIP)
             return
         for column, label in enumerate(_HEADERS):
             item = self.horizontalHeaderItem(column)
@@ -412,10 +378,6 @@ class FileListTableWidget(QTableWidget):
         if images_header is not None:
             images_header.setToolTip("Cytogenetic images attached (click a tick to open)")
             images_header.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-        annot_header = self.horizontalHeaderItem(_COL_ANNOTATIONS)
-        if annot_header is not None:
-            annot_header.setToolTip(_ANNOTATIONS_HEADER_TIP)
-            annot_header.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
 
     def _reapply_cell_alignment(self) -> None:
         for row in range(self.rowCount()):
@@ -423,7 +385,7 @@ class FileListTableWidget(QTableWidget):
                 cell = super().item(row, column)
                 if cell is None:
                     continue
-                if column in (_COL_CHECK, _COL_IMAGES, _COL_ANNOTATIONS):
+                if column in (_COL_CHECK, _COL_IMAGES):
                     cell.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 else:
                     cell.setTextAlignment(_LEFT_ALIGN)
@@ -602,7 +564,6 @@ class FileListTableWidget(QTableWidget):
         if fill_metadata_columns:
             self._apply_metadata_cells(row, path_text, meta)
         self._apply_cyto_cell(row, path)
-        self._apply_annotation_cell(row, path)
         if was_sorting:
             self.setSortingEnabled(True)
         return FileListRow(self, row)
@@ -849,50 +810,6 @@ class FileListTableWidget(QTableWidget):
             cell.setFont(bold)
         self.setItem(row, _COL_IMAGES, cell)
 
-    # -- saved annotations ------------------------------------------------
-
-    def _apply_annotation_cell(self, row: int, path: Path) -> None:
-        """Tick when the FASTA has a ``.seqmap_RV.json`` (one stat, big-folder safe)."""
-        sidecar = None
-        if path.suffix.lower() in _FASTA_SUFFIXES:
-            try:
-                from repeatviewer.backends.sequence_features import resolve_sidecar_path
-
-                sidecar = resolve_sidecar_path(path)
-            except Exception:  # noqa: BLE001 - never break the listing
-                sidecar = None
-        has = sidecar is not None
-        cell = _SortableTableItem("\u2713" if has else "", sort_key=int(has))
-        cell.setData(_ROLE_PATH, str(path))
-        cell.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-        if has:
-            cell.setToolTip(
-                f"Annotations saved in {sidecar.name}. "
-                "Click to export GFF3 / GTF / BED."
-            )
-            bold = cell.font()
-            bold.setBold(True)
-            cell.setFont(bold)
-        self.setItem(row, _COL_ANNOTATIONS, cell)
-
-    def has_saved_annotations(self, row: int) -> bool:
-        cell = super().item(row, _COL_ANNOTATIONS)
-        if cell is None:
-            return False
-        return bool(cell.data(_ROLE_SORT))
-
-    def refresh_annotation_marks(self) -> None:
-        """Re-read the annotations tick column (after a Save or Delete)."""
-        was_sorting = self.isSortingEnabled()
-        self.setSortingEnabled(False)
-        try:
-            for row in range(self.rowCount()):
-                raw = self._path_for_row(row)
-                if raw:
-                    self._apply_annotation_cell(row, Path(raw))
-        finally:
-            self.setSortingEnabled(was_sorting)
-
     def cyto_image_count(self, row: int) -> int:
         cell = super().item(row, _COL_IMAGES)
         if cell is None:
@@ -1115,7 +1032,6 @@ class FileListTableWidget(QTableWidget):
 
             self._apply_file_color_cells(row, new_resolved, resolved=True)
             self._apply_cyto_cell(row, new_resolved)
-            self._apply_annotation_cell(row, new_resolved)
 
             if fill_metadata_columns is None:
                 from repeatviewer.widgets.file_list_columns import metadata_columns_visible
@@ -1342,11 +1258,6 @@ class FileListTableWidget(QTableWidget):
             raw = self._path_for_row(row)
             if raw:
                 self.cyto_images_requested.emit(Path(raw))
-                return
-        if column == _COL_ANNOTATIONS and self.has_saved_annotations(row):
-            raw = self._path_for_row(row)
-            if raw:
-                self.export_annotation_requested.emit(Path(raw))
                 return
         row_item = self.item(row)
         if row_item is not None:

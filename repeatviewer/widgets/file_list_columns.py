@@ -5,7 +5,6 @@ from __future__ import annotations
 from PySide6.QtCore import QSettings
 
 from repeatviewer.widgets.file_list_table import (
-    COL_ANNOTATIONS,
     COL_CHECK,
     COL_COLOR,
     COL_DESCRIPTION,
@@ -34,7 +33,6 @@ TOGGLEABLE_COLUMNS: dict[int, str] = {
     COL_SIZE: "Size",
     COL_COLOR: "Color",
     COL_IMAGES: "Cytogenetic images",
-    COL_ANNOTATIONS: "Saved annotations",
 }
 
 DEFAULT_VISIBLE_COLUMNS = frozenset(
@@ -46,12 +44,8 @@ def metadata_columns_visible(visible: set[int] | None = None) -> bool:
     """True when any optional metadata column is shown."""
     if visible is None:
         visible = load_visible_file_columns()
-    # The tick columns are filled from the image store / annotation sidecar,
-    # not from file metadata.
-    return bool(
-        set(visible)
-        & (set(TOGGLEABLE_COLUMNS.keys()) - {COL_IMAGES, COL_ANNOTATIONS})
-    )
+    # The images tick column is filled from the image store, not file metadata.
+    return bool(set(visible) & (set(TOGGLEABLE_COLUMNS.keys()) - {COL_IMAGES}))
 
 
 def load_visible_file_columns() -> set[int]:
@@ -77,30 +71,7 @@ def load_visible_file_columns() -> set[int]:
         visible.add(COL_IMAGES)
         save_visible_file_columns(visible)
         _mark_images_column_migration_done()
-    if not _annotations_column_migration_done():
-        # One-shot, same as the images column: show the new tick column once.
-        visible.add(COL_ANNOTATIONS)
-        save_visible_file_columns(visible)
-        _mark_annotations_column_migration_done()
     return visible
-
-
-_ANNOTATIONS_COLUMN_MIGRATION_KEY = "annotations_column_migrated_v1"
-
-
-def _annotations_column_migration_done() -> bool:
-    s = QSettings()
-    s.beginGroup(FILES_SETTINGS_GROUP)
-    done = s.value(_ANNOTATIONS_COLUMN_MIGRATION_KEY, False)
-    s.endGroup()
-    return str(done).lower() in {"1", "true"}
-
-
-def _mark_annotations_column_migration_done() -> None:
-    s = QSettings()
-    s.beginGroup(FILES_SETTINGS_GROUP)
-    s.setValue(_ANNOTATIONS_COLUMN_MIGRATION_KEY, True)
-    s.endGroup()
 
 
 _IMAGES_COLUMN_MIGRATION_KEY = "images_column_migrated_v1"
