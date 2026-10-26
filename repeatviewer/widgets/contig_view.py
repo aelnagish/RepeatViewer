@@ -47,10 +47,11 @@ LABEL_W = 150
 RULER_H = 24
 FEATURE_ROW_H = 14
 TRACK_H = 16
-COVERAGE_H = 44
+COVERAGE_H = 30
+IDENTITY_H = 6
 READ_H = 12
 READ_H_LETTERS = 16
-LETTER_PPB = 7.0
+LETTER_PPB = 6.0
 MAX_PPB = 18.0
 ONE_PER_ROW_LIMIT = 200
 
@@ -64,6 +65,23 @@ _READ_FILL = QColor("#cfcfcf")
 _READ_FILL_SEL = QColor("#9cc0ef")
 _INSERT_COLOR = QColor("#8e44ad")
 _DELETE_COLOR = QColor("#5a5a5a")
+_REVERSE_TINT = QColor(123, 63, 181, 22)    # reverse-strand rows, light lavender
+_MARK_FILL = QColor(31, 95, 191, 28)        # current difference column
+_MARK_EDGE = QColor("#1f5fbf")
+_NO_COVERAGE = QColor("#d9d9d6")
+_IDENTITY_OK = QColor("#5fae66")
+_IDENTITY_SOME = QColor("#e0b43a")
+_IDENTITY_MANY = QColor("#d0574a")
+_CONS_DIFF_MARK = QColor("#e0a020")
+
+# IUPAC codes: which plain bases each letter stands for. A read base "matches"
+# the reference when it is one of the bases the reference letter allows, so an
+# ambiguity code in the reference (Y, R, N…) is not drawn as a difference.
+IUPAC = {
+    "A": "A", "C": "C", "G": "G", "T": "T", "U": "T",
+    "R": "AG", "Y": "CT", "S": "CG", "W": "AT", "K": "GT", "M": "AC",
+    "B": "CGT", "D": "AGT", "H": "ACT", "V": "ACG", "N": "ACGT",
+}
 
 
 # --------------------------------------------------------------------------
@@ -89,6 +107,75 @@ def pack_lanes(spans: list[tuple[int, int]], gap: int = 2) -> tuple[list[int], i
     return lanes, len(lane_ends)
 
 
+def _compat_table() -> np.ndarray:
+    """256 x 256 table: True when read byte b agrees with reference byte a."""
+    table = np.zeros((256, 256), dtype=bool)
+    for i in range(256):
+        table[i, i] = True
+    for ref_code, allowed in IUPAC.items():
+        for ref_c in (ref_code, ref_code.lower()):
+            for base in allowed:
+                for read_c in (base, base.lower()):
+                    table[ord(ref_c), ord(read_c)] = True
+            for read_c in (ref_code, ref_code.lower()):
+                table[ord(ref_c), ord(read_c)] = True
+    # case never makes a difference
+    for c in range(ord("A"), ord("Z") + 1):
+        table[c, c + 32] = table[c + 32, c] = True
+    return table
+
+
+_COMPAT = _compat_table()
+
+
+def bases_match(ref_base: str, base: str) -> bool:
+    """True when ``base`` agrees with ``ref_base`` (IUPAC aware, case blind)."""
+    if not ref_base or not base:
+        return False
+    a, b = ord(ref_base[0]), ord(base[0])
+    return bool(a < 256 and b < 256 and _COMPAT[a, b])
+
+
+def difference_profile(reads: list, length: int) -> np.ndarray:
+    """Number of placed sequences that differ from the reference at each position
+    (a mismatch or a deleted base)."""
+    out = np.zeros(max(0, int(length)), dtype=np.int32)
+    for r in reads:
+        if r.mism_pos:
+            pos = np.asarray(r.mism_pos, dtype=np.int64)
+            pos = pos[(pos >= 0) & (pos < length)]
+            np.add.at(out, pos, 1)
+        for s, e in r.del_runs:
+            s, e = max(0, s), min(length, e)
+            if e > s:
+                out[s:e] += 1
+    return out
+
+
+def difference_positions(variants: list) -> list[int]:
+    """Sorted 0-based reference positions that have a variant (Variants table)."""
+    out = set()
+    for v in variants:
+        try:
+            out.add(int(v[0]) - 1)
+        except (TypeError, ValueError, IndexError):
+            continue
+    return sorted(p for p in out if p >= 0)
+
+
+def step_difference(positions: list[int], current: int | None, direction: int) -> int | None:
+    """Next (direction > 0) or previous difference from ``current``; wraps around."""
+    if not positions:
+        return None
+    if current is None:
+        return positions[0] if direction > 0 else positions[-1]
+    if direction > 0:
+        k = bisect.bisect_right(positions, current)
+        return positions[k] if k < len(positions) else positions[0]
+    k = bisect.bisect_left(positions, current) - 1
+    return positions[k] if k >= 0 else positions[-1]
+
+
 def difference_marks(row: str, start: int, reference: str) -> tuple[list[int], list[str],
                                                                    list[tuple[int, int]]]:
     """(mismatch positions, their bases, deletion runs [s, e)) of a placed row."""
@@ -102,7 +189,8 @@ def difference_marks(row: str, start: int, reference: str) -> tuple[list[int], l
         ref = reference[start:start + len(row)]
         b = np.frombuffer(ref.encode("ascii", "replace"), dtype=np.uint8)
         n = min(len(a), len(b))
-        diff = np.flatnonzero((a[:n] != b[:n]) & ~gap[:n])
+        # IUPAC aware: a read C or T under a reference Y is not a difference.
+        diff = np.flatnonzero(~_COMPAT[b[:n], a[:n]] & ~gap[:n])
         positions = (diff + start).tolist()
         bases = [row[k] for k in diff.tolist()]
     runs: list[tuple[int, int]] = []
@@ -180,6 +268,8 @@ class ContigModel:
     variants: list
     feature_summary: list
     n_reads: int
+    diff_count: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.int32))
+    diff_pos: list[int] = field(default_factory=list)
 
     @classmethod
     def from_json(cls, entry: dict) -> "ContigModel":
@@ -202,14 +292,18 @@ class ContigModel:
                 features.append(SequenceFeature.from_dict(d))
             except (TypeError, ValueError):
                 continue
+        length = int(entry["length"])
+        variants = entry.get("variants", [])
         return cls(
-            ref_id=entry["id"], length=int(entry["length"]), detailed=bool(entry["detailed"]),
+            ref_id=entry["id"], length=length, detailed=bool(entry["detailed"]),
             reference=reference, consensus=entry.get("consensus") or "",
             cons_on_ref=consensus_on_reference(entry.get("consensus") or "", ref_to_cons,
                                                int(entry["length"])),
             coverage=mr.unrle(entry.get("coverage") or []), bin_size=int(entry.get("bin_size", 1)),
-            features=features, reads=reads, variants=entry.get("variants", []),
-            feature_summary=entry.get("feature_summary", []), n_reads=int(entry.get("n_reads", 0)))
+            features=features, reads=reads, variants=variants,
+            feature_summary=entry.get("feature_summary", []), n_reads=int(entry.get("n_reads", 0)),
+            diff_count=difference_profile(reads, length),
+            diff_pos=difference_positions(variants))
 
     def coverage_at(self, bp: int) -> float:
         i = bp // max(1, self.bin_size)
@@ -259,6 +353,7 @@ class ContigCanvas(QAbstractScrollArea):
         self.highlight = self.HIGHLIGHT_DIFF
         self.one_per_row = True
         self.selected = -1
+        self.mark_bp: int | None = None     # current difference column (0-based)
         self._lane_count = 0
         self._feature_rows: list[int] = []
         self._feature_row_count = 0
@@ -274,6 +369,7 @@ class ContigCanvas(QAbstractScrollArea):
     def set_model(self, model: ContigModel | None) -> None:
         self.model = model
         self.selected = -1
+        self.mark_bp = None
         if model is not None:
             from repeatviewer.widgets.sequence_map_viewer import _pack_feature_rows
 
@@ -312,9 +408,10 @@ class ContigCanvas(QAbstractScrollArea):
         return READ_H_LETTERS if (self.letters() or self.one_per_row) else READ_H
 
     def header_h(self) -> int:
-        n_tracks = 2 if (self.model and self.model.detailed) else 0   # consensus + reference
+        detailed = bool(self.model and self.model.detailed)
+        n_tracks = 2 if detailed else 0   # consensus + reference
         return (RULER_H + max(1, self._feature_row_count) * FEATURE_ROW_H + 6
-                + n_tracks * TRACK_H + COVERAGE_H + 8)
+                + n_tracks * TRACK_H + (IDENTITY_H + 3 if detailed else 0) + COVERAGE_H + 8)
 
     def _track_y(self) -> dict[str, int]:
         y = RULER_H
@@ -323,6 +420,8 @@ class ContigCanvas(QAbstractScrollArea):
         if self.model and self.model.detailed:
             out["consensus"] = y
             y += TRACK_H
+            out["identity"] = y + 1
+            y += IDENTITY_H + 3
         out["coverage"] = y
         y += COVERAGE_H + 4
         if self.model and self.model.detailed:
@@ -380,9 +479,11 @@ class ContigCanvas(QAbstractScrollArea):
         self.horizontalScrollBar().setValue(int(bp * self.ppb - (anchor_x - LABEL_W)))
         self.viewport().update()
 
-    def show_base(self, bp: int, *, zoom_to_letters: bool = False) -> None:
+    def show_base(self, bp: int, *, zoom_to_letters: bool = False, mark: bool = False) -> None:
+        if mark:
+            self.mark_bp = int(bp)
         if zoom_to_letters and self.ppb < LETTER_PPB:
-            self.ppb = 10.0
+            self.ppb = 12.0
             self._update_scrollbars()
         self.horizontalScrollBar().setValue(int(bp * self.ppb - self._data_w() / 2))
         self.viewport().update()
@@ -467,7 +568,18 @@ class ContigCanvas(QAbstractScrollArea):
             lines[0] += f" · reference {m.reference[bp]}"
         if m.cons_on_ref and bp < len(m.cons_on_ref):
             lines[0] += f" · consensus {m.cons_on_ref[bp]}"
-        lines.append(f"Coverage {m.coverage_at(bp):.0f}")
+        cov = m.coverage_at(bp)
+        if cov <= 0:
+            lines.append("No coverage")
+        else:
+            line = f"Depth {cov:.0f}"
+            if m.detailed and bp < len(m.diff_count) and m.diff_count[bp]:
+                k = int(m.diff_count[bp])
+                line += f" · {k} differ ({k / cov:.0%})"
+            counts = self._base_counts(bp)
+            if counts:
+                line += " · " + " ".join(f"{b} {n}" for b, n in counts)
+            lines.append(line)
         feats = [f.name for f in m.features if f.start <= bp + 1 <= f.end]
         if feats:
             lines.append("In " + ", ".join(feats[:6]))
@@ -483,6 +595,22 @@ class ContigCanvas(QAbstractScrollArea):
             if 0 <= k < len(row):
                 lines.append(f"Base here: {row[k]}")
         QToolTip.showText(event.globalPosition().toPoint(), "\n".join(lines), self)
+
+    def _base_counts(self, bp: int, limit: int = 5000) -> list[tuple[str, int]]:
+        """Bases of the placed sequences at ``bp`` (detailed results only)."""
+        m = self.model
+        if m is None or not m.detailed:
+            return []
+        counts: dict[str, int] = {}
+        for r in m.reads[:limit]:
+            if r.start <= bp < r.end:
+                row = r.data.get("row", "")
+                k = bp - r.start
+                if 0 <= k < len(row):
+                    c = row[k].upper()
+                    counts[c] = counts.get(c, 0) + 1
+        order = "ACGT-"
+        return sorted(counts.items(), key=lambda kv: (order.find(kv[0]) % 9, kv[0]))
 
     # ---------------------------------------------------------------- painting
 
@@ -513,11 +641,20 @@ class ContigCanvas(QAbstractScrollArea):
         if m.detailed:
             self._paint_sequence_track(p, ys["consensus"], m.cons_on_ref, bp0, bp1, letters,
                                        compare=m.reference, fg=fg)
+            self._paint_identity(p, ys["identity"], bp0, bp1, w)
             self._paint_sequence_track(p, ys["reference"], m.reference, bp0, bp1, letters,
                                        compare="", fg=fg)
         self._paint_coverage(p, ys["coverage"], bp0, bp1, w)
         p.setClipRect(QRectF(LABEL_W, header, w - LABEL_W, h - header))
         self._paint_reads(p, ys["reads"], bp0, bp1, letters, fg, h)
+        if self.mark_bp is not None and bp0 <= self.mark_bp <= bp1:
+            p.setClipRect(QRectF(LABEL_W, RULER_H, w - LABEL_W, h - RULER_H))
+            x = self.x_of(self.mark_bp)
+            col = QRectF(x, RULER_H, max(2.0, self.ppb), h - RULER_H)
+            p.fillRect(col, _MARK_FILL)
+            p.setPen(QPen(_MARK_EDGE, 1))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRect(col)
         # label column
         p.setClipping(False)
         p.fillRect(QRectF(0, 0, LABEL_W, h), pal.color(pal.ColorRole.Window))
@@ -533,11 +670,19 @@ class ContigCanvas(QAbstractScrollArea):
             p.drawText(QRectF(6, y, LABEL_W - 10, height),
                        Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, text)
 
-        label(0, m.ref_id, RULER_H)
+        label(0, f"{m.length:,} bp", RULER_H)
         label(ys["features"], "Annotations" if m.features else "No annotations", FEATURE_ROW_H)
         if m.detailed:
             label(ys["consensus"], "Consensus")
-            label(ys["reference"], "Reference")
+            small = QFont(label_font)
+            small.setPointSize(7)
+            p.setFont(small)
+            p.drawText(QRectF(6, ys["identity"] - 3, LABEL_W - 10, IDENTITY_H + 6),
+                       Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, "Identity")
+            p.setFont(label_font)
+            fm_ref = QFontMetrics(label_font)
+            label(ys["reference"], fm_ref.elidedText(f"Reference · {m.ref_id}",
+                                                     Qt.TextElideMode.ElideRight, LABEL_W - 12))
         top = max(1.0, float(m.coverage[max(0, bp0 // m.bin_size):
                                          max(1, bp1 // m.bin_size + 1)].max(initial=0)))
         label(ys["coverage"], f"Coverage (max {top:.0f})", COVERAGE_H)
@@ -552,6 +697,8 @@ class ContigCanvas(QAbstractScrollArea):
                     continue
                 if i == self.selected:
                     p.fillRect(QRectF(0, y, LABEL_W - 1, rh), _READ_FILL_SEL)
+                elif r.strand == "-":
+                    p.fillRect(QRectF(0, y, LABEL_W - 1, rh), _REVERSE_TINT)
                 p.setPen(fg)
                 p.drawText(QRectF(6, y, LABEL_W - 10, rh),
                            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
@@ -586,37 +733,119 @@ class ContigCanvas(QAbstractScrollArea):
             _draw_directed_feature(p, rect, QColor(f.color or "#888888"),
                                    forward=f.is_forward(), label=f.name)
 
+    def _hatch(self, p: QPainter, rect: QRectF) -> None:
+        """No coverage: light diagonal hatching, never a difference colour."""
+        from PySide6.QtGui import QBrush
+
+        p.fillRect(rect, QBrush(_NO_COVERAGE, Qt.BrushStyle.BDiagPattern))
+
+    def _uncovered_runs(self, bp0: int, bp1: int) -> list[tuple[int, int]]:
+        """[start, end) runs without coverage between bp0 and bp1 (vectorised)."""
+        m = self.model
+        step = max(1, m.bin_size)
+        i0, i1 = bp0 // step, min(len(m.coverage), bp1 // step + 1)
+        if i1 <= i0:
+            return []
+        empty = (np.asarray(m.coverage[i0:i1]) <= 0).astype(np.int8)
+        if not empty.any():
+            return []
+        edges = np.diff(np.concatenate(([0], empty, [0])))
+        starts = np.flatnonzero(edges == 1)
+        ends = np.flatnonzero(edges == -1)
+        return [(max(bp0, (i0 + int(a)) * step), min(bp1, (i0 + int(b)) * step))
+                for a, b in zip(starts, ends)]
+
     def _paint_sequence_track(self, p: QPainter, y: int, seq: str, bp0: int, bp1: int,
                               letters: bool, *, compare: str, fg: QColor) -> None:
+        """Reference (compare == "") or consensus (compare = reference)."""
         if not seq:
             return
+        m = self.model
         rect_h = TRACK_H - 3
+        is_consensus = bool(compare)
+        uncovered = self._uncovered_runs(bp0, bp1) if is_consensus else []
+
+        def covered(bp: int) -> bool:
+            return not is_consensus or m.coverage_at(bp) > 0
+
         if not letters:
-            p.fillRect(QRectF(self.x_of(0), y + 4, self.model.length * self.ppb, rect_h - 6),
+            p.fillRect(QRectF(self.x_of(0), y + 4, m.length * self.ppb, rect_h - 6),
                        QColor("#b9b9b9"))
-            if compare:
-                p.setPen(Qt.PenStyle.NoPen)
-                for bp in range(bp0, min(bp1, len(seq), len(compare))):
-                    if seq[bp] != compare[bp]:
-                        p.fillRect(QRectF(self.x_of(bp), y + 1, max(1.0, self.ppb), rect_h),
-                                   QColor("#d9534f"))
+            for s0, e0 in uncovered:
+                r = QRectF(self.x_of(s0), y + 1, max(1.0, (e0 - s0) * self.ppb), rect_h)
+                p.fillRect(r, pal_base(self))
+                self._hatch(p, r)
+            if is_consensus:
+                hi = min(bp1, len(seq), len(compare))
+                if hi > bp0:
+                    a = np.frombuffer(seq[bp0:hi].encode("ascii", "replace"), dtype=np.uint8)
+                    b = np.frombuffer(compare[bp0:hi].encode("ascii", "replace"), dtype=np.uint8)
+                    step = max(1, m.bin_size)
+                    cov = np.repeat(np.asarray(m.coverage), step)[bp0:hi] if step > 1 else \
+                        np.asarray(m.coverage)[bp0:hi]
+                    n = min(len(a), len(cov))
+                    bad = np.flatnonzero(~_COMPAT[b[:n], a[:n]] & (cov[:n] > 0)) + bp0
+                    red = QColor("#d9534f")
+                    for bp in bad.tolist():
+                        p.fillRect(QRectF(self.x_of(bp), y + 1, max(1.0, self.ppb), rect_h), red)
             return
-        font = _mono(int(min(11, self.ppb * 0.85)))
+        font = _mono(int(min(11, max(7, self.ppb * 0.85))))
         p.setFont(font)
         for bp in range(bp0, min(bp1, len(seq))):
-            c = seq[bp]
             rect = QRectF(self.x_of(bp), y, self.ppb, rect_h)
-            differs = bool(compare) and bp < len(compare) and c != compare[bp]
-            bg_c, fg_c = self._colors.get(c, _FALLBACK)
-            if self.highlight == self.HIGHLIGHT_ALL or (differs and self.highlight !=
-                                                        self.HIGHLIGHT_NONE) or not compare:
+            if not covered(bp):
+                self._hatch(p, rect)
+                continue
+            c = seq[bp]
+            differs = is_consensus and bp < len(compare) and not bases_match(compare[bp], c)
+            bg_c, fg_c = self._colors.get(c.upper(), _FALLBACK)
+            ambiguous = c.upper() not in "ACGT-"
+            if ambiguous and not is_consensus:
+                # ambiguity code in the reference: pale fill, dashed outline
+                p.fillRect(rect, QColor("#fff4d6"))
+                p.setPen(QPen(QColor("#a35f00"), 1, Qt.PenStyle.DashLine))
+                p.drawRect(rect.adjusted(0.5, 0.5, -0.5, -0.5))
+                p.setPen(QColor("#6b4100"))
+            elif (self.highlight == self.HIGHLIGHT_ALL or not is_consensus
+                  or (differs and self.highlight != self.HIGHLIGHT_NONE)):
                 p.fillRect(rect, bg_c)
                 p.setPen(fg_c)
             else:
                 p.setPen(fg)
             p.drawText(rect, Qt.AlignmentFlag.AlignCenter, c)
+            if (is_consensus and bp < len(m.diff_count) and m.diff_count[bp]
+                    and self.highlight != self.HIGHLIGHT_NONE):
+                # some sequences differ here: amber underline
+                p.fillRect(QRectF(rect.left(), rect.bottom() - 2, rect.width(), 2),
+                           _CONS_DIFF_MARK)
+
+    def _paint_identity(self, p: QPainter, y: int, bp0: int, bp1: int, w: int) -> None:
+        """Green where all sequences agree with the reference, yellow where a few
+        differ, red where many (>= 30 %) differ; nothing where there is no coverage."""
+        m = self.model
+        if m.diff_count.size == 0:
+            return
+        x_start = int(max(LABEL_W, self.x_of(bp0)))
+        x_end = int(min(w, self.x_of(bp1)))
+        step = max(1, int(round(self.ppb))) if self.ppb >= 1 else 1
+        for x in range(x_start, x_end + 1, step):
+            a = max(0, self.bp_at(x))
+            b = min(m.length, max(a + 1, self.bp_at(x + step)))
+            if a >= m.length:
+                break
+            cov = max(m.coverage_at(k) for k in range(a, b)) if b - a <= 64 else \
+                m.coverage_at((a + b) // 2)
+            if cov <= 0:
+                continue
+            share = float(m.diff_count[a:b].max(initial=0)) / cov
+            color = _IDENTITY_OK if share == 0 else (_IDENTITY_SOME if share < 0.3
+                                                     else _IDENTITY_MANY)
+            p.fillRect(QRectF(x, y, step, IDENTITY_H), color)
 
     def _paint_coverage(self, p: QPainter, y: int, bp0: int, bp1: int, w: int) -> None:
+        """Coverage on a log scale, so one or two sequences do not fill the track."""
+        import math
+
         m = self.model
         cov = m.coverage
         if cov.size == 0:
@@ -634,9 +863,11 @@ class ContigCanvas(QAbstractScrollArea):
         if not vals:
             return
         top = max(1.0, max(vals))
+        scale = math.log1p(max(top, 4.0))      # one read stays a low band, not a wall
+        span = COVERAGE_H - 6
         base = y + COVERAGE_H - 2
         poly = QPolygonF([QPointF(xs[0], base)] + [
-            QPointF(x, base - v / top * (COVERAGE_H - 6)) for x, v in zip(xs, vals)]
+            QPointF(x, base - math.log1p(v) / scale * span) for x, v in zip(xs, vals)]
             + [QPointF(xs[-1], base)])
         p.setPen(QPen(QColor("#3b6fb6"), 1))
         p.setBrush(QColor("#cfe0f5"))
@@ -651,12 +882,18 @@ class ContigCanvas(QAbstractScrollArea):
         rh = self.read_h()
         off = top - self.verticalScrollBar().value()
         header = self.header_h()
-        font = _mono(int(min(11, self.ppb * 0.85)))
+        w = self.viewport().width()
+        font = _mono(int(min(11, max(7, self.ppb * 0.85))))
+        dot_color = QColor("#9a9a96")
         for i, r in enumerate(m.reads):
             y = off + r.lane * rh
-            if y + rh < header or y > h or r.end < bp0 or r.start > bp1:
+            if y + rh < header or y > h:
                 continue
             sel = i == self.selected
+            if self.one_per_row and r.strand == "-" and not sel:
+                p.fillRect(QRectF(LABEL_W, y, w - LABEL_W, rh), _REVERSE_TINT)
+            if r.end < bp0 or r.start > bp1:
+                continue
             if not letters:
                 rect = QRectF(self.x_of(r.start), y + 1, max(2.0, (r.end - r.start) * self.ppb),
                               rh - 3)
@@ -668,7 +905,7 @@ class ContigCanvas(QAbstractScrollArea):
                     for k in range(lo, hi):
                         p.fillRect(QRectF(self.x_of(r.mism_pos[k]), y + 1,
                                           max(1.0, self.ppb), rh - 3),
-                                   self._colors.get(r.mism_base[k], _FALLBACK)[0])
+                                   self._colors.get(r.mism_base[k].upper(), _FALLBACK)[0])
                 for s, e in r.del_runs:
                     if e < bp0 or s > bp1:
                         continue
@@ -680,31 +917,52 @@ class ContigCanvas(QAbstractScrollArea):
                 p.setFont(font)
                 row = r.data["row"]
                 ref = m.reference
+                if sel:
+                    p.fillRect(QRectF(self.x_of(max(bp0, r.start)), y,
+                                      (min(bp1, r.end) - max(bp0, r.start)) * self.ppb, rh - 2),
+                               _READ_FILL_SEL)
                 for bp in range(max(bp0, r.start), min(bp1, r.end)):
                     c = row[bp - r.start]
                     rect = QRectF(self.x_of(bp), y, self.ppb, rh - 2)
                     if c == "-":
-                        p.setPen(QPen(_DELETE_COLOR, 1))
-                        p.drawLine(QPointF(rect.left(), rect.center().y()),
-                                   QPointF(rect.right(), rect.center().y()))
+                        # deleted base: dark cell with a dash
+                        p.fillRect(rect.adjusted(0, 1, 0, -1), _DELETE_COLOR)
+                        p.setPen(QColor("#ffffff"))
+                        p.drawText(rect, Qt.AlignmentFlag.AlignCenter, "-")
                         continue
-                    differs = bp < len(ref) and c != ref[bp]
-                    bg_c, fg_c = self._colors.get(c, _FALLBACK)
-                    if self.highlight == self.HIGHLIGHT_ALL or (differs and self.highlight ==
-                                                                self.HIGHLIGHT_DIFF):
+                    differs = bp < len(ref) and not bases_match(ref[bp], c)
+                    bg_c, fg_c = self._colors.get(c.upper(), _FALLBACK)
+                    if self.highlight == self.HIGHLIGHT_ALL:
                         p.fillRect(rect, bg_c)
                         p.setPen(fg_c)
+                        p.drawText(rect, Qt.AlignmentFlag.AlignCenter, c)
+                    elif self.highlight == self.HIGHLIGHT_DIFF:
+                        if differs:
+                            p.fillRect(rect, bg_c)
+                            p.setPen(fg_c)
+                            bold = QFont(font)
+                            bold.setBold(True)
+                            p.setFont(bold)
+                            p.drawText(rect, Qt.AlignmentFlag.AlignCenter, c)
+                            p.setFont(font)
+                        else:
+                            # agrees with the reference: a dot, so differences stand out
+                            p.setPen(dot_color)
+                            p.drawText(rect, Qt.AlignmentFlag.AlignCenter, "·")
                     else:
-                        if sel:
-                            p.fillRect(rect, _READ_FILL_SEL)
-                        p.setPen(QColor("#000000") if differs else QColor("#6b6b6b"))
-                    p.drawText(rect, Qt.AlignmentFlag.AlignCenter, c)
+                        p.setPen(fg)
+                        p.drawText(rect, Qt.AlignmentFlag.AlignCenter, c)
             p.setPen(QPen(_INSERT_COLOR, 2))
             lo = bisect.bisect_left(r.ins_pos, bp0)
             hi = bisect.bisect_right(r.ins_pos, bp1)
             for k in range(lo, hi):
                 x = self.x_of(r.ins_pos[k])
                 p.drawLine(QPointF(x, y), QPointF(x, y + rh - 2))
+
+
+def pal_base(widget: QWidget) -> QColor:
+    pal = widget.palette()
+    return pal.color(pal.ColorRole.Base)
 
 
 # --------------------------------------------------------------------------
@@ -804,9 +1062,9 @@ class ContigViewPanel(QWidget):
         self._contig.setMinimumWidth(180)
         self._contig.currentIndexChanged.connect(self._on_contig_changed)
         self._highlight = QComboBox(self)
-        for label, value in (("Highlight differences", ContigCanvas.HIGHLIGHT_DIFF),
+        for label, value in (("Dots where they match", ContigCanvas.HIGHLIGHT_DIFF),
                              ("Colour all bases", ContigCanvas.HIGHLIGHT_ALL),
-                             ("No highlighting", ContigCanvas.HIGHLIGHT_NONE)):
+                             ("Plain letters", ContigCanvas.HIGHLIGHT_NONE)):
             self._highlight.addItem(label, value)
         self._highlight.currentIndexChanged.connect(self._on_highlight)
         self._layout_mode = QComboBox(self)
@@ -828,6 +1086,12 @@ class ContigViewPanel(QWidget):
         bases = tool("Bases", "Zoom in until the bases are written out",
                      lambda: self.canvas.show_base(self.canvas.bp_at(
                          LABEL_W + self.canvas._data_w() / 2), zoom_to_letters=True))
+        self._prev_diff = tool("◀ Previous difference", "Go to the previous variant position",
+                               lambda: self._step_difference(-1))
+        self._next_diff = tool("Next difference ▶", "Go to the next variant position",
+                               lambda: self._step_difference(1))
+        self._diff_label = QLabel(self)
+        self._diff_label.setMinimumWidth(60)
         self._files_btn = QToolButton(self)
         self._files_btn.setText("Results")
         self._files_btn.setToolTip("Open the report, the consensus, the placed or unused "
@@ -841,7 +1105,7 @@ class ContigViewPanel(QWidget):
         bl.setContentsMargins(6, 4, 6, 4)
         bl.setSpacing(6)
         for wdg in (self._contig, zoom_out, zoom_in, fit, bases, self._highlight,
-                    self._layout_mode):
+                    self._layout_mode, self._prev_diff, self._diff_label, self._next_diff):
             bl.addWidget(wdg)
         bl.addStretch(1)
         bl.addWidget(self._files_btn)
@@ -936,6 +1200,7 @@ class ContigViewPanel(QWidget):
         self._fill_reads(model)
         self._fill_features(model)
         self._fill_variants(model)
+        self._sync_difference_label()
 
     def _on_highlight(self, _index: int) -> None:
         self.canvas.highlight = str(self._highlight.currentData())
@@ -1051,7 +1316,44 @@ class ContigViewPanel(QWidget):
     def _on_variant_row(self, index) -> None:
         pos = self._variants_view.model().index(index.row(), 0).data(Qt.ItemDataRole.UserRole)
         if pos:
-            self.canvas.show_base(int(pos) - 1, zoom_to_letters=True)
+            self.canvas.show_base(int(pos) - 1, zoom_to_letters=True, mark=True)
+            self._sync_difference_label()
+
+    # ---------------------------------------------------------------- differences
+
+    def _step_difference(self, direction: int) -> None:
+        m = self.canvas.model
+        if m is None or not m.diff_pos:
+            return
+        target = step_difference(m.diff_pos, self.canvas.mark_bp, direction)
+        if target is None:
+            return
+        self.canvas.show_base(target, zoom_to_letters=True, mark=True)
+        self._sync_difference_label()
+        self._select_variant_row(target + 1)
+
+    def _sync_difference_label(self) -> None:
+        m = self.canvas.model
+        n = len(m.diff_pos) if m is not None else 0
+        self._prev_diff.setEnabled(n > 0)
+        self._next_diff.setEnabled(n > 0)
+        mark = self.canvas.mark_bp
+        if not n:
+            self._diff_label.setText("No differences")
+        elif mark is not None and mark in m.diff_pos:
+            self._diff_label.setText(f"{m.diff_pos.index(mark) + 1} of {n:,}")
+        else:
+            self._diff_label.setText(f"{n:,} differences")
+
+    def _select_variant_row(self, pos1: int) -> None:
+        model = self._variants_view.model()
+        if model is None:
+            return
+        for row in range(model.rowCount()):
+            if model.index(row, 0).data(Qt.ItemDataRole.UserRole) == pos1:
+                self._variants_view.selectRow(row)
+                self._variants_view.scrollTo(model.index(row, 0))
+                break
 
     def _select_read_row(self, read_idx: int) -> None:
         model = self._reads_view.model()

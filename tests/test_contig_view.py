@@ -98,3 +98,42 @@ def test_panel_reports_a_bad_file(qapp, tmp_path):
     panel = cv.ContigViewPanel(path)
     assert panel.current_model() is None
     assert "Cannot open" in panel._title.text()
+
+
+def test_bases_match_is_iupac_aware_and_case_blind():
+    assert cv.bases_match("A", "A") and cv.bases_match("a", "A")
+    assert cv.bases_match("Y", "C") and cv.bases_match("Y", "t")
+    assert cv.bases_match("N", "G")
+    assert not cv.bases_match("Y", "A")
+    assert not cv.bases_match("A", "G")
+
+
+def test_difference_marks_ignore_ambiguity_codes_in_reference():
+    pos, bases, runs = cv.difference_marks("ACTA", 0, "ACYG")
+    assert pos == [3] and bases == ["A"] and runs == []
+
+
+def test_difference_profile_counts_mismatches_and_deletions():
+    reads = [
+        cv.ReadView({}, "a", 0, 6, "+", 1.0, [2], ["T"], [(4, 6)]),
+        cv.ReadView({}, "b", 0, 6, "-", 1.0, [2, 3], ["T", "A"], []),
+    ]
+    prof = cv.difference_profile(reads, 8)
+    assert prof.tolist() == [0, 0, 2, 1, 1, 1, 0, 0]
+
+
+def test_step_difference_wraps_both_ways():
+    pos = [10, 20, 30]
+    assert cv.step_difference(pos, None, 1) == 10
+    assert cv.step_difference(pos, None, -1) == 30
+    assert cv.step_difference(pos, 10, 1) == 20
+    assert cv.step_difference(pos, 30, 1) == 10
+    assert cv.step_difference(pos, 10, -1) == 30
+    assert cv.step_difference(pos, 25, -1) == 20
+    assert cv.step_difference([], 5, 1) is None
+
+
+def test_difference_positions_from_variants():
+    variants = [[50, "C", "A", 1, 1, "CG", ""], [52, "G", "C", 1, 1, "", ""],
+                [50, "C", "T", 1, 1, "CG", ""]]
+    assert cv.difference_positions(variants) == [49, 51]

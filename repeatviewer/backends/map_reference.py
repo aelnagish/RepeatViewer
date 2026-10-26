@@ -215,10 +215,21 @@ def scan_inputs(files: Iterable[Path], *, keep_names: int = 2_000_000,
     return info
 
 
-def reference_lengths(path: Path) -> dict[str, int]:
+def reference_lengths(path: Path, duplicates: list[str] | None = None) -> dict[str, int]:
     """Record lengths, from a current ``.fai`` index when there is one, otherwise
-    by reading the FASTA line by line (no whole-chromosome strings)."""
+    by reading the FASTA line by line (no whole-chromosome strings).
+
+    Names that occur more than once are appended to ``duplicates`` when given:
+    the mappers report hits by name only, so such a reference cannot be used.
+    """
     path = Path(path)
+    seen: set[str] = set()
+
+    def _note(name: str) -> None:
+        if name in seen and duplicates is not None and name not in duplicates:
+            duplicates.append(name)
+        seen.add(name)
+
     fai = path.with_name(path.name + ".fai")
     try:
         if fai.is_file() and fai.stat().st_mtime >= path.stat().st_mtime:
@@ -226,6 +237,7 @@ def reference_lengths(path: Path) -> dict[str, int]:
             for line in fai.read_text(encoding="utf-8").splitlines():
                 parts = line.split("\t")
                 if len(parts) >= 2:
+                    _note(parts[0])
                     out[parts[0]] = int(parts[1])
             if out:
                 return out
@@ -238,6 +250,7 @@ def reference_lengths(path: Path) -> dict[str, int]:
             if line.startswith(">"):
                 words = line[1:].split()
                 name = words[0] if words else ""
+                _note(name)
                 out[name] = 0
             elif name is not None:
                 out[name] += len(line.strip())
@@ -1810,9 +1823,18 @@ def run_mapping(
         raise MapReferenceError("Select the FASTA / FASTQ files to map in the file panel.")
 
     say("Reading the input…")
-    ref_lengths = reference_lengths(reference)
+    duplicate_refs: list[str] = []
+    ref_lengths = reference_lengths(reference, duplicate_refs)
     if not ref_lengths or not any(ref_lengths.values()):
         raise MapReferenceError(f"{reference.name} contains no sequences.")
+    if duplicate_refs:
+        # minimap2 / HISAT2 report hits by name only: with two records of the
+        # same name the result would be drawn against the wrong sequence.
+        shown = ", ".join(duplicate_refs[:5]) + (" …" if len(duplicate_refs) > 5 else "")
+        raise MapReferenceError(
+            f"{reference.name} has more than one sequence named {shown}.\n\n"
+            "Give every sequence in the reference its own name (edit the headers, for "
+            "example with Open in Text Editor) and run Mapping again.")
     info = scan_inputs(queries, max_records=50_000)
     if info.n == 0:
         raise MapReferenceError("The selected files contain no sequences.")
