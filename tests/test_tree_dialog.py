@@ -1,4 +1,5 @@
-"""Tree dialog: shared rows above the tabs, IQ-TREE / FastME / FastTree / Options tabs."""
+"""Tree dialog: IQ-TREE / FastME / FastTree / Options tabs on top, Inputs / Alignment /
+Settings sections on every engine tab (BLAST / Mapping / Repeat Quantify layout)."""
 
 from __future__ import annotations
 
@@ -146,29 +147,70 @@ def test_tree_dialog_reopens_last_tab(qapp, tmp_path):
     assert dlg2.current_dialog_tab() == TREE_ENGINE_IQTREE
 
 
-def test_shared_rows_always_visible_above_tabs(qapp, tmp_path):
+def test_title_and_sections(qapp, tmp_path):
+    from PySide6.QtWidgets import QLabel
+
+    dlg = _dialog(qapp, tmp_path)
+    assert dlg.windowTitle() == "Tree parameters"
+    sections = [lab.text() for lab in dlg.findChildren(QLabel) if lab.text().startswith("<b>")]
+    assert sections[:3] == ["<b>Inputs</b>", "<b>Alignment</b>", "<b>Settings</b>"]
+    assert "<b>Mode</b>" not in sections
+
+
+def test_shared_rows_on_every_engine_tab(qapp, tmp_path):
     dlg = _dialog(qapp, tmp_path)
     _wait_summary(dlg, qapp)
-    shared = (dlg._align_mode, dlg._rotate, dlg._root_mode, dlg._min_cov, dlg._cov_ref)
-    for i in range(dlg._tabs.count()):
-        dlg._tabs.setCurrentIndex(i)
+    shared = (dlg._input_selected, dlg._align_mode, dlg._rotate, dlg._root_mode,
+              dlg._min_cov, dlg._cov_ref, dlg._threads)
+    for engine in ("iqtree", "fastme", "fasttree"):
+        dlg._tabs.setCurrentIndex(dlg._tab_index[engine])
         for w in shared:
             assert _shown(dlg, w)
-    assert dlg._shared.parentWidget() is dlg and dlg._shared is not dlg._tabs.currentWidget()
+    dlg._tabs.setCurrentIndex(dlg._options_index)
+    assert not _shown(dlg, dlg._align_mode)
     assert "1 of 4 sequences" in dlg._frag_hint.text()    # m4 is 6 bp vs median 10 bp
     dlg._min_cov.setValue(0)
     assert "None of the 4" in dlg._frag_hint.text()
 
 
-def test_engine_specific_options_sit_on_their_tabs(qapp, tmp_path):
+def test_each_tab_shows_only_its_engine_rows(qapp, tmp_path):
     dlg = _dialog(qapp, tmp_path)
-    assert dlg._model.parentWidget() is not None
-    for w in (dlg._support_iq, dlg._model, dlg._mask, dlg._threads):
-        assert dlg._iq_tab.isAncestorOf(w)
+    _wait_summary(dlg, qapp)
+    dlg._tabs.setCurrentIndex(dlg._tab_index["iqtree"])
+    assert _shown(dlg, dlg._support_iq) and _shown(dlg, dlg._model) and _shown(dlg, dlg._mask)
+    assert not _shown(dlg, dlg._support_fme) and not _shown(dlg, dlg._support_ft)
+    dlg._tabs.setCurrentIndex(dlg._tab_index["fastme"])
+    assert _shown(dlg, dlg._support_fme)
+    assert not _shown(dlg, dlg._model) and not _shown(dlg, dlg._mask)
+    dlg._tabs.setCurrentIndex(dlg._tab_index["fasttree"])
+    assert _shown(dlg, dlg._support_ft) and not _shown(dlg, dlg._support_iq)
     for w in (dlg._runs, dlg._seed, dlg._bnni, dlg._iqtree_fast):
         assert dlg._iq_advanced_panel.isAncestorOf(w)
-    assert dlg._fme_tab.isAncestorOf(dlg._support_fme) and dlg._fme_tab.isAncestorOf(dlg._threads_fme)
-    assert dlg._ft_tab.isAncestorOf(dlg._support_ft) and dlg._ft_tab.isAncestorOf(dlg._threads_ft)
+
+
+def test_define_inputs(qapp, tmp_path):
+    dlg = _dialog(qapp, tmp_path)
+    assert dlg.input_source() == "selected"
+    assert [p.name for p in dlg.run_files()] == ["sat.fa"]
+    assert not _shown(dlg, dlg._define_inputs)
+    dlg._input_define.setChecked(True)
+    assert _shown(dlg, dlg._define_inputs)
+    assert dlg.run_files() == []
+    other = tmp_path / "other.fa"
+    other.write_text(">a\nACGTACGT\n>b\nACGTACGA\n")
+    assert dlg.apply_path_from_panel(other)            # a Files click fills a row
+    assert dlg.run_files() == [other.resolve()]
+    _wait_summary(dlg, qapp)                            # summary follows the defined file
+    assert dlg._summary.n_sequences == 2
+    dlg._restore_defaults()
+    assert dlg.input_source() == "selected" and dlg._define_inputs.paths() == []
+
+
+def test_selected_mode_ignores_panel_clicks_on_plain_fasta(qapp, tmp_path):
+    dlg = _dialog(qapp, tmp_path)
+    other = tmp_path / "other.fa"
+    other.write_text(">a\nACGT\n")
+    assert not dlg.apply_path_from_panel(other)
 
 
 def test_engine_comes_from_the_open_tab(qapp, tmp_path):
@@ -182,11 +224,12 @@ def test_engine_comes_from_the_open_tab(qapp, tmp_path):
     assert dlg.options().engine == TREE_ENGINE_FASTTREE
 
 
-def test_threads_are_shared_between_tabs(qapp, tmp_path):
+def test_one_threads_box_for_every_tab(qapp, tmp_path):
     dlg = _dialog(qapp, tmp_path)
-    dlg._threads_fme.setValue(7)
-    assert dlg._threads.value() == 7 and dlg._threads_ft.value() == 7
+    dlg._tabs.setCurrentIndex(1)
+    dlg._threads.setValue(7)
     dlg._tabs.setCurrentIndex(2)
+    assert _shown(dlg, dlg._threads)
     assert dlg.options().threads == 7
 
 
@@ -269,17 +312,20 @@ def test_question_mark_help(qapp, tmp_path):
 
     dlg = _dialog(qapp, tmp_path)
     radios = [r.text() for r in dlg.findChildren(QRadioButton)]
-    assert [r.split(" (")[0] for r in radios] == ["IQ-TREE", "FastME", "FastTree"]
+    # Qt lists children by parent, not creation order: compare as a set.
+    assert {r.split(" (")[0] for r in radios} == {
+        "Use selected sequences", "Define inputs", "IQ-TREE", "FastME", "FastTree",
+    }
     assert not [lab for lab in dlg.findChildren(QLabel) if lab.text() == "ⓘ"]
     helps = [b for b in dlg.findChildren(QToolButton) if b.text() == "?"]
-    # shared: Alignment, Monomers, Root, Skip fragments;
+    # Inputs; Alignment, Monomers, Skip fragments; Root, Threads;
     # IQ-TREE Settings: Branch support, Model, Methylation check;
-    # IQ-TREE Advanced: Searches, bnni, fast;
+    # IQ-TREE Advanced: Searches, Random seed, bnni, fast;
     # FastME and FastTree: support  (no REXdb on Options)
-    assert len(helps) == 12
+    assert len(helps) == 15
     joined = " ".join(b.toolTip() for b in helps)
     for piece in ("L-INS-i", "FFT-NS-2", "Align tool", "ModelFinder", "UFBoot",
-                  "Midpoint", "CHG", "--bnni", "--fast"):
+                  "Midpoint", "CHG", "--bnni", "--fast", "Define inputs", "-T AUTO"):
         assert piece in joined
 
 

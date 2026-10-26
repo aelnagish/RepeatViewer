@@ -4916,16 +4916,32 @@ class MainWindow(QMainWindow):
             if not d.should_run():
                 self._set_status_message("Tree settings saved", 4000)
                 return
-            # Non-modal: Files clicks can change the selection after open; when
-            # nothing was selected at open, re-read the panel. Prefer the files
-            # chosen when the dialog opened otherwise.
-            run_files = [
-                p for p in (files or self._tree_candidate_files())
-                if str(p) != self._tree_options.rexdb_fasta
-            ]
-            if not run_files:
-                self._selected_files_for_tree()  # warning: select FASTA first
-                return
+            from repeatviewer.job_options import ALIGN_INPUT_DEFINE
+
+            if d.input_source() == ALIGN_INPUT_DEFINE:
+                run_files = [
+                    p for p in d.run_files()
+                    if str(p) != self._tree_options.rexdb_fasta
+                ]
+                if not run_files:
+                    QMessageBox.information(
+                        self,
+                        "Tree",
+                        "Add at least one FASTA file under Define inputs "
+                        "(click it in the Files panel, or use Browse).",
+                    )
+                    return
+            else:
+                # Non-modal: Files clicks can change the selection after open;
+                # when nothing was selected at open, re-read the panel. Prefer
+                # the files chosen when the dialog opened otherwise.
+                run_files = [
+                    p for p in (files or self._tree_candidate_files())
+                    if str(p) != self._tree_options.rexdb_fasta
+                ]
+                if not run_files:
+                    self._selected_files_for_tree()  # warning: select FASTA first
+                    return
             self._start_tree_job(run_files, self._tree_options)
 
         # Non-modal so Files clicks can update the selection after open.

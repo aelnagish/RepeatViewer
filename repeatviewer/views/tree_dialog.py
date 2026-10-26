@@ -1,8 +1,9 @@
-"""Tree dialog (Tools → Tree), Align / BLAST–style function window.
+"""Tree dialog (Tools → Tree), laid out like BLAST / Mapping / Repeat Quantify.
 
-Shared above the tabs: Mode (alignment) and Settings (monomers, root, skip
-fragments). Tabs: IQ-TREE | FastME | FastTree | Options. Each engine tab has
-Settings; IQ-TREE also has Advanced Settings (searches, seed, --bnni, --fast).
+Tabs: IQ-TREE | FastME | FastTree | Options. The engine tabs share one page:
+Inputs (selected sequences or Define inputs), Alignment (alignment, monomers,
+skip fragments) and Settings (that engine's rows, then Root and Threads).
+IQ-TREE also has Advanced Settings (searches, seed, --bnni, --fast).
 Save / Run take the engine from the open tab (on Options, from the last engine
 tab). Input is used as given (DNA or protein); RT-domain trees are started from
 Tools → Tree → RT-domain tree.
@@ -33,7 +34,8 @@ from PySide6.QtWidgets import (
     QPushButton,
     QRadioButton,
     QSizePolicy,
-    QTabWidget,
+    QStackedWidget,
+    QTabBar,
     QVBoxLayout,
     QWidget,
 )
@@ -41,6 +43,8 @@ from PySide6.QtWidgets import (
 from repeatviewer.backends import tree_builder as tb
 from repeatviewer.backends import tree_portable_tools as tpt
 from repeatviewer.job_options import (
+    ALIGN_INPUT_DEFINE,
+    ALIGN_INPUT_SELECTED,
     DIALOG_TAB_OPTIONS,
     TREE_ALIGN_ALWAYS,
     TREE_ALIGN_NEVER,
@@ -64,6 +68,7 @@ from repeatviewer.views.tool_dialogs import (
     TOOL_PARAMS_DIALOG_WIDTH,
     TOOL_PARAMS_FIELD_WIDTH,
     QComboBox,
+    TeMultiInputFilesWidget,
     QSpinBox,
     _form_section_separator,
     dialog_should_run,
@@ -75,6 +80,7 @@ from repeatviewer.views.tool_dialogs import (
     set_path_checkbox_status,
     sync_form_field_column_spacers,
     system_path_executable_label,
+    tool_params_dialog_width,
 )
 from repeatviewer.widgets.help_button import field_with_help
 
@@ -85,6 +91,18 @@ _ENGINE_TITLES = {
     TREE_ENGINE_FASTTREE: "FastTree",
 }
 
+INPUTS_INFO = (
+    "<b>Use selected sequences</b> (default): build the tree from the FASTA "
+    "files selected in the Files panel.<br>"
+    "<b>Define inputs</b>: choose the FASTA files for this run only. Click a file "
+    "in the Files panel to fill a row, or use Browse. Several files are combined "
+    "into one tree."
+)
+THREADS_INFO = (
+    "<b>Threads</b>: the most CPU threads to use.<br>"
+    "IQ-TREE picks the best number up to this (<code>-T AUTO</code>); FastME and "
+    "FastTree use it as given."
+)
 ALIGN_INFO = (
     "<b>Align with MAFFT</b>: RepeatViewer aligns the sequences. It picks the method: "
     "L-INS-i (most accurate) up to 200 sequences, FFT-NS-2 (fast) above that. DNA copies "
@@ -270,7 +288,7 @@ class _SummaryLoader(QThread):
 
 
 class TreeParamsDialog(QDialog):
-    """Build a phylogenetic tree from the selected FASTA file(s)."""
+    """Build a phylogenetic tree from the selected or defined FASTA file(s)."""
 
     _DIALOG_WIDTH = TOOL_PARAMS_DIALOG_WIDTH
 
@@ -279,7 +297,7 @@ class TreeParamsDialog(QDialog):
         *,
         initial: TreeOptions | None = None,
         files: list[Path] | None = None,
-        title: str = "Tree",
+        title: str = "Tree parameters",
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -287,31 +305,36 @@ class TreeParamsDialog(QDialog):
         self.setMinimumWidth(self._DIALOG_WIDTH)
         opts = initial or TreeOptions()
         self._initial = opts
-        self._files = [Path(p) for p in (files or [])]
+        # Files selected in the Files panel when the window opened.
+        self._panel_files = [Path(p) for p in (files or [])]
+        self._files = list(self._panel_files)  # files the summary describes
         self._outgroup = list(opts.outgroup)
         self._summary = None
         self._summary_loader: _SummaryLoader | None = None
         self._found_timer: QTimer | None = None
-        self._iq_compact_size = None
         # REXdb is configured when running RT-domain tree, not on this form.
         self._rexdb_fasta = str(opts.rexdb_fasta or "")
         self._rexdb_references = int(opts.rexdb_references)
 
         self._build_shared(opts)
         self._build_engine_tabs(opts)
+        self._build_engine_page()
         self._build_options_tab(opts)
 
-        self._tabs = QTabWidget(self)
-        self._tabs.tabBar().setExpanding(False)
-        self._tabs.tabBar().setDocumentMode(True)
+        # Tabs on top (BLAST / Mapping / Repeat Quantify style); every engine tab
+        # shows the same page, with only that engine's rows visible.
+        self._tabs = QTabBar(self)
+        self._tabs.setExpanding(False)
         self._tabs.setDocumentMode(True)
-        self._tabs.setSizePolicy(
-            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
-        )
         self._tab_index: dict[str, int] = {}
-        for engine, page in zip(ENGINE_TABS, (self._iq_tab, self._fme_tab, self._ft_tab)):
-            self._tab_index[engine] = self._tabs.addTab(page, _ENGINE_TITLES[engine])
-        self._options_index = self._tabs.addTab(self._options_tab, "Options")
+        for engine in ENGINE_TABS:
+            self._tab_index[engine] = self._tabs.addTab(_ENGINE_TITLES[engine])
+        self._options_index = self._tabs.addTab("Options")
+        self._stack = QStackedWidget(self)
+        self._stack.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+        self._stack.addWidget(self._engine_page)
+        self._stack.addWidget(self._options_tab)
+
         self._last_engine = (
             opts.engine if opts.engine in ENGINE_TABS else TREE_ENGINE_IQTREE
         )
@@ -330,9 +353,7 @@ class TreeParamsDialog(QDialog):
         )
         if open_tab in self._tab_index:
             self._last_engine = open_tab
-            self._tabs.setCurrentIndex(self._tab_index[open_tab])
-        else:
-            self._tabs.setCurrentIndex(self._tab_index[self._last_engine])
+        self._tabs.setCurrentIndex(self._tab_index[self._last_engine])
         self._tabs.currentChanged.connect(self._tab_changed)
 
         restore = QPushButton("Restore Defaults", self)
@@ -349,17 +370,19 @@ class TreeParamsDialog(QDialog):
         layout.setContentsMargins(22, 18, 22, 16)
         layout.setSpacing(8)
         layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-        layout.addWidget(self._shared, 0)
         layout.addWidget(self._tabs, 0)
+        layout.addWidget(self._stack, 0)
         layout.addWidget(self._button_box, 0)
 
         for w in (self._align_mode, self._root_mode, self._cov_ref):
             w.currentIndexChanged.connect(self._sync)
         self._min_cov.valueChanged.connect(self._update_check)
-        self._tabs.currentChanged.connect(self._on_tab_for_found_and_fit)
+        self._input_selected.toggled.connect(self._on_inputs_changed)
+        self._define_inputs.paths_changed.connect(self._on_inputs_changed)
         self._set_advanced_visible(False)
-        self._update_advanced_settings_button()
+        self._sync_inputs()
         self._sync_field_columns()
+        self._tab_changed(self._tabs.currentIndex())
         self._sync()
         QTimer.singleShot(0, self._start_summary_load)
         QTimer.singleShot(0, self._fit_to_content)
@@ -367,7 +390,6 @@ class TreeParamsDialog(QDialog):
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
-        self._iq_compact_size = None
         self._sync_field_columns()
         QTimer.singleShot(0, self._fit_to_content)
 
@@ -375,18 +397,15 @@ class TreeParamsDialog(QDialog):
         sync_form_field_column_spacers(
             self,
             [
+                self._inputs_radio_label,
+                self._inputs_define_label,
+                self._inputs_host_label,
                 self._frag_hint_label,
                 self._bnni_label,
                 self._fast_label,
                 self._ft_support_note_label,
             ],
-            [
-                self._top_form,
-                self._iq_form,
-                self._iq_adv_form,
-                self._fme_form,
-                self._ft_form,
-            ],
+            [self._form, self._iq_adv_form],
         )
 
     # ------------------------------------------------------------------ building
@@ -428,41 +447,27 @@ class TreeParamsDialog(QDialog):
         self._frag_hint.setWordWrap(False)
         self._frag_hint_label = QLabel("")
 
-        self._shared = QWidget(self)
-        self._shared.setSizePolicy(
-            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
-        )
-        f = _form(self._shared, margins=(16, 4, 16, 4))
-        self._top_form = f
-        f.addRow(_section("Mode", self._shared))
-        f.addRow(
-            "Alignment:",
-            field_with_help(self._align_mode, "Alignment", ALIGN_INFO),
-        )
-        f.addRow(_form_section_separator())
-        f.addRow(_section("Settings", self._shared))
-        f.addRow(
-            "Monomers:",
-            field_with_help(self._rotate, "Rotate monomers", ROTATE_INFO),
-        )
-        f.addRow(
-            "Root:",
-            field_with_help(
-                _row(self, self._root_mode, self._outgroup_btn, stretch=False),
-                "Root",
-                ROOT_INFO,
+        # Inputs: Files-panel selection, or files chosen for this run only.
+        self._input_group = QButtonGroup(self)
+        self._input_selected = QRadioButton("Use selected sequences", self)
+        self._input_define = QRadioButton("Define inputs", self)
+        self._input_group.addButton(self._input_selected)
+        self._input_group.addButton(self._input_define)
+        self._input_selected.setChecked(True)
+        self._define_inputs = TeMultiInputFilesWidget(
+            self,
+            allow_multiple=True,
+            placeholder="FASTA: click it in Files, or Browse",
+            browse_title="Choose FASTA files for the tree",
+            file_filter=(
+                "FASTA (*.fa *.fasta *.fna *.fas *.faa *.aln *.afa);;All files (*)"
+            ),
+            add_button_label="Add another input",
+            add_button_tooltip=(
+                "Add another FASTA file; all files are combined into one tree. "
+                "Click a file in the Files panel to fill a row, or use Browse."
             ),
         )
-        f.addRow(
-            "Skip fragments:",
-            field_with_help(
-                _row(self, self._min_cov, self._cov_ref, stretch=False),
-                "Skip fragments",
-                FRAG_INFO,
-            ),
-        )
-        f.addRow(self._frag_hint_label, self._frag_hint)
-        self._set_row(f, self._frag_hint, bool(self._files))
 
     def _number_spin(self, lo: int, hi: int, value: int) -> QSpinBox:
         box = QSpinBox(self)
@@ -472,7 +477,7 @@ class TreeParamsDialog(QDialog):
         return box
 
     def _build_engine_tabs(self, opts: TreeOptions) -> None:
-        threads = max(1, opts.threads)
+        """Engine-specific controls (placed on the shared engine page)."""
         self._support_iq = self._support_combo(
             IQ_SUPPORT,
             f"{opts.alrt},{opts.ufboot}",
@@ -511,50 +516,99 @@ class TreeParamsDialog(QDialog):
         self._iqtree_fast.setChecked(bool(getattr(opts, "iqtree_fast", False)))
         self._bnni_label = QLabel("")
         self._fast_label = QLabel("")
-        self._threads = self._number_spin(1, 256, threads)
-        self._threads.setToolTip(
-            "Most threads to use. IQ-TREE picks the best number up to this (-T AUTO)."
-        )
+        # One Threads box for every engine (it used to be copied per tab).
+        self._threads = self._number_spin(1, 256, max(1, opts.threads))
         self._support_fme = self._support_combo(
             FASTME_SUPPORT,
             opts.distance_bootstrap,
             lambda v: f"Bootstrap, {v} replicates",
         )
-        self._threads_fme = self._number_spin(1, 256, threads)
-        self._threads_fme.setToolTip("Most threads to use.")
         self._support_ft = QLabel("Local support (built in)", self)
-        self._threads_ft = self._number_spin(1, 256, threads)
-        self._threads_ft.setToolTip("Most threads to use.")
-        self._thread_boxes = (self._threads, self._threads_fme, self._threads_ft)
-        for box in self._thread_boxes:
-            box.valueChanged.connect(self._threads_changed)
+        self._ft_support_note_label = QLabel("")
 
-        # --- IQ-TREE tab ----------------------------------------------------
-        self._iq_tab = QWidget(self)
-        iq_root = QVBoxLayout(self._iq_tab)
-        iq_root.setContentsMargins(16, 10, 16, 10)
-        iq_root.setSpacing(4)
-        iq_root.setAlignment(Qt.AlignmentFlag.AlignTop)
+    def _build_engine_page(self) -> None:
+        """Inputs / Alignment / Settings, then the IQ-TREE Advanced panel."""
+        page = self._engine_page = QWidget(self)
+        page.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
+        root = QVBoxLayout(page)
+        root.setContentsMargins(16, 10, 16, 10)
+        root.setSpacing(4)
+        root.setAlignment(Qt.AlignmentFlag.AlignTop)
 
-        iq_basic = QWidget(self._iq_tab)
-        f = self._iq_form = _form(iq_basic, margins=(0, 0, 0, 0))
-        f.addRow(_section("Settings", iq_basic))
+        basic = self._engine_basic = QWidget(page)
+        basic.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
+        f = self._form = _form(basic, margins=(0, 0, 0, 0))
+        f.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        # Old names, kept so every row helper below has one form to talk to.
+        self._top_form = self._iq_form = self._fme_form = self._ft_form = f
+
+        f.addRow(_section("Inputs", basic))
+        self._inputs_radio_label = QLabel("")
+        self._inputs_define_label = QLabel("")
+        self._inputs_host_label = QLabel("")
         f.addRow(
-            "Branch support:",
-            field_with_help(self._support_iq, "Branch support", IQ_SUPPORT_INFO),
+            self._inputs_radio_label,
+            field_with_help(
+                self._input_selected, "Tree inputs", INPUTS_INFO, stretch=True
+            ),
+        )
+        f.addRow(self._inputs_define_label, self._input_define)
+        f.addRow(self._inputs_host_label, self._define_inputs)
+
+        f.addRow(_form_section_separator())
+        f.addRow(_section("Alignment", basic))
+        f.addRow(
+            "Alignment:",
+            field_with_help(self._align_mode, "Alignment", ALIGN_INFO),
         )
         f.addRow(
-            "Model:",
-            field_with_help(self._model, "Substitution model", MODEL_INFO),
+            "Monomers:",
+            field_with_help(self._rotate, "Rotate monomers", ROTATE_INFO),
         )
         f.addRow(
-            "Methylation check:",
-            field_with_help(self._mask, "Methylation check", MASK_INFO),
+            "Skip fragments:",
+            field_with_help(
+                _row(self, self._min_cov, self._cov_ref, stretch=False),
+                "Skip fragments",
+                FRAG_INFO,
+            ),
         )
-        f.addRow("Threads:", self._threads)
-        iq_root.addWidget(iq_basic)
+        f.addRow(self._frag_hint_label, self._frag_hint)
 
-        self._iq_advanced_panel = QWidget(self._iq_tab)
+        f.addRow(_form_section_separator())
+        f.addRow(_section("Settings", basic))
+        self._support_iq_field = field_with_help(
+            self._support_iq, "Branch support", IQ_SUPPORT_INFO
+        )
+        self._support_fme_field = field_with_help(
+            self._support_fme, "Branch support", FASTME_SUPPORT_INFO
+        )
+        self._support_ft_field = field_with_help(
+            self._support_ft, "FastTree", FASTTREE_SUPPORT_INFO
+        )
+        self._ft_note = _note(
+            "Local support values (0 to 1) are built in and always computed.", basic
+        )
+        self._model_field = field_with_help(self._model, "Substitution model", MODEL_INFO)
+        self._mask_field = field_with_help(self._mask, "Methylation check", MASK_INFO)
+        f.addRow("Branch support:", self._support_iq_field)
+        f.addRow("Branch support:", self._support_fme_field)
+        f.addRow("Branch support:", self._support_ft_field)
+        f.addRow(self._ft_support_note_label, self._ft_note)
+        f.addRow("Model:", self._model_field)
+        f.addRow("Methylation check:", self._mask_field)
+        f.addRow(
+            "Root:",
+            field_with_help(
+                _row(self, self._root_mode, self._outgroup_btn, stretch=False),
+                "Root",
+                ROOT_INFO,
+            ),
+        )
+        f.addRow("Threads:", field_with_help(self._threads, "Threads", THREADS_INFO))
+        root.addWidget(basic)
+
+        self._iq_advanced_panel = QWidget(page)
         self._iq_advanced_panel.setSizePolicy(
             QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
         )
@@ -565,7 +619,10 @@ class TreeParamsDialog(QDialog):
             "Searches:",
             field_with_help(self._runs, "Searches and seed", SEARCH_INFO),
         )
-        af.addRow("Random seed:", self._seed)
+        af.addRow(
+            "Random seed:",
+            field_with_help(self._seed, "Searches and seed", SEARCH_INFO),
+        )
         af.addRow(
             self._bnni_label,
             field_with_help(self._bnni, "UFBoot NNI", BNNI_INFO, stretch=True),
@@ -574,52 +631,7 @@ class TreeParamsDialog(QDialog):
             self._fast_label,
             field_with_help(self._iqtree_fast, "Fast search", FAST_INFO, stretch=True),
         )
-        iq_root.addWidget(self._iq_advanced_panel)
-
-        # --- FastME tab -----------------------------------------------------
-        self._fme_tab = QWidget(self)
-        fme_root = QVBoxLayout(self._fme_tab)
-        fme_root.setContentsMargins(16, 10, 16, 10)
-        fme_root.setSpacing(4)
-        fme_root.setAlignment(Qt.AlignmentFlag.AlignTop)
-        fme_basic = QWidget(self._fme_tab)
-        f = self._fme_form = _form(fme_basic, margins=(0, 0, 0, 0))
-        f.addRow(_section("Settings", fme_basic))
-        f.addRow(
-            "Branch support:",
-            field_with_help(self._support_fme, "Branch support", FASTME_SUPPORT_INFO),
-        )
-        f.addRow("Threads:", self._threads_fme)
-        fme_root.addWidget(fme_basic)
-
-        # --- FastTree tab ---------------------------------------------------
-        self._ft_tab = QWidget(self)
-        ft_root = QVBoxLayout(self._ft_tab)
-        ft_root.setContentsMargins(16, 10, 16, 10)
-        ft_root.setSpacing(4)
-        ft_root.setAlignment(Qt.AlignmentFlag.AlignTop)
-        ft_basic = QWidget(self._ft_tab)
-        f = self._ft_form = _form(ft_basic, margins=(0, 0, 0, 0))
-        f.addRow(_section("Settings", ft_basic))
-        f.addRow(
-            "Branch support:",
-            field_with_help(self._support_ft, "FastTree", FASTTREE_SUPPORT_INFO),
-        )
-        self._ft_support_note_label = QLabel("")
-        f.addRow(
-            self._ft_support_note_label,
-            _note(
-                "Local support values (0 to 1) are built in and always computed.",
-                self._ft_tab,
-            ),
-        )
-        f.addRow("Threads:", self._threads_ft)
-        ft_root.addWidget(ft_basic)
-
-        for page in (self._iq_tab, self._fme_tab, self._ft_tab):
-            page.setSizePolicy(
-                QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
-            )
+        root.addWidget(self._iq_advanced_panel)
 
     def _build_options_tab(self, opts: TreeOptions) -> None:
         rc_box = QGroupBox("Right-click action", self)
@@ -752,20 +764,33 @@ class TreeParamsDialog(QDialog):
         )
 
     def _tab_changed(self, index: int) -> None:
+        on_options = index == self._options_index
         for engine, i in self._tab_index.items():
             if i == index:
                 self._last_engine = engine
-
-    def _on_tab_for_found_and_fit(self, *_args) -> None:
+        self._stack.setCurrentIndex(1 if on_options else 0)
+        self._apply_engine_rows()
         self._update_advanced_settings_button()
         self._schedule_found_update()
         if self.isVisible():
             QTimer.singleShot(0, self._fit_to_content)
 
+    def _apply_engine_rows(self) -> None:
+        """Show only the open engine's Settings rows."""
+        engine = self._last_engine
+        f = self._form
+        f.setRowVisible(self._support_iq_field, engine == TREE_ENGINE_IQTREE)
+        f.setRowVisible(self._support_fme_field, engine == TREE_ENGINE_FASTME)
+        f.setRowVisible(self._support_ft_field, engine == TREE_ENGINE_FASTTREE)
+        f.setRowVisible(self._ft_note, engine == TREE_ENGINE_FASTTREE)
+        f.setRowVisible(self._model_field, engine == TREE_ENGINE_IQTREE)
+        f.setRowVisible(
+            self._mask_field, engine == TREE_ENGINE_IQTREE and not self._protein()
+        )
+
     def _update_advanced_settings_button(self) -> None:
         on_iq = self._tabs.currentIndex() == self._tab_index[TREE_ENGINE_IQTREE]
-        on_options = self._tabs.currentIndex() == self._options_index
-        self._advanced_settings_btn.setVisible(on_iq and not on_options)
+        self._advanced_settings_btn.setVisible(on_iq)
         if not on_iq and self._advanced_settings_btn.isChecked():
             self._advanced_settings_btn.blockSignals(True)
             self._advanced_settings_btn.setChecked(False)
@@ -776,32 +801,57 @@ class TreeParamsDialog(QDialog):
     def _set_advanced_visible(self, visible: bool) -> None:
         panel = self._iq_advanced_panel
         panel.setVisible(visible)
-        if visible:
-            panel.setMaximumHeight(16777215)
-        else:
-            panel.setMaximumHeight(0)
+        panel.setMaximumHeight(16777215 if visible else 0)
         panel.updateGeometry()
-        root = self._iq_tab.layout()
-        if root is not None:
-            root.invalidate()
-            root.activate()
-        self._iq_tab.updateGeometry()
 
     def _on_advanced_toggled(self, checked: bool) -> None:
         self._advanced_settings_btn.setText(
             "Advanced Settings ▾" if checked else "Advanced Settings ▸"
         )
-        if checked:
-            self._iq_compact_size = self.size()
         self._set_advanced_visible(checked)
-        self._resize_for_iq_advanced(checked)
+        self._fit_to_content()
 
-    def _threads_changed(self, value: int) -> None:
-        for box in self._thread_boxes:
-            if box.value() != value:
-                box.blockSignals(True)
-                box.setValue(value)
-                box.blockSignals(False)
+    # ------------------------------------------------------------------ inputs
+
+    def input_source(self) -> str:
+        if self._input_define.isChecked():
+            return ALIGN_INPUT_DEFINE
+        return ALIGN_INPUT_SELECTED
+
+    def run_files(self, *, panel_files: list[Path] | None = None) -> list[Path]:
+        """FASTA files the tree is built from (Define inputs, else the panel)."""
+        if self.input_source() == ALIGN_INPUT_DEFINE:
+            return self._define_inputs.paths()
+        if panel_files is not None:
+            return [Path(p) for p in panel_files]
+        return list(self._panel_files)
+
+    def _sync_inputs(self) -> None:
+        define = self._input_define.isChecked()
+        self._form.setRowVisible(self._define_inputs, define)
+        self.setMinimumWidth(tool_params_dialog_width(define_inputs=define))
+
+    def _on_inputs_changed(self, *_args) -> None:
+        self._sync_inputs()
+        files = self.run_files()
+        if files != self._files:
+            self._files = files
+            self._restart_summary_load()
+        if self.isVisible():
+            QTimer.singleShot(0, self._fit_to_content)
+
+    def _drop_summary_loader(self) -> None:
+        loader = self._summary_loader
+        if loader is not None and loader.isRunning():
+            loader.ready.disconnect(self._on_summary_ready)
+            loader.setParent(None)
+        self._summary_loader = None
+
+    def _restart_summary_load(self) -> None:
+        self._drop_summary_loader()
+        self._summary = None
+        self._start_summary_load()
+        self._sync()
 
     def _protein(self) -> bool:
         s = self._summary
@@ -871,7 +921,7 @@ class TreeParamsDialog(QDialog):
         self._set_row(
             self._top_form, self._rotate.parentWidget(), aligning and not protein
         )
-        self._set_row(self._iq_form, self._mask.parentWidget(), not protein)
+        self._apply_engine_rows()
         outgroup = self._root_mode.currentData() == TREE_ROOT_OUTGROUP
         self._outgroup_btn.setEnabled(outgroup)
         n = len(self._outgroup)
@@ -932,91 +982,54 @@ class TreeParamsDialog(QDialog):
 
     def _dialog_chrome_height(self) -> int:
         lay = self.layout()
-        margins = lay.contentsMargins() if lay is not None else None
-        margin_h = (margins.top() + margins.bottom()) if margins is not None else 34
-        spacing = lay.spacing() if lay is not None else 8
-        shared_h = max(
-            self._shared.minimumSizeHint().height(),
-            self._shared.sizeHint().height(),
+        margins = lay.contentsMargins()
+        tab_h = max(24, self._tabs.sizeHint().height()) + 4
+        return (
+            margins.top() + margins.bottom() + lay.spacing() * 2
+            + tab_h + self._button_box.sizeHint().height()
         )
-        tab_bar_h = self._tabs.tabBar().sizeHint().height() + 8
-        buttons_h = self._button_box.sizeHint().height()
-        # shared + tabs + buttons → two spacings
-        return margin_h + shared_h + tab_bar_h + buttons_h + (2 * spacing)
-
-    def _iq_compact_content_height(self) -> int:
-        root = self._iq_tab.layout()
-        margins = root.contentsMargins() if root is not None else None
-        margin_h = (margins.top() + margins.bottom()) if margins is not None else 20
-        spacing = root.spacing() if root is not None else 4
-        basic = self._iq_form.parentWidget()
-        basic_h = max(basic.minimumSizeHint().height(), basic.sizeHint().height())
-        return margin_h + basic_h + spacing
-
-    def _resize_for_iq_advanced(self, expanded: bool) -> None:
-        if self._tabs.currentIndex() != self._tab_index[TREE_ENGINE_IQTREE]:
-            return
-        if not expanded and self._iq_compact_size is not None:
-            self.resize(self._iq_compact_size)
-            self._iq_compact_size = None
-            return
-        self._fit_to_content()
 
     def _fit_to_content(self) -> None:
-        """Shrink / grow to the active tab’s real height (no blank band)."""
-        page = self._tabs.currentWidget()
+        """Size the window to the open tab's real height (no blank band)."""
+        page = self._stack.currentWidget()
         if page is None:
             return
-        # Clear prior pins so newly shown PATH status lines can grow sizeHint.
-        self._tabs.setMaximumHeight(16777215)
+        self._stack.setMaximumHeight(16777215)
         page.setMaximumHeight(16777215)
-        self._shared.ensurePolished()
         page.ensurePolished()
-        page.adjustSize()
         root = page.layout()
         if root is not None:
             root.invalidate()
             root.activate()
-        page_hint = page.minimumSizeHint().expandedTo(page.sizeHint())
-        content_h = page_hint.height()
+        content_h = max(page.minimumSizeHint().height(), page.sizeHint().height())
         if root is not None:
             content_h = max(
                 content_h,
                 root.totalMinimumSize().height(),
                 root.totalSizeHint().height(),
             )
-        # When IQ Advanced is collapsed, measure basic only (panel maxHeight 0
-        # can still leave a stale hint on some platforms).
-        if (
-            page is self._iq_tab
-            and not self._iq_advanced_panel.isVisible()
-        ):
-            content_h = self._iq_compact_content_height()
-        chrome = self._dialog_chrome_height()
-        height = chrome + content_h
-        width = max(self.width(), self._DIALOG_WIDTH)
+        self._stack.setMaximumHeight(content_h)
+        page.setMaximumHeight(content_h)
+        height = self._dialog_chrome_height() + content_h
         screen = self.screen().availableGeometry() if self.screen() else None
-        max_h = screen.height() - 40 if screen is not None else 10_000
-        height = min(max(height, 220), max_h)
+        if screen is not None:
+            height = min(height, screen.height() - 40)
+        width = self.minimumWidth()
         self.setMinimumHeight(0)
-        self._tabs.setMinimumHeight(0)
-        page.setMinimumHeight(0)
         self.setMaximumHeight(height)
         self.resize(width, height)
         self.setMaximumHeight(16777215)
 
     def done(self, result: int) -> None:  # noqa: N802
-        loader = self._summary_loader
-        if loader is not None and loader.isRunning():
-            loader.ready.disconnect(self._on_summary_ready)
-            loader.setParent(None)
-            self._summary_loader = None
+        self._drop_summary_loader()
         super().done(result)
 
     # ------------------------------------------------------------------ defaults / results
 
     def _restore_defaults(self) -> None:
         d = TreeOptions()
+        self._input_selected.setChecked(True)
+        self._define_inputs.clear_paths()
         self._rexdb_fasta = str(d.rexdb_fasta or "")
         self._rexdb_references = int(d.rexdb_references)
         self._align_mode.setCurrentIndex(1 if d.align_mode == TREE_ALIGN_NEVER else 0)
@@ -1051,14 +1064,20 @@ class TreeParamsDialog(QDialog):
         return dialog_should_run(self)
 
     def apply_path_from_panel(self, path: Path) -> bool:
-        """Files-panel click on a REXdb FASTA still stores it for RT-domain runs."""
+        """Files-panel click.
+
+        A REXdb FASTA is stored for RT-domain runs. With Define inputs on, any
+        other file fills the focused (or first empty) input row.
+        """
         from repeatviewer.backends.rt_domains import looks_like_rexdb
 
         resolved = Path(path).expanduser()
-        if not looks_like_rexdb(resolved):
-            return False
-        self._rexdb_fasta = str(resolved)
-        return True
+        if looks_like_rexdb(resolved):
+            self._rexdb_fasta = str(resolved)
+            return True
+        if self.input_source() == ALIGN_INPUT_DEFINE and resolved.is_file():
+            return bool(self._define_inputs.accept_path(resolved))
+        return False
 
     def options(self) -> TreeOptions:
         text = self._model.currentText().strip()
@@ -1074,11 +1093,7 @@ class TreeParamsDialog(QDialog):
         protein = self._protein()
         d = TreeOptions()
         engine = self._engine()
-        threads = {
-            TREE_ENGINE_IQTREE: self._threads,
-            TREE_ENGINE_FASTME: self._threads_fme,
-            TREE_ENGINE_FASTTREE: self._threads_ft,
-        }[engine].value()
+        threads = self._threads.value()
         sysbox = self._system_boxes
         return TreeOptions(
             align_mode=str(self._align_mode.currentData()),
