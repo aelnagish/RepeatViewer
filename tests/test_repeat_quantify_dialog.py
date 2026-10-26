@@ -1,4 +1,4 @@
-"""Repeat quantify dialog: BLAST/Align-style layout, saved options, path fields.
+"""Repeat Quantify dialog: BLAST/Mapping-style tabs, saved options, path fields.
 
 Only behaviour is checked here; the visual layout was compared by rendering
 the dialog offscreen next to the Align dialog.
@@ -46,18 +46,64 @@ def test_initial_options_fill_every_tab():
     )
     d = _dialog(initial=opts)
     assert d.engine() == "repeatmasker"
-    assert d._blast_c["word"].value() == 15  # "Both" copy follows
-    assert d._rm_d["div"].value() == 25
-    assert d._rm_d["sens"].currentData() == "quick"
+    assert d._word.value() == 15
+    assert d._div.value() == 25
+    assert d._sens.currentData() == "quick"
     assert d.options() == opts
 
 
-def test_both_tab_and_single_tabs_stay_in_sync():
+def test_window_title_and_tabs_match_the_other_tools():
     d = _dialog()
-    d._blast_c["mincov"].setValue(50)
-    d._rm_b["sens"].setCurrentIndex(2)
-    assert d._blast_a["mincov"].value() == 50
-    assert d._rm_d["sens"].currentData() == "quick"
+    assert d.windowTitle() == "Repeat Quantify parameters"
+    names = [d._tab_bar.tabText(i) for i in range(d._tab_bar.count())]
+    assert names == ["BLASTn", "RepeatMasker", "Both", "Options"]
+
+
+def test_each_tab_shows_only_its_engine_rows():
+    d = _dialog()
+    form = d._basic_form
+    d._tab_bar.setCurrentIndex(0)  # BLASTn
+    assert form.isRowVisible(d._word_field) and not form.isRowVisible(d._div_field)
+    d._tab_bar.setCurrentIndex(1)  # RepeatMasker
+    assert form.isRowVisible(d._div_field) and not form.isRowVisible(d._word_field)
+    assert d._advanced_settings_btn.isHidden()  # every Advanced row is BLASTn
+    d._tab_bar.setCurrentIndex(2)  # Both
+    assert form.isRowVisible(d._word_field) and form.isRowVisible(d._sens_field)
+    assert not d._advanced_settings_btn.isHidden()
+
+
+def test_options_tab_keeps_the_last_engine():
+    d = _dialog(initial=RepeatQuantifyOptions(engine="blastn"))
+    d._tab_bar.setCurrentIndex(d._TAB_OPTIONS)
+    assert d.engine() == "blastn"
+    assert d.current_dialog_tab() == "options"
+    assert d.options().engine == "blastn"
+
+
+def test_options_tab_settings_round_trip(settings):
+    from repeatviewer.job_options import REPEAT_QUANTIFY_RIGHT_CLICK_RERUN
+
+    opts = RepeatQuantifyOptions(
+        threads=12,
+        right_click_action=REPEAT_QUANTIFY_RIGHT_CLICK_RERUN,
+        show_process_window=False,
+        close_process_window_when_finished=False,
+    )
+    d = _dialog(initial=opts)
+    assert d.threads() == 12
+    assert d._right_click_buttons[REPEAT_QUANTIFY_RIGHT_CLICK_RERUN].isChecked()
+    assert d.options() == opts
+    save_repeat_quantify_options(d.options())
+    assert load_repeat_quantify_options() == opts
+
+
+def test_use_system_blast_follows_the_project_setting():
+    assert _dialog(use_system_blast=True).use_system_blast() is True
+    assert _dialog().use_system_blast() is False
+
+
+def test_threads_are_not_a_quantify_library_param():
+    assert "threads" not in RepeatQuantifyOptions().params()
 
 
 def test_restore_defaults_resets_parameters_not_files(tmp_path):
@@ -115,13 +161,15 @@ def test_options_round_trip_through_settings(settings):
 def test_bad_stored_values_fall_back_to_defaults(settings):
     settings["repeat_quantify"] = {
         "engine": "hmmer", "blast_word_size": "abc", "rm_div": "999",
-        "rm_sensitivity": "turbo",
+        "rm_sensitivity": "turbo", "threads": "0", "right_click_action": "explode",
     }
     loaded = load_repeat_quantify_options()
     assert loaded.engine == "both"
     assert loaded.blast_word_size == 11
     assert loaded.rm_div == 100  # clamped to the spin box range
     assert loaded.rm_sensitivity == "sensitive"
+    assert loaded.threads == 1  # clamped
+    assert loaded.right_click_action == "dialog"
 
 
 def test_params_match_quantify_library_keywords():
@@ -153,10 +201,10 @@ def test_output_preview_follows_genome_and_chosen_folder(tmp_path):
     d._genome_input.add_row(genome)
     d._update_output_preview()
     text = d._output_preview.full_text()
-    assert str(tmp_path.resolve() / "Csat_v1_repeat_quant_") in text
+    assert str(tmp_path.resolve() / "Csat_v1.fa_repeat_quant_") in text
     results = tmp_path / "results"
     d.set_output_dir(results)
-    assert str(results.resolve() / "Csat_v1_repeat_quant_") in d._output_preview.full_text()
+    assert str(results.resolve() / "Csat_v1.fa_repeat_quant_") in d._output_preview.full_text()
     d.set_output_dir(None)
     assert d.output_dir() is None
 
@@ -245,11 +293,10 @@ def test_library_and_genome_start_empty():
     assert d.targets() == []
 
 
-def test_save_index_box_is_on_by_default_and_synced_across_tabs():
+def test_save_index_box_is_on_by_default():
     d = _dialog()
     assert d.save_blast_index() is True
-    d._blast_c["save"].setChecked(False)
-    assert d._blast_a["save"].isChecked() is False
+    d._save_index.setChecked(False)
     assert d.options().blast_save_index is False
     d._restore_defaults()
     assert d.save_blast_index() is True
@@ -281,16 +328,16 @@ def test_status_says_which_genomes_reuse_a_saved_database(tmp_path):
     assert lines[0].startswith("saved.fa: uses saved BLAST database")
     assert "Saffron v3" in lines[0]
     assert "indexed once and added to Add/Manage databases" in lines[1]
-    d._blast_a["save"].setChecked(False)
-    assert "temporary index" in d.blast_database_status()[1]
+    d._save_index.setChecked(False)
+    assert "temporary" in d.blast_database_status()[1]
 
 
 def test_status_is_hidden_for_repeatmasker_only(tmp_path):
     genome = tmp_path / "g.fa"
     genome.write_text(">s\nACGT\n")
     d = _dialog()
-    d._tabs.setCurrentIndex(0)
+    d._tab_bar.setCurrentIndex(0)
     d._genome_input._rows[0].set_path(genome)
     assert d._db_status.text()
-    d._tabs.setCurrentIndex(1)  # RepeatMasker
+    d._tab_bar.setCurrentIndex(1)  # RepeatMasker
     assert d._db_status.text() == ""

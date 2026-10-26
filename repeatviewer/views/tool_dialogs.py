@@ -452,6 +452,8 @@ from repeatviewer.job_options import (
     TeDivergencePlotOptions,
     MsaPlotJobOptions,
     RepeatQuantifyOptions,
+    REPEAT_QUANTIFY_RIGHT_CLICK_DIALOG,
+    REPEAT_QUANTIFY_RIGHT_CLICK_RERUN,
     TeConfusionMatrixBenchmarkOptions,
     TeLibraryBenchmarkOptions,
     DEFAULT_TE_BENCHMARK_THREADS,
@@ -15524,17 +15526,78 @@ class _ElidedPathLabel(QLabel):
         super().setText(f"{self._prefix}{shown}{self._suffix}")
 
 
-class RepeatQuantifyDialog(QDialog):
-    """Choose a library FASTA, one or more genome FASTAs, and the engine.
+_RQ_LIBRARY_HELP = (
+    "<b>Library</b>: the repeat library FASTA to quantify (monomers, "
+    "satellites or TE consensus sequences).<br>"
+    "Click a FASTA in the Files panel to fill this field, or use Browse."
+)
+_RQ_GENOME_HELP = (
+    "<b>Genome</b>: the assembly FASTA (scaffolds or chromosomes) to search.<br>"
+    "<b>Add another genome</b> quantifies the same library against more "
+    "genomes; each genome gets its own report.<br>"
+    "Click a FASTA in the Files panel to fill the field that last had focus."
+)
+_RQ_OUTPUT_HELP = (
+    "<b>Auto</b> (empty): each genome's results go to a new folder next to "
+    "that genome.<br>"
+    "<b>Chosen folder</b>: the run folders are created inside it.<br>"
+    "Every run gets its own timestamped folder, so nothing is overwritten.<br>"
+    "Click this field, then a folder in the Folders panel, to fill it."
+)
+_RQ_THREADS_HELP = (
+    "<b>Threads</b>: CPU threads for BLASTn (<code>-num_threads</code>) and "
+    "RepeatMasker (<code>-pa</code>)."
+)
+_RQ_WORD_SIZE_HELP = (
+    "<b>-word_size</b>: BLASTn seed length.<br>"
+    "Lower is more sensitive but much slower on big, repetitive genomes "
+    "(7 can hang; 11 is a good balance)."
+)
+_RQ_EVALUE_HELP = "<b>-evalue</b>: report BLASTn hits at or below this E-value."
+_RQ_DIV_HELP = (
+    "<b>-div</b>: RepeatMasker reports only copies less diverged than this "
+    "percentage.<br>"
+    "Higher captures older copies, but the result is noisier."
+)
+_RQ_SENSITIVITY_HELP = (
+    "<b>Sensitivity</b>: RepeatMasker search speed.<br>"
+    "<b>Sensitive (-s)</b>: slowest, finds the most copies.<br>"
+    "<b>Default</b>: RepeatMasker's own default.<br>"
+    "<b>Quick (-q)</b>: fastest on large genomes."
+)
+_RQ_PERC_IDENTITY_HELP = (
+    "<b>-perc_identity</b>: minimum BLASTn percent identity per hit.<br>"
+    "0 = no minimum."
+)
+_RQ_QCOV_HELP = (
+    "<b>-qcov_hsp_perc</b>: minimum query (monomer) coverage per hit.<br>"
+    "0 = no minimum."
+)
+_RQ_BLAST_INDEX_HELP = (
+    "Repeat Quantify searches each genome's BLAST index. If the genome is "
+    "already in Add/Manage databases (and the FASTA has not changed since), "
+    "that index is reused and makeblastdb is skipped.<br>"
+    "<b>Ticked</b>: a genome without a saved index is indexed once and added "
+    "to Add/Manage databases, so the next run and the BLAST, TE-Aid and Extend "
+    "tools reuse it.<br>"
+    "<b>Unticked</b>: the index is temporary and rebuilt when the system "
+    "clears its temp folder."
+)
 
-    Laid out like the BLAST / Align dialogs: right-aligned labels, fixed-width
-    parameter fields, one tab per engine, and Restore Defaults + Cancel / Save /
-    Run. Save stores the parameters without running.
+
+class RepeatQuantifyDialog(QDialog):
+    """Repeat Quantify parameters (Tools → Repeat Quantify).
+
+    Tabs: **BLASTn** | **RepeatMasker** | **Both** | **Options**, laid out like
+    the BLAST and Mapping dialogs. The engine tabs share one page with
+    Inputs / Outputs / Settings sections; each tab shows only its engine's
+    rows. Restore Defaults and Advanced Settings sit bottom-left, Cancel /
+    Save / Run bottom-right. Save stores the parameters without running.
 
     Both path fields start empty (nothing is guessed from the current folder,
-    which could pick up a previous run's intermediate FASTAs). The
-    dialog is shown non-modally, so the Folders and Files panels stay live:
-    clicking a FASTA there drops it into whichever field last had focus
+    which could pick up a previous run's intermediate FASTAs). The dialog is
+    shown non-modally, so the Folders and Files panels stay live: clicking a
+    FASTA there drops it into whichever field last had focus
     (``apply_path_from_panel``), and Browse covers files elsewhere.
 
     The output folder is optional. Empty (Auto) writes each genome's results to
@@ -15547,7 +15610,8 @@ class RepeatQuantifyDialog(QDialog):
     # Mirrors _FASTA_FILTER: what a Files-panel click may drop into a field.
     _FASTA_SUFFIXES = frozenset({".fa", ".fasta", ".fna", ".fas"})
     _ENGINES = ("blastn", "repeatmasker", "both")
-    _FIELD_WIDTH = 260  # same as the BLAST / Align parameter fields
+    _TAB_OPTIONS = 3
+    _DIALOG_WIDTH = TOOL_PARAMS_DIALOG_WIDTH
 
     def __init__(
         self,
@@ -15555,33 +15619,36 @@ class RepeatQuantifyDialog(QDialog):
         start_dir: str = "",
         initial: RepeatQuantifyOptions | None = None,
         blast_databases: list | None = None,
+        use_system_blast: bool = False,
         parent=None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Repeat quantify")
+        self.setWindowTitle("Repeat Quantify parameters")
+        self.setMinimumWidth(self._DIALOG_WIDTH)
         # Saved BLAST databases (Add/Manage databases), to show which genomes
         # already have an index Repeat Quantify will reuse.
         self._blast_databases = list(blast_databases or [])
-        # Wide enough for the labels plus a readable path, Browse and Remove;
-        # any wider only leaves empty space beside the fixed-width parameters.
-        self.setMinimumWidth(680)
         self._start_dir = start_dir
         opts = initial or RepeatQuantifyOptions()
+        self._engine = opts.engine if opts.engine in self._ENGINES else "both"
 
+        # --- Inputs ----------------------------------------------------------
         # Path fields rather than dropdowns, so the dialog can stay non-modal and
         # be filled by clicking files in the Files panel (see apply_path_from_panel).
         self._library_input = TeMultiInputFilesWidget(
             self,
             allow_multiple=False,
             start_dir=start_dir,
-            placeholder="TE library FASTA (monomers / satellites)",
-            browse_title="Select TE library FASTA",
+            placeholder="Library FASTA: click it in Files, or Browse",
+            browse_title="Select repeat library FASTA",
             file_filter=self._FASTA_FILTER,
+            help_title="Library",
+            help_text=_RQ_LIBRARY_HELP,
         )
         self._genome_input = TeMultiInputFilesWidget(
             self,
             start_dir=start_dir,
-            placeholder="Genome FASTA (scaffolds / assembly)",
+            placeholder="Genome FASTA: click it in Files, or Browse",
             browse_title="Select genome FASTA",
             file_filter=self._FASTA_FILTER,
             add_button_label="Add another genome",
@@ -15589,79 +15656,254 @@ class RepeatQuantifyDialog(QDialog):
                 "Quantify the same library against another genome. "
                 "Each genome produces its own report."
             ),
+            help_title="Genome",
+            help_text=_RQ_GENOME_HELP,
         )
         self._focused_file_input: TeMultiInputFilesWidget | None = None
         for widget in (self._library_input, self._genome_input):
             widget.field_activated.connect(self._on_file_input_field_activated)
-
-        inputs_form = self._form()
-        inputs_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
-        inputs_form.setContentsMargins(0, 0, 0, 0)
-        inputs_form.addRow("Library (monomers / satellites):", self._library_input)
-        inputs_form.addRow("Genome (scaffolds / assembly):", self._genome_input)
         self._db_status = QLabel(self)
         self._db_status.setWordWrap(True)
         self._db_status.setTextFormat(Qt.TextFormat.PlainText)
+        self._db_status.setStyleSheet("color: palette(mid);")
         # A word-wrapped label asks for a narrow width; let it use the whole field.
         self._db_status.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
         )
-        self._db_status.setVisible(False)
-        inputs_form.addRow("", self._db_status)
-        inputs_form.addRow("Output folder:", self._make_output_controls())
 
-        # Tabs are the engine choice; each tab holds that engine's parameters.
-        # "Both" repeats the controls, kept in sync with the single-engine tabs.
-        self._tabs = QTabWidget(self)
-        self._blast_a = self._make_blast_controls()
-        self._rm_b = self._make_rm_controls()
-        self._blast_c = self._make_blast_controls()
-        self._rm_d = self._make_rm_controls()
-        self._link_controls(self._blast_a, self._blast_c)
-        self._link_controls(self._rm_b, self._rm_d)
-        self._tabs.addTab(
-            self._params_tab(self._blast_rows(self._blast_a)), "BLASTn"
+        # --- Settings / Advanced controls --------------------------------------
+        self._threads = QSpinBox(self)
+        self._threads.setRange(1, 256)
+        self._word = QSpinBox(self)
+        self._word.setRange(4, 24)
+        self._evalue = QDoubleSpinBox(self)
+        configure_report_evalue_spinbox(self._evalue)
+        self._div = QSpinBox(self)
+        self._div.setRange(1, 100)
+        self._div.setSuffix(" %")
+        self._sens = QComboBox(self)
+        self._sens.addItem("Sensitive (-s)", "sensitive")
+        self._sens.addItem("Default", "default")
+        self._sens.addItem("Quick (-q)", "quick")
+        self._minid = QDoubleSpinBox(self)
+        self._minid.setRange(0.0, 100.0)
+        self._minid.setDecimals(0)
+        self._minid.setSuffix(" %")
+        self._mincov = QDoubleSpinBox(self)
+        self._mincov.setRange(0.0, 100.0)
+        self._mincov.setDecimals(0)
+        self._mincov.setSuffix(" %")
+        self._save_index = QCheckBox("Save new indexes as BLAST databases", self)
+        for field in (
+            self._threads, self._word, self._evalue, self._div, self._sens,
+            self._minid, self._mincov,
+        ):
+            field.setFixedWidth(TOOL_PARAMS_FIELD_WIDTH)
+        for field in (
+            self._threads, self._word, self._evalue, self._div,
+            self._minid, self._mincov,
+        ):
+            field.setAlignment(Qt.AlignmentFlag.AlignRight)
+
+        # --- engine page (one page; rows shown per engine tab) ----------------
+        engine_page = QWidget(self)
+        self._engine_page = engine_page
+        engine_page.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum
         )
-        self._tabs.addTab(
-            self._params_tab(self._rm_rows(self._rm_b)), "RepeatMasker"
+        engine_root = QVBoxLayout(engine_page)
+        engine_root.setContentsMargins(16, 10, 16, 10)
+        engine_root.setSpacing(4)
+        engine_root.setAlignment(Qt.AlignmentFlag.AlignTop)
+
+        basic = QWidget(engine_page)
+        self._engine_basic = basic
+        basic.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
+        form = self._form(basic, grow=True)
+        self._basic_form = form
+
+        def _section(title: str, parent: QWidget) -> QLabel:
+            return QLabel(f"<b>{title}</b>", parent)
+
+        form.addRow(_section("Inputs", basic))
+        form.addRow("Library:", self._library_input)
+        form.addRow("Genome:", self._genome_input)
+        self._db_status_label = QLabel("")
+        form.addRow(self._db_status_label, self._db_status)
+
+        form.addRow(_form_section_separator())
+        form.addRow(_section("Outputs", basic))
+        form.addRow("Output folder:", self._make_output_controls())
+
+        form.addRow(_form_section_separator())
+        form.addRow(_section("Settings", basic))
+        form.addRow(
+            "Threads:", field_with_help(self._threads, "Threads", _RQ_THREADS_HELP)
         )
-        both_rows = (
-            [("BLASTn", None)]
-            + self._blast_rows(self._blast_c)
-            + [("RepeatMasker", None)]
-            + self._rm_rows(self._rm_d)
+        self._word_field = field_with_help(self._word, "-word_size", _RQ_WORD_SIZE_HELP)
+        self._evalue_field = field_with_help(self._evalue, "-evalue", _RQ_EVALUE_HELP)
+        self._div_field = field_with_help(self._div, "-div", _RQ_DIV_HELP)
+        self._sens_field = field_with_help(
+            self._sens, "Sensitivity", _RQ_SENSITIVITY_HELP
         )
-        self._tabs.addTab(self._params_tab(both_rows), "Both")
-        self._apply_options(opts)
-        self._genome_input.paths_changed.connect(self._update_db_status)
-        self._tabs.currentChanged.connect(self._update_db_status)
-        self._blast_a["save"].toggled.connect(self._update_db_status)
-        self._update_db_status()
+        form.addRow("-word_size:", self._word_field)
+        form.addRow("-evalue:", self._evalue_field)
+        form.addRow("-div:", self._div_field)
+        form.addRow("Sensitivity:", self._sens_field)
+        engine_root.addWidget(basic)
+
+        advanced = QWidget(engine_page)
+        self._advanced_panel = advanced
+        advanced.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+        adv = self._form(advanced, grow=False)
+        adv.setContentsMargins(0, 4, 0, 0)
+        adv.addRow(_form_section_separator())
+        adv.addRow(_section("Advanced Settings", advanced))
+        self._minid_field = field_with_help(
+            self._minid, "-perc_identity", _RQ_PERC_IDENTITY_HELP
+        )
+        self._mincov_field = field_with_help(
+            self._mincov, "-qcov_hsp_perc", _RQ_QCOV_HELP
+        )
+        self._save_index_field = field_with_help(
+            self._save_index, "BLAST index", _RQ_BLAST_INDEX_HELP
+        )
+        self._save_index_label = QLabel("")
+        adv.addRow("-perc_identity:", self._minid_field)
+        adv.addRow("-qcov_hsp_perc:", self._mincov_field)
+        adv.addRow(self._save_index_label, self._save_index_field)
+        self._advanced_form = adv
+        engine_root.addWidget(advanced)
+
+        # --- Options page ----------------------------------------------------
+        options_page = QWidget(self)
+        self._options_page = options_page
+        options_page.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+        ol = QVBoxLayout(options_page)
+        ol.setContentsMargins(16, 14, 16, 14)
+        ol.setSpacing(14)
+        ol.setAlignment(Qt.AlignmentFlag.AlignTop)
+
+        rc_box = QGroupBox("Right-click action", self)
+        rc_box.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+        rcl = QVBoxLayout(rc_box)
+        rcl.setSpacing(6)
+        rc_label = QLabel("Right-clicking the Repeat Quantify button:", self)
+        rc_label.setWordWrap(True)
+        rcl.addWidget(rc_label)
+        self._right_click_group = QButtonGroup(self)
+        self._right_click_buttons: dict[str, QRadioButton] = {}
+        for label, value in (
+            ("Opens this window", REPEAT_QUANTIFY_RIGHT_CLICK_DIALOG),
+            (
+                "Runs again on the last library and genomes, with saved settings",
+                REPEAT_QUANTIFY_RIGHT_CLICK_RERUN,
+            ),
+        ):
+            radio = QRadioButton(label, self)
+            self._right_click_group.addButton(radio)
+            self._right_click_buttons[value] = radio
+            rcl.addWidget(radio)
+        ol.addWidget(rc_box)
+
+        self._use_system_blast = QCheckBox(system_path_executable_label("BLAST+"), self)
+        self._use_system_blast.setChecked(bool(use_system_blast))
+        self._use_system_blast.setToolTip(
+            "Use blastn and makeblastdb from PATH or the conda env in "
+            "File → Settings → External tools instead of the bundled BLAST+. "
+            "Shared with the BLAST window."
+        )
+        self._blast_path_status = make_executable_status_label(self)
+        self._rm_path_status = make_executable_status_label(self)
+        self._use_system_blast.toggled.connect(self._update_executable_status)
+        exe_box = QGroupBox("Executables", self)
+        exe_box.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+        exl = QVBoxLayout(exe_box)
+        exl.setContentsMargins(10, 8, 10, 8)
+        exl.setSpacing(8)
+        exl.addWidget(
+            executable_checkbox_row(self, self._use_system_blast, self._blast_path_status)
+        )
+        exl.addWidget(self._rm_path_status)
+        ol.addWidget(exe_box)
+
+        process_box, self._show_process_window, self._close_process_window = (
+            make_process_output_box(
+                self,
+                tool_name="Repeat Quantify",
+                checked=opts.show_process_window,
+                close_when_finished=opts.close_process_window_when_finished,
+            )
+        )
+        ol.addWidget(process_box)
+
+        # --- tabs + stack ------------------------------------------------------
+        self._tab_bar = QTabBar(self)
+        self._tab_bar.setExpanding(False)
+        self._tab_bar.setDocumentMode(True)
+        for name in ("BLASTn", "RepeatMasker", "Both", "Options"):
+            self._tab_bar.addTab(name)
+        self._stack = QStackedWidget(self)
+        self._stack.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+        self._stack.addWidget(engine_page)
+        self._stack.addWidget(options_page)
 
         restore = QPushButton("Restore Defaults", self)
         restore.clicked.connect(self._restore_defaults)
+        self._advanced_settings_btn = QPushButton("Advanced Settings ▸", self)
+        self._advanced_settings_btn.setCheckable(True)
+        self._advanced_settings_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._advanced_settings_btn.toggled.connect(self._on_advanced_toggled)
         self._button_box = make_cancel_save_run_bar(
             self,
-            left_widgets=[restore],
+            left_widgets=[restore, self._advanced_settings_btn],
             on_accept=self._on_footer_accept,
         )
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(22, 18, 22, 16)
-        layout.setSpacing(14)
-        layout.addLayout(inputs_form)
-        layout.addWidget(self._tabs)
-        layout.addWidget(self._button_box)
+        layout.setSpacing(8)
+        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        layout.addWidget(self._tab_bar, 0)
+        layout.addWidget(self._stack, 0)
+        layout.addWidget(self._button_box, 0)
+
+        self._apply_options(opts)
+        self._genome_input.paths_changed.connect(self._update_db_status)
+        self._genome_input.paths_changed.connect(self._refit_soon)
+        self._save_index.toggled.connect(self._update_db_status)
+        self._tab_bar.currentChanged.connect(self._on_tab_changed)
+        self._set_advanced_visible(False)
+        self._sync_field_column()
+        self._on_tab_changed(self._tab_bar.currentIndex())
+        self.resize(self._DIALOG_WIDTH, 420)
+
+    # --- layout helpers ---------------------------------------------------------
+
+    @staticmethod
+    def _form(parent: QWidget, *, grow: bool) -> QFormLayout:
+        form = QFormLayout(parent)
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        form.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow
+            if grow
+            else QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint
+        )
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(4)
+        return form
 
     def _make_output_controls(self) -> QWidget:
-        """Output folder field + Browse, with a preview of the run folder below."""
+        """Output folder field + Browse + ?, with a preview of the run folder below."""
         self._output_focused = False
         self._output_row = PathBrowseRow(
             self,
-            placeholder="Auto — a new folder next to each genome",
+            placeholder="Auto: a new folder next to each genome",
             browse_title="Select output folder",
             mode="directory",
         )
+        self._output_row.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._output_path = self._output_row.line_edit()
         self._output_row.set_default_tooltip(
             "Leave empty to write each genome's results to a new folder next to "
@@ -15676,15 +15918,143 @@ class RepeatQuantifyDialog(QDialog):
         self._output_preview.setStyleSheet("color: palette(mid);")
 
         host = QWidget(self)
+        host.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         box = QVBoxLayout(host)
         box.setContentsMargins(0, 0, 0, 0)
         box.setSpacing(3)
-        box.addWidget(self._output_row)
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(6)
+        row.addWidget(self._output_row, stretch=1)
+        row.addWidget(make_help_button(host, "Output folder", _RQ_OUTPUT_HELP))
+        box.addLayout(row)
         box.addWidget(self._output_preview)
 
         self._genome_input.paths_changed.connect(self._update_output_preview)
         self._update_output_preview()
         return host
+
+    def _sync_field_column(self) -> None:
+        """Every label and spacer on the shared Settings field column."""
+        sync_form_field_column_spacers(
+            self,
+            [self._db_status_label, self._save_index_label],
+            [self._basic_form, self._advanced_form],
+        )
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        self._sync_field_column()
+        QTimer.singleShot(0, self._refit)
+
+    def _refit_soon(self, *_args) -> None:
+        if self.isVisible():
+            QTimer.singleShot(0, self._refit)
+
+    # --- tabs ---------------------------------------------------------------------
+
+    def current_dialog_tab(self) -> str:
+        """Active tab key (blastn / repeatmasker / both / options)."""
+        index = self._tab_bar.currentIndex()
+        if index == self._TAB_OPTIONS:
+            return DIALOG_TAB_OPTIONS
+        return self._ENGINES[index]
+
+    def _on_tab_changed(self, index: int) -> None:
+        on_options = index == self._TAB_OPTIONS
+        self._stack.setCurrentIndex(1 if on_options else 0)
+        if not on_options:
+            self._engine = self._ENGINES[index]
+        uses_blast = self._engine in ("blastn", "both")
+        uses_rm = self._engine in ("repeatmasker", "both")
+        form = self._basic_form
+        form.setRowVisible(self._word_field, uses_blast)
+        form.setRowVisible(self._evalue_field, uses_blast)
+        form.setRowVisible(self._div_field, uses_rm)
+        form.setRowVisible(self._sens_field, uses_rm)
+        # Every Advanced row is a BLASTn option: no button on RepeatMasker / Options.
+        show_advanced_btn = uses_blast and not on_options
+        self._advanced_settings_btn.setVisible(show_advanced_btn)
+        if not show_advanced_btn and self._advanced_settings_btn.isChecked():
+            self._advanced_settings_btn.blockSignals(True)
+            self._advanced_settings_btn.setChecked(False)
+            self._advanced_settings_btn.setText("Advanced Settings ▸")
+            self._advanced_settings_btn.blockSignals(False)
+            self._set_advanced_visible(False)
+        self._update_db_status()
+        if on_options:
+            self._update_executable_status()
+        self._refit_soon()
+
+    def _update_executable_status(self, *_args) -> None:
+        """Refresh BLAST+ PATH / RepeatMasker lines on Options → Executables."""
+        set_path_checkbox_status(
+            self._blast_path_status,
+            resolve_system_executable("blastn"),
+            checked=self._use_system_blast.isChecked(),
+            has_builtin=True,
+        )
+        set_named_executable_status(
+            self._rm_path_status,
+            "RepeatMasker",
+            resolve_system_executable("RepeatMasker"),
+            missing_text="not found on PATH",
+        )
+        self._refit_soon()
+
+    # --- Advanced Settings and sizing (Mapping-dialog pattern) ------------------
+
+    def _set_advanced_visible(self, visible: bool) -> None:
+        panel = self._advanced_panel
+        panel.setVisible(visible)
+        panel.setMaximumHeight(16777215 if visible else 0)
+        panel.updateGeometry()
+
+    def _on_advanced_toggled(self, checked: bool) -> None:
+        self._advanced_settings_btn.setText(
+            "Advanced Settings ▾" if checked else "Advanced Settings ▸"
+        )
+        self._set_advanced_visible(checked)
+        self._refit()
+
+    def _dialog_chrome_height(self) -> int:
+        lay = self.layout()
+        margins = lay.contentsMargins()
+        tab_h = max(24, self._tab_bar.sizeHint().height()) + 4
+        return (
+            margins.top() + margins.bottom() + lay.spacing() * 2
+            + tab_h + self._button_box.sizeHint().height()
+        )
+
+    def _page_height(self, page: QWidget) -> int:
+        page.ensurePolished()
+        root = page.layout()
+        if root is not None:
+            root.invalidate()
+            root.activate()
+        h = max(page.minimumSizeHint().height(), page.sizeHint().height())
+        if root is not None:
+            h = max(h, root.totalMinimumSize().height(), root.totalSizeHint().height())
+        return h
+
+    def _refit(self) -> None:
+        """Size the window to the active page so no empty band is left."""
+        page = self._stack.currentWidget()
+        self._stack.setMaximumHeight(16777215)
+        page.setMaximumHeight(16777215)
+        content_h = max(1, self._page_height(page))
+        self._stack.setMaximumHeight(content_h)
+        page.setMaximumHeight(content_h)
+        height = self._dialog_chrome_height() + content_h
+        screen = self.screen().availableGeometry() if self.screen() else None
+        if screen is not None:
+            height = min(height, screen.height() - 40)
+        self.setMinimumHeight(0)
+        self.setMaximumHeight(height)
+        self.resize(max(self.width(), self._DIALOG_WIDTH), height)
+        self.setMaximumHeight(16777215)
+
+    # --- output folder ------------------------------------------------------------
 
     def _update_output_preview(self, *_args) -> None:
         from repeatviewer.backends.repeat_quantify import (
@@ -15732,166 +16102,65 @@ class RepeatQuantifyDialog(QDialog):
             self._focused_file_input = None
         return super().eventFilter(obj, event)
 
-    @staticmethod
-    def _form(parent: QWidget | None = None) -> QFormLayout:
-        form = QFormLayout(parent) if parent is not None else QFormLayout()
-        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
-        form.setHorizontalSpacing(12)
-        form.setVerticalSpacing(10)
-        return form
-
-    def _make_blast_controls(self) -> dict:
-        word = QSpinBox(self)
-        word.setRange(4, 24)
-        word.setToolTip(
-            "BLASTn -word_size. Lower is more sensitive but much slower on "
-            "big/repetitive genomes (7 can hang; 11 is a good balance)."
-        )
-        evalue = QDoubleSpinBox(self)
-        configure_report_evalue_spinbox(evalue)
-        evalue.setToolTip("BLASTn -evalue: report hits at or below this E-value.")
-        minid = QDoubleSpinBox(self)
-        minid.setRange(0.0, 100.0)
-        minid.setDecimals(0)
-        minid.setSuffix(" %")
-        minid.setToolTip("BLASTn -perc_identity. 0 = no minimum.")
-        mincov = QDoubleSpinBox(self)
-        mincov.setRange(0.0, 100.0)
-        mincov.setDecimals(0)
-        mincov.setSuffix(" %")
-        mincov.setToolTip(
-            "BLASTn -qcov_hsp_perc: minimum query (monomer) coverage per hit. "
-            "0 = no minimum."
-        )
-        for w in (word, evalue, minid, mincov):
-            w.setFixedWidth(self._FIELD_WIDTH)
-            w.setAlignment(Qt.AlignmentFlag.AlignRight)
-        save = QCheckBox("Save new indexes as BLAST databases", self)
-        save.setToolTip(
-            "Keep each genome's BLAST index in Add/Manage databases so later "
-            "runs and other tools reuse it."
-        )
-        return {
-            "word": word, "evalue": evalue, "minid": minid, "mincov": mincov,
-            "save": save,
-        }
-
-    def _make_rm_controls(self) -> dict:
-        div = QSpinBox(self)
-        div.setRange(1, 100)
-        div.setSuffix(" %")
-        div.setFixedWidth(self._FIELD_WIDTH)
-        div.setAlignment(Qt.AlignmentFlag.AlignRight)
-        div.setToolTip(
-            "RepeatMasker -div: report only copies less than this % diverged "
-            "(higher captures older copies, but noisier)."
-        )
-        sens = QComboBox(self)
-        sens.addItem("Sensitive (-s)", "sensitive")
-        sens.addItem("Default", "default")
-        sens.addItem("Quick (-q)", "quick")
-        sens.setFixedWidth(self._FIELD_WIDTH)
-        sens.setToolTip(
-            "RepeatMasker search sensitivity. Sensitive is slowest; Quick is "
-            "fastest on large genomes."
-        )
-        return {"div": div, "sens": sens}
-
-    @staticmethod
-    def _link_controls(first: dict, second: dict) -> None:
-        """Mirror each control of ``first`` into ``second`` and back."""
-        for key, a in first.items():
-            b = second[key]
-            if isinstance(a, QComboBox):
-                a.currentIndexChanged.connect(b.setCurrentIndex)
-                b.currentIndexChanged.connect(a.setCurrentIndex)
-            elif isinstance(a, QCheckBox):
-                a.toggled.connect(b.setChecked)
-                b.toggled.connect(a.setChecked)
-            else:
-                a.valueChanged.connect(b.setValue)
-                b.valueChanged.connect(a.setValue)
-
-    @staticmethod
-    def _blast_rows(c: dict) -> list:
-        return [
-            ("-word_size:", c["word"]),
-            ("-evalue:", c["evalue"]),
-            ("-perc_identity:", c["minid"]),
-            ("-qcov_hsp_perc:", c["mincov"]),
-            (
-                "BLAST index:",
-                field_with_help(
-                    c["save"],
-                    "BLAST index",
-                    "Repeat Quantify searches each genome's BLAST index. If the "
-                    "genome is already in Add/Manage databases (and the FASTA has "
-                    "not changed since), that index is reused and makeblastdb is "
-                    "skipped.\n\nWhen this box is ticked, a genome without a saved "
-                    "index is indexed once and added to Add/Manage databases, so "
-                    "the next run, and the BLAST, TE-Aid and Extend tools, reuse "
-                    "it. When unticked, the index is temporary and rebuilt when "
-                    "the system clears its temp folder.",
-                ),
-            ),
-        ]
-
-    @staticmethod
-    def _rm_rows(c: dict) -> list:
-        return [
-            ("-div (divergence cutoff):", c["div"]),
-            ("Sensitivity:", c["sens"]),
-        ]
-
-    def _params_tab(self, rows: list) -> QWidget:
-        """Build a tab from (label, widget) rows; a None widget = bold header."""
-        tab = QWidget()
-        form = self._form(tab)
-        form.setContentsMargins(16, 14, 16, 14)
-        for label, widget in rows:
-            if widget is None:
-                header = QLabel(label, self)
-                font = header.font()
-                font.setBold(True)
-                header.setFont(font)
-                form.addRow(header)
-            else:
-                form.addRow(label, widget)
-        return tab
+    # --- options ------------------------------------------------------------------
 
     def _apply_options(self, opts: RepeatQuantifyOptions) -> None:
-        # Setting the single-engine controls updates the "Both" copies too.
-        self._blast_a["word"].setValue(int(opts.blast_word_size))
-        self._blast_a["evalue"].setValue(float(opts.blast_evalue))
-        self._blast_a["minid"].setValue(float(opts.blast_min_identity))
-        self._blast_a["mincov"].setValue(float(opts.blast_min_coverage))
-        self._blast_a["save"].setChecked(bool(opts.blast_save_index))
-        self._rm_b["div"].setValue(int(opts.rm_div))
-        idx = self._rm_b["sens"].findData(opts.rm_sensitivity)
-        self._rm_b["sens"].setCurrentIndex(max(0, idx))
+        self._threads.setValue(max(1, int(opts.threads)))
+        self._word.setValue(int(opts.blast_word_size))
+        self._evalue.setValue(float(opts.blast_evalue))
+        self._minid.setValue(float(opts.blast_min_identity))
+        self._mincov.setValue(float(opts.blast_min_coverage))
+        self._save_index.setChecked(bool(opts.blast_save_index))
+        self._div.setValue(int(opts.rm_div))
+        idx = self._sens.findData(opts.rm_sensitivity)
+        self._sens.setCurrentIndex(max(0, idx))
+        action = (
+            opts.right_click_action
+            if opts.right_click_action in self._right_click_buttons
+            else REPEAT_QUANTIFY_RIGHT_CLICK_DIALOG
+        )
+        self._right_click_buttons[action].setChecked(True)
+        self._show_process_window.setChecked(bool(opts.show_process_window))
+        self._close_process_window.setChecked(
+            bool(opts.close_process_window_when_finished)
+        )
         engine = opts.engine if opts.engine in self._ENGINES else "both"
-        self._tabs.setCurrentIndex(self._ENGINES.index(engine))
+        self._engine = engine
+        self._tab_bar.setCurrentIndex(self._ENGINES.index(engine))
 
     def _restore_defaults(self) -> None:
         """Reset the parameters (not the chosen files) to their defaults."""
         self._apply_options(RepeatQuantifyOptions())
 
     def options(self) -> RepeatQuantifyOptions:
+        right_click = next(
+            (v for v, b in self._right_click_buttons.items() if b.isChecked()),
+            REPEAT_QUANTIFY_RIGHT_CLICK_DIALOG,
+        )
         return RepeatQuantifyOptions(
             engine=self.engine(),
-            blast_word_size=int(self._blast_a["word"].value()),
-            blast_evalue=float(self._blast_a["evalue"].value()),
-            blast_min_identity=float(self._blast_a["minid"].value()),
-            blast_min_coverage=float(self._blast_a["mincov"].value()),
-            rm_div=int(self._rm_b["div"].value()),
-            rm_sensitivity=str(self._rm_b["sens"].currentData()),
+            blast_word_size=int(self._word.value()),
+            blast_evalue=float(self._evalue.value()),
+            blast_min_identity=float(self._minid.value()),
+            blast_min_coverage=float(self._mincov.value()),
+            rm_div=int(self._div.value()),
+            rm_sensitivity=str(self._sens.currentData()),
             blast_save_index=self.save_blast_index(),
+            threads=self.threads(),
+            right_click_action=right_click,
+            show_process_window=self._show_process_window.isChecked(),
+            close_process_window_when_finished=self._close_process_window.isChecked(),
         )
+
+    def threads(self) -> int:
+        return int(self._threads.value())
+
+    def use_system_blast(self) -> bool:
+        return bool(self._use_system_blast.isChecked())
 
     def save_blast_index(self) -> bool:
         """Save a genome's new BLAST index to Add/Manage databases."""
-        return bool(self._blast_a["save"].isChecked())
+        return bool(self._save_index.isChecked())
 
     def blast_database_status(self) -> list[str]:
         """One line per genome: whether its BLAST index is reused or built."""
@@ -15901,15 +16170,16 @@ class RepeatQuantifyDialog(QDialog):
         for target in self.targets():
             saved = saved_blast_database_for(target, self._blast_databases)
             if saved is not None:
-                lines.append(f"{target.name}: uses saved BLAST database \u201c{saved.name}\u201d")
+                lines.append(f"{target.name}: uses saved BLAST database “{saved.name}”")
             elif self.save_blast_index():
                 lines.append(
-                    f"{target.name}: no saved BLAST database yet \u2014 indexed once "
-                    "and added to Add/Manage databases"
+                    f"{target.name}: no saved BLAST database yet, so it is indexed "
+                    "once and added to Add/Manage databases"
                 )
             else:
                 lines.append(
-                    f"{target.name}: no saved BLAST database \u2014 temporary index for this run"
+                    f"{target.name}: no saved BLAST database, so a temporary "
+                    "index is built for this run"
                 )
         return lines
 
@@ -15917,7 +16187,10 @@ class RepeatQuantifyDialog(QDialog):
         uses_blast = self.engine() in ("blastn", "both")
         lines = self.blast_database_status() if uses_blast else []
         self._db_status.setText("\n".join(lines))
-        self._db_status.setVisible(bool(lines))
+        self._basic_form.setRowVisible(self._db_status, bool(lines))
+        self._refit_soon()
+
+    # --- run --------------------------------------------------------------------
 
     def should_run(self) -> bool:
         """True when the dialog was closed with Run (not Save or Cancel)."""
@@ -15954,11 +16227,12 @@ class RepeatQuantifyDialog(QDialog):
         return self._focused_file_input.set_path_at_focus(path)
 
     def _try_accept(self) -> None:
+        title = "Repeat Quantify"
         library = self.library()
         targets = self.targets()
         if library is None or not targets:
             QMessageBox.information(
-                self, "Repeat quantify",
+                self, title,
                 "Choose both a library FASTA and at least one genome FASTA "
                 "(click a file in the Files panel, or use Browse).",
             )
@@ -15966,40 +16240,31 @@ class RepeatQuantifyDialog(QDialog):
         missing = [p for p in [library, *targets] if not p.is_file()]
         if missing:
             QMessageBox.warning(
-                self, "Repeat quantify",
-                "File not found:\n" + "\n".join(str(p) for p in missing[:5]),
+                self, title, "File not found:\n" + "\n".join(str(p) for p in missing[:5]),
             )
             return
         if library in targets:
-            QMessageBox.warning(
-                self, "Repeat quantify",
-                "Genome and library must be different files.",
-            )
+            QMessageBox.warning(self, title, "Genome and library must be different files.")
             return
         if len(set(targets)) != len(targets):
-            QMessageBox.warning(
-                self, "Repeat quantify",
-                "The same genome is listed more than once.",
-            )
+            QMessageBox.warning(self, title, "The same genome is listed more than once.")
             return
         out = self.output_dir()
         if out is not None:
             if not out.is_absolute():
                 QMessageBox.warning(
-                    self, "Repeat quantify",
-                    "Enter the full path of the output folder, or use Browse.",
+                    self, title, "Enter the full path of the output folder, or use Browse.",
                 )
                 return
             if out.exists() and not out.is_dir():
                 QMessageBox.warning(
-                    self, "Repeat quantify",
-                    f"The output path is a file, not a folder:\n{out}",
+                    self, title, f"The output path is a file, not a folder:\n{out}",
                 )
                 return
         self.accept()
 
     def targets(self) -> list[Path]:
-        """Genome FASTAs to quantify against — one report per genome."""
+        """Genome FASTAs to quantify against, one report per genome."""
         return self._genome_input.paths()
 
     def target(self) -> Path | None:
@@ -16011,7 +16276,8 @@ class RepeatQuantifyDialog(QDialog):
         return paths[0] if paths else None
 
     def engine(self) -> str:
-        return ("blastn", "repeatmasker", "both")[self._tabs.currentIndex()]
+        """Engine of the active tab (the last engine tab while on Options)."""
+        return self._engine
 
     def params(self) -> dict:
         return self.options().params()

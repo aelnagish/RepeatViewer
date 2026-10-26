@@ -386,6 +386,7 @@ from repeatviewer.job_options import (
     load_te_divergence_plot_options,
     load_msa_plot_options,
     load_repeat_quantify_options,
+    REPEAT_QUANTIFY_RIGHT_CLICK_RERUN,
     load_te_confusion_matrix_benchmark_options,
     load_te_library_benchmark_options,
     load_tsd_search_options,
@@ -1012,6 +1013,8 @@ class RepeatQuantifyWorker(QObject):
     """Quantify a repeat library across target sequences off the UI thread."""
 
     progress = Signal(int, str)
+    # Command lines and tool messages for the process window (Options tab).
+    log_line = Signal(str)
     finished = Signal(object)
     failed = Signal(str)
     # A new saved BLAST database (BlastDatabase) built for a genome; the main
@@ -1048,6 +1051,15 @@ class RepeatQuantifyWorker(QObject):
 
     @Slot()
     def run(self) -> None:
+        from repeatviewer.external_process import process_log_sink
+
+        def _log(message: str) -> None:
+            self.log_line.emit(str(message))
+
+        with process_log_sink(_log):
+            self._run()
+
+    def _run(self) -> None:
         from datetime import datetime
 
         from repeatviewer.backends.repeat_quantify import (
@@ -5595,65 +5607,58 @@ class MainWindow(QMainWindow):
             body += f"\n\n{install_hint()}"
         QMessageBox.warning(self, "FastGA failed", body)
 
+    def _quick_repeat_quantify_right_click(self) -> None:
+        """Right-click: open the window, or rerun on the last inputs (Options tab)."""
+        opts = load_repeat_quantify_options()
+        last = getattr(self, "_repeat_quant_last_inputs", None)
+        if opts.right_click_action != REPEAT_QUANTIFY_RIGHT_CLICK_RERUN or last is None:
+            if opts.right_click_action == REPEAT_QUANTIFY_RIGHT_CLICK_RERUN:
+                self._set_status_message(
+                    "Repeat Quantify: no earlier run in this session, "
+                    "choose the library and genomes first",
+                    6000,
+                )
+            self._open_repeat_quantify()
+            return
+        library, targets, output_base = last
+        missing = [p for p in [library, *targets] if not Path(p).is_file()]
+        if missing:
+            self._set_status_message(
+                f"Repeat Quantify: {Path(missing[0]).name} no longer exists", 6000
+            )
+            self._open_repeat_quantify()
+            return
+        from repeatviewer.backends.repeat_quantify import run_stamp
+
+        self._start_repeat_quantify_job(
+            library, targets, opts, output_base=output_base, stamp=run_stamp()
+        )
+
     def _open_repeat_quantify(self) -> None:
-        """Quantify a tandem-repeat / satellite library across a target FASTA."""
+        """Quantify a tandem-repeat / satellite library across genome FASTAs."""
         from repeatviewer.views.tool_dialogs import RepeatQuantifyDialog
 
         start_dir = str(self._current_folder) if self._current_folder else ""
 
         def _on_accept(dialog: RepeatQuantifyDialog) -> None:
-            save_repeat_quantify_options(dialog.options())
+            opts = dialog.options()
+            save_repeat_quantify_options(opts)
+            # Same BLAST+ PATH setting as the BLAST window.
+            self._project.use_system_blast = dialog.use_system_blast()
+            self._persist_workspace()
             if not dialog.should_run():
-                self._set_status_message("Repeat quantify settings saved", 4000)
+                self._set_status_message("Repeat Quantify settings saved", 4000)
                 return
             library = dialog.library()
             targets = dialog.targets()
-            engine = dialog.engine()
-            params = dialog.params()
             if library is None or not targets:
                 return
-            if engine in ("both", "repeatmasker"):
-                from repeatviewer.backends.repeat_quantify import (
-                    repeatmasker_executable_available,
-                )
-
-                if not repeatmasker_executable_available():
-                    QMessageBox.warning(
-                        self,
-                        "RepeatMasker not found",
-                        "RepeatMasker is not on PATH. Install it, or choose the "
-                        "BLASTn engine instead.",
-                    )
-                    return
-            from repeatviewer.app_preferences import load_blast_db_base_dir
-            from repeatviewer.database_settings import (
-                reload_blast_databases_into_project,
-            )
-
-            worker = RepeatQuantifyWorker(
+            self._start_repeat_quantify_job(
                 Path(library),
                 targets,
-                engine=engine,
-                threads=self._project.batch_workers,
-                params=params,
-                cancel=self._job_cancel,
+                opts,
                 output_base=dialog.output_dir(),
                 stamp=dialog.run_stamp(),
-                blast_databases=reload_blast_databases_into_project(self._project),
-                save_blast_index=dialog.save_blast_index(),
-                blast_db_base_dir=load_blast_db_base_dir(),
-                use_system_blast=self._project.use_system_blast,
-            )
-            worker.database_created.connect(self._register_blast_database)
-            self._start_background_job(
-                worker,
-                job_title="Repeat quantify",
-                # 1 = the app's plain "Repeat quantify… <genome>" status line; a
-                # count > 1 would switch the status bar to the batch progress bar.
-                total_steps=1,
-                source_files=targets,
-                on_finished=self._on_repeat_quantify_finished,
-                on_failed=self._on_repeat_quantify_failed,
             )
 
         from repeatviewer.database_settings import reload_blast_databases_into_project
@@ -5662,11 +5667,76 @@ class MainWindow(QMainWindow):
             start_dir=start_dir,
             initial=load_repeat_quantify_options(),
             blast_databases=reload_blast_databases_into_project(self._project),
+            use_system_blast=self._project.use_system_blast,
             parent=self,
         )
         # Same non-modal presentation as the TE visualization dialogs, so the
         # Folders and Files panels stay clickable while it is open.
         self._present_te_viz_dialog(dialog, _on_accept)
+
+    def _start_repeat_quantify_job(
+        self,
+        library: Path,
+        targets: list[Path],
+        opts,
+        *,
+        output_base: Path | None,
+        stamp: str,
+    ) -> None:
+        engine = opts.engine
+        if engine in ("both", "repeatmasker"):
+            from repeatviewer.backends.repeat_quantify import (
+                repeatmasker_executable_available,
+            )
+
+            if not repeatmasker_executable_available():
+                QMessageBox.warning(
+                    self,
+                    "RepeatMasker not found",
+                    "RepeatMasker is not on PATH. Install it, or choose the "
+                    "BLASTn tab instead.",
+                )
+                return
+        from repeatviewer.app_preferences import load_blast_db_base_dir
+        from repeatviewer.database_settings import (
+            reload_blast_databases_into_project,
+        )
+
+        # Remembered for right-click "run again" (this session only, never saved).
+        self._repeat_quant_last_inputs = (Path(library), list(targets), output_base)
+        worker = RepeatQuantifyWorker(
+            Path(library),
+            targets,
+            engine=engine,
+            threads=max(1, int(opts.threads)),
+            params=opts.params(),
+            cancel=self._job_cancel,
+            output_base=output_base,
+            stamp=stamp,
+            blast_databases=reload_blast_databases_into_project(self._project),
+            save_blast_index=bool(opts.blast_save_index),
+            blast_db_base_dir=load_blast_db_base_dir(),
+            use_system_blast=self._project.use_system_blast,
+        )
+        worker.database_created.connect(self._register_blast_database)
+        self._attach_process_monitor(
+            worker,
+            title="Repeat Quantify",
+            enabled=bool(opts.show_process_window),
+            tool_key="repeat_quantify",
+            mirror_progress=True,
+            close_when_finished=bool(opts.close_process_window_when_finished),
+        )
+        self._start_background_job(
+            worker,
+            job_title="Repeat Quantify",
+            # 1 = the app's plain "Repeat Quantify… <genome>" status line; a
+            # count > 1 would switch the status bar to the batch progress bar.
+            total_steps=1,
+            source_files=targets,
+            on_finished=self._on_repeat_quantify_finished,
+            on_failed=self._on_repeat_quantify_failed,
+        )
 
     @Slot(object)
     def _register_blast_database(self, db) -> None:
@@ -5698,7 +5768,7 @@ class MainWindow(QMainWindow):
         for index, path in enumerate(paths):
             self._open_preview_tab(path, replace=(index == 0))
         self._set_status_message(
-            f"Repeat quantify — {len(paths)} report(s) written",
+            f"Repeat Quantify: {len(paths)} report(s) written",
             12000,
             override_file_link=True,
         )
@@ -5706,7 +5776,7 @@ class MainWindow(QMainWindow):
     @Slot(str)
     def _on_repeat_quantify_failed(self, error: str) -> None:
         QMessageBox.warning(
-            self, "Repeat quantify failed", error.strip() or "Unknown error."
+            self, "Repeat Quantify failed", error.strip() or "Unknown error."
         )
 
     def _populate_blast_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
@@ -7421,11 +7491,16 @@ class MainWindow(QMainWindow):
                 right_click_slot=self._quick_map_right_click,
             )
         elif tool_id == "repeat_quantify":
-            self._add_toolbar_text_action(
+            self._add_toolbar_action_button(
                 bar,
                 "Repeat Quantify",
                 self._open_repeat_quantify,
-                tooltip="Quantify a repeat / satellite library across a genome.",
+                tooltip=(
+                    "Click: set parameters and run.\n"
+                    "Right-click: action chosen in the Options tab "
+                    "(default: open this window)."
+                ),
+                right_click_slot=self._quick_repeat_quantify_right_click,
             )
         elif tool_id == "blast":
             self._add_toolbar_action_button(

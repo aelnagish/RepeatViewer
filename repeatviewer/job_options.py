@@ -2112,6 +2112,14 @@ def save_msa_plot_options(opts: MsaPlotJobOptions) -> None:
 
 REPEAT_QUANTIFY_ENGINES = ("blastn", "repeatmasker", "both")
 REPEAT_QUANTIFY_SENSITIVITIES = ("sensitive", "default", "quick")
+# Right-click on the Repeat Quantify button: open the window, or run again on
+# the library and genomes of the last run in this session (never saved).
+REPEAT_QUANTIFY_RIGHT_CLICK_DIALOG = "dialog"
+REPEAT_QUANTIFY_RIGHT_CLICK_RERUN = "rerun"
+REPEAT_QUANTIFY_RIGHT_CLICK_ACTIONS = (
+    REPEAT_QUANTIFY_RIGHT_CLICK_DIALOG,
+    REPEAT_QUANTIFY_RIGHT_CLICK_RERUN,
+)
 
 
 @dataclass
@@ -2130,9 +2138,15 @@ class RepeatQuantifyOptions:
     # Save a genome's BLAST index as a named database (Add/Manage databases)
     # so later runs and other tools reuse it. Not a quantify_library keyword.
     blast_save_index: bool = True
+    # CPU threads for BLASTn and RepeatMasker (passed as ``threads``).
+    threads: int = 4
+    # Options tab.
+    right_click_action: str = REPEAT_QUANTIFY_RIGHT_CLICK_DIALOG
+    show_process_window: bool = DEFAULT_SHOW_PROCESS_WINDOW
+    close_process_window_when_finished: bool = DEFAULT_CLOSE_PROCESS_WINDOW_WHEN_FINISHED
 
     def params(self) -> dict:
-        """Keyword arguments for ``quantify_library`` (everything but engine)."""
+        """Keyword arguments for ``quantify_library`` (everything but engine/threads)."""
         return {
             "blast_word_size": self.blast_word_size,
             "blast_evalue": self.blast_evalue,
@@ -2156,6 +2170,7 @@ def load_repeat_quantify_options() -> RepeatQuantifyOptions:
     d = RepeatQuantifyOptions()
     engine = str(v.get("engine", d.engine))
     sensitivity = str(v.get("rm_sensitivity", d.rm_sensitivity))
+    right_click = str(v.get("right_click_action", d.right_click_action))
     return RepeatQuantifyOptions(
         engine=engine if engine in REPEAT_QUANTIFY_ENGINES else d.engine,
         blast_word_size=_clamped(
@@ -2181,6 +2196,22 @@ def load_repeat_quantify_options() -> RepeatQuantifyOptions:
         blast_save_index=_setting_bool(
             v.get("blast_save_index", d.blast_save_index), d.blast_save_index
         ),
+        threads=_clamped(v.get("threads", d.threads), int, d.threads, 1, 256),
+        right_click_action=(
+            right_click if right_click in REPEAT_QUANTIFY_RIGHT_CLICK_ACTIONS
+            else d.right_click_action
+        ),
+        show_process_window=_setting_bool(
+            v.get("show_process_window", d.show_process_window),
+            d.show_process_window,
+        ),
+        close_process_window_when_finished=_setting_bool(
+            v.get(
+                "close_process_window_when_finished",
+                d.close_process_window_when_finished,
+            ),
+            d.close_process_window_when_finished,
+        ),
     )
 
 
@@ -2203,6 +2234,12 @@ def save_repeat_quantify_options(opts: RepeatQuantifyOptions) -> None:
             "engine": opts.engine,
             **opts.params(),
             "blast_save_index": bool(opts.blast_save_index),
+            "threads": int(opts.threads),
+            "right_click_action": opts.right_click_action,
+            "show_process_window": bool(opts.show_process_window),
+            "close_process_window_when_finished": bool(
+                opts.close_process_window_when_finished
+            ),
         },
     )
 
