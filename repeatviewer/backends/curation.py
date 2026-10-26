@@ -1228,7 +1228,8 @@ def run_batch(
     source_files: list[str] = []
     os_type = platform.system()
 
-    genome_dependent = func_name in {"blast", "extend", "teaid", "flexidot"}
+    # Dotplot compares only the selected sequences, so it needs no genome.
+    genome_dependent = func_name in {"blast", "extend", "teaid"}
     genome_items: list[tuple[str, Path]] = []
     db_cache: dict[Path, str] = {}
     chrom_cache: dict[Path, dict[str, int]] = {}

@@ -15847,7 +15847,7 @@ class MainWindow(QMainWindow):
                 )
                 return
         if (
-            func_name in {"blast", "extend", "teaid", "flexidot"}
+            func_name in {"blast", "extend", "teaid"}
             and not uses_saved_blast_database
             and not blast_is_online
             and not teaid_is_pan

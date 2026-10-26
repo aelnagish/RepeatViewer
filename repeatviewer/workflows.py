@@ -96,7 +96,6 @@ WORKFLOW_TOOLS: dict[str, WorkflowToolInfo] = {
         "Flexidot",
         frozenset({FMT_FASTA}),
         frozenset({FMT_PLOT}),
-        needs_genome=True,
     ),
     "orf_prediction": WorkflowToolInfo(
         "orf_prediction",
