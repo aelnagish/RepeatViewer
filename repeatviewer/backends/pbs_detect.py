@@ -31,16 +31,26 @@ FIELDS = OUTFMT.split()[1:]
 
 @dataclass(frozen=True)
 class PBSSettings:
-    window: int = 100
+    # Window is an upper bound; max_distance constrains PBS placement.
+    window: int = 40
     min_length: int = 15
-    min_identity: float = 90.0  # percent
-    min_coverage: float = 0.85
+    min_identity: float = 95.0  # percent
+    min_coverage: float = 0.90  # fraction of reference motif aligned
+    max_distance_from_ltr5_nt: int = 20
     orientation: str = "auto"  # auto, +, -
     num_threads: int = 1
 
     def __post_init__(self):
-        if self.window < 1 or self.min_length < 1 or self.num_threads < 1:
-            raise ValueError("window, min_length and num_threads must be >= 1")
+        if (
+            self.window < 1
+            or self.min_length < 1
+            or self.num_threads < 1
+            or self.max_distance_from_ltr5_nt < 0
+        ):
+            raise ValueError(
+                "window, min_length and num_threads must be >= 1; "
+                "max_distance_from_ltr5_nt must be >= 0"
+            )
         if not 0 <= self.min_identity <= 100 or not 0 <= self.min_coverage <= 1:
             raise ValueError("min_identity must be 0..100 and min_coverage must be 0..1")
         if self.orientation not in {"auto", "+", "-"}:
@@ -87,6 +97,20 @@ def default_motif_fasta() -> Path:
     return next((p for p in candidates if p.is_file()), candidates[0])
 
 
+def motif_database_label(path: Path | None = None) -> str:
+    """Short display name for the PBS motif FASTA (hover / Source field)."""
+    source = Path(path) if path is not None else default_motif_fasta()
+    stem = source.stem or source.name
+    if stem == Path(MOTIF_FILENAME).stem or "Neumann2019" in stem:
+        return "Neumann2019"
+    return stem or "PBS motifs"
+
+
+def pbs_motif_source(path: Path | None = None) -> str:
+    """``SequenceFeature.source`` stamp for PBS motif hits (not an import)."""
+    return f"PBS motif: {motif_database_label(path)}"
+
+
 def pbs_motif_database_available(path: Path | None = None) -> bool:
     """True when the Neumann PBS motif FASTA is present on disk."""
     source = Path(path) if path is not None else default_motif_fasta()
@@ -94,6 +118,28 @@ def pbs_motif_database_available(path: Path | None = None) -> bool:
         return source.expanduser().resolve().is_file()
     except OSError:
         return False
+
+
+def pbs_feature_from_candidate(
+    hit: PBSCandidate,
+    *,
+    motif_database: Path | None = None,
+) -> SequenceFeature:
+    """Build a PBS ``SequenceFeature`` with identity, coverage, and DB source."""
+    # Keep readable feature names: avoid a percent character (GFF serializers
+    # may otherwise encode it as %25).
+    safe_trna = re.sub(r"[^A-Za-z0-9_.-]", "_", hit.trna or "unknown")
+    return SequenceFeature(
+        start=hit.start,
+        end=hit.end,
+        name=f"PBS_{safe_trna}",
+        feature_type="PBS",
+        strand=hit.strand,
+        source=pbs_motif_source(motif_database),
+        pident=float(hit.identity_percent),
+        subject_id=str(hit.motif_id or "").strip(),
+        coverage=float(hit.motif_coverage),
+    )
 
 
 def _extract_ltrs(terminal_repeat_result: "TerminalRepeatResult | Iterable[SequenceFeature]"):
@@ -122,10 +168,17 @@ def _extract_ltrs(terminal_repeat_result: "TerminalRepeatResult | Iterable[Seque
 
 
 def _ranking(hit: PBSCandidate):
-    # Mirrors the validated strand-aware adapter's prioritization.
-    return (-hit.motif_coverage, -hit.identity_percent,
-            -hit.alignment_length, -hit.bitscore, hit.distance_from_ltr5_nt,
-            hit.strand != "+", hit.motif_id)
+    # Prefer a stronger and longer PBS match over a short full-coverage motif.
+    # Do not let motif coverage alone elevate short 12-nt hits.
+    return (
+        -hit.identity_percent,
+        -hit.alignment_length,
+        -hit.motif_coverage,
+        hit.distance_from_ltr5_nt,
+        -hit.bitscore,
+        hit.strand != "+",
+        hit.motif_id,
+    )
 
 
 def _candidate_rows(table: Path, motif_lengths: dict[str, int],
@@ -156,11 +209,23 @@ def _candidate_rows(table: Path, motif_lengths: dict[str, int],
                 start, end = region_end - qhi + 1, region_end - qlo + 1
                 distance = anchor - end - 1
             length = int(row["length"])
+            # Require ungapped matches; BLAST alignment length otherwise includes gaps.
+            if (
+                int(row["gapopen"]) != 0
+                or qhi - qlo + 1 != length
+                or abs(send - sstart) + 1 != length
+            ):
+                continue
             identity = float(row["pident"])
             coverage = (abs(send - sstart) + 1) / motif_len
-            if (length < settings.min_length or identity < settings.min_identity
-                    or coverage < settings.min_coverage or distance < 0
-                    or not (region_start <= start <= end <= region_end)):
+            if (
+                length < settings.min_length
+                or identity < settings.min_identity
+                or coverage < settings.min_coverage
+                or distance < 0
+                or distance > settings.max_distance_from_ltr5_nt
+                or not (region_start <= start <= end <= region_end)
+            ):
                 continue
             trna = motif_id.split("tRNA=", 1)[1] if "tRNA=" in motif_id else ""
             hits.append(PBSCandidate(motif_id=motif_id, trna=trna,
@@ -264,16 +329,22 @@ def auto_annotate_pbs(
     best = hits[0] if hits else None
     if best is None:
         return PBSResult((), None, (), "No PBS motif passed the candidate filters.", None, left, right)
-    # Keep readable feature names: avoid a percent character (GFF serializers
-    # may otherwise encode it as %25).
-    safe_trna = re.sub(r"[^A-Za-z0-9_.-]", "_", best.trna or "unknown")
-    feature = SequenceFeature(start=best.start, end=best.end,
-                              name=f"PBS_{safe_trna}", feature_type="PBS",
-                              strand=best.strand)
+    feature = pbs_feature_from_candidate(best, motif_database=source)
+    db_label = motif_database_label(source)
     ltr5, ltr3 = (left, right) if best.strand == "+" else (right, left)
-    return PBSResult(features=(feature,), best_candidate=best, candidates=tuple(hits),
-                     message=f"Detected PBS candidate ({best.start}-{best.end}, strand {best.strand}, tRNA {best.trna}).",
-                     orientation=best.strand, ltr5=ltr5, ltr3=ltr3)
+    return PBSResult(
+        features=(feature,),
+        best_candidate=best,
+        candidates=tuple(hits),
+        message=(
+            f"Detected PBS candidate ({best.start}-{best.end}, strand {best.strand}, "
+            f"tRNA {best.trna or 'unknown'}, identity {best.identity_percent:.1f}%, "
+            f"coverage {best.motif_coverage * 100.0:.1f}%, DB {db_label})."
+        ),
+        orientation=best.strand,
+        ltr5=ltr5,
+        ltr3=ltr3,
+    )
 
 
 def merge_pbs_features(existing: list[SequenceFeature],

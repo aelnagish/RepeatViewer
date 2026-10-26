@@ -54,6 +54,7 @@ _FEATURE_DETECT_TYPE_BY_LABEL: dict[str, str] = {
     "TSD": "TSD",
     "PBS": "PBS",
 }
+from repeatviewer.backends.boundary_predict import TE_TYPE_CHOICES
 from repeatviewer.backends.genetic_codes import (
     genetic_code_choices,
     normalize_genetic_code_id,
@@ -715,6 +716,7 @@ class SequenceAnnotationRail(QWidget):
     residueColorsChanged = Signal()  # quick nucleotide / protein scheme applied
     msaColoringModeChanged = Signal(str)  # MSA residue paint mode id
     msaDivergenceChanged = Signal(float)  # conserved-letter frequency threshold 0–1
+    boundaryPredictClicked = Signal()  # MSA only: TEtrimmer boundary prediction
     featureDetectClicked = Signal()
     featureDetectSettingsClicked = Signal()
     similarityAnnotateClicked = Signal()
@@ -733,6 +735,9 @@ class SequenceAnnotationRail(QWidget):
     annotationTrackKindsChanged = Signal(object)
     showStandardBoundariesChanged = Signal(bool)
     showBlastCoverageChanged = Signal(bool)
+    # Split Preview: link vertical scroll, selection, and annotation filters
+    # (horizontal columns stay independent).
+    syncSplitViewsChanged = Signal(bool)
     sequenceSortChanged = Signal(str)  # original | name | selected_columns
     showComplementChanged = Signal(bool)
     showTranslationChanged = Signal(bool)
@@ -1045,6 +1050,19 @@ class SequenceAnnotationRail(QWidget):
         )
         self.show_blast_coverage_row.setVisible(False)
         tracks_section.add_widget(self.show_blast_coverage_row)
+
+        self.sync_split_views = QCheckBox("Sync left and right view", tracks_section)
+        self.sync_split_views.setChecked(False)
+        self.sync_split_views.setToolTip(
+            "In Split Preview, keep both panes aligned by sequence row "
+            "(same sequence at the same vertical level even at different zoom), "
+            "Displayed annotations, and selection. Horizontal position / columns "
+            "stay independent so each pane can show a different region."
+        )
+        self.sync_split_views.toggled.connect(self.syncSplitViewsChanged.emit)
+        self.sync_split_views.setVisible(False)
+        self._split_sync_available = False
+        tracks_section.add_widget(self.sync_split_views)
 
         self.show_complement = QCheckBox("Show complement", tracks_section)
         self.show_complement.setToolTip(
@@ -1636,6 +1654,55 @@ class SequenceAnnotationRail(QWidget):
         # grey status text in this rail.
         self.annotation_job_status = QLabel("", page)
         self.annotation_job_status.hide()
+
+        # Boundary prediction (MSA only): TEtrimmer column clean + boundaries.
+        self.boundary_section = _CollapsibleSection(
+            "Boundary prediction", page, expanded=False
+        )
+        boundary_type_row = QWidget(self.boundary_section)
+        boundary_type_row.setMinimumWidth(0)
+        boundary_type_layout = QHBoxLayout(boundary_type_row)
+        boundary_type_layout.setContentsMargins(0, 0, 0, 0)
+        boundary_type_layout.setSpacing(6)
+        boundary_type_layout.addWidget(QLabel("TE type:", boundary_type_row), 0)
+        self.boundary_te_type_combo = QComboBox(boundary_type_row)
+        self.boundary_te_type_combo.addItems(list(TE_TYPE_CHOICES))
+        self.boundary_te_type_combo.setToolTip(
+            "LINE crops divergent ends by gaps and uses the cropped 0.7 "
+            "consensus for BLAST coverage. LINE and SINE also look for a "
+            "poly-A 3′ end. Other types follow TEtrimmer's default path."
+        )
+        boundary_type_layout.addWidget(self.boundary_te_type_combo, 0)
+        boundary_type_layout.addStretch(1)
+        self.boundary_section.add_widget(boundary_type_row)
+        boundary_btn_row = QWidget(self.boundary_section)
+        boundary_btn_layout = QHBoxLayout(boundary_btn_row)
+        boundary_btn_layout.setContentsMargins(0, 0, 0, 0)
+        boundary_btn_layout.setSpacing(6)
+        self.boundary_run_btn = QPushButton("Run", boundary_btn_row)
+        self.boundary_run_btn.setFixedWidth(52)
+        self.boundary_run_btn.setToolTip(
+            "Clean the MSA with TEtrimmer's column rules, then predict the TE "
+            "boundary from MSA identity, BLAST coverage (project genome) and "
+            "LTR/TIR. Results are drawn as dashed column guides."
+        )
+        self.boundary_run_btn.clicked.connect(self.boundaryPredictClicked.emit)
+        boundary_btn_layout.addWidget(self.boundary_run_btn, 0)
+        boundary_btn_layout.addStretch(1)
+        self.boundary_section.add_widget(boundary_btn_row)
+        self.boundary_result_label = QLabel("", self.boundary_section)
+        self.boundary_result_label.setWordWrap(True)
+        self.boundary_result_label.setTextFormat(Qt.TextFormat.RichText)
+        self.boundary_result_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self.boundary_result_label.hide()
+        self.boundary_section.add_widget(self.boundary_result_label)
+        layout.addWidget(self.boundary_section)
+        self._boundary_divider = _h_divider(page)
+        layout.addWidget(self._boundary_divider)
+        self.boundary_section.setVisible(False)
+        self._boundary_divider.setVisible(False)
 
         feature_section = _CollapsibleSection(
             "Feature detection", page, expanded=False
@@ -2344,6 +2411,44 @@ class SequenceAnnotationRail(QWidget):
             if check.isChecked()
         )
 
+    def set_split_sync_available(self, available: bool) -> None:
+        """Show the Split Preview link checkbox when this rail is in a split pane."""
+        self._split_sync_available = bool(available)
+        self._sync_split_views_visibility()
+
+    def _sync_split_views_visibility(self) -> None:
+        check = getattr(self, "sync_split_views", None)
+        if check is None:
+            return
+        overview = bool(getattr(self, "_overview_mode", False))
+        check.setVisible(overview and bool(getattr(self, "_split_sync_available", False)))
+
+    def apply_visible_annotation_kinds(self, keys: frozenset[str] | set[str]) -> None:
+        """Set Displayed annotations checkboxes to ``keys`` (Split Preview sync)."""
+        wanted = {str(k).strip() for k in keys if str(k).strip()}
+        if not self.annotation_kind_checks:
+            return
+        changed = False
+        self._annotation_kinds_all_updating = True
+        try:
+            for key, check in self.annotation_kind_checks.items():
+                on = key in wanted
+                if check.isChecked() != on:
+                    check.setChecked(on)
+                    changed = True
+                if on:
+                    self._hidden_annotation_kinds.discard(key)
+                else:
+                    self._hidden_annotation_kinds.add(key)
+        finally:
+            self._annotation_kinds_all_updating = False
+        if not changed:
+            return
+        self._save_hidden_annotation_kinds()
+        self._sync_annotation_kinds_all_check()
+        self._sync_show_annotation_track_from_kinds()
+        self._emit_annotation_track_kinds()
+
     def ensure_annotation_kinds_visible(self, keys: list[str] | tuple[str, ...] | set[str]) -> None:
         """Tick Displayed annotations for ``keys`` after a prediction run.
 
@@ -2646,6 +2751,7 @@ class SequenceAnnotationRail(QWidget):
             blast_cov_row.setVisible(msa_overview)
         elif getattr(self, "show_blast_coverage", None) is not None:
             self.show_blast_coverage.setVisible(msa_overview)
+        self._sync_split_views_visibility()
         self.sequence_sort_row.setVisible(overview)
         if overview:
             self._populate_sequence_sort_options(
@@ -2693,6 +2799,11 @@ class SequenceAnnotationRail(QWidget):
         self._module_width = _MODULE_WIDTH
         self._apply_module_geometry()
 
+    def set_boundary_prediction_text(self, html: str) -> None:
+        """Show (or clear with "") the Boundary prediction summary."""
+        self.boundary_result_label.setText(html)
+        self.boundary_result_label.setVisible(bool(html))
+
     def set_msa_display_mode(self, enabled: bool) -> None:
         """Toggle controls that apply only to aligned residue columns."""
         self._msa_display_mode = bool(enabled)
@@ -2701,6 +2812,8 @@ class SequenceAnnotationRail(QWidget):
         self.msa_coloring_header.setVisible(visible)
         self.msa_coloring_mode_host.setVisible(visible)
         self.msa_divergence_row.setVisible(visible)
+        self.boundary_section.setVisible(visible)
+        self._boundary_divider.setVisible(visible)
         self._column_distance_label.setVisible(False)
         self.column_distance.setVisible(False)
         self.color_multi_sequence_background.setVisible(
@@ -2716,6 +2829,7 @@ class SequenceAnnotationRail(QWidget):
                 blast_cov_row.setVisible(self._msa_display_mode)
             elif getattr(self, "show_blast_coverage", None) is not None:
                 self.show_blast_coverage.setVisible(self._msa_display_mode)
+            self._sync_split_views_visibility()
             self.set_nucleotide_color_context(
                 "msa" if self._msa_display_mode else "multi"
             )

@@ -117,10 +117,11 @@ class OrfSettings:
         self.frames = normalize_orf_frames(self.frames)
 
 
-DEFAULT_PBS_WINDOW = 100
+DEFAULT_PBS_WINDOW = 40
 DEFAULT_PBS_MIN_LENGTH = 15
-DEFAULT_PBS_MIN_IDENTITY = 90.0
-DEFAULT_PBS_MIN_COVERAGE = 0.85
+DEFAULT_PBS_MIN_IDENTITY = 95.0
+DEFAULT_PBS_MIN_COVERAGE = 0.90
+DEFAULT_PBS_MAX_DISTANCE = 20
 DEFAULT_PBS_ORIENTATION = "auto"
 
 
@@ -132,6 +133,7 @@ class PbsSettings:
     min_length: int = DEFAULT_PBS_MIN_LENGTH
     min_identity: float = DEFAULT_PBS_MIN_IDENTITY  # percent
     min_coverage: float = DEFAULT_PBS_MIN_COVERAGE
+    max_distance_from_ltr5_nt: int = DEFAULT_PBS_MAX_DISTANCE
     orientation: str = DEFAULT_PBS_ORIENTATION  # auto, +, -
     # Empty → bundled ``PBS_unique_motifs_Neumann2019.fasta``.
     motif_database: str = ""
@@ -141,6 +143,7 @@ class PbsSettings:
         self.min_length = max(1, int(self.min_length))
         self.min_identity = max(0.0, min(100.0, float(self.min_identity)))
         self.min_coverage = max(0.0, min(1.0, float(self.min_coverage)))
+        self.max_distance_from_ltr5_nt = max(0, int(self.max_distance_from_ltr5_nt))
         orient = str(self.orientation or DEFAULT_PBS_ORIENTATION).strip().lower()
         if orient not in {"auto", "+", "-"}:
             orient = DEFAULT_PBS_ORIENTATION
@@ -351,6 +354,9 @@ def load_auto_annotation_settings() -> AutoAnnotationSettings:
         min_coverage=_get_float(
             s, f"{prefix}pbs_min_coverage", DEFAULT_PBS_MIN_COVERAGE
         ),
+        max_distance_from_ltr5_nt=_get_int(
+            s, f"{prefix}pbs_max_distance", DEFAULT_PBS_MAX_DISTANCE
+        ),
         orientation=str(
             s.value(f"{prefix}pbs_orientation", DEFAULT_PBS_ORIENTATION) or ""
         ),
@@ -418,6 +424,7 @@ def save_auto_annotation_settings(settings: AutoAnnotationSettings) -> None:
     s.setValue(f"{prefix}pbs_min_length", pbs.min_length)
     s.setValue(f"{prefix}pbs_min_identity", pbs.min_identity)
     s.setValue(f"{prefix}pbs_min_coverage", pbs.min_coverage)
+    s.setValue(f"{prefix}pbs_max_distance", pbs.max_distance_from_ltr5_nt)
     s.setValue(f"{prefix}pbs_orientation", pbs.orientation)
     s.setValue(f"{prefix}pbs_motif_database", pbs.motif_database)
     save_annotation_run_options(

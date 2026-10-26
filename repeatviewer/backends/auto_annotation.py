@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from collections import Counter
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 
@@ -51,6 +52,12 @@ class MultiAutoAnnotationResult:
     features: tuple[SequenceFeature, ...]
     modes: tuple[AutoAnnotationMode, ...]
     message: str
+    # Detector totals for this run (before merge / unchanged skip).
+    found_by_type: dict[str, int] = field(default_factory=dict)
+    # Detected features matching an existing same-type interval (start/end/strand).
+    overlap_by_type: dict[str, int] = field(default_factory=dict)
+    # Detected features with no matching existing interval.
+    new_by_type: dict[str, int] = field(default_factory=dict)
 
 
 def _next_track(features: list[SequenceFeature]) -> int:
@@ -67,6 +74,17 @@ def _auto_mode_feature_type(mode: AutoAnnotationMode) -> str:
 
 def _feature_signature(feat: SequenceFeature) -> tuple[int, int, str, str]:
     return (feat.start, feat.end, feat.name, feat.strand)
+
+
+def _feature_coord_key(feat: SequenceFeature) -> tuple[str, int, int, str]:
+    """Type + interval identity (ignore name/track; ORF renumbering is common)."""
+    ftype = str(getattr(feat, "feature_type", "") or "").strip() or "others"
+    return (
+        ftype,
+        int(getattr(feat, "start", 0) or 0),
+        int(getattr(feat, "end", 0) or 0),
+        str(getattr(feat, "strand", "") or ""),
+    )
 
 
 def _features_for_mode(
@@ -116,7 +134,11 @@ def _is_auto_generated_tsd(feat: SequenceFeature) -> bool:
 def _is_auto_generated_pbs(feat: SequenceFeature) -> bool:
     if feat.feature_type != "PBS" or not _AUTO_PBS_NAME.match(feat.name or ""):
         return False
-    return not _is_curated_or_imported_source(str(feat.source or ""))
+    src = str(feat.source or "").strip()
+    # Motif DB stamps from Feature detection (not Transfer / GFF imports).
+    if not src or src == REPEATVIEWER_INTERNAL_SOURCE or src.startswith("PBS motif:"):
+        return True
+    return False
 
 
 def _remove_features_for_auto_rerun(
@@ -189,6 +211,7 @@ def _pbs_runtime_settings(cfg: AutoAnnotationSettings) -> PBSSettings:
         min_length=pbs.min_length,
         min_identity=pbs.min_identity,
         min_coverage=pbs.min_coverage,
+        max_distance_from_ltr5_nt=pbs.max_distance_from_ltr5_nt,
         orientation=pbs.orientation,
         num_threads=max(1, int(cfg.num_threads)),
     )
@@ -210,7 +233,13 @@ def _stamp_track(
                 strand=feat.strand,
                 track=track,
                 parent=feat.parent,
-                source=REPEATVIEWER_INTERNAL_SOURCE,
+                # Keep PBS motif DB (and other) labels; fall back to internal.
+                source=str(feat.source or "").strip() or REPEATVIEWER_INTERNAL_SOURCE,
+                pident=feat.pident,
+                subject_id=feat.subject_id,
+                coverage=feat.coverage,
+                source_start=feat.source_start,
+                source_end=feat.source_end,
             )
         )
     return stamped
@@ -264,6 +293,9 @@ def run_auto_annotations(
             progress("MSA: removed gaps for feature detection")
         next_track = _next_track(features)
         total = len(ordered)
+        found_by_type: Counter[str] = Counter()
+        overlap_by_type: Counter[str] = Counter()
+        new_by_type: Counter[str] = Counter()
         if progress is not None:
             progress(f"0/{total} starting")
         for index, mode in enumerate(ordered, start=1):
@@ -283,6 +315,15 @@ def run_auto_annotations(
             if result.message.strip():
                 messages.append(result.message.strip())
             existing = _features_for_mode(features, mode)
+            existing_coords = {_feature_coord_key(feat) for feat in existing}
+            for feat in result.features:
+                key = _feature_coord_key(feat)
+                ftype = key[0]
+                found_by_type[ftype] += 1
+                if key in existing_coords:
+                    overlap_by_type[ftype] += 1
+                else:
+                    new_by_type[ftype] += 1
             new_sigs = {_feature_signature(feat) for feat in result.features}
             if existing and new_sigs == {_feature_signature(feat) for feat in existing}:
                 messages.append(
@@ -309,6 +350,9 @@ def run_auto_annotations(
             features=tuple(workspace.project_features(features)),
             modes=ordered,
             message=summary,
+            found_by_type=dict(found_by_type),
+            overlap_by_type=dict(overlap_by_type),
+            new_by_type=dict(new_by_type),
         )
     finally:
         workspace.close()
@@ -399,6 +443,7 @@ def run_auto_annotation(
             min_length=runtime.min_length,
             min_identity=runtime.min_identity,
             min_coverage=runtime.min_coverage,
+            max_distance_from_ltr5_nt=runtime.max_distance_from_ltr5_nt,
             orientation=runtime.orientation,
             num_threads=threads,
         )

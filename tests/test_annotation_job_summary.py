@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from repeatviewer.widgets.process_monitor_dialog import (
     annotation_job_summary_lines,
@@ -27,6 +27,9 @@ class MultiAutoAnnotationResult:
     features: tuple
     modes: tuple
     message: str
+    found_by_type: dict = field(default_factory=dict)
+    overlap_by_type: dict = field(default_factory=dict)
+    new_by_type: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -65,6 +68,62 @@ def test_format_summary_plain_sentences_and_per_type() -> None:
     assert lines[1] == "Found 20 new features (LTR 5, TIR 0, PBS 15)."
 
 
+def test_format_summary_found_overlap_and_new() -> None:
+    lines = format_annotation_run_summary(
+        n_sequences=15,
+        preferred_types=("ORF", "PBS"),
+        found_by_type={"ORF": 49, "PBS": 0},
+        overlap_by_type={"ORF": 49},
+        counts_by_type={"ORF": 0, "PBS": 0},
+        total_new=0,
+    )
+    assert lines == [
+        "Finished annotating 15 sequences.",
+        "Found 49 features (ORF 49, PBS 0): 49 overlap existing (ORF 49), 0 new.",
+    ]
+
+
+def test_format_summary_mixed_new_and_overlap() -> None:
+    lines = format_annotation_run_summary(
+        n_sequences=1,
+        preferred_types=("ORF", "PBS"),
+        found_by_type={"ORF": 10, "PBS": 3},
+        overlap_by_type={"ORF": 7},
+        counts_by_type={"ORF": 3, "PBS": 3},
+        total_new=6,
+    )
+    assert lines[1] == (
+        "Found 13 features (ORF 10, PBS 3): "
+        "7 overlap existing (ORF 7), 6 new (ORF 3, PBS 3)."
+    )
+
+
+def test_format_summary_overlap_breakdown_by_kind() -> None:
+    lines = format_annotation_run_summary(
+        n_sequences=15,
+        preferred_types=("LTR", "TIR", "tandem repeat", "ORF"),
+        found_by_type={
+            "LTR": 40,
+            "TIR": 130,
+            "tandem repeat": 233,
+            "ORF": 52,
+        },
+        overlap_by_type={"LTR": 8, "ORF": 24},
+        counts_by_type={
+            "LTR": 32,
+            "TIR": 130,
+            "tandem repeat": 233,
+            "ORF": 28,
+        },
+        total_new=423,
+    )
+    assert lines[1] == (
+        "Found 455 features (LTR 40, TIR 130, tandem repeat 233, ORF 52): "
+        "32 overlap existing (LTR 8, ORF 24), "
+        "423 new (LTR 32, TIR 130, tandem repeat 233, ORF 28)."
+    )
+
+
 def test_format_summary_zero_features() -> None:
     lines = format_annotation_run_summary(
         n_sequences=15,
@@ -99,7 +158,7 @@ def test_auto_annotation_summary_includes_count() -> None:
     lines = annotation_job_summary_lines(result)
     assert "Detected 3 ORF(s) with orfipy." in lines
     assert "Finished annotating 1 sequence." in lines
-    assert "Found 3 new features (ORF 3)." in lines
+    assert "Found 3 features (ORF 3): 0 overlap existing, 3 new (ORF 3)." in lines
 
 
 def test_multi_auto_counts_only_selected_modes() -> None:
@@ -116,10 +175,16 @@ def test_multi_auto_counts_only_selected_modes() -> None:
         ),
         modes=(Mode("ORF"), Mode("LTR")),
         message="Detected 2 ORF(s).\nLTR: 1 pair.",
+        found_by_type={"ORF": 2, "LTR": 1},
+        overlap_by_type={"ORF": 2},
+        new_by_type={"LTR": 1},
     )
     lines = annotation_job_summary_lines(result)
     assert "Finished annotating 1 sequence." in lines
-    assert "Found 3 new features (ORF 2, LTR 1)." in lines
+    assert (
+        "Found 3 features (ORF 2, LTR 1): "
+        "2 overlap existing (ORF 2), 1 new (LTR 1)."
+    ) in lines
 
 
 def test_similarity_sums_hit_counts() -> None:

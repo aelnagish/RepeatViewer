@@ -22,39 +22,19 @@ from PySide6.QtWidgets import (
 _HIT_COUNT_RE = re.compile(r"(\d+)\s+(?:\S+\s+)*hit\(s\)", re.IGNORECASE)
 
 
-def format_annotation_run_summary(
-    *,
-    n_sequences: int,
-    counts_by_type: Mapping[str, int] | None = None,
-    preferred_types: Sequence[str] | None = None,
-    total_new: int | None = None,
-) -> list[str]:
-    """Plain-language end-of-job lines for Feature / Similarity annotation.
-
-    Example::
-
-        Finished annotating 15 sequences.
-        Found 20 new features (LTR 5, PBS 15).
-    """
-    n_sequences = max(0, int(n_sequences))
-    counts = {
+def _normalize_count_map(raw: Mapping[str, int] | None) -> dict[str, int]:
+    return {
         str(key).strip(): max(0, int(value))
-        for key, value in dict(counts_by_type or {}).items()
+        for key, value in dict(raw or {}).items()
         if str(key).strip()
     }
-    if total_new is None:
-        total = sum(counts.values())
-    else:
-        total = max(0, int(total_new))
 
-    lines: list[str] = []
-    if n_sequences <= 0:
-        lines.append("Finished annotation.")
-    elif n_sequences == 1:
-        lines.append("Finished annotating 1 sequence.")
-    else:
-        lines.append(f"Finished annotating {n_sequences} sequences.")
 
+def _ordered_type_keys(
+    *,
+    preferred_types: Sequence[str] | None,
+    counts: Mapping[str, int],
+) -> list[str]:
     preferred = [str(t).strip() for t in (preferred_types or ()) if str(t).strip()]
     ordered: list[str] = []
     seen: set[str] = set()
@@ -70,15 +50,124 @@ def format_annotation_run_summary(
             continue
         seen.add(key)
         ordered.append(key)
+    return [key for key in ordered if counts.get(key, 0) > 0 or key in preferred]
 
-    # Drop preferred types that were never selected and have no hits.
-    ordered = [key for key in ordered if counts.get(key, 0) > 0 or key in preferred]
+
+def _positive_type_parts(
+    ordered: Sequence[str],
+    counts: Mapping[str, int],
+) -> list[str]:
+    """``LTR 8, ORF 24`` style parts for keys with count > 0."""
+    return [
+        f"{key} {counts.get(key, 0)}"
+        for key in ordered
+        if counts.get(key, 0) > 0
+    ]
+
+
+def format_annotation_run_summary(
+    *,
+    n_sequences: int,
+    counts_by_type: Mapping[str, int] | None = None,
+    preferred_types: Sequence[str] | None = None,
+    total_new: int | None = None,
+    found_by_type: Mapping[str, int] | None = None,
+    overlap_by_type: Mapping[str, int] | None = None,
+) -> list[str]:
+    """Plain-language end-of-job lines for Feature / Similarity annotation.
+
+    When ``found_by_type`` is set (Feature detection), report total found plus
+    how many already match existing annotations vs newly found, with per-type
+    breakdowns for overlap and new::
+
+        Finished annotating 15 sequences.
+        Found 49 features (ORF 49): 49 overlap existing (ORF 49), 0 new.
+
+    Otherwise keep the legacy “new features” wording (Similarity / Transfer).
+    """
+    n_sequences = max(0, int(n_sequences))
+    lines: list[str] = []
+    if n_sequences <= 0:
+        lines.append("Finished annotation.")
+    elif n_sequences == 1:
+        lines.append("Finished annotating 1 sequence.")
+    else:
+        lines.append(f"Finished annotating {n_sequences} sequences.")
+
+    found = _normalize_count_map(found_by_type)
+    overlap = _normalize_count_map(overlap_by_type)
+    new_counts = _normalize_count_map(counts_by_type)
+    if found:
+        # Prefer explicit new map; else derive from found − overlap per type.
+        if not new_counts:
+            new_counts = {
+                key: max(0, found.get(key, 0) - overlap.get(key, 0))
+                for key in set(found) | set(overlap)
+            }
+        display = {
+            key: found.get(key, 0)
+            for key in set(found) | set(overlap) | set(new_counts)
+        }
+        preferred = [
+            str(t).strip() for t in (preferred_types or ()) if str(t).strip()
+        ]
+        for key in preferred:
+            display.setdefault(key, 0)
+        ordered = _ordered_type_keys(preferred_types=preferred, counts=display)
+        total_found = sum(found.values())
+        total_overlap = sum(overlap.values())
+        if total_new is None:
+            total_new_n = sum(new_counts.values())
+        else:
+            total_new_n = max(0, int(total_new))
+
+        if total_found <= 0 and not ordered:
+            lines.append("Found no features.")
+            return lines
+
+        parts = [f"{key} {display.get(key, 0)}" for key in ordered]
+        if len(preferred) <= 1:
+            parts = [p for p in parts if not p.endswith(" 0")] or parts
+        feat_word = "feature" if total_found == 1 else "features"
+        type_bit = f" ({', '.join(parts)})" if parts else ""
+        if total_found <= 0:
+            lines.append(f"Found no features{type_bit}.")
+            return lines
+
+        overlap_parts = _positive_type_parts(ordered, overlap)
+        new_parts = _positive_type_parts(ordered, new_counts)
+        # Include types that only appear in overlap/new (not in preferred zeros).
+        for key in sorted(set(overlap) | set(new_counts)):
+            if key in ordered:
+                continue
+            if overlap.get(key, 0) > 0:
+                overlap_parts.append(f"{key} {overlap[key]}")
+            if new_counts.get(key, 0) > 0:
+                new_parts.append(f"{key} {new_counts[key]}")
+        overlap_bit = (
+            f" ({', '.join(overlap_parts)})" if overlap_parts and total_overlap > 0 else ""
+        )
+        new_bit = f" ({', '.join(new_parts)})" if new_parts and total_new_n > 0 else ""
+        lines.append(
+            f"Found {total_found} {feat_word}{type_bit}: "
+            f"{total_overlap} overlap existing{overlap_bit}, "
+            f"{total_new_n} new{new_bit}."
+        )
+        return lines
+
+    counts = new_counts
+    if total_new is None:
+        total = sum(counts.values())
+    else:
+        total = max(0, int(total_new))
+
+    preferred = [str(t).strip() for t in (preferred_types or ()) if str(t).strip()]
+    ordered = _ordered_type_keys(preferred_types=preferred, counts=counts)
 
     if total <= 0 and not ordered:
         lines.append("Found no new features.")
         return lines
     if total <= 0:
-        # Selected types ran but none produced new features.
         zero_parts = [f"{key} 0" for key in ordered]
         if zero_parts:
             lines.append(
@@ -90,7 +179,6 @@ def format_annotation_run_summary(
         return lines
 
     parts = [f"{key} {counts.get(key, 0)}" for key in ordered if counts.get(key, 0) > 0]
-    # Include explicit zeros for selected types that found nothing when several ran.
     if len(preferred) > 1:
         parts = [f"{key} {counts.get(key, 0)}" for key in ordered]
 
@@ -139,10 +227,13 @@ def annotation_job_summary_lines(result: object) -> list[str]:
             key = str(getattr(feat, "feature_type", "") or "").strip() or "others"
             counts[key] = counts.get(key, 0) + 1
         preferred = [mode_name] if mode_name else list(counts)
+        # Single-mode result has no pre-existing overlap context here.
         summary = format_annotation_run_summary(
             n_sequences=1,
             counts_by_type=counts,
             preferred_types=preferred,
+            found_by_type=counts,
+            overlap_by_type={key: 0 for key in counts},
             total_new=len(features),
         )
         for line in summary:
@@ -158,22 +249,30 @@ def annotation_job_summary_lines(result: object) -> list[str]:
             for mode in modes
             if str(getattr(mode, "value", mode) or "").strip()
         ]
-        type_names = set(preferred)
-        counts: dict[str, int] = {key: 0 for key in preferred}
-        matched = 0
-        for feat in features:
-            key = str(getattr(feat, "feature_type", "") or "").strip()
-            if type_names and key not in type_names:
-                continue
-            if not key:
-                key = "others"
-            counts[key] = counts.get(key, 0) + 1
-            matched += 1
+        found = dict(getattr(result, "found_by_type", None) or {})
+        overlap = dict(getattr(result, "overlap_by_type", None) or {})
+        new_counts = dict(getattr(result, "new_by_type", None) or {})
+        if not found:
+            type_names = set(preferred)
+            new_counts = {key: 0 for key in preferred}
+            matched = 0
+            for feat in features:
+                key = str(getattr(feat, "feature_type", "") or "").strip()
+                if type_names and key not in type_names:
+                    continue
+                if not key:
+                    key = "others"
+                new_counts[key] = new_counts.get(key, 0) + 1
+                matched += 1
+            found = dict(new_counts)
+            overlap = {key: 0 for key in found}
         summary = format_annotation_run_summary(
             n_sequences=1,
-            counts_by_type=counts,
+            counts_by_type=new_counts,
             preferred_types=preferred,
-            total_new=matched if type_names else len(features),
+            found_by_type=found,
+            overlap_by_type=overlap,
+            total_new=sum(new_counts.values()),
         )
         for line in summary:
             if line not in lines:

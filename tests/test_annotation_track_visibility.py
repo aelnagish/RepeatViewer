@@ -100,6 +100,14 @@ def test_rail_nested_kind_checks(qapp: QApplication) -> None:
     assert "project genome" not in tip
     assert "Define Genome" not in tip
     assert "Reading the plot" not in tip
+    assert rail.sync_split_views.text() == "Sync left and right view"
+    assert rail.sync_split_views.isHidden()
+    rail.set_overview_display_mode(True)
+    rail.set_msa_display_mode(True)
+    rail.set_split_sync_available(True)
+    assert not rail.sync_split_views.isHidden()
+    rail.set_split_sync_available(False)
+    assert rail.sync_split_views.isHidden()
 
     feats = [
         SequenceFeature(1, 10, "left", feature_type="LTR"),
@@ -188,6 +196,26 @@ def test_ensure_annotation_kinds_visible_after_run(qapp: QApplication) -> None:
     assert rail.annotation_kind_checks["domain::CDD"].isChecked()
 
     rail.annotation_kinds_all_check.setChecked(True)
+    rail.close()
+
+
+def test_rail_apply_visible_annotation_kinds_sync(qapp: QApplication) -> None:
+    from repeatviewer.widgets.sequence_annotation_rail import SequenceAnnotationRail
+
+    rail = SequenceAnnotationRail()
+    rail.show()
+    rail._stack.setCurrentIndex(0)
+    rail._tracks_section.set_expanded(True)
+    feats = [
+        SequenceFeature(1, 10, "a", feature_type="LTR"),
+        SequenceFeature(1, 10, "b", feature_type="ORF"),
+        SequenceFeature(1, 10, "c", feature_type="PBS"),
+    ]
+    rail.set_available_annotation_kinds(feats)
+    assert rail.visible_annotation_kinds() == frozenset({"LTR", "ORF", "PBS"})
+    rail.apply_visible_annotation_kinds(frozenset({"LTR", "PBS"}))
+    assert rail.visible_annotation_kinds() == frozenset({"LTR", "PBS"})
+    assert rail.annotation_kind_checks["ORF"].isChecked() is False
     rail.close()
 
 

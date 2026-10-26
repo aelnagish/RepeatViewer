@@ -16,6 +16,7 @@ from Bio.SeqRecord import SeqRecord
 
 from repeatviewer.backends.auto_annotation import (
     AutoAnnotationMode,
+    _feature_coord_key,
     _is_auto_generated_tsd,
     _next_track,
     _target_track_for_auto_rerun,
@@ -88,6 +89,10 @@ class TeAnnotationBatchResult:
     identified_count: int = 0
     # New-feature counts by ``feature_type`` (e.g. LTR, PBS, domain).
     identified_by_type: dict[str, int] = field(default_factory=dict)
+    # Detector totals this run (includes hits that already matched existing).
+    found_by_type: dict[str, int] = field(default_factory=dict)
+    overlap_by_type: dict[str, int] = field(default_factory=dict)
+    new_by_type: dict[str, int] = field(default_factory=dict)
     # How many sequences were actually annotated in this job.
     annotated_sequence_count: int = 0
 
@@ -216,14 +221,18 @@ def _annotate_one_record_fasta(
     auto_threads: int | None = None,
     run_auto: bool = True,
     run_similarity: bool = True,
-) -> list:
-    """Run selected modules on one single-sequence FASTA; return feature list.
+) -> tuple[list, dict[str, int], dict[str, int], dict[str, int]]:
+    """Run selected modules on one single-sequence FASTA.
 
+    Returns ``(features, found_by_type, overlap_by_type, new_by_type)``.
     Gap stripping and MSA coordinate projection are handled inside
     ``run_auto_annotations`` / ``run_similarity_annotations``.
     TSD is skipped here — it needs the full MSA (see ``_apply_msa_tsd``).
     """
     features: tuple = tuple(base_features)
+    found_by_type: Counter[str] = Counter()
+    overlap_by_type: Counter[str] = Counter()
+    new_by_type: Counter[str] = Counter()
     per_seq_modes = tuple(
         mode for mode in options.auto_modes if mode != AutoAnnotationMode.TSD
     )
@@ -240,6 +249,9 @@ def _annotate_one_record_fasta(
             num_threads=auto_threads,
         )
         features = auto_result.features
+        found_by_type.update(auto_result.found_by_type)
+        overlap_by_type.update(auto_result.overlap_by_type)
+        new_by_type.update(auto_result.new_by_type)
         if progress is not None and auto_result.message.strip():
             for line in auto_result.message.splitlines():
                 text = line.strip()
@@ -249,6 +261,7 @@ def _annotate_one_record_fasta(
     if run_similarity and options.similarity_databases:
         if progress is not None:
             progress(f"Similarity annotation: {label}")
+        before_coords = {_feature_coord_key(feat) for feat in features}
         sim_result = run_similarity_annotations(
             record_fasta,
             options.similarity_databases,
@@ -260,12 +273,24 @@ def _annotate_one_record_fasta(
             progress=progress,
         )
         features = sim_result.features
+        for feat in features:
+            key = _feature_coord_key(feat)
+            if key in before_coords:
+                continue
+            ftype = key[0]
+            found_by_type[ftype] += 1
+            new_by_type[ftype] += 1
         if progress is not None and sim_result.message.strip():
             for line in sim_result.message.splitlines():
                 text = line.strip()
                 if text:
                     progress(text)
-    return list(features)
+    return (
+        list(features),
+        dict(found_by_type),
+        dict(overlap_by_type),
+        dict(new_by_type),
+    )
 
 
 def run_te_annotation_on_fasta(
@@ -350,6 +375,26 @@ def run_te_annotation_on_fasta(
         rid: list(existing_by_id.get(rid) or []) for rid in all_record_ids
     }
     skipped: list[tuple[str, str]] = []
+    found_by_type: Counter[str] = Counter()
+    overlap_by_type: Counter[str] = Counter()
+    new_by_type: Counter[str] = Counter()
+    stats_lock = threading.Lock()
+
+    def _accumulate_stats(
+        found: Mapping[str, int],
+        overlap: Mapping[str, int],
+        new: Mapping[str, int],
+    ) -> None:
+        with stats_lock:
+            found_by_type.update(
+                {k: v for k, v in dict(found or {}).items() if str(k).strip()}
+            )
+            overlap_by_type.update(
+                {k: v for k, v in dict(overlap or {}).items() if str(k).strip()}
+            )
+            new_by_type.update(
+                {k: v for k, v in dict(new or {}).items() if str(k).strip()}
+            )
 
     def _apply_msa_tsd() -> None:
         """Scan TSD on each MSA row and merge features (no cluster step)."""
@@ -379,8 +424,25 @@ def run_te_annotation_on_fasta(
                 AutoAnnotationMode.TSD,
                 next_track=_next_track(existing),
             )
+            # Overlap vs what was on the map before this TSD pass.
+            prior_coords = {
+                _feature_coord_key(feat)
+                for feat in existing
+                if str(getattr(feat, "feature_type", "") or "") == "TSD"
+            }
             existing = [feat for feat in existing if not _is_auto_generated_tsd(feat)]
             detected = list(tsd_by_id.get(rid) or [])
+            tsd_found: Counter[str] = Counter()
+            tsd_overlap: Counter[str] = Counter()
+            tsd_new: Counter[str] = Counter()
+            for feat in detected:
+                key = _feature_coord_key(feat)
+                tsd_found["TSD"] += 1
+                if key in prior_coords:
+                    tsd_overlap["TSD"] += 1
+                else:
+                    tsd_new["TSD"] += 1
+            _accumulate_stats(tsd_found, tsd_overlap, tsd_new)
             if not detected:
                 features_by_id[rid] = existing
                 continue
@@ -408,7 +470,7 @@ def run_te_annotation_on_fasta(
         if progress is not None:
             progress(0, 1, resolved.name)
         try:
-            features = _annotate_one_record_fasta(
+            features, found, overlap, new = _annotate_one_record_fasta(
                 resolved,
                 options,
                 auto_cfg=auto_cfg,
@@ -424,6 +486,7 @@ def run_te_annotation_on_fasta(
                 ),
             )
             features_by_id[rid] = features
+            _accumulate_stats(found, overlap, new)
         except JobCancelledError:
             raise
         except Exception as exc:
@@ -472,10 +535,17 @@ def run_te_annotation_on_fasta(
 
             def _run_one(
                 rid: str, temp_fa: Path
-            ) -> tuple[str, list[SequenceFeature] | None, str | None]:
+            ) -> tuple[
+                str,
+                list[SequenceFeature] | None,
+                dict[str, int],
+                dict[str, int],
+                dict[str, int],
+                str | None,
+            ]:
                 check_cancelled(cancel)
                 try:
-                    feats = _annotate_one_record_fasta(
+                    feats, found, overlap, new = _annotate_one_record_fasta(
                         temp_fa,
                         options,
                         auto_cfg=auto_cfg,
@@ -487,12 +557,12 @@ def run_te_annotation_on_fasta(
                         label=f"{resolved.name} [{rid}]",
                         auto_threads=auto_threads,
                     )
-                    return rid, feats, None
+                    return rid, feats, found, overlap, new, None
                 except JobCancelledError:
                     raise
                 except Exception as exc:
                     logging.exception("Annotation failed for %s", rid)
-                    return rid, None, str(exc) or exc.__class__.__name__
+                    return rid, None, {}, {}, {}, str(exc) or exc.__class__.__name__
 
             if progress is not None:
                 progress(
@@ -509,7 +579,7 @@ def run_te_annotation_on_fasta(
                 for future in as_completed(futures):
                     check_cancelled(cancel)
                     try:
-                        rid, feats, error = future.result()
+                        rid, feats, found, overlap, new, error = future.result()
                     except JobCancelledError:
                         for pending in futures:
                             pending.cancel()
@@ -518,6 +588,7 @@ def run_te_annotation_on_fasta(
                         skipped.append((rid, error))
                     elif feats is not None:
                         features_by_id[rid] = feats
+                        _accumulate_stats(found, overlap, new)
                     with progress_lock:
                         completed += 1
                         done = completed
@@ -560,12 +631,25 @@ def run_te_annotation_on_fasta(
                 ftype = str(getattr(feat, "feature_type", "") or "").strip() or "others"
                 identified_by_type[ftype] += 1
 
+    # If detectors reported no found map (e.g. unexpected path), fall back to
+    # baseline-diff counts so the summary still has numbers.
+    if not found_by_type and identified_by_type:
+        found_by_type.update(identified_by_type)
+        new_by_type.update(identified_by_type)
+    elif not new_by_type and identified_by_type:
+        # Prefer detector "new" when present; else baseline-diff.
+        new_by_type.update(identified_by_type)
+
     preferred_types = [
         str(mode.value) for mode in options.auto_modes if str(mode.value or "").strip()
     ]
     # Similarity hits are usually ``domain`` (or similar); include when that ran.
     if options.similarity_databases and "domain" not in preferred_types:
-        if identified_by_type.get("domain", 0) or options.similarity_databases:
+        if (
+            identified_by_type.get("domain", 0)
+            or found_by_type.get("domain", 0)
+            or options.similarity_databases
+        ):
             preferred_types.append("domain")
 
     # Stream into the process monitor (Worker.log_line / FunctionWorker.log_line).
@@ -574,9 +658,11 @@ def run_te_annotation_on_fasta(
 
     for line in format_annotation_run_summary(
         n_sequences=len(annotate_ids),
-        counts_by_type=dict(identified_by_type),
+        counts_by_type=dict(new_by_type),
         preferred_types=preferred_types,
-        total_new=identified_count,
+        total_new=sum(new_by_type.values()),
+        found_by_type=dict(found_by_type),
+        overlap_by_type=dict(overlap_by_type),
     ):
         emit_process_log(line)
 
@@ -602,5 +688,8 @@ def run_te_annotation_on_fasta(
         skipped_sequences=tuple(skipped),
         identified_count=identified_count,
         identified_by_type=dict(identified_by_type),
+        found_by_type=dict(found_by_type),
+        overlap_by_type=dict(overlap_by_type),
+        new_by_type=dict(new_by_type),
         annotated_sequence_count=len(annotate_ids),
     )

@@ -1125,7 +1125,7 @@ def test_run_te_annotation_filters_record_ids(tmp_path: Path) -> None:
         text = Path(record_fasta).read_text(encoding="utf-8")
         header = text.splitlines()[0].lstrip(">")
         annotated.append(header)
-        return []
+        return [], {}, {}, {}
 
     with patch(
         "repeatviewer.backends.te_annotation_batch._annotate_one_record_fasta",
