@@ -2542,6 +2542,7 @@ class MainWindow(QMainWindow):
         self._file_list.add_annotation_requested.connect(self._add_annotation_for_fasta)
         self._file_list.export_annotation_requested.connect(self._export_annotation_for_fasta)
         self._file_list.attach_cyto_image_requested.connect(self._attach_cyto_images)
+        self._file_list.annotation_files_dropped.connect(self._import_dropped_annotations)
         self._file_list.cyto_images_requested.connect(self._open_cyto_images)
         from repeatviewer.widgets.cyto_images_ui import cyto_notifier
 
@@ -11569,6 +11570,54 @@ class MainWindow(QMainWindow):
             self._sync_status_file_link_from_preview()
         finally:
             dialog.deleteLater()
+
+    def _import_dropped_annotations(self, fasta: Path, annotations: list) -> None:
+        """Import GFF/GFF3/GTF/BED files dropped on a FASTA row (same as Add Annotation)."""
+        from repeatviewer.backends.sequence_features import (
+            import_annotation_as_rv_gff3,
+            sidecar_path,
+        )
+
+        fasta = Path(fasta).expanduser().resolve()
+        if not fasta.is_file():
+            QMessageBox.warning(self, "Add annotation", f"FASTA not found:\n{fasta}")
+            return
+        imported: list[str] = []
+        errors: list[str] = []
+        result = None
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            for raw in annotations or []:
+                annotation = Path(raw)
+                try:
+                    result = import_annotation_as_rv_gff3(fasta, annotation)
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(f"{annotation.name}: {exc}")
+                    continue
+                imported.append(annotation.name)
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        if result is not None:
+            if self._preview_tabs is not None:
+                self._preview_tabs.show_annotation_for_path(fasta)
+                self._ensure_preview_visible()
+            sources = imported[0] if len(imported) == 1 else f"{len(imported)} files"
+            seqs = result.sequence_count
+            where = f" across {seqs:,} sequences" if seqs > 1 else ""
+            self._set_status_message(
+                f"Added {sources} to {fasta.name}: {result.feature_count:,} feature(s)"
+                f"{where} → {sidecar_path(fasta).name}",
+                8000,
+                override_file_link=True,
+            )
+            self._sync_status_file_link_from_preview()
+        if errors:
+            QMessageBox.warning(
+                self,
+                "Add annotation",
+                f"Could not add to {fasta.name}:\n\n" + "\n\n".join(errors),
+            )
 
     def _open_blast_genome_map_from_selection(
         self,

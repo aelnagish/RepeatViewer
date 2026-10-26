@@ -190,6 +190,7 @@ class FileListTableWidget(QTableWidget):
     export_annotation_requested = Signal(Path)
     cyto_images_requested = Signal(Path)             # open the image(s) of a sequence
     attach_cyto_image_requested = Signal(Path, list)  # FASTA, image paths ([] = ask)
+    annotation_files_dropped = Signal(Path, list)  # FASTA, GFF/GTF/BED paths
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -836,18 +837,34 @@ class FileListTableWidget(QTableWidget):
             return None
         return index.row()
 
-    def dragEnterEvent(self, event) -> None:  # noqa: N802 (Qt API)
+    def _drop_payload(self, event) -> tuple[list[Path], list[Path]]:
+        """(images, annotation files) a drag carries onto a FASTA row.
+
+        Images only come from outside the app (Finder / Explorer). Annotation
+        files (GFF/GFF3/GTF/BED) may also be dragged from this Files panel.
+        """
+        from repeatviewer.backends.sequence_features import annotation_import_paths
         from repeatviewer.widgets.cyto_images_ui import image_paths_from_mime
 
-        if event.source() is None and image_paths_from_mime(event.mimeData()):
+        mime = event.mimeData()
+        images = image_paths_from_mime(mime) if event.source() is None else []
+        annotations: list[Path] = []
+        if mime is not None and mime.hasUrls():
+            annotations = annotation_import_paths(
+                Path(url.toLocalFile()) for url in mime.urls() if url.isLocalFile()
+            )
+        return images, annotations
+
+    def dragEnterEvent(self, event) -> None:  # noqa: N802 (Qt API)
+        images, annotations = self._drop_payload(event)
+        if images or annotations:
             event.acceptProposedAction()
             return
         event.ignore()
 
     def dragMoveEvent(self, event) -> None:  # noqa: N802 (Qt API)
-        from repeatviewer.widgets.cyto_images_ui import image_paths_from_mime
-
-        if event.source() is not None or not image_paths_from_mime(event.mimeData()):
+        images, annotations = self._drop_payload(event)
+        if not images and not annotations:
             event.ignore()
             return
         row = self._fasta_row_at(event.position().toPoint())
@@ -858,25 +875,31 @@ class FileListTableWidget(QTableWidget):
         if row != self._cyto_drop_row:
             self._cyto_drop_row = row
             self.selectRow(row)
-        event.acceptProposedAction()
+        # Copy, never move: the annotation file stays where it is.
+        event.setDropAction(Qt.DropAction.CopyAction)
+        event.accept()
 
     def dragLeaveEvent(self, event) -> None:  # noqa: N802 (Qt API)
         self._cyto_drop_row = None
         super().dragLeaveEvent(event)
 
     def dropEvent(self, event) -> None:  # noqa: N802 (Qt API)
-        from repeatviewer.widgets.cyto_images_ui import image_paths_from_mime
-
         self._cyto_drop_row = None
-        paths = image_paths_from_mime(event.mimeData()) if event.source() is None else []
+        images, annotations = self._drop_payload(event)
         row = self._fasta_row_at(event.position().toPoint())
-        if not paths or row is None:
+        if (not images and not annotations) or row is None:
             event.ignore()
             return
-        event.acceptProposedAction()
+        event.setDropAction(Qt.DropAction.CopyAction)
+        event.accept()
         fasta = Path(str(self._path_for_row(row)))
-        # Open the dialog after the drop returns (Finder waits for the drop otherwise).
-        QTimer.singleShot(0, lambda: self.attach_cyto_image_requested.emit(fasta, list(paths)))
+        # Act after the drop returns (Finder waits for the drop otherwise).
+        if annotations:
+            QTimer.singleShot(
+                0, lambda: self.annotation_files_dropped.emit(fasta, list(annotations))
+            )
+        if images:
+            QTimer.singleShot(0, lambda: self.attach_cyto_image_requested.emit(fasta, list(images)))
 
     def _row_decoration(self, row: int) -> tuple[QBrush | None, QBrush | None, QFont | None]:
         """Background/foreground/font already applied to this row (if any)."""

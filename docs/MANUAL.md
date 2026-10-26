@@ -188,7 +188,11 @@ sub-tabs:
 
 - **Text** — the sequence itself.
 - **Annotation** — a feature map: ORFs, terminal repeats, and any annotations
-  you have added.
+  you have added. To add a GFF, GFF3, GTF or BED file, drag it onto the FASTA
+  row in the Files panel (from your file manager or from the Files panel
+  itself), or right-click the FASTA → **Add Annotation…**. Features are matched
+  to sequences by ID (GFF column 1 = the FASTA header up to the first space), so
+  the annotation file can have any name. The file itself is not moved or copied.
 - **Dotplot** — a self dotplot, which is the fastest way to see internal
   tandem structure or an unresolved terminal repeat.
 
