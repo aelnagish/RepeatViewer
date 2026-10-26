@@ -239,6 +239,42 @@ def write_new_sequence(
     return out_path
 
 
+def combine_annotation_json(sources: list[Path], dest_fasta: Path) -> None:
+    """Merge JSON annotations from source FASTAs into the ``dest_fasta`` sidecar.
+
+    Records are matched by order, so ``dest_fasta`` must hold the source
+    records in the same order (as written by :func:`group_sequences`).
+    """
+    from repeatviewer.backends.sequence_features import (
+        fasta_record_lengths,
+        load_features_by_id_from_json,
+        save_annotations_multi,
+    )
+
+    dest_lengths = fasta_record_lengths(dest_fasta)
+    dest_ids = list(dest_lengths.keys())
+    merged: dict[str, list] = {rid: [] for rid in dest_ids}
+    dest_index = 0
+    for src in sources:
+        src_lengths = fasta_record_lengths(src)
+        src_ids = list(src_lengths.keys())
+        src_feats = load_features_by_id_from_json(src, src_ids)
+        for sid in src_ids:
+            if dest_index >= len(dest_ids):
+                break
+            feats = src_feats.get(sid) or []
+            if feats:
+                merged[dest_ids[dest_index]].extend(feats)
+            dest_index += 1
+    if any(merged.values()):
+        save_annotations_multi(
+            dest_fasta,
+            features_by_id=merged,
+            lengths_by_id=dest_lengths,
+            record_ids=dest_ids,
+        )
+
+
 def group_sequences(
     files: list[Path],
     out_path: Path,

@@ -165,6 +165,8 @@ class FileListTableWidget(QTableWidget):
     itemDoubleClicked = Signal(object)
     # Emitted when a Files-list drag starts (copy/move to Folders); cancel Preview.
     dragStarted = Signal()
+    # Ticked boxes or highlighted rows changed (drives the multi-file Preview).
+    selectionSetChanged = Signal()
     open_in_preview_requested = Signal(list)
     open_in_preview_tab_requested = Signal(list)
     open_in_text_editor_requested = Signal(list)
@@ -258,6 +260,10 @@ class FileListTableWidget(QTableWidget):
         self.cellClicked.connect(self._on_cell_clicked)
         self.cellDoubleClicked.connect(self._on_cell_double_clicked)
         self.currentCellChanged.connect(self._on_current_cell_changed)
+        self.itemChanged.connect(self._on_table_item_changed)
+        self.selectionModel().selectionChanged.connect(
+            lambda *_args: self.selectionSetChanged.emit()
+        )
 
         from repeatviewer.widgets.file_list_columns import load_visible_file_columns
 
@@ -1211,6 +1217,10 @@ class FileListTableWidget(QTableWidget):
         # Keep deferred metadata moving after a large-folder sort.
         if hasattr(window, "_ensure_file_list_metadata_fill"):
             window._ensure_file_list_metadata_fill()
+
+    def _on_table_item_changed(self, item: QTableWidgetItem) -> None:
+        if item is not None and item.column() == _COL_CHECK:
+            self.selectionSetChanged.emit()
 
     def _on_cell_clicked(self, row: int, column: int) -> None:
         if column == _COL_CHECK:

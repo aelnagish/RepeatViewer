@@ -6094,6 +6094,10 @@ class MultiSequenceOverviewPanel(QWidget):
         self._restore_zoom_bar_to_header(bar)
         self._header_zoom_bar = None
 
+    def set_annotation_editing_enabled(self, enabled: bool) -> None:
+        """Turn the Annotation rail page on or off (off for a multi-file preview)."""
+        self._rail.set_annotation_editing_enabled(enabled)
+
     def bind_annotation_zoom_bar(self, bar) -> None:
         """Attach −/+/slider/Position/Select/Fit beside the rail (single-seq top)."""
         if not isinstance(bar, AnnotationZoomBar):
