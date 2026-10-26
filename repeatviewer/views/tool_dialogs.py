@@ -10954,6 +10954,12 @@ _TEAID_WORD_SIZE_HELP = (
     "self-BLASTs the input sequence to find repetitive regions and draw the "
     "self-alignment / terminal-repeat panels."
 )
+_TEAID_X_AXIS_LABEL_HELP = (
+    "Title of the input-sequence axis in the BLAST hits, coverage and self "
+    f"dot plots (default: \"{DEFAULT_TEAID_X_AXIS_LABEL}\"). Change it to "
+    "describe the input, e.g. \"Consensus (bp)\" or \"satDNA monomer (bp)\". "
+    "Leave empty to use the default."
+)
 _TEAID_TRANSPARENCY_HELP = (
     "Transparency of genome BLAST hit lines on the coverage track "
     "(0% = fully opaque, 100% = invisible)."
@@ -11008,10 +11014,12 @@ class TeaAidParamsDialog(QDialog):
         # Kept for call-site compatibility; Genome list uses BLAST DBs.
         _ = genome_history
         self._teaid_compact_size: QSize | None = None
-        # Plot-axis label stays persisted but is not shown in this dialog.
-        self._x_axis_label_value = (
+        self._x_axis_label = QLineEdit(self)
+        self._x_axis_label.setText(
             (opts.x_axis_label or "").strip() or DEFAULT_TEAID_X_AXIS_LABEL
         )
+        self._x_axis_label.setPlaceholderText(DEFAULT_TEAID_X_AXIS_LABEL)
+        self._x_axis_label.setMinimumWidth(220)
 
         high_pct, mid_pct = clamp_teaid_hit_len_pct(
             opts.hit_len_high_pct, opts.hit_len_mid_pct
@@ -11297,6 +11305,12 @@ class TeaAidParamsDialog(QDialog):
         advanced_form.addRow(
             "Mid-length hits (≥):",
             field_with_help(mid_row, "Mid-length hits", _TEAID_HIT_MID_HELP),
+        )
+        advanced_form.addRow(
+            "X-axis label:",
+            field_with_help(
+                self._x_axis_label, "X-axis label", _TEAID_X_AXIS_LABEL_HELP
+            ),
         )
         params_root.addWidget(advanced)
         params_root.addStretch(1)
@@ -11715,7 +11729,7 @@ class TeaAidParamsDialog(QDialog):
         self._update_hit_color_button(self._hit_color_high_btn, self._hit_color_high)
         self._update_hit_color_button(self._hit_color_mid_btn, self._hit_color_mid)
         self._line_transparency.setValue(DEFAULT_TEAID_HIT_LINE_TRANSPARENCY * 100.0)
-        self._x_axis_label_value = DEFAULT_TEAID_X_AXIS_LABEL
+        self._x_axis_label.setText(DEFAULT_TEAID_X_AXIS_LABEL)
         self._right_click_buttons[TEAID_RIGHT_CLICK_RUN].setChecked(True)
         self._show_process_window.setChecked(defaults.show_process_window)
         self._close_process_window.setChecked(
@@ -11738,7 +11752,8 @@ class TeaAidParamsDialog(QDialog):
             ),
             self_blast_word_size=self._word_size.value(),
             num_threads=max(1, self._threads.value()),
-            x_axis_label=self._x_axis_label_value or DEFAULT_TEAID_X_AXIS_LABEL,
+            x_axis_label=self._x_axis_label.text().strip()
+            or DEFAULT_TEAID_X_AXIS_LABEL,
             hit_len_high_pct=high_pct,
             hit_len_mid_pct=mid_pct,
             hit_color_high=self._hit_color_high or DEFAULT_TEAID_HIT_COLOR_HIGH,
