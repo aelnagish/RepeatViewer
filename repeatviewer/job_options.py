@@ -2567,11 +2567,6 @@ TREE_RIGHT_CLICK_DIALOG = "dialog"
 TREE_RIGHT_CLICK_ACTIONS = (TREE_RIGHT_CLICK_RUN, TREE_RIGHT_CLICK_DIALOG)
 
 
-TREE_SEQ_AS_IS = "as_is"
-TREE_SEQ_RT = "rt_domain"
-TREE_SEQ_MODES = (TREE_SEQ_AS_IS, TREE_SEQ_RT)
-
-
 @dataclass
 class TreeOptions:
     """Phylogenetic tree building (Tools → Tree).
@@ -2586,10 +2581,6 @@ class TreeOptions:
     mafft_strategy: str = "choose"     # L-INS-i up to 200 sequences, else FFT-NS-2
     adjust_direction: bool = True
     rotate_monomers: bool = False      # satellite monomers: common start before aligning
-    # Sequences: TREE_SEQ_AS_IS, or TREE_SEQ_RT = RT domain found in the DNA (REXdb)
-    sequence_mode: str = TREE_SEQ_AS_IS
-    rexdb_fasta: str = ""              # user's REXdb protein FASTA (.classification beside it)
-    rexdb_references: int = 3          # REXdb RTs added per lineage (0 = none)
     mafft_gap_open: float = 1.53
     mafft_offset: float = 0.0
     min_coverage: float = 0.7          # fraction of the reference length; 0 = off
@@ -2650,9 +2641,6 @@ def load_tree_options() -> TreeOptions:
         adjust_direction=_to_bool(v.get("adjust_direction"), d.adjust_direction),
         rotate_monomers=_to_bool(v.get("rotate_monomers"), d.rotate_monomers),
         methylation_mask=_pick("methylation_mask", ("", "CG", "CG_CHG"), d.methylation_mask),
-        sequence_mode=_pick("sequence_mode", TREE_SEQ_MODES, d.sequence_mode),
-        rexdb_fasta=str(v.get("rexdb_fasta", d.rexdb_fasta) or ""),
-        rexdb_references=_num("rexdb_references", d.rexdb_references, int, 0, 50),
         mafft_gap_open=_num("mafft_gap_open", d.mafft_gap_open, float, 0.0, 20.0),
         mafft_offset=_num("mafft_offset", d.mafft_offset, float, 0.0, 10.0),
         min_coverage=_num("min_coverage", d.min_coverage, float, 0.0, 1.0),
@@ -2698,9 +2686,6 @@ def save_tree_options(opts: TreeOptions) -> None:
             "adjust_direction": opts.adjust_direction,
             "rotate_monomers": opts.rotate_monomers,
             "methylation_mask": opts.methylation_mask,
-            "sequence_mode": opts.sequence_mode,
-            "rexdb_fasta": opts.rexdb_fasta,
-            "rexdb_references": opts.rexdb_references,
             "mafft_gap_open": opts.mafft_gap_open,
             "mafft_offset": opts.mafft_offset,
             "min_coverage": opts.min_coverage,

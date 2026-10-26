@@ -4848,21 +4848,6 @@ class MainWindow(QMainWindow):
         menu.addAction(
             "Change Tree parameters", lambda: self._open_tree_dialog(require_selection=False)
         )
-        menu.addSeparator()
-        menu.addAction(
-            "Methylation-masked sensitivity run (CG and CHG)", self._run_tree_methylation_masked
-        )
-        menu.addAction("RT-domain tree (REXdb lineages)", self._run_tree_rt_domains)
-
-    def _run_tree_methylation_masked(self) -> None:
-        """Saved settings, plus a second tree without CG/CHG columns, compared in the report."""
-        from dataclasses import replace
-
-        from repeatviewer.backends.methylation_mask import MASK_CG_CHG
-
-        files = self._selected_files_for_tree()
-        if files:
-            self._start_tree_job(files, replace(self._tree_options, methylation_mask=MASK_CG_CHG))
 
     def _tree_candidate_files(self) -> list[Path]:
         """Selected FASTA files (several files are combined into one tree). No UI."""
@@ -4920,10 +4905,7 @@ class MainWindow(QMainWindow):
             from repeatviewer.job_options import ALIGN_INPUT_DEFINE
 
             if d.input_source() == ALIGN_INPUT_DEFINE:
-                run_files = [
-                    p for p in d.run_files()
-                    if str(p) != self._tree_options.rexdb_fasta
-                ]
+                run_files = list(d.run_files())
                 if not run_files:
                     QMessageBox.information(
                         self,
@@ -4936,10 +4918,7 @@ class MainWindow(QMainWindow):
                 # Non-modal: Files clicks can change the selection after open;
                 # when nothing was selected at open, re-read the panel. Prefer
                 # the files chosen when the dialog opened otherwise.
-                run_files = [
-                    p for p in (files or self._tree_candidate_files())
-                    if str(p) != self._tree_options.rexdb_fasta
-                ]
+                run_files = list(files or self._tree_candidate_files())
                 if not run_files:
                     self._selected_files_for_tree()  # warning: select FASTA first
                     return
@@ -4948,41 +4927,6 @@ class MainWindow(QMainWindow):
         # Non-modal so Files clicks can update the selection after open.
         self._present_te_viz_dialog(dialog, _accepted)
 
-    def _run_tree_rt_domains(self) -> None:
-        """Saved settings, with the sequences replaced by their RT domains (REXdb)."""
-        from PySide6.QtWidgets import QFileDialog
-
-        from repeatviewer.backends.rt_domains import looks_like_rexdb
-        from repeatviewer.job_options import TREE_SEQ_RT, save_tree_options
-
-        rexdb = self._tree_options.rexdb_fasta
-        if not rexdb or not looks_like_rexdb(Path(rexdb)):
-            chosen, _filter = QFileDialog.getOpenFileName(
-                self,
-                "Choose the REXdb protein FASTA",
-                "",
-                "FASTA (*.fasta *.fa *.faa);;All files (*)",
-            )
-            if not chosen:
-                return
-            path = Path(chosen)
-            if not looks_like_rexdb(path):
-                QMessageBox.warning(
-                    self,
-                    "RT-domain tree",
-                    f"{path.name} needs its .classification table in the same folder.\n\n"
-                    "Download Viridiplantae_v4.0.fasta and "
-                    "Viridiplantae_v4.0.classification from "
-                    "github.com/repeatexplorer/rexdb into one folder.",
-                )
-                return
-            self._tree_options = replace(self._tree_options, rexdb_fasta=str(path))
-            save_tree_options(self._tree_options)
-        files = self._selected_files_for_tree()
-        if files:
-            self._start_tree_job(
-                files, replace(self._tree_options, sequence_mode=TREE_SEQ_RT)
-            )
     def _start_tree_job(self, files: list[Path], options) -> None:
         title = (f"Tree ({files[0].name})" if len(files) == 1
                  else f"Tree ({len(files)} files combined)")

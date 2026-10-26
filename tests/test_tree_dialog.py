@@ -15,7 +15,6 @@ from repeatviewer.job_options import (
     TREE_ENGINE_IQTREE,
     TREE_ROOT_MIDPOINT,
     TREE_ROOT_OUTGROUP,
-    TREE_SEQ_AS_IS,
     TreeOptions,
 )
 
@@ -55,7 +54,6 @@ def _normalised(opts: TreeOptions) -> TreeOptions:
                    else opts.align_mode, mafft_strategy=tb.MAFFT_CHOOSE, adjust_direction=True,
                    mafft_gap_open=1.53, mafft_offset=0.0,
                    right_click_action="run",
-                   sequence_mode=TREE_SEQ_AS_IS,
                    # Dialog never reopens on Options; visible engine tab is persisted.
                    last_dialog_tab=opts.engine if opts.engine in (
                        TREE_ENGINE_IQTREE, TREE_ENGINE_FASTME, TREE_ENGINE_FASTTREE
@@ -321,7 +319,7 @@ def test_question_mark_help(qapp, tmp_path):
     # Inputs; Alignment, Monomers, Skip fragments; Root, Threads;
     # IQ-TREE Settings: Branch support, Model, Methylation check;
     # IQ-TREE Advanced: Searches, Random seed, bnni, fast;
-    # FastME and FastTree: support  (no REXdb on Options)
+    # FastME and FastTree: support
     assert len(helps) == 15
     joined = " ".join(b.toolTip() for b in helps)
     for piece in ("L-INS-i", "FFT-NS-2", "Align tool", "ModelFinder", "UFBoot",
@@ -357,26 +355,6 @@ def test_opens_without_selection(qapp):
     dlg = TreeParamsDialog(files=[])
     assert not _shown(dlg, dlg._frag_hint)
     assert dlg.options().outgroup == []
-
-
-def test_rexdb_not_on_options_tab(qapp, tmp_path):
-    """REXdb is picked when running RT-domain tree; not shown on Tree Options."""
-    rex = tmp_path / "Viridiplantae_v4.0.fasta"
-    rex.write_text(">Ty1-RT__REXdb_ID1\nMKV\n")
-    (tmp_path / "Viridiplantae_v4.0.classification").write_text("REXdb_ID1\tClass_I\tAle\n")
-    opts = TreeOptions(threads=2, rexdb_fasta=str(rex), rexdb_references=5, rotate_monomers=True)
-    dlg = _dialog(qapp, tmp_path, initial=opts)
-    _wait_summary(dlg, qapp)
-    assert dlg.options() == _normalised(opts)
-    assert not hasattr(dlg, "_rexdb")
-    assert not hasattr(dlg, "_rexdb_refs")
-    other = tmp_path / "copies.fa"
-    other.write_text(">a\nACGT\n")
-    assert not dlg.apply_path_from_panel(other)
-    assert dlg.apply_path_from_panel(rex)
-    assert dlg.options().rexdb_fasta == str(rex)
-    assert dlg.options().sequence_mode == TREE_SEQ_AS_IS
-    assert dlg.width() == dlg._DIALOG_WIDTH
 
 
 def test_options_tab_executable_status(qapp, tmp_path):

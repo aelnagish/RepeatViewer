@@ -5,14 +5,13 @@ Inputs (selected sequences or Define inputs), Alignment (alignment, monomers,
 skip fragments) and Settings (that engine's rows, then Root and Threads).
 IQ-TREE also has Advanced Settings (searches, seed, --bnni, --fast).
 Save / Run take the engine from the open tab (on Options, from the last engine
-tab). Input is used as given (DNA or protein); RT-domain trees are started from
-Tools → Tree → RT-domain tree.
+tab). Input is used as given (DNA or protein).
 
 The dialog opens immediately; sequence lengths for Skip fragments / Outgroup are
 loaded in the background so large FASTA files do not block the window.
 
 Options tab: right-click engine, Executables (PATH checkboxes + grey status),
-then Process output. REXdb is not configured here (RT-domain tree picks it when needed).
+then Process output.
 """
 
 from __future__ import annotations
@@ -59,7 +58,6 @@ from repeatviewer.job_options import (
     TREE_ROOT_MIDPOINT,
     TREE_ROOT_NONE,
     TREE_ROOT_OUTGROUP,
-    TREE_SEQ_AS_IS,
     TreeOptions,
     opening_dialog_tab,
     persistable_dialog_tab,
@@ -312,9 +310,6 @@ class TreeParamsDialog(QDialog):
         self._summary = None
         self._summary_loader: _SummaryLoader | None = None
         self._found_timer: QTimer | None = None
-        # REXdb is configured when running RT-domain tree, not on this form.
-        self._rexdb_fasta = str(opts.rexdb_fasta or "")
-        self._rexdb_references = int(opts.rexdb_references)
 
         self._build_shared(opts)
         self._build_engine_tabs(opts)
@@ -1030,8 +1025,6 @@ class TreeParamsDialog(QDialog):
         d = TreeOptions()
         self._input_selected.setChecked(True)
         self._define_inputs.clear_paths()
-        self._rexdb_fasta = str(d.rexdb_fasta or "")
-        self._rexdb_references = int(d.rexdb_references)
         self._align_mode.setCurrentIndex(1 if d.align_mode == TREE_ALIGN_NEVER else 0)
         self._rotate.setChecked(d.rotate_monomers)
         self._set_combo(self._mask, d.methylation_mask)
@@ -1064,17 +1057,9 @@ class TreeParamsDialog(QDialog):
         return dialog_should_run(self)
 
     def apply_path_from_panel(self, path: Path) -> bool:
-        """Files-panel click.
-
-        A REXdb FASTA is stored for RT-domain runs. With Define inputs on, any
-        other file fills the focused (or first empty) input row.
-        """
-        from repeatviewer.backends.rt_domains import looks_like_rexdb
-
+        """Files-panel click: with Define inputs on, fills the focused (or
+        first empty) input row."""
         resolved = Path(path).expanduser()
-        if looks_like_rexdb(resolved):
-            self._rexdb_fasta = str(resolved)
-            return True
         if self.input_source() == ALIGN_INPUT_DEFINE and resolved.is_file():
             return bool(self._define_inputs.accept_path(resolved))
         return False
@@ -1100,9 +1085,6 @@ class TreeParamsDialog(QDialog):
             mafft_strategy=tb.MAFFT_CHOOSE,
             adjust_direction=True,
             rotate_monomers=self._rotate.isChecked(),
-            sequence_mode=TREE_SEQ_AS_IS,
-            rexdb_fasta=self._rexdb_fasta,
-            rexdb_references=self._rexdb_references,
             methylation_mask="" if protein else str(self._mask.currentData() or ""),
             mafft_gap_open=d.mafft_gap_open,
             mafft_offset=d.mafft_offset,
