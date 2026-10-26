@@ -19,7 +19,10 @@ from PySide6.QtGui import (
 )
 from PySide6.QtPdf import QPdfDocument
 from PySide6.QtWidgets import (
+    QFrame,
+    QHBoxLayout,
     QLabel,
+    QPushButton,
     QMenu,
     QMessageBox,
     QScrollArea,
@@ -33,6 +36,10 @@ from PySide6.QtWidgets import (
 )
 
 from repeatviewer.backends.bismark_cov import is_bismark_cov_file
+from repeatviewer.backends.selection_preview import (
+    is_selection_preview_path,
+    selection_preview_sources,
+)
 from repeatviewer.backends.sequence_features import (
     format_multi_sequence_fasta_summary_text,
     format_single_sequence_summary_text,
@@ -715,6 +722,8 @@ class FilePreviewPage(QWidget):
     dotplotRegionSelected = Signal(dict)  # payload from window.__flexidotLastClick
     fileWritten = Signal(object)  # Path of a file written from the preview (e.g. tree export)
     openFileRequested = Signal(object)  # Path a preview asks to open (contig view → Results)
+    # Source FASTAs of a temporary multi-file preview, to combine into a real file.
+    saveSelectionAsFileRequested = Signal(list)
 
     def __init__(self, path: Path, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -841,9 +850,29 @@ class FilePreviewPage(QWidget):
         self._mode_stack.addWidget(self._stack)
         self._mode_stack.addWidget(self._fasta_stack)
 
+        self._selection_banner = QFrame(self)
+        self._selection_banner.setObjectName("selectionPreviewBanner")
+        self._selection_banner.setStyleSheet(
+            "QFrame#selectionPreviewBanner {"
+            " background: rgba(255, 196, 0, 45);"
+            " border-bottom: 1px solid palette(mid); }"
+        )
+        banner_layout = QHBoxLayout(self._selection_banner)
+        banner_layout.setContentsMargins(8, 4, 8, 4)
+        self._selection_banner_label = QLabel(self._selection_banner)
+        self._selection_banner_label.setWordWrap(True)
+        banner_layout.addWidget(self._selection_banner_label, stretch=1)
+        self._selection_save_button = QPushButton(
+            "Save as One File…", self._selection_banner
+        )
+        self._selection_save_button.clicked.connect(self._on_save_selection_as_file)
+        banner_layout.addWidget(self._selection_save_button)
+        self._selection_banner.hide()
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
+        layout.addWidget(self._selection_banner)
         layout.addWidget(self._mode_stack, stretch=1)
         layout.addWidget(self._sequence_info_bar)
         self._load()
@@ -1373,6 +1402,7 @@ class FilePreviewPage(QWidget):
         )
         if multi:
             overview = self._ensure_annotation_overview()
+            overview.set_annotation_editing_enabled(not self.is_selection_preview())
             overview.show()
             if self._annotation_panel is not None:
                 self._annotation_panel.hide()
@@ -2266,8 +2296,29 @@ class FilePreviewPage(QWidget):
             if show_progress:
                 self._end_open_progress()
 
+    def is_selection_preview(self) -> bool:
+        """True for the temporary combined view of several selected files."""
+        return is_selection_preview_path(self.path)
+
+    def _sync_selection_preview_banner(self) -> None:
+        if not self.is_selection_preview():
+            self._selection_banner.hide()
+            return
+        count = len(selection_preview_sources(self.path))
+        self._selection_banner_label.setText(
+            f"Temporary preview of {count} selected files. "
+            "Annotation editing is off, and nothing here is saved to your files."
+        )
+        self._selection_banner.show()
+
+    def _on_save_selection_as_file(self) -> None:
+        sources = [p for p in selection_preview_sources(self.path) if p.is_file()]
+        if sources:
+            self.saveSelectionAsFileRequested.emit(sources)
+
     def _load(self) -> None:
         path = self.path
+        self._sync_selection_preview_banner()
         if _is_fasta_too_large_for_preview(path):
             self._set_single_fasta_mode(False)
             self._show_text(_FASTA_TOO_LARGE_MESSAGE)
@@ -2399,6 +2450,8 @@ class FilePreviewPage(QWidget):
     def can_edit_text(self) -> bool:
         if not self.is_text_preview_active():
             return False
+        if self.is_selection_preview():
+            return False
         if self.path.name.lower().endswith(".gz"):
             return False
         if not self.path.is_file():
@@ -2486,6 +2539,9 @@ class FilePreviewPage(QWidget):
                 if self._annotation_overview is not None:
                     self._annotation_overview.load_path(
                         self.path, msa_mode=self._msa_aligned_mode
+                    )
+                    self._annotation_overview.set_annotation_editing_enabled(
+                        not self.is_selection_preview()
                     )
                     try:
                         self._annotation_data_loaded_for = self.path.expanduser().resolve()
@@ -2651,6 +2707,8 @@ class PreviewTabWidget(QTabWidget):
     dotplotRegionSelected = Signal(dict)  # payload from window.__flexidotLastClick
     fileWritten = Signal(object)  # Path of a file written from a preview (e.g. tree export)
     openFileRequested = Signal(object)  # Path a preview asks to open (contig view → Results)
+    # Source FASTAs of a temporary multi-file preview, to combine into a real file.
+    saveSelectionAsFileRequested = Signal(list)
     # Active preview file path (``Path``) or ``None`` when no tab is open.
     currentPathChanged = Signal(object)
 
@@ -3008,6 +3066,7 @@ class PreviewTabWidget(QTabWidget):
         page.dotplotRegionSelected.connect(self.dotplotRegionSelected.emit)
         page.fileWritten.connect(self.fileWritten.emit)
         page.openFileRequested.connect(self.openFileRequested.emit)
+        page.saveSelectionAsFileRequested.connect(self.saveSelectionAsFileRequested.emit)
         self._wheel_zoom_filter.register_page(page)
 
     def show_annotation_region_for_sequence(self, seq_id: str, start: int, end: int) -> bool:

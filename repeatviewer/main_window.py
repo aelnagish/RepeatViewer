@@ -2438,6 +2438,16 @@ class MainWindow(QMainWindow):
         self._preview_selection_timer.setInterval(75)
         self._preview_selection_timer.timeout.connect(self._open_pending_preview_selection)
         self._pending_preview_selection: Path | None = None
+        # Two or more ticked / highlighted FASTA files: preview them together.
+        # Waits a little longer so ticking several boxes builds the view once.
+        self._selection_preview_timer = QTimer(self)
+        self._selection_preview_timer.setSingleShot(True)
+        self._selection_preview_timer.setInterval(250)
+        self._selection_preview_timer.timeout.connect(self._refresh_selection_preview)
+        self._selection_preview_limit_note: str | None = None
+        # Files shown in the last combined view; a refresh only acts when the
+        # set changes, so a tool result opened afterwards is not replaced.
+        self._selection_preview_key: tuple[str, ...] | None = None
         self._pending_te_genome_map: TeGenomeMapOptions | None = None
         self._pending_te_genome_map_fastas: list[Path] = []
         self._pending_te_viz: _PendingTeVizBuild | None = None
@@ -2497,6 +2507,7 @@ class MainWindow(QMainWindow):
         self._file_list.itemClicked.connect(self._on_file_item_clicked)
         self._file_list.itemDoubleClicked.connect(self._on_file_double_clicked)
         self._file_list.dragStarted.connect(self._on_file_list_drag_started)
+        self._file_list.selectionSetChanged.connect(self._selection_preview_timer.start)
         self._file_list.open_in_preview_requested.connect(self._open_files_in_preview)
         self._file_list.open_in_preview_tab_requested.connect(self._open_files_in_preview_tabs)
         self._file_list.open_in_text_editor_requested.connect(self._open_selected_in_text_editor)
@@ -2531,6 +2542,7 @@ class MainWindow(QMainWindow):
         self._file_list.add_annotation_requested.connect(self._add_annotation_for_fasta)
         self._file_list.export_annotation_requested.connect(self._export_annotation_for_fasta)
         self._file_list.attach_cyto_image_requested.connect(self._attach_cyto_images)
+        self._file_list.annotation_files_dropped.connect(self._import_dropped_annotations)
         self._file_list.cyto_images_requested.connect(self._open_cyto_images)
         from repeatviewer.widgets.cyto_images_ui import cyto_notifier
 
@@ -3298,6 +3310,17 @@ class MainWindow(QMainWindow):
 
     def _set_status_file_link(self, path: Path | None) -> None:
         """Replace the left status text with a clickable filename (Finder link)."""
+        from repeatviewer.backends.selection_preview import (
+            is_selection_preview_path,
+            selection_preview_sources,
+        )
+
+        if path is not None and is_selection_preview_path(path):
+            # The combined file lives in the app cache; do not link to it.
+            count = len(selection_preview_sources(path))
+            self._set_status_file_link(None)
+            self._set_status_message(f"Previewing {count} selected files together")
+            return
         self._status_link_restore_timer.stop()
         if path is None:
             self._status_linked_file = None
@@ -3667,6 +3690,7 @@ class MainWindow(QMainWindow):
             self._on_preview_open_additional_tab
         )
         self._preview_tabs.fileWritten.connect(self._on_preview_file_written)
+        self._preview_tabs.saveSelectionAsFileRequested.connect(self._group_sequences)
         self._preview_tabs.openFileRequested.connect(self._on_preview_open_requested)
         self._preview_tabs.dotplotRegionSelected.connect(self._on_dotplot_region_selected)
         self._preview_tabs.currentPathChanged.connect(
@@ -3948,35 +3972,9 @@ class MainWindow(QMainWindow):
 
     def _combine_annotation_json(self, sources: list[Path], dest_fasta: Path) -> None:
         """Merge JSON annotations from source FASTAs into ``dest_fasta`` sidecar."""
-        from repeatviewer.backends.sequence_features import (
-            fasta_record_lengths,
-            load_features_by_id_from_json,
-            save_annotations_multi,
-        )
+        from repeatviewer.backends.sequence_compose import combine_annotation_json
 
-        dest_lengths = fasta_record_lengths(dest_fasta)
-        dest_ids = list(dest_lengths.keys())
-        merged: dict[str, list] = {rid: [] for rid in dest_ids}
-        # Walk sources in order; assign features to dest records in the same order.
-        dest_index = 0
-        for src in sources:
-            src_lengths = fasta_record_lengths(src)
-            src_ids = list(src_lengths.keys())
-            src_feats = load_features_by_id_from_json(src, src_ids)
-            for sid in src_ids:
-                if dest_index >= len(dest_ids):
-                    break
-                feats = src_feats.get(sid) or []
-                if feats:
-                    merged[dest_ids[dest_index]].extend(feats)
-                dest_index += 1
-        if any(merged.values()):
-            save_annotations_multi(
-                dest_fasta,
-                features_by_id=merged,
-                lengths_by_id=dest_lengths,
-                record_ids=dest_ids,
-            )
+        combine_annotation_json(sources, dest_fasta)
 
     def _overview_extract_pick_records(
         self, source: Path
@@ -10004,6 +10002,9 @@ class MainWindow(QMainWindow):
     def _open_file_in_preview_if_allowed(self, path: Path) -> None:
         if self._file_list.suppress_selection_preview():
             return
+        if self._selection_preview_files() and self._showing_selection_preview():
+            # Several files are ticked / highlighted: the combined view stays.
+            return
         # Debounced after the click. If the current file has moved on since
         # (another click, or Cancel at the unsaved-changes prompt put the
         # selection back), the request is stale: skip it.
@@ -10667,19 +10668,92 @@ class MainWindow(QMainWindow):
             self._schedule_preview_for_selection(panel_path)
             QTimer.singleShot(0, self._raise_open_tool_dialogs)
 
+    def _preview_follow_selection_blocked(self) -> bool:
+        """True while a dialog uses Files-panel clicks to fill its own fields."""
+        if self._file_list.suppress_selection_preview():
+            return True
+        if self._define_database_dialog is not None and self._define_database_dialog.isVisible():
+            return True
+        if self._manage_references_dialog is not None and self._manage_references_dialog.isVisible():
+            return True
+        if self._te_viz_input_dialog is not None and self._te_viz_input_dialog.isVisible():
+            return True
+        if self._plugin_run_dialog is not None and self._plugin_run_dialog.isVisible():
+            return True
+        return self._tree_trait_dialog_open()
+
+    def _showing_selection_preview(self) -> bool:
+        from repeatviewer.backends.selection_preview import is_selection_preview_path
+
+        if self._preview_tabs is None:
+            return False
+        return is_selection_preview_path(self._preview_tabs.current_preview_path())
+
+    def _selection_preview_candidates(self) -> list[Path]:
+        """FASTA files among the ticked (else highlighted) rows, in list order."""
+        return [
+            p for p in self._selected_files()
+            if p.suffix.lower() in _FASTA_SUFFIXES
+        ]
+
+    def _selection_preview_files(self) -> list[Path]:
+        """Files to preview together, or [] for the normal single-file preview."""
+        from repeatviewer.backends.selection_preview import (
+            SELECTION_PREVIEW_MIN_FILES,
+            selection_preview_limit_message,
+        )
+
+        files = self._selection_preview_candidates()
+        if len(files) < SELECTION_PREVIEW_MIN_FILES:
+            return []
+        if selection_preview_limit_message(files) is not None:
+            return []
+        return files
+
+    def _refresh_selection_preview(self) -> None:
+        """Show ticked / highlighted FASTA files together, or go back to one file."""
+        from repeatviewer.backends.selection_preview import (
+            SELECTION_PREVIEW_MIN_FILES,
+            build_selection_preview,
+            selection_preview_limit_message,
+        )
+
+        if self._preview_tabs is None or self._preview_follow_selection_blocked():
+            return
+        candidates = self._selection_preview_candidates()
+        files = self._selection_preview_files()
+        if len(candidates) >= SELECTION_PREVIEW_MIN_FILES and not files:
+            note = selection_preview_limit_message(candidates)
+            if note and note != self._selection_preview_limit_note:
+                self._set_status_message(note, 6000)
+            self._selection_preview_limit_note = note
+        else:
+            self._selection_preview_limit_note = None
+        if not files:
+            self._selection_preview_key = None
+            if self._showing_selection_preview():
+                current = self._preview_path_from_item(self._file_list.currentItem())
+                if current is not None:
+                    self._schedule_preview_for_selection(current)
+            return
+        key = tuple(str(p) for p in files)
+        if key == self._selection_preview_key:
+            return
+        try:
+            combined = build_selection_preview(files)
+        except Exception as exc:  # noqa: BLE001
+            self._set_status_message(
+                f"Could not preview the selected files together: {exc}", 6000
+            )
+            return
+        self._selection_preview_key = key
+        self._pending_preview_selection = None
+        self._preview_selection_timer.stop()
+        self._open_preview_tab(combined, replace=True)
+
     def _schedule_preview_for_selection(self, path: Path) -> None:
         """Debounced Preview open used by selection-change and explicit click."""
-        if self._file_list.suppress_selection_preview():
-            return
-        if self._define_database_dialog is not None and self._define_database_dialog.isVisible():
-            return
-        if self._manage_references_dialog is not None and self._manage_references_dialog.isVisible():
-            return
-        if self._te_viz_input_dialog is not None and self._te_viz_input_dialog.isVisible():
-            return
-        if self._plugin_run_dialog is not None and self._plugin_run_dialog.isVisible():
-            return
-        if self._tree_trait_dialog_open():
+        if self._preview_follow_selection_blocked():
             return
         if not path.is_file():
             return
@@ -11496,6 +11570,54 @@ class MainWindow(QMainWindow):
             self._sync_status_file_link_from_preview()
         finally:
             dialog.deleteLater()
+
+    def _import_dropped_annotations(self, fasta: Path, annotations: list) -> None:
+        """Import GFF/GFF3/GTF/BED files dropped on a FASTA row (same as Add Annotation)."""
+        from repeatviewer.backends.sequence_features import (
+            import_annotation_as_rv_gff3,
+            sidecar_path,
+        )
+
+        fasta = Path(fasta).expanduser().resolve()
+        if not fasta.is_file():
+            QMessageBox.warning(self, "Add annotation", f"FASTA not found:\n{fasta}")
+            return
+        imported: list[str] = []
+        errors: list[str] = []
+        result = None
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            for raw in annotations or []:
+                annotation = Path(raw)
+                try:
+                    result = import_annotation_as_rv_gff3(fasta, annotation)
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(f"{annotation.name}: {exc}")
+                    continue
+                imported.append(annotation.name)
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        if result is not None:
+            if self._preview_tabs is not None:
+                self._preview_tabs.show_annotation_for_path(fasta)
+                self._ensure_preview_visible()
+            sources = imported[0] if len(imported) == 1 else f"{len(imported)} files"
+            seqs = result.sequence_count
+            where = f" across {seqs:,} sequences" if seqs > 1 else ""
+            self._set_status_message(
+                f"Added {sources} to {fasta.name}: {result.feature_count:,} feature(s)"
+                f"{where} → {sidecar_path(fasta).name}",
+                8000,
+                override_file_link=True,
+            )
+            self._sync_status_file_link_from_preview()
+        if errors:
+            QMessageBox.warning(
+                self,
+                "Add annotation",
+                f"Could not add to {fasta.name}:\n\n" + "\n\n".join(errors),
+            )
 
     def _open_blast_genome_map_from_selection(
         self,
@@ -15847,7 +15969,7 @@ class MainWindow(QMainWindow):
                 )
                 return
         if (
-            func_name in {"blast", "extend", "teaid", "flexidot"}
+            func_name in {"blast", "extend", "teaid"}
             and not uses_saved_blast_database
             and not blast_is_online
             and not teaid_is_pan

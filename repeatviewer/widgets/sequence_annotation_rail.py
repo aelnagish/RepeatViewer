@@ -2906,6 +2906,16 @@ class SequenceAnnotationRail(QWidget):
         self.tabChanged.emit(index)
         self._save_rail_ui_state()
 
+    def set_annotation_editing_enabled(self, enabled: bool) -> None:
+        """Grey out the Annotation page (temporary multi-file preview)."""
+        self._annotations_page.setEnabled(bool(enabled))
+        if len(self._tab_buttons) > 1:
+            self._tab_buttons[1].setToolTip(
+                self._tab_tips[1]
+                if enabled
+                else "Annotation editing is off in a temporary preview of several files"
+            )
+
     def set_current_tab(self, index: int) -> None:
         index = max(0, min(index, self._stack.count() - 1))
         self._active_tab = index

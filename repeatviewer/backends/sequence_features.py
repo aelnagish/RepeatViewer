@@ -1893,6 +1893,33 @@ class AnnotationImportResult:
         yield self.feature_count
 
 
+ANNOTATION_IMPORT_SUFFIXES = (".gff", ".gff3", ".gtf", ".bed")
+
+
+def is_importable_annotation_path(path: Path) -> bool:
+    """True for a GFF/GFF3/GTF/BED file that :func:`import_annotation_as_rv_gff3` accepts."""
+    name = path.name.lower()
+    if name.endswith(".gz"):
+        return False
+    return path.suffix.lower() in ANNOTATION_IMPORT_SUFFIXES
+
+
+def annotation_import_paths(paths) -> list[Path]:
+    """Importable annotation files among ``paths``, in order, without duplicates."""
+    out: list[Path] = []
+    seen: set[str] = set()
+    for raw in paths or []:
+        path = Path(raw)
+        if not is_importable_annotation_path(path) or not path.is_file():
+            continue
+        key = str(path.expanduser().resolve())
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(Path(key))
+    return out
+
+
 def import_annotation_as_rv_gff3(
     fasta_path: Path,
     annotation_path: Path,
@@ -1916,7 +1943,7 @@ def import_annotation_as_rv_gff3(
     suffix = source.suffix.lower()
     if source.name.lower().endswith(".gz"):
         raise ValueError("Gzipped annotation files are not supported for import.")
-    if suffix not in {".gff", ".gff3", ".gtf", ".bed"}:
+    if suffix not in ANNOTATION_IMPORT_SUFFIXES:
         raise ValueError(
             f"Unsupported annotation type ({suffix or 'unknown'}). "
             "Use .gff, .gff3, .gtf, or .bed."
