@@ -226,3 +226,37 @@ def test_contig_statistics_rows():
     assert rows["Identical sites"].startswith("3 of 4")
     assert rows["Variant positions"] == "1"
     assert "1 intact" in rows["Features in sequences"] and "1 lost" in rows["Features in sequences"]
+
+
+def test_go_to_and_double_click_open_in_rows(qapp, tmp_path):
+    from repeatviewer.widgets.contig_view import ContigViewPanel
+
+    ref = "ACGT" * 50
+    rows = [{"name": f"r{i}", "start": 10 * i, "end": 10 * i + 40, "strand": "+-"[i % 2],
+             "row": ref[10 * i:10 * i + 40], "ins": [], "identity": 1.0, "mismatches": 0,
+             "deleted": 0, "inserted": 0, "mapq": 60, "kind": "primary", "lift": []}
+            for i in range(5)]
+    data = {"format": "repeatviewer-map", "version": 1, "title": "t", "summary": {},
+            "engine": "minimap2", "contigs": [{
+                "id": "ref", "length": len(ref), "detailed": True, "n_reads": 5,
+                "reference": ref, "consensus": ref,
+                "ref_to_cons": [[i, 1] for i in range(len(ref))],
+                "coverage": [[2, len(ref)]], "bin_size": 1, "features": [],
+                "feature_summary": [], "variants": [], "reads": rows}], "unused": []}
+    path = tmp_path / "t.rvmap"
+    path.write_text(json.dumps(data))
+    panel = ContigViewPanel()
+    panel.resize(1000, 600)
+    panel.show()
+    panel.load(path)
+    qapp.processEvents()
+    panel._goto.setText("50-80")
+    panel._go_to()
+    qapp.processEvents()
+    c = panel.canvas
+    assert c.bp_at(150) <= 50 and c.bp_at(c.viewport().width()) >= 79
+    panel._layout_mode.setCurrentIndex(1)          # packed
+    assert not c.one_per_row
+    panel._open_read_in_rows(3)
+    assert c.one_per_row and c.selected == 3
+    panel.close()

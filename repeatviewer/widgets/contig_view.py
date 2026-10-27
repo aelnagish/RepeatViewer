@@ -68,6 +68,8 @@ _READ_FILL_SEL = QColor("#9cc0ef")
 _INSERT_COLOR = QColor("#8e44ad")
 _DELETE_COLOR = QColor("#5a5a5a")
 _REVERSE_TINT = QColor(123, 63, 181, 22)    # reverse-strand rows, light lavender
+_ARROW_FWD = QColor("#1f5fbf")
+_ARROW_REV = QColor("#7b3fb5")
 _MARK_FILL = QColor(31, 95, 191, 28)        # current difference column
 _MARK_EDGE = QColor("#1f5fbf")
 _NO_COVERAGE = QColor("#d9d9d6")
@@ -546,6 +548,7 @@ _FALLBACK = (QColor("#dddddd"), QColor("#000000"))
 
 class ContigCanvas(QAbstractScrollArea):
     readClicked = Signal(int)
+    readDoubleClicked = Signal(int)
     viewChanged = Signal()       # zoom or scroll (the overview strip follows)
 
     HIGHLIGHT_DIFF = "diff"
@@ -936,9 +939,29 @@ class ContigCanvas(QAbstractScrollArea):
         super().mousePressEvent(event)
 
     def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802
-        if self.read_at(event.position()) < 0:
+        i = self.read_at(event.position())
+        if i < 0:
             self.fit()
+        else:
+            self.readDoubleClicked.emit(i)
         super().mouseDoubleClickEvent(event)
+
+    def show_range(self, start0: int, end0: int) -> None:
+        """Zoom so [start0, end0) fills the view (a single position: zoom to bases)."""
+        m = self.model
+        if m is None:
+            return
+        start0, end0 = max(0, start0), min(m.length, max(end0, start0 + 1))
+        if end0 - start0 <= 1:
+            self.show_base(start0, zoom_to_letters=True, mark=True)
+            return
+        self.ppb = min(MAX_PPB, max(1e-6, (self._data_w() - 12) / (end0 - start0)))
+        self._update_scrollbars()
+        # centred: a short range shown at the maximum zoom sits in the middle
+        mid = (start0 + end0) / 2 * self.ppb
+        self.horizontalScrollBar().setValue(int(mid - self._data_w() / 2))
+        self.viewport().update()
+        self.viewChanged.emit()
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
         m = self.model
@@ -950,6 +973,10 @@ class ContigCanvas(QAbstractScrollArea):
             QToolTip.hideText()
             return
         lines = [f"Position {bp + 1:,}"]
+        if m.reference and bp < len(m.reference):
+            ctx = mr.methylation_context(m.reference, bp)
+            if ctx:
+                lines[0] += f" · {ctx} context"
         if m.reference and bp < len(m.reference):
             lines[0] += f" · reference {m.reference[bp]}"
         cons = self.consensus_seq()
@@ -1104,10 +1131,17 @@ class ContigCanvas(QAbstractScrollArea):
                     p.fillRect(QRectF(0, y, LABEL_W - 1, rh), _READ_FILL_SEL)
                 elif r.strand == "-":
                     p.fillRect(QRectF(0, y, LABEL_W - 1, rh), _REVERSE_TINT)
+                bh_ = self.read_base_h()
+                rev = r.strand == "-"
+                p.setPen(_ARROW_REV if rev else _ARROW_FWD)
+                p.drawText(QRectF(6, y, 14, bh_), Qt.AlignmentFlag.AlignCenter,
+                           "←" if rev else "→")
                 p.setPen(fg)
-                p.drawText(QRectF(6, y, LABEL_W - 10, self.read_base_h()),
+                pl = int(r.data.get("placement", 1) or 1)
+                name = r.name if pl == 1 else f"{r.name} #{pl}"
+                p.drawText(QRectF(24, y, LABEL_W - 28, bh_),
                            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
-                           fm.elidedText(r.label, Qt.TextElideMode.ElideRight, LABEL_W - 12))
+                           fm.elidedText(name, Qt.TextElideMode.ElideRight, LABEL_W - 30))
                 if self.read_features_on() and y + rh < h:
                     # light rule between sequences when their features are shown
                     p.setPen(QPen(QColor(0, 0, 0, 28), 1))
@@ -1132,8 +1166,6 @@ class ContigCanvas(QAbstractScrollArea):
             p.drawText(QPointF(x + 2, RULER_H - 10), f"{max(1, bp):,}")
 
     def _paint_features(self, p: QPainter, y0: int, bp0: int, bp1: int) -> None:
-        from repeatviewer.widgets.sequence_map_viewer import _draw_directed_feature
-
         m = self.model
         summary = m.feature_summary
         for k, (f, row) in enumerate(zip(m.features, self._feat_row)):
@@ -1142,9 +1174,9 @@ class ContigCanvas(QAbstractScrollArea):
             x0, x1 = self.x_of(f.start - 1), self.x_of(f.end)
             rect = QRectF(x0, y0 + row * FEATURE_ROW_H + 1, max(2.0, x1 - x0), FEATURE_ROW_H - 3)
             status = feature_status_text(summary[k]) if k < len(summary) else ""
-            _draw_directed_feature(p, rect, QColor(f.color or "#888888"),
-                                   forward=f.is_forward(),
-                                   label=f"{f.name} · {status}" if status else f.name)
+            _feature_bar(p, rect, QColor(f.color or "#888888"), forward=f.is_forward(),
+                         label=f"{f.name} · {status}" if status else f.name, point_size=7,
+                         left_edge=LABEL_W, right_edge=self.viewport().width())
 
     def _hatch(self, p: QPainter, rect: QRectF) -> None:
         """No coverage: light diagonal hatching, never a difference colour."""
@@ -1456,10 +1488,31 @@ class ContigCanvas(QAbstractScrollArea):
                 p.drawLine(QPointF(x, y), QPointF(x, y + bh - 2))
 
 
-def _paint_read_features_impl(canvas: "ContigCanvas", p: QPainter, r: "ReadView", y0: float,
-                              bp0: int, bp1: int) -> None:
+def _feature_bar(p: QPainter, rect: QRectF, color: QColor, *, forward: bool, label: str,
+                 point_size: int, left_edge: float, right_edge: float) -> None:
+    """Directed bar with its label kept inside the visible part, so a long feature
+    that starts off-screen still says what it is."""
     from repeatviewer.widgets.sequence_map_viewer import _draw_directed_feature
 
+    _draw_directed_feature(p, rect, color, forward=forward, label="")
+    vis_l, vis_r = max(rect.left(), left_edge), min(rect.right(), right_edge)
+    if not label or vis_r - vis_l < 28:
+        return
+    font = QFont(p.font())
+    font.setPointSize(point_size)
+    p.setFont(font)
+    fm = QFontMetrics(font)
+    head = min(rect.height() * 0.9, 10.0)
+    text_rect = QRectF(vis_l + 4, rect.top(), vis_r - vis_l - 8 - head, rect.height())
+    if text_rect.width() < 12:
+        return
+    p.setPen(QColor("#ffffff"))
+    p.drawText(text_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+               fm.elidedText(label, Qt.TextElideMode.ElideRight, int(text_rect.width())))
+
+
+def _paint_read_features_impl(canvas: "ContigCanvas", p: QPainter, r: "ReadView", y0: float,
+                              bp0: int, bp1: int) -> None:
     m = canvas.model
     for fi, status, ndiff, _ident, _s, _e in r.data.get("lift", []):
         if not 0 <= fi < len(m.features) or status == mr.STATUS_NOT_COVERED:
@@ -1480,12 +1533,81 @@ def _paint_read_features_impl(canvas: "ContigCanvas", p: QPainter, r: "ReadView"
             color.setAlpha(120)
         label = f.name if status == mr.STATUS_INTACT else f"{f.name} · " + (
             f"{ndiff} diff" if status == mr.STATUS_CHANGED else status)
-        _draw_directed_feature(p, rect, color, forward=f.is_forward(), label=label,
-                               label_point_size=6)
+        _feature_bar(p, rect, color, forward=f.is_forward(), label=label, point_size=6,
+                     left_edge=LABEL_W, right_edge=canvas.viewport().width())
         if status == mr.STATUS_PARTIAL:
             p.setPen(QPen(QColor(f.color or "#888888"), 1, Qt.PenStyle.DashLine))
             p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawRect(rect)
+
+
+class ContigLegend(QWidget):
+    """One quiet line under the view explaining its marks (centred)."""
+
+    HEIGHT = 22
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setFixedHeight(self.HEIGHT)
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        from PySide6.QtGui import QBrush
+
+        p = QPainter(self)
+        pal = self.palette()
+        p.fillRect(self.rect(), pal.color(pal.ColorRole.Window))
+        f = QFont(p.font())
+        f.setPointSize(8)
+        p.setFont(f)
+        fm = QFontMetrics(f)
+        muted = pal.color(pal.ColorRole.PlaceholderText)
+        mono = _mono(8)
+        colors = _base_colors()
+        items = [
+            ("dot", "matches reference"), ("T", "differs"), ("-", "deleted"),
+            ("Y", "ambiguity code"), ("hatch", "no coverage"),
+            ("fwd", "forward"), ("rev", "reverse"),
+            ("partial", "feature partial"), ("lost", "feature lost"),
+        ]
+        sw, gap, pad = 14, 6, 18
+        widths = [sw + gap + fm.horizontalAdvance(t) for _k, t in items]
+        x = max(8.0, (self.width() - (sum(widths) + pad * (len(items) - 1))) / 2)
+        cy = self.HEIGHT / 2
+        for (kind, text), wdt in zip(items, widths):
+            box = QRectF(x, cy - 6, sw, 12)
+            if kind == "dot":
+                p.setPen(QColor("#9a9a96"))
+                p.setFont(mono)
+                p.drawText(box, Qt.AlignmentFlag.AlignCenter, "·")
+            elif kind in ("T", "-"):
+                bg_c = colors.get("T", _FALLBACK)[0] if kind == "T" else _DELETE_COLOR
+                p.fillRect(box, bg_c)
+                p.setPen(QColor("#ffffff") if kind == "-" else colors.get("T", _FALLBACK)[1])
+                p.setFont(mono)
+                p.drawText(box, Qt.AlignmentFlag.AlignCenter, kind)
+            elif kind == "Y":
+                p.fillRect(box, QColor("#fff4d6"))
+                p.setPen(QPen(QColor("#a35f00"), 1, Qt.PenStyle.DashLine))
+                p.drawRect(box.adjusted(0.5, 0.5, -0.5, -0.5))
+            elif kind == "hatch":
+                p.fillRect(box, QBrush(_NO_COVERAGE, Qt.BrushStyle.BDiagPattern))
+            elif kind in ("fwd", "rev"):
+                p.setPen(_ARROW_REV if kind == "rev" else _ARROW_FWD)
+                p.drawText(box, Qt.AlignmentFlag.AlignCenter, "←" if kind == "rev" else "→")
+            elif kind == "partial":
+                c = QColor("#4caf50")
+                c.setAlpha(120)
+                p.fillRect(box.adjusted(0, 3, 0, -3), c)
+                p.setPen(QPen(QColor("#4caf50"), 1, Qt.PenStyle.DashLine))
+                p.drawRect(box.adjusted(0, 3, 0, -3))
+            elif kind == "lost":
+                p.fillRect(box.adjusted(0, 3, 0, -3), QColor("#c4c4c0"))
+            p.setFont(f)
+            p.setPen(muted)
+            p.drawText(QRectF(x + sw + gap, 0, wdt, self.HEIGHT),
+                       Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, text)
+            x += wdt + pad
+        p.end()
 
 
 class ContigOverview(QWidget):
@@ -1810,6 +1932,17 @@ class ContigViewPanel(QWidget):
         b2.addSpacing(8)
         b2.addWidget(self._hidden_label)
         b2.addStretch(1)
+        from PySide6.QtWidgets import QLineEdit
+
+        self._goto = QLineEdit(self)
+        self._goto.setPlaceholderText("e.g. 103 or 90-130")
+        self._goto.setFixedWidth(150)
+        self._goto.setClearButtonEnabled(True)
+        self._goto.setToolTip("Go to a position or a range on the reference "
+                              "(e.g. 103, 90-130, or CroSat2:90-130). Enter to go.")
+        self._goto.returnPressed.connect(self._go_to)
+        b2.addWidget(QLabel("Go to", self))
+        b2.addWidget(self._goto)
 
         self._tabs = QTabWidget(self)
         self._reads_view = _table(self)
@@ -1827,6 +1960,11 @@ class ContigViewPanel(QWidget):
         self._features_view.clicked.connect(self._on_feature_cell)
         self._variants_view.clicked.connect(self._on_variant_row)
         self.canvas.readClicked.connect(self._select_read_row)
+        self.canvas.readDoubleClicked.connect(self._open_read_in_rows)
+        hint = QLabel("Click a row to show it in the view", self)
+        hint.setEnabled(False)
+        hint.setContentsMargins(0, 0, 8, 0)
+        self._tabs.setCornerWidget(hint, Qt.Corner.TopRightCorner)
 
         top = QWidget(self)
         tl = QVBoxLayout(top)
@@ -1834,6 +1972,8 @@ class ContigViewPanel(QWidget):
         tl.setSpacing(0)
         tl.addWidget(self.overview)
         tl.addWidget(self.canvas, 1)
+        self.legend = ContigLegend(top)
+        tl.addWidget(self.legend)
         split = QSplitter(Qt.Orientation.Vertical, self)
         split.addWidget(top)
         split.addWidget(self._tabs)
@@ -2043,6 +2183,41 @@ class ContigViewPanel(QWidget):
         self.overview.update()
         if hasattr(self, "_stats_view"):
             self._fill_statistics()
+
+    # ---------------------------------------------------------------- go to / reads
+
+    def _go_to(self) -> None:
+        from repeatviewer.backends.motif_search import parse_position
+
+        text = self._goto.text().strip()
+        parsed = parse_position(text)
+        if parsed is None:
+            self._goto.setToolTip(f"\"{text}\" is not a position. Type e.g. 103 or 90-130.")
+            self._goto.selectAll()
+            return
+        name, start, end = parsed
+        if name:
+            for i in range(self._contig.count()):
+                if str(self._contig.itemData(i)) == name:
+                    self._contig.setCurrentIndex(i)
+                    break
+        m = self.canvas.model
+        if m is None:
+            return
+        if start > m.length:
+            self._goto.setToolTip(f"The reference is {m.length:,} bp long.")
+            self._goto.selectAll()
+            return
+        self.canvas.show_range(start - 1, min(end, m.length))
+        self._sync_difference_label()
+
+    def _open_read_in_rows(self, read_idx: int) -> None:
+        """Double-click a read (packed view): show it in One sequence per row."""
+        if not self.canvas.one_per_row:
+            self._layout_mode.setCurrentIndex(0)       # One sequence per row
+        self.canvas.selected = read_idx
+        self.canvas.show_read(read_idx)
+        self._select_read_row(read_idx)
 
     # ---------------------------------------------------------------- menus
 
