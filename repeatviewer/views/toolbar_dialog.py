@@ -56,6 +56,7 @@ SEQUENCE_TOOLBAR_IDS: tuple[str, ...] = (
 )
 
 TOOLS_TOOLBAR_IDS: tuple[str, ...] = (
+    "ncbi_download",
     "aliview",
     "blast",
     "hmmer",
@@ -105,6 +106,7 @@ TOOLBAR_LABELS: dict[str, str] = {
     "orf_prediction": "ORF Prediction",
     "translate": "Translate",
     "aliview": "AliView",
+    "ncbi_download": "NCBI Download",
     "_sep1": "— separator —",
     "align": "Align",
     "fastga": "FastGA",
