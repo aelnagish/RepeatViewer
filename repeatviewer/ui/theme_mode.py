@@ -15,9 +15,18 @@ from __future__ import annotations
 
 import os
 
-from PySide6.QtCore import Qt, QSettings
+from PySide6.QtCore import QEvent, QObject, Qt, QSettings
 from PySide6.QtGui import QColor, QGuiApplication, QPalette
-from PySide6.QtWidgets import QApplication, QMenu, QProxyStyle, QStyleFactory
+from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QApplication,
+    QComboBox,
+    QMenu,
+    QProxyStyle,
+    QStyledItemDelegate,
+    QStyleFactory,
+    QWidget,
+)
 
 THEME_SETTINGS_GROUP = "appearance"
 DEFAULT_THEME_MODE = "auto"
@@ -90,14 +99,86 @@ def save_corner_shape(value: str) -> None:
 _APP_STYLE = None
 
 
+# Popups drawn by the stylesheet with rounded corners (theme.py). Their window must be
+# transparent or the corners stay square behind the rounded border.
+_ROUNDED_POPUP_CLASSES = ("QComboBoxPrivateContainer", "QTipLabel")
+_ROUNDED_POPUP_NAMES = ("previewScaleSliderPopup",)
+POPUP_RADIUS = 8
+
+# Completer lists are stand-alone popup views the app stylesheet can't single out,
+# so they get this sheet directly. The rounded panel behind them is painted by
+# _POPUP_PAINTER; the list itself is transparent on top.
+_POPUP_LIST_CSS = (
+    "QAbstractItemView { background: transparent; border: none; padding: 5px;"
+    " outline: 0; }"
+    "QAbstractItemView::item { padding: 3px 8px; border-radius: 5px; min-height: 18px; }"
+    "QAbstractItemView::item:selected { background: palette(highlight);"
+    " color: palette(highlighted-text); }"
+)
+
+
+def paint_rounded_popup(widget) -> None:
+    """Background for a hand-made popup frame: rounded, base colour, hairline border."""
+    from PySide6.QtCore import QRectF
+    from PySide6.QtGui import QPainter, QPen
+
+    p = QPainter(widget)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    # app palette: a popup list's own stylesheet ('transparent') overrides its palette
+    pal = QApplication.palette()
+    p.setPen(QPen(pal.color(pal.ColorRole.Midlight), 1))
+    p.setBrush(pal.color(pal.ColorRole.Base))
+    p.drawRoundedRect(QRectF(widget.rect()).adjusted(0.5, 0.5, -0.5, -0.5),
+                      POPUP_RADIUS, POPUP_RADIUS)
+    p.end()
+
+
+class _PopupPainter(QObject):
+    """Paints the rounded panel for popup windows whose own painting is square: the
+    combo-box list container (Fusion draws a square frame there) and completer lists."""
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802 (Qt API)
+        if event.type() == QEvent.Type.Paint and isinstance(obj, QWidget):
+            paint_rounded_popup(obj)
+            return True
+        return False
+
+
+_POPUP_PAINTER = _PopupPainter()
+
+
 class _MenuStyle(QProxyStyle):
-    """Fusion, with menus drawn on a transparent popup so the stylesheet's rounded
-    corners show (an opaque popup keeps square corners behind them)."""
+    """Fusion, with every popup (menus, combo-box lists, tooltips, completer lists, the
+    preview zoom slider) on a transparent window, so the stylesheet's rounded corners
+    show. One look for all popups across the app."""
 
     def polish(self, target):  # Qt override: QWidget, QPalette or QApplication
-        if isinstance(target, QMenu) and not target.testAttribute(
-                Qt.WidgetAttribute.WA_TranslucentBackground):
-            target.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        if isinstance(target, QWidget):
+            rounded = (
+                isinstance(target, QMenu)
+                or type(target).__name__ in _ROUNDED_POPUP_CLASSES
+                or target.metaObject().className() in _ROUNDED_POPUP_CLASSES
+                or target.objectName() in _ROUNDED_POPUP_NAMES
+            )
+            if (not rounded and isinstance(target, QAbstractItemView)
+                    and target.isWindow()
+                    and target.windowType() == Qt.WindowType.Popup):
+                # QCompleter list: a stand-alone popup view
+                rounded = True
+                if not target.styleSheet():
+                    target.setStyleSheet(_POPUP_LIST_CSS)
+                target.installEventFilter(_POPUP_PAINTER)
+            if isinstance(target, QComboBox):
+                # The internal combo delegates ignore the stylesheet's rounded item
+                # highlight; the standard one follows it. Custom delegates are kept.
+                name = target.itemDelegate().metaObject().className()
+                if name in ("QComboMenuDelegate", "QComboBoxDelegate"):
+                    target.setItemDelegate(QStyledItemDelegate(target))
+            if target.metaObject().className() == "QComboBoxPrivateContainer":
+                target.installEventFilter(_POPUP_PAINTER)
+            if rounded and not target.testAttribute(
+                    Qt.WidgetAttribute.WA_TranslucentBackground):
+                target.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         return super().polish(target)
 
 

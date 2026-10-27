@@ -558,7 +558,7 @@ def application_stylesheet(
     }}
     QFrame#previewScaleSliderPopup {{
         border: 1px solid palette(mid);
-        border-radius: {radius_sm}px;
+        border-radius: {radius}px;
         background: palette(base);
     }}
     QSlider#previewScaleSlider::groove:vertical {{
@@ -627,7 +627,7 @@ def application_stylesheet(
        in theme_mode._MenuStyle. Check marks and submenu arrows stay with Fusion. */
     QMenu {{
         background: palette(base);
-        border: 1px solid palette(mid);
+        border: 1px solid palette(midlight);
         border-radius: {radius}px;
         padding: 5px;
     }}
@@ -648,5 +648,37 @@ def application_stylesheet(
         height: 1px;
         background: palette(midlight);
         margin: 4px 8px;
+    }}
+    /* Combo-box drop-down lists: same rounded popup as menus. The panel is painted
+       by theme_mode._PopupPainter on the container; the list is transparent on top
+       (only the list view is styled here, never QComboBox itself -- see the note on
+       buttons above). Completer lists get the same in theme_mode. */
+    QComboBoxPrivateContainer {{
+        background: transparent;
+        border: none;
+    }}
+    QComboBox QAbstractItemView {{
+        background: transparent;
+        border: none;
+        padding: 5px;
+        outline: 0;
+        selection-background-color: {accent};
+        selection-color: white;
+    }}
+    QComboBox QAbstractItemView::item {{
+        padding: 3px 8px;
+        border-radius: 5px;
+        min-height: 18px;
+    }}
+    QComboBox QAbstractItemView::item:selected {{
+        background: {accent};
+        color: white;
+    }}
+    QToolTip {{
+        background: palette(tool-tip-base);
+        color: palette(tool-tip-text);
+        border: 1px solid palette(midlight);
+        border-radius: {radius_sm}px;
+        padding: 4px 6px;
     }}
     """

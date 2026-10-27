@@ -2085,16 +2085,11 @@ class ContigViewPanel(QWidget):
         nr.addSpacing(2)
         nr.addWidget(self._files_btn)
         nr.addWidget(self._side_btn)
-        # legend: the app's round "?" (help_button style), click shows the key as a popup
-        from repeatviewer.widgets.help_button import HELP_BUTTON_SIZE, HELP_BUTTON_STYLE
+        # legend: the app's shared round "?"; click shows the key as a popup
+        from repeatviewer.widgets.help_button import make_help_popup_button
 
-        self._legend_btn = QToolButton(self)
-        self._legend_btn.setText("?")
-        self._legend_btn.setFixedSize(HELP_BUTTON_SIZE, HELP_BUTTON_SIZE)
-        self._legend_btn.setStyleSheet(HELP_BUTTON_STYLE)
-        self._legend_btn.setToolTip("What the colours and marks mean")
-        self._legend_btn.setAccessibleName("Legend")
-        self._legend_btn.clicked.connect(self._show_legend)
+        self._legend_btn = make_help_popup_button(
+            self, "Legend", "What the colours and marks mean", self._show_legend)
         nr.addSpacing(2)
         nr.addWidget(self._legend_btn)
         bl.addWidget(self._nav_right)

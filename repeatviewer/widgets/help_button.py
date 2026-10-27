@@ -59,18 +59,33 @@ def show_help_message(parent: QWidget | None, title: str, help_text: str) -> Non
     box.exec()
 
 
-def make_help_button(parent: QWidget | None, title: str, help_text: str) -> QToolButton:
-    """Round "?" button: hover shows ``help_text``, click opens it titled ``title``."""
+def _round_help_button(parent: QWidget | None, title: str, tooltip: str) -> QToolButton:
     button = QToolButton(parent)
     button.setText("?")
-    button.setToolTip(help_tooltip_text(help_text))
+    button.setToolTip(tooltip)
     button.setAutoRaise(False)
     button.setFixedSize(HELP_BUTTON_SIZE, HELP_BUTTON_SIZE)
     button.setStyleSheet(HELP_BUTTON_STYLE)
     button.setAccessibleName(f"Help: {title}")
+    return button
+
+
+def make_help_button(parent: QWidget | None, title: str, help_text: str) -> QToolButton:
+    """Round "?" button: hover shows ``help_text``, click opens it titled ``title``."""
+    button = _round_help_button(parent, title, help_tooltip_text(help_text))
     button.clicked.connect(
         lambda checked=False: show_help_message(button.window(), title, help_text)
     )
+    return button
+
+
+def make_help_popup_button(
+    parent: QWidget | None, title: str, tooltip: str, on_click
+) -> QToolButton:
+    """The same round "?" for help that is a picture rather than text (e.g. the contig
+    view's legend): hover shows ``tooltip``, click calls ``on_click`` to show a popup."""
+    button = _round_help_button(parent, title, tooltip)
+    button.clicked.connect(lambda checked=False: on_click())
     return button
 
 
