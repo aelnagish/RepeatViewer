@@ -941,20 +941,29 @@ class ContigCanvas(QAbstractScrollArea):
         return False
 
     def wheelEvent(self, event) -> None:  # noqa: N802
+        """Mouse wheel: zoom around the mouse (Shift: up/down through the sequences,
+        Option/Alt: along the sequence). A trackpad scrolls as usual (two fingers up/down
+        and sideways) and zooms with a pinch or Cmd/Ctrl."""
         mods = event.modifiers()
-        if mods & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier):
-            # Cmd/Ctrl + wheel: smooth on a trackpad (many small steps), one notch = 25 %
-            delta = event.angleDelta().y() or event.angleDelta().x()
-            if not delta:
-                delta = (event.pixelDelta().y() or event.pixelDelta().x()) * 2
+        d = event.angleDelta()
+        step = d.y() or d.x()           # macOS turns Shift + wheel into a sideways delta
+        trackpad = event.phase() != Qt.ScrollPhase.NoScrollPhase
+        zoom_key = mods & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier)
+        if zoom_key or (not trackpad and not mods and d.x() == 0):
+            # one notch = 25 %; small trackpad steps zoom smoothly
+            delta = step or (event.pixelDelta().y() or event.pixelDelta().x()) * 2
             if delta:
                 self._zoom_at(1.25 ** (delta / 120.0), event.position().x())
             event.accept()
             return
-        if mods & Qt.KeyboardModifier.ShiftModifier:
+        if not trackpad and mods & Qt.KeyboardModifier.ShiftModifier:
+            v = self.verticalScrollBar()
+            v.setValue(v.value() - step)
+            event.accept()
+            return
+        if not trackpad and mods & Qt.KeyboardModifier.AltModifier:
             h = self.horizontalScrollBar()
-            d = event.angleDelta()
-            h.setValue(h.value() - (d.y() or d.x()))
+            h.setValue(h.value() - step)
             event.accept()
             return
         super().wheelEvent(event)
@@ -1974,10 +1983,12 @@ class ContigViewPanel(QWidget):
             b.clicked.connect(slot)
             return b
 
-        key = "Cmd" if sys.platform == "darwin" else "Ctrl"
-        zoom_out = tool("−", f"Zoom out\n{key} + wheel or pinch zooms around the mouse",
+        alt = "Option" if sys.platform == "darwin" else "Alt"
+        zoom_out = tool("−", "Zoom out\nMouse wheel or trackpad pinch zooms around the mouse; "
+                        f"Shift + wheel scrolls the sequences, {alt} + wheel moves along",
                         lambda: self.canvas.zoom(0.66))
-        zoom_in = tool("+", f"Zoom in\n{key} + wheel or pinch zooms around the mouse",
+        zoom_in = tool("+", "Zoom in\nMouse wheel or trackpad pinch zooms around the mouse; "
+                       f"Shift + wheel scrolls the sequences, {alt} + wheel moves along",
                        lambda: self.canvas.zoom(1.5))
         fit = tool("Fit", "Show the whole reference (or double-click empty space in the view)",
                    self.canvas.fit)
