@@ -17,7 +17,7 @@ import os
 
 from PySide6.QtCore import Qt, QSettings
 from PySide6.QtGui import QColor, QGuiApplication, QPalette
-from PySide6.QtWidgets import QApplication, QStyleFactory
+from PySide6.QtWidgets import QApplication, QMenu, QProxyStyle, QStyleFactory
 
 THEME_SETTINGS_GROUP = "appearance"
 DEFAULT_THEME_MODE = "auto"
@@ -87,6 +87,20 @@ def save_corner_shape(value: str) -> None:
     del value
 
 
+_APP_STYLE = None
+
+
+class _MenuStyle(QProxyStyle):
+    """Fusion, with menus drawn on a transparent popup so the stylesheet's rounded
+    corners show (an opaque popup keeps square corners behind them)."""
+
+    def polish(self, target):  # Qt override: QWidget, QPalette or QApplication
+        if isinstance(target, QMenu) and not target.testAttribute(
+                Qt.WidgetAttribute.WA_TranslucentBackground):
+            target.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        return super().polish(target)
+
+
 def apply_theme(mode: str | None = None) -> None:
     """Apply the theme to the current QApplication.
 
@@ -103,7 +117,9 @@ def apply_theme(mode: str | None = None) -> None:
 
     fusion = QStyleFactory.create("Fusion")
     if fusion is not None:
-        app.setStyle(fusion)
+        global _APP_STYLE
+        _APP_STYLE = _MenuStyle(fusion)
+        app.setStyle(_APP_STYLE)
 
     _apply_color_scheme(mode)
     concrete = _resolve_os_theme() if mode == "auto" else mode

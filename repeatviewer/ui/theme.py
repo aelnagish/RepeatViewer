@@ -621,4 +621,32 @@ def application_stylesheet(
         margin: -4px 0;
         border-radius: 5px;
     }}
+    /* Menus (menu bar, right-click, toolbar drop-downs): rounded popup with a soft
+       rounded highlight. Safe as a stylesheet, unlike buttons and combo boxes: Qt
+       paints the whole menu from it. Round corners need the translucent popup set
+       in theme_mode._MenuStyle. Check marks and submenu arrows stay with Fusion. */
+    QMenu {{
+        background: palette(base);
+        border: 1px solid palette(mid);
+        border-radius: {radius}px;
+        padding: 5px;
+    }}
+    QMenu::item {{
+        padding: 4px 14px 4px 10px;
+        border-radius: 5px;
+        background: transparent;
+    }}
+    QMenu::item:selected {{
+        background: {accent};
+        color: white;
+    }}
+    QMenu::item:disabled {{
+        color: palette(mid);
+        background: transparent;
+    }}
+    QMenu::separator {{
+        height: 1px;
+        background: palette(midlight);
+        margin: 4px 8px;
+    }}
     """

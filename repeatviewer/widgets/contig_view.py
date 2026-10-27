@@ -2689,49 +2689,53 @@ class ContigViewPanel(QWidget):
                 self._reads_view.scrollTo(model.index(row, 0))
                 break
 
+    FILES_MENU_W = 260
+
     def _build_files_menu(self) -> None:
-        """Files the run wrote, by their real names. Tables and the report are not listed:
-        the tabs show them live; Reveal in Finder gives the files themselves."""
+        """Files the run wrote: what each one is on the left, the end of its name on the
+        right, full path in the tooltip; the same width whatever the run is called. Tables and the report are not listed: the tabs show them live."""
         import platform
 
         from repeatviewer.ui.platform import reveal_in_file_manager
 
-        self._files_menu.clear()
+        menu = self._files_menu
+        menu.clear()
+        menu.setMinimumWidth(self.FILES_MENU_W)
+        menu.setToolTipsVisible(True)
         if self._path is None:
             return
-        details = self._path.parent / self._data.get("details_dir", "")
-        tips = {"consensus": "Consensus sequence with the reference features",
-                "mapped": "The placed sequences, turned to the reference strand",
-                "unused": "Sequences that could not be placed",
-                "raw": "The aligner's own output, for other tools"}
-        for key in ("consensus", "mapped", "unused", "raw"):
-            name = self._data.get("details", {}).get(key)
-            if not name:
-                continue
-            target = details / name
-            act = QAction(name, self._files_menu)
-            act.setToolTip(tips[key])
+        fm = QFontMetrics(menu.font())
+        name_w = fm.horizontalAdvance("x" * 16)           # same for every run
+
+        def add(label: str, target: Path, tip: str) -> None:
+            short = fm.elidedText(target.name, Qt.TextElideMode.ElideLeft, name_w)
+            act = QAction(f"{label}\t{short}", menu)      # tab: name in the right column
+            act.setToolTip(f"{tip}\n{target}")
             act.setEnabled(target.is_file())
             act.triggered.connect(lambda _c=False, t=target: self.openRequested.emit(t))
-            self._files_menu.addAction(act)
+            menu.addAction(act)
+
+        head = menu.addAction("Written by this run")
+        head.setEnabled(False)
+        details = self._path.parent / self._data.get("details_dir", "")
+        for key, label, tip in (
+                ("consensus", "Consensus", "Consensus sequence with the reference features"),
+                ("mapped", "Placed sequences", "The placed sequences, on the reference strand"),
+                ("unused", "Not used", "Sequences that could not be placed"),
+                ("raw", "Aligner output", "The aligner's own output, for other tools")):
+            name = self._data.get("details", {}).get(key)
+            if name:
+                add(label, details / name, tip)
         ref = Path(self._data.get("reference", ""))
         if ref.name:
-            self._files_menu.addSeparator()
-            act = QAction(ref.name, self._files_menu)
-            act.setToolTip("The reference the sequences were mapped to")
-            act.setEnabled(ref.is_file())
-            act.triggered.connect(lambda _c=False, t=ref: self.openRequested.emit(t))
-            self._files_menu.addAction(act)
-        self._files_menu.addSeparator()
-        copy = QAction("Copy consensus", self._files_menu)
-        copy.triggered.connect(self._copy_consensus)
-        self._files_menu.addAction(copy)
-        reveal = QAction("Reveal in Finder" if platform.system() == "Darwin"
-                         else "Show in File Manager", self._files_menu)
+            menu.addSeparator()
+            add("Reference", ref, "The reference the sequences were mapped to")
+        menu.addSeparator()
+        menu.addAction("Copy consensus", self._copy_consensus)
         folder = details if details.is_dir() else self._path
-        reveal.triggered.connect(lambda _c=False, t=folder: reveal_in_file_manager(t))
-        self._files_menu.addAction(reveal)
-        self._files_menu.setToolTipsVisible(True)
+        menu.addAction("Reveal in Finder" if platform.system() == "Darwin"
+                       else "Show in File Manager",
+                       lambda t=folder: reveal_in_file_manager(t))
 
     def _copy_consensus(self) -> None:
         m = self.canvas.model
