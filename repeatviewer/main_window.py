@@ -468,6 +468,7 @@ from repeatviewer.views.settings_dialog import (
     load_root_folders,
     save_workspace,
 )
+from repeatviewer.primer_actions import PrimerActionsMixin
 from repeatviewer.views.toolbar_dialog import (
     DEFAULT_TOOLBAR_ORDER,
     load_toolbar_font_size,
@@ -588,6 +589,8 @@ _TOOLBAR_TOOLTIPS = {
     "fastga": "FastGA whole-genome alignment (each file against itself, against each other, or against a reference)",
     "tree": "Phylogenetic tree from the selected FASTA (MAFFT + IQ-TREE / FastME / FastTree)",
     "map_reference": "Map the selected sequences or reads to a reference (minimap2 / HISAT2)",
+    "primer_design": "Design primers or probes on the selected FASTA (Primer3, repeat-aware)",
+    "primer_map": "Test primers on the selected sequences (binding sites, products, virtual gel)",
     "blast": "BLAST selected FASTA against the project genome using default parameters",
     "hmmer": "HMMER (pyhmmer) search of selected FASTA against a project HMM database",
     "te_genome_map": "Genome density plot using default parameters",
@@ -620,6 +623,7 @@ _JOB_DISPLAY_TITLES = {
     "orf_prediction": "ORF prediction",
     "dna_translation": "DNA translation",
     "te_abundance_plot": "TE abundance plot",
+    "primers": "Primers",
 }
 
 
@@ -2302,7 +2306,7 @@ class _ToolbarActionButton(QToolButton):
         super().mouseReleaseEvent(event)
 
 
-class MainWindow(QMainWindow):
+class MainWindow(PrimerActionsMixin, QMainWindow):
     """Browser panel with folders, files, and preview."""
 
     def __init__(self) -> None:
@@ -2400,6 +2404,7 @@ class MainWindow(QMainWindow):
         self._fastga_options = load_fastga_options()
         self._tree_options = load_tree_options()
         self._map_options = load_map_options()
+        self._init_primer_actions()
         self._extend_options = load_extend_options()
         self._tsd_search_options = load_tsd_search_options()
         self._teaid_options = load_teaid_options()
@@ -5922,6 +5927,7 @@ class MainWindow(QMainWindow):
         self._populate_align_menu(tools_menu.addMenu("&Align"))
         self._populate_tree_menu(tools_menu.addMenu("T&ree"))
         self._populate_map_menu(tools_menu.addMenu("&Mapping"))
+        self._populate_primers_menu(tools_menu.addMenu("&Primers"))
         self._populate_extend_menu(tools_menu.addMenu("MSA &Extend"))
         self._populate_tsd_search_menu(tools_menu.addMenu("TSD &search"))
         self._populate_teaid_menu(tools_menu.addMenu("&TE-Aid"))
@@ -7465,6 +7471,30 @@ class MainWindow(QMainWindow):
                     "(default: map with saved parameters)."
                 ),
                 right_click_slot=self._quick_map_right_click,
+            )
+        elif tool_id == "primer_design":
+            self._add_toolbar_action_button(
+                bar,
+                "Primers",
+                lambda: self._open_primer_design_dialog(),
+                tooltip=(
+                    "Click: set parameters and run.\n"
+                    "Right-click: action chosen in the Options tab "
+                    "(default: design with saved parameters)."
+                ),
+                right_click_slot=self._quick_primer_design_right_click,
+            )
+        elif tool_id == "primer_map":
+            self._add_toolbar_action_button(
+                bar,
+                "Map Primers",
+                lambda: self._open_map_primers_dialog(),
+                tooltip=(
+                    "Click: choose primers and run.\n"
+                    "Right-click: action chosen in the Options tab "
+                    "(default: open this window)."
+                ),
+                right_click_slot=self._quick_map_primers_right_click,
             )
         elif tool_id == "repeat_quantify":
             self._add_toolbar_action_button(
@@ -10430,6 +10460,8 @@ class MainWindow(QMainWindow):
 
         current_tab = getattr(dialog, "current_dialog_tab", None)
         if not callable(current_tab):
+            return
+        if self._remember_primer_dialog_tab(dialog):
             return
         tab = current_tab()
         # Align / FastGA

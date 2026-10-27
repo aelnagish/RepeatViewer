@@ -3031,3 +3031,105 @@ def save_map_options(opts: MapOptions) -> None:
             "use_system_path": opts.use_system_path,
         },
     )
+
+
+# --------------------------------------------------------------------------
+# Primers (Tools > Primers)
+# --------------------------------------------------------------------------
+
+PRIMER_DIALOG_TAB_PRIMERS = "primers"
+PRIMER_DIALOG_TAB_REGIONS = "regions"
+PRIMER_DIALOG_TAB_SPECIFICITY = "specificity"
+PRIMER_DIALOG_TABS = (
+    PRIMER_DIALOG_TAB_PRIMERS,
+    PRIMER_DIALOG_TAB_REGIONS,
+    PRIMER_DIALOG_TAB_SPECIFICITY,
+    DIALOG_TAB_OPTIONS,
+)
+PRIMER_RIGHT_CLICK_RUN = "run"
+PRIMER_RIGHT_CLICK_DIALOG = "dialog"
+PRIMER_RIGHT_CLICK_ACTIONS = (PRIMER_RIGHT_CLICK_RUN, PRIMER_RIGHT_CLICK_DIALOG)
+
+
+@dataclass
+class PrimerOptions:
+    """Saved settings of the primer windows (Design Primers, Map Primers, database).
+
+    ``design`` and ``map`` hold the back-end settings as plain dicts so new
+    fields never break older saved settings.
+    """
+
+    design: dict = field(default_factory=dict)
+    map: dict = field(default_factory=dict)
+    database_path: str = ""
+    right_click_action: str = PRIMER_RIGHT_CLICK_RUN
+    map_right_click_action: str = PRIMER_RIGHT_CLICK_DIALOG
+    annotate_design: bool = True
+    save_design_to_database: bool = False
+    show_process_window: bool = DEFAULT_SHOW_PROCESS_WINDOW
+    close_process_window_when_finished: bool = DEFAULT_CLOSE_PROCESS_WINDOW_WHEN_FINISHED
+    last_dialog_tab: str = PRIMER_DIALOG_TAB_PRIMERS
+
+    def design_settings(self):
+        from repeatviewer.backends.primers.design import DesignSettings
+
+        return DesignSettings.from_dict(self.design)
+
+    def map_settings(self):
+        from repeatviewer.backends.primers.jobs import MapSettings
+
+        return MapSettings.from_dict(self.map)
+
+
+def load_primer_options() -> PrimerOptions:
+    v = _load_settings_group("primers")
+    d = PrimerOptions()
+
+    def _dict(key: str) -> dict:
+        try:
+            data = json.loads(str(v.get(key) or "{}"))
+        except (TypeError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _pick(key: str, allowed: tuple, default):
+        value = v.get(key, default)
+        return value if value in allowed else default
+
+    return PrimerOptions(
+        design=_dict("design_json"),
+        map=_dict("map_json"),
+        database_path=str(v.get("database_path", "") or ""),
+        right_click_action=_pick("right_click_action", PRIMER_RIGHT_CLICK_ACTIONS,
+                                 d.right_click_action),
+        map_right_click_action=_pick("map_right_click_action", PRIMER_RIGHT_CLICK_ACTIONS,
+                                     d.map_right_click_action),
+        annotate_design=_to_bool(v.get("annotate_design"), d.annotate_design),
+        save_design_to_database=_to_bool(v.get("save_design_to_database"),
+                                         d.save_design_to_database),
+        show_process_window=_to_bool(v.get("show_process_window"), d.show_process_window),
+        close_process_window_when_finished=_to_bool(
+            v.get("close_process_window_when_finished"), d.close_process_window_when_finished
+        ),
+        last_dialog_tab=_pick("last_dialog_tab", PRIMER_DIALOG_TABS, d.last_dialog_tab),
+    )
+
+
+def save_primer_options(opts: PrimerOptions) -> None:
+    _save_settings_group(
+        "primers",
+        {
+            "design_json": json.dumps(opts.design or {}),
+            "map_json": json.dumps(opts.map or {}),
+            "database_path": opts.database_path or "",
+            "right_click_action": opts.right_click_action,
+            "map_right_click_action": opts.map_right_click_action,
+            "annotate_design": opts.annotate_design,
+            "save_design_to_database": opts.save_design_to_database,
+            "show_process_window": opts.show_process_window,
+            "close_process_window_when_finished": opts.close_process_window_when_finished,
+            "last_dialog_tab": persistable_dialog_tab(
+                opts.last_dialog_tab, first_tab=PRIMER_DIALOG_TAB_PRIMERS
+            ),
+        },
+    )

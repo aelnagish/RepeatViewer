@@ -30,6 +30,8 @@ dependencies = [
   "orfipy>=0.0.4",
   "pyahocorasick>=2.0",
   "pyhmmer>=0.10",
+  # Tools > Primers: Tm, hairpins, dimers and primer design (Primer3)
+  "primer3-py>=2.0",
 ]
 
 [project.optional-dependencies]
