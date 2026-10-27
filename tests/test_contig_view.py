@@ -300,7 +300,7 @@ def test_legend_lists_only_marks_that_apply():
     entry = dict(payload["contigs"][0])
     model = cv.ContigModel.from_json(entry)
     full = [t for _k, t in cv.legend_items(model)]
-    assert "differs" in full
+    assert "differs from reference" in full
     entry_plain = dict(entry, features=[], feature_summary=[],
                        reads=[dict(r, strand="+", lift=[]) for r in entry["reads"]])
     plain = [t for _k, t in cv.legend_items(cv.ContigModel.from_json(entry_plain))]

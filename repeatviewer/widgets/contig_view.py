@@ -555,12 +555,32 @@ class ContigCanvas(QAbstractScrollArea):
     HIGHLIGHT_DIFF = "diff"
     HIGHLIGHT_ALL = "all"
     HIGHLIGHT_NONE = "none"
+    # Highlighting (Geneious): what to colour, compared to what
+    SHOW_DISAGREE = "disagree"
+    SHOW_AGREE = "agree"
+    SHOW_ALL = "all"
+    SHOW_NONE = "none"
+    TO_REFERENCE = "reference"
+    TO_CONSENSUS = "consensus"
+    # annotation names
+    LABELS_INSIDE = "inside"
+    LABELS_OUTSIDE = "outside"
+    LABELS_NONE = "none"
+    OUTSIDE_LABEL_H = 10
+    WRAP_GAP = 18           # space between wrapped blocks
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.model: ContigModel | None = None
         self.ppb = 1.0
         self.highlight = self.HIGHLIGHT_DIFF
+        self.hl_show = self.SHOW_DISAGREE
+        self.hl_target = self.TO_REFERENCE
+        self.hl_dots = True
+        self.label_mode = self.LABELS_INSIDE
+        self.type_colors: dict[str, str] = {}     # feature type -> colour chosen by the user
+        self.wrap = False
+        self._wrap_origin: int | None = None      # first base of the block being painted
         self.one_per_row = True
         self.selected = -1
         self.mark_bp: int | None = None     # current difference column (0-based)
@@ -594,6 +614,8 @@ class ContigCanvas(QAbstractScrollArea):
         self.horizontalScrollBar().valueChanged.connect(lambda _v: self.viewChanged.emit())
         self.horizontalScrollBar().rangeChanged.connect(lambda _a, _b: self.viewChanged.emit())
         self.verticalScrollBar().valueChanged.connect(self.viewport().update)
+        self.verticalScrollBar().valueChanged.connect(
+            lambda _v: self.viewChanged.emit() if self.wrap_active() else None)
         self.setMinimumHeight(220)
 
     # ---------------------------------------------------------------- model
@@ -708,6 +730,134 @@ class ContigCanvas(QAbstractScrollArea):
     def logo_on(self) -> bool:
         return bool(self.show_logo and self.model and self.model.detailed)
 
+    # ---------------------------------------------------------------- highlighting
+
+    def set_highlighting(self, show: str, target: str, dots: bool) -> None:
+        self.hl_show = show
+        self.hl_target = target
+        self.hl_dots = bool(dots)
+        # older single setting, still read by the legend
+        self.highlight = (self.HIGHLIGHT_DIFF if show == self.SHOW_DISAGREE and dots else
+                          self.HIGHLIGHT_ALL if show == self.SHOW_ALL else
+                          self.HIGHLIGHT_NONE if show == self.SHOW_NONE else show)
+        self.viewport().update()
+
+    def compare_seq(self) -> str:
+        """What the sequences are compared with: the reference or the consensus."""
+        m = self.model
+        if m is None:
+            return ""
+        return self.consensus_seq() if self.hl_target == self.TO_CONSENSUS else m.reference
+
+    def diff_positions(self) -> list[int]:
+        """Positions (0-based) where a shown sequence differs from the comparison; the
+        toolbar's ◀ ▶ steps through these."""
+        m = self.model
+        if m is None:
+            return []
+        if self.hl_target != self.TO_CONSENSUS or not m.detailed:
+            return m.diff_pos
+        key = ("cons_diff", self.consensus_threshold)
+        if key not in m.cache:
+            cons = self.consensus_seq()
+            found: set[int] = set()
+            for r in m.reads:
+                if r.hidden:
+                    continue
+                pos, _b, runs = difference_marks(r.data.get("row", ""), r.start, cons)
+                found.update(pos)
+                found.update(s for s, _e in runs)
+            m.cache[key] = sorted(found)
+        return m.cache[key]
+
+    def _marks(self, index: int, r: "ReadView") -> tuple[list[int], list[str]]:
+        """Difference marks of one sequence against the current comparison."""
+        m = self.model
+        if self.hl_target != self.TO_CONSENSUS or not m.detailed or not r.data.get("row"):
+            return r.mism_pos, r.mism_base
+        cache = m.cache.setdefault(("cons_marks", self.consensus_threshold), {})
+        if index not in cache:
+            pos, bases, _runs = difference_marks(r.data["row"], r.start, self.consensus_seq())
+            cache[index] = (pos, bases)
+        return cache[index]
+
+    # ---------------------------------------------------------------- labels and colours
+
+    def set_label_mode(self, mode: str) -> None:
+        self.label_mode = mode
+        self._update_scrollbars()
+        self.viewport().update()
+
+    def feature_row_h(self) -> int:
+        return FEATURE_ROW_H + (self.OUTSIDE_LABEL_H if self.label_mode == self.LABELS_OUTSIDE
+                                else 0)
+
+    def feature_color(self, f) -> QColor:
+        return QColor(self.type_colors.get(str(f.feature_type or "other"))
+                      or f.color or "#888888")
+
+    def set_type_colors(self, colors: dict[str, str]) -> None:
+        self.type_colors = dict(colors)
+        self.viewport().update()
+        self.viewChanged.emit()
+
+    # ---------------------------------------------------------------- wrap
+
+    def set_wrap(self, on: bool) -> None:
+        keep = self.view_center_bp()
+        self.wrap = bool(on)
+        self._update_scrollbars()
+        if keep is not None:
+            self.show_base(keep)
+        self.viewport().update()
+        self.viewChanged.emit()
+
+    def wrap_active(self) -> bool:
+        """Wrapping only applies while the bases are written out."""
+        return bool(self.wrap and self.model is not None and self.letters())
+
+    def _wrap_block_bp(self) -> int:
+        return max(10, int((self._data_w() - 8) / self.ppb))
+
+    def _wrap_block_h(self) -> int:
+        return self.header_h() + self._lane_count * self.read_h() + 10 + self.WRAP_GAP
+
+    def _wrap_blocks(self) -> int:
+        m = self.model
+        return 0 if m is None else -(-m.length // self._wrap_block_bp())
+
+    def view_center_bp(self) -> int | None:
+        span = self.visible_span()
+        return None if span is None else (span[0] + span[1]) // 2
+
+    def visible_span(self) -> tuple[int, int] | None:
+        """[first, last) reference positions on screen (wrapped: all visible blocks)."""
+        m = self.model
+        if m is None:
+            return None
+        if self.wrap_active():
+            bh, bbp = self._wrap_block_h(), self._wrap_block_bp()
+            v = self.verticalScrollBar().value()
+            first = v // bh
+            last = (v + self.viewport().height()) // bh
+            return first * bbp, min(m.length, (last + 1) * bbp)
+        return (max(0, self.bp_at(LABEL_W)),
+                min(m.length, self.bp_at(self.viewport().width())))
+
+    def _wrap_scroll_to(self, bp: int, lane: int | None = None) -> None:
+        """Scroll so the block holding ``bp`` (and the given sequence row) is in view."""
+        bh = self._wrap_block_h()
+        block = max(0, int(bp) // self._wrap_block_bp())
+        y = block * bh
+        if lane is not None and lane >= 0:
+            y += self._track_y()["reads"] + lane * self.read_h() - self.viewport().height() // 2
+        v = self.verticalScrollBar()
+        top, bottom = v.value(), v.value() + self.viewport().height()
+        block_top, block_bottom = block * bh, block * bh + self.header_h() + 40
+        if lane is None and top <= block_top and block_bottom <= bottom:
+            return
+        v.setValue(max(0, min(v.maximum(), y)))
+
     def set_one_per_row(self, on: bool) -> None:
         self.one_per_row = on
         self._relayout()
@@ -786,14 +936,14 @@ class ContigCanvas(QAbstractScrollArea):
     def header_h(self) -> int:
         detailed = bool(self.model and self.model.detailed)
         n_tracks = 2 if detailed else 0   # consensus + reference
-        return (RULER_H + max(1, self._feature_row_count) * FEATURE_ROW_H + 6
+        return (RULER_H + max(1, self._feature_row_count) * self.feature_row_h() + 6
                 + n_tracks * TRACK_H + (IDENTITY_H + 3 if detailed else 0) + COVERAGE_H + 8
                 + (LOGO_H + 4 if self.logo_on() else 0))
 
     def _track_y(self) -> dict[str, int]:
         y = RULER_H
         out = {"features": y}
-        y += max(1, self._feature_row_count) * FEATURE_ROW_H + 6
+        y += max(1, self._feature_row_count) * self.feature_row_h() + 6
         if self.model and self.model.detailed:
             out["consensus"] = y
             y += TRACK_H
@@ -817,6 +967,16 @@ class ContigCanvas(QAbstractScrollArea):
         m = self.model
         if m is None:
             return
+        if self.wrap_active():
+            # blocks stacked down the page: no sideways scrolling
+            h = self.horizontalScrollBar()
+            h.setRange(0, 0)
+            total = self._wrap_blocks() * self._wrap_block_h()
+            v = self.verticalScrollBar()
+            v.setRange(0, max(0, total - self.viewport().height()))
+            v.setPageStep(max(1, self.viewport().height()))
+            v.setSingleStep(max(1, self.read_h()))
+            return
         content = int(m.length * self.ppb) + 20
         h = self.horizontalScrollBar()
         h.setRange(0, max(0, content - self._data_w()))
@@ -838,10 +998,32 @@ class ContigCanvas(QAbstractScrollArea):
         self._frame_if_ready()
 
     def x_of(self, bp: float) -> float:
+        if self._wrap_origin is not None:
+            return LABEL_W + (bp - self._wrap_origin) * self.ppb
         return LABEL_W + bp * self.ppb - self.horizontalScrollBar().value()
 
     def bp_at(self, x: float) -> int:
+        if self._wrap_origin is not None:
+            return int(self._wrap_origin + (x - LABEL_W) / self.ppb)
         return int((x - LABEL_W + self.horizontalScrollBar().value()) / self.ppb)
+
+    def _wrap_locate(self, pos: QPointF) -> tuple[int, float] | None:
+        """Wrapped view: (block, y inside the block) under ``pos``."""
+        bh = self._wrap_block_h()
+        y = pos.y() + self.verticalScrollBar().value()
+        block = int(y // bh)
+        if block < 0 or block >= self._wrap_blocks():
+            return None
+        return block, y - block * bh
+
+    def bp_at_pos(self, pos: QPointF) -> int:
+        """Reference position under the mouse, wrapped or not."""
+        if self.wrap_active():
+            loc = self._wrap_locate(pos)
+            if loc is None:
+                return -1
+            return int(loc[0] * self._wrap_block_bp() + (pos.x() - LABEL_W) / self.ppb)
+        return self.bp_at(pos.x())
 
     # ---------------------------------------------------------------- zoom and scroll
 
@@ -858,11 +1040,27 @@ class ContigCanvas(QAbstractScrollArea):
         if self.model is None:
             return
         anchor_x = LABEL_W + self._data_w() / 2 if anchor_x is None else anchor_x
+        if self.wrap_active():
+            keep = self.view_center_bp()
+            fit = (self._data_w() - 12) / max(1, self.model.length)
+            self.ppb = min(MAX_PPB, max(fit, self.ppb * factor))
+            self._update_scrollbars()
+            if self.wrap_active() and keep is not None:
+                self._wrap_scroll_to(keep)
+            elif keep is not None:
+                self.horizontalScrollBar().setValue(int(keep * self.ppb - self._data_w() / 2))
+            self.viewport().update()
+            self.viewChanged.emit()
+            return
+        was_letters = self.letters()
         bp = (anchor_x - LABEL_W + self.horizontalScrollBar().value()) / self.ppb
         fit = (self._data_w() - 12) / max(1, self.model.length)
         self.ppb = min(MAX_PPB, max(fit, self.ppb * factor))
         self._update_scrollbars()
-        self.horizontalScrollBar().setValue(int(bp * self.ppb - (anchor_x - LABEL_W)))
+        if not was_letters and self.wrap_active():
+            self._wrap_scroll_to(int(bp))          # just reached the bases: blocks start
+        else:
+            self.horizontalScrollBar().setValue(int(bp * self.ppb - (anchor_x - LABEL_W)))
         self.viewport().update()
         self.viewChanged.emit()
 
@@ -872,6 +1070,11 @@ class ContigCanvas(QAbstractScrollArea):
         if zoom_to_letters and self.ppb < LETTER_PPB:
             self.ppb = 12.0
             self._update_scrollbars()
+        if self.wrap_active():
+            self._wrap_scroll_to(bp)
+            self.viewport().update()
+            self.viewChanged.emit()
+            return
         self.horizontalScrollBar().setValue(int(bp * self.ppb - self._data_w() / 2))
         self.viewport().update()
         self.viewChanged.emit()
@@ -884,6 +1087,10 @@ class ContigCanvas(QAbstractScrollArea):
         if r.hidden:
             return
         self.selected = index
+        if self.wrap_active():
+            self._wrap_scroll_to(r.start, lane=r.lane)
+            self.viewport().update()
+            return
         span = (r.end - r.start) * self.ppb
         if span > self._data_w():
             self.horizontalScrollBar().setValue(int(r.start * self.ppb) - 10)
@@ -975,11 +1182,19 @@ class ContigCanvas(QAbstractScrollArea):
         if m is None:
             return -1
         top = self._track_y()["reads"]
-        y = pos.y() - top + self.verticalScrollBar().value()
-        if pos.y() < self.header_h() or y < 0:
-            return -1
+        if self.wrap_active():
+            loc = self._wrap_locate(pos)
+            if loc is None:
+                return -1
+            y = loc[1] - top
+            if y < 0:
+                return -1
+        else:
+            y = pos.y() - top + self.verticalScrollBar().value()
+            if pos.y() < self.header_h() or y < 0:
+                return -1
         lane = int(y // self.read_h())
-        bp = self.bp_at(pos.x())
+        bp = self.bp_at_pos(pos)
         for i, r in enumerate(m.reads):
             if r.hidden:
                 continue
@@ -1027,7 +1242,7 @@ class ContigCanvas(QAbstractScrollArea):
         if m is None or event.position().x() < LABEL_W:
             QToolTip.hideText()
             return
-        bp = self.bp_at(event.position().x())
+        bp = self.bp_at_pos(event.position())
         if not 0 <= bp < m.length:
             QToolTip.hideText()
             return
@@ -1103,7 +1318,6 @@ class ContigCanvas(QAbstractScrollArea):
         p = QPainter(self.viewport())
         pal = self.palette()
         bg = pal.color(pal.ColorRole.Base)
-        fg = pal.color(pal.ColorRole.Text)
         mid = pal.color(pal.ColorRole.Mid)
         p.fillRect(self.viewport().rect(), bg)
         m = self.model
@@ -1112,8 +1326,50 @@ class ContigCanvas(QAbstractScrollArea):
             p.drawText(self.viewport().rect(), Qt.AlignmentFlag.AlignCenter, "No mapping loaded")
             return
         w, h = self.viewport().width(), self.viewport().height()
+        if self.wrap_active():
+            self._paint_wrapped(p, w, h)
+            return
         bp0 = max(0, self.bp_at(LABEL_W) - 1)
         bp1 = min(m.length, self.bp_at(w) + 2)
+        self._paint_page(p, w, h, bp0, bp1, self.verticalScrollBar().value())
+
+    def _paint_wrapped(self, p: QPainter, w: int, h: int) -> None:
+        """Wrap contig: the alignment in blocks one view wide, stacked down the page,
+        each with its own ruler, tracks and sequences."""
+        m = self.model
+        bh, bbp = self._wrap_block_h(), self._wrap_block_bp()
+        v = self.verticalScrollBar().value()
+        pal = self.palette()
+        try:
+            for block in range(max(0, v // bh), self._wrap_blocks()):
+                top = block * bh - v
+                if top > h:
+                    break
+                bp0 = block * bbp
+                bp1 = min(m.length, bp0 + bbp)
+                self._wrap_origin = bp0
+                p.save()
+                p.translate(0, top)
+                self._paint_page(p, w, bh - self.WRAP_GAP, bp0, bp1, 0)
+                p.restore()
+                # gap between blocks
+                p.setClipping(False)
+                p.fillRect(QRectF(0, top + bh - self.WRAP_GAP, w, self.WRAP_GAP),
+                           pal.color(pal.ColorRole.Base))
+                p.setPen(QPen(pal.color(pal.ColorRole.Midlight), 1))
+                y_sep = top + bh - self.WRAP_GAP / 2
+                p.drawLine(QPointF(LABEL_W, y_sep), QPointF(w, y_sep))
+        finally:
+            self._wrap_origin = None
+
+    def _paint_page(self, p: QPainter, w: int, h: int, bp0: int, bp1: int,
+                    scroll: int) -> None:
+        """Ruler, annotations, consensus / identity / coverage / logo / reference, the
+        sequences (scrolled by ``scroll``) and the label column, for bp0..bp1."""
+        m = self.model
+        pal = self.palette()
+        fg = pal.color(pal.ColorRole.Text)
+        mid = pal.color(pal.ColorRole.Mid)
         ys = self._track_y()
         letters = self.letters()
         font = QFont(p.font())
@@ -1124,16 +1380,20 @@ class ContigCanvas(QAbstractScrollArea):
         self._paint_ruler(p, bp0, bp1, fg, mid)
         self._paint_features(p, ys["features"], bp0, bp1)
         if m.detailed:
-            self._paint_sequence_track(p, ys["consensus"], self.consensus_seq(), bp0, bp1,
-                                       letters, compare=m.reference, fg=fg)
+            to_cons = self.hl_target == self.TO_CONSENSUS
+            cons = self.consensus_seq()
+            self._paint_sequence_track(p, ys["consensus"], cons, bp0, bp1, letters,
+                                       compare="" if to_cons else m.reference, fg=fg,
+                                       consensus_track=True)
             self._paint_identity(p, ys["identity"], bp0, bp1, w)
             self._paint_sequence_track(p, ys["reference"], m.reference, bp0, bp1, letters,
-                                       compare="", fg=fg)
+                                       compare=cons if to_cons else "", fg=fg,
+                                       consensus_track=False)
         self._paint_coverage(p, ys["coverage"], bp0, bp1, w)
         if "logo" in ys:
             self._paint_logo(p, ys["logo"], bp0, bp1, fg)
         p.setClipRect(QRectF(LABEL_W, header, w - LABEL_W, h - header))
-        self._paint_reads(p, ys["reads"], bp0, bp1, letters, fg, h)
+        self._paint_reads(p, ys["reads"], bp0, bp1, letters, fg, h, scroll)
         if self.mark_bp is not None and bp0 <= self.mark_bp <= bp1:
             p.setClipRect(QRectF(LABEL_W, RULER_H, w - LABEL_W, h - RULER_H))
             x = self.x_of(self.mark_bp)
@@ -1143,7 +1403,7 @@ class ContigCanvas(QAbstractScrollArea):
             p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawRect(col)
         # label column
-        p.setClipping(False)
+        p.setClipRect(QRectF(0, 0, w, h))
         p.fillRect(QRectF(0, 0, LABEL_W, h), pal.color(pal.ColorRole.Window))
         p.setPen(QPen(mid, 1))
         p.drawLine(LABEL_W - 1, 0, LABEL_W - 1, h)
@@ -1157,8 +1417,12 @@ class ContigCanvas(QAbstractScrollArea):
             p.drawText(QRectF(6, y, LABEL_W - 10, height),
                        Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, text)
 
-        label(0, f"{m.length:,} bp", RULER_H)
-        label(ys["features"], "Annotations" if m.features else "No annotations", FEATURE_ROW_H)
+        if self._wrap_origin is not None:
+            label(0, f"{bp0 + 1:,}–{bp1:,}", RULER_H)
+        else:
+            label(0, f"{m.length:,} bp", RULER_H)
+        label(ys["features"], "Annotations" if m.features else "No annotations",
+              self.feature_row_h())
         if m.detailed:
             label(ys["consensus"], "Consensus")
             small = QFont(label_font)
@@ -1178,7 +1442,7 @@ class ContigCanvas(QAbstractScrollArea):
         if self.one_per_row:
             p.setClipRect(QRectF(0, header, LABEL_W - 1, h - header))
             rh = self.read_h()
-            off = ys["reads"] - self.verticalScrollBar().value()
+            off = ys["reads"] - scroll
             fm = QFontMetrics(label_font)
             for i, r in enumerate(m.reads):
                 if r.hidden:
@@ -1209,6 +1473,7 @@ class ContigCanvas(QAbstractScrollArea):
             shown = len(m.reads) - self.hidden_count()
             label(ys["reads"], f"{shown:,} of {m.n_reads:,} shown"
                   if shown < m.n_reads else f"{m.n_reads:,} sequences")
+        p.setClipping(False)
 
     def _paint_ruler(self, p: QPainter, bp0: int, bp1: int, fg: QColor, mid: QColor) -> None:
         step = nice_step(1.0 / self.ppb)
@@ -1227,15 +1492,40 @@ class ContigCanvas(QAbstractScrollArea):
     def _paint_features(self, p: QPainter, y0: int, bp0: int, bp1: int) -> None:
         m = self.model
         summary = m.feature_summary
+        row_h = self.feature_row_h()
+        outside = self.label_mode == self.LABELS_OUTSIDE
+        pal = self.palette()
+        text_c = pal.color(pal.ColorRole.Text)
+        next_start: dict[int, int] = {}
+        if outside:
+            # an outside label may run past its bar, up to the next annotation in its row
+            by_row: dict[int, list[int]] = {}
+            for k, row in enumerate(self._feat_row):
+                if row >= 0:
+                    by_row.setdefault(row, []).append(k)
+            for ks in by_row.values():
+                ks.sort(key=lambda k: m.features[k].start)
+                for a_, b_ in zip(ks, ks[1:]):
+                    next_start[a_] = m.features[b_].start - 1
         for k, (f, row) in enumerate(zip(m.features, self._feat_row)):
             if row < 0 or f.end < bp0 or f.start - 1 > bp1:
                 continue
             x0, x1 = self.x_of(f.start - 1), self.x_of(f.end)
-            rect = QRectF(x0, y0 + row * FEATURE_ROW_H + 1, max(2.0, x1 - x0), FEATURE_ROW_H - 3)
+            top = y0 + row * row_h
+            bar_top = top + (self.OUTSIDE_LABEL_H if outside else 0) + 1
+            rect = QRectF(x0, bar_top, max(2.0, x1 - x0), FEATURE_ROW_H - 3)
             status = feature_status_text(summary[k]) if k < len(summary) else ""
-            _feature_bar(p, rect, QColor(f.color or "#888888"), forward=f.is_forward(),
-                         label=f"{f.name} · {status}" if status else f.name, point_size=7,
-                         left_edge=LABEL_W, right_edge=self.viewport().width())
+            text = f"{f.name} · {status}" if status else f.name
+            _feature_bar(p, rect, self.feature_color(f), forward=f.is_forward(),
+                         label=text if self.label_mode == self.LABELS_INSIDE else "",
+                         point_size=7, left_edge=LABEL_W, right_edge=self.viewport().width())
+            if outside:
+                limit = self.x_of(next_start[k]) - 6 if k in next_start else \
+                    self.viewport().width()
+                room = QRectF(rect.left(), rect.top(), max(rect.width(), limit - rect.left()),
+                              rect.height())
+                _outside_label(p, room, text, top, self.OUTSIDE_LABEL_H + 1, text_c,
+                               left_edge=LABEL_W, right_edge=self.viewport().width())
 
     def _hatch(self, p: QPainter, rect: QRectF) -> None:
         """No coverage: light diagonal hatching, never a difference colour."""
@@ -1259,18 +1549,34 @@ class ContigCanvas(QAbstractScrollArea):
         return [(max(bp0, (i0 + int(a)) * step), min(bp1, (i0 + int(b)) * step))
                 for a, b in zip(starts, ends)]
 
+    def _base_style(self, differs: bool) -> str:
+        """How one compared base is drawn under the Highlighting settings:
+        'colour' (filled), 'dot', or 'plain' (letter only)."""
+        show = self.hl_show
+        if show == self.SHOW_ALL:
+            return "colour"
+        if show == self.SHOW_NONE:
+            return "plain"
+        if show == self.SHOW_AGREE:
+            return "plain" if differs else "colour"
+        # disagreements
+        if differs:
+            return "colour"
+        return "dot" if self.hl_dots else "plain"
+
     def _paint_sequence_track(self, p: QPainter, y: int, seq: str, bp0: int, bp1: int,
-                              letters: bool, *, compare: str, fg: QColor) -> None:
-        """Reference (compare == "") or consensus (compare = reference)."""
+                              letters: bool, *, compare: str, fg: QColor,
+                              consensus_track: bool) -> None:
+        """Consensus or reference. The track that is the comparison target (compare
+        == "") is drawn fully coloured; the other one is compared with it."""
         if not seq:
             return
         m = self.model
         rect_h = TRACK_H - 3
-        is_consensus = bool(compare)
-        uncovered = self._uncovered_runs(bp0, bp1) if is_consensus else []
+        uncovered = self._uncovered_runs(bp0, bp1) if consensus_track else []
 
         def covered(bp: int) -> bool:
-            return not is_consensus or m.coverage_at(bp) > 0
+            return not consensus_track or m.coverage_at(bp) > 0
 
         if not letters:
             p.fillRect(QRectF(self.x_of(0), y + 4, m.length * self.ppb, rect_h - 6),
@@ -1279,7 +1585,7 @@ class ContigCanvas(QAbstractScrollArea):
                 r = QRectF(self.x_of(s0), y + 1, max(1.0, (e0 - s0) * self.ppb), rect_h)
                 p.fillRect(r, pal_base(self))
                 self._hatch(p, r)
-            if is_consensus:
+            if compare and self.hl_show in (self.SHOW_DISAGREE, self.SHOW_ALL):
                 hi = min(bp1, len(seq), len(compare))
                 if hi > bp0:
                     a = np.frombuffer(seq[bp0:hi].encode("ascii", "replace"), dtype=np.uint8)
@@ -1295,30 +1601,38 @@ class ContigCanvas(QAbstractScrollArea):
             return
         font = _mono(int(min(11, max(7, self.ppb * 0.85))))
         p.setFont(font)
+        dot_color = QColor("#9a9a96")
         for bp in range(bp0, min(bp1, len(seq))):
             rect = QRectF(self.x_of(bp), y, self.ppb, rect_h)
             if not covered(bp):
                 self._hatch(p, rect)
                 continue
             c = seq[bp]
-            differs = is_consensus and bp < len(compare) and not bases_match(compare[bp], c)
             bg_c, fg_c = self._colors.get(c.upper(), _FALLBACK)
             ambiguous = c.upper() not in "ACGT-"
-            if ambiguous and not is_consensus:
+            if ambiguous and not consensus_track:
                 # ambiguity code in the reference: pale fill, dashed outline
                 p.fillRect(rect, QColor("#fff4d6"))
                 p.setPen(QPen(QColor("#a35f00"), 1, Qt.PenStyle.DashLine))
                 p.drawRect(rect.adjusted(0.5, 0.5, -0.5, -0.5))
                 p.setPen(QColor("#6b4100"))
-            elif (self.highlight == self.HIGHLIGHT_ALL or not is_consensus
-                  or (differs and self.highlight != self.HIGHLIGHT_NONE)):
+                p.drawText(rect, Qt.AlignmentFlag.AlignCenter, c)
+                continue
+            if not compare:
+                style = "colour"                         # the comparison target itself
+            else:
+                differs = bp < len(compare) and not bases_match(compare[bp], c)
+                style = self._base_style(differs)
+                if style == "dot":
+                    style = "plain"                      # tracks keep their letters
+            if style == "colour":
                 p.fillRect(rect, bg_c)
                 p.setPen(fg_c)
             else:
-                p.setPen(fg)
+                p.setPen(fg if compare else dot_color)
             p.drawText(rect, Qt.AlignmentFlag.AlignCenter, c)
-            if (is_consensus and bp < len(m.diff_count) and m.diff_count[bp]
-                    and self.highlight != self.HIGHLIGHT_NONE):
+            if (consensus_track and bp < len(m.diff_count) and m.diff_count[bp]
+                    and self.hl_show != self.SHOW_NONE):
                 # some sequences differ here: amber underline
                 p.fillRect(QRectF(rect.left(), rect.bottom() - 2, rect.width(), 2),
                            _CONS_DIFF_MARK)
@@ -1452,18 +1766,24 @@ class ContigCanvas(QAbstractScrollArea):
                     p.fillRect(QRectF(x, band_y + 3, 2, 2), QColor("#7b3fb5"))
 
     def _paint_reads(self, p: QPainter, top: int, bp0: int, bp1: int, letters: bool,
-                     fg: QColor, h: int) -> None:
+                     fg: QColor, h: int, scroll: int | None = None) -> None:
         from repeatviewer.widgets.sequence_map_viewer import _draw_directed_feature
 
         m = self.model
         rh = self.read_h()
         bh = self.read_base_h()
         feats_on = self.read_features_on()
-        off = top - self.verticalScrollBar().value()
+        if scroll is None:
+            scroll = self.verticalScrollBar().value()
+        off = top - scroll
         header = self.header_h()
         w = self.viewport().width()
         font = _mono(int(min(11, max(7, self.ppb * 0.85))))
+        bold = QFont(font)
+        bold.setBold(True)
         dot_color = QColor("#9a9a96")
+        ref = self.compare_seq()
+        show_marks = self.hl_show in (self.SHOW_DISAGREE, self.SHOW_ALL)
         for i, r in enumerate(m.reads):
             if r.hidden:
                 continue
@@ -1484,13 +1804,14 @@ class ContigCanvas(QAbstractScrollArea):
                     p.setPen(QPen(QColor("#1d1d1f"), 1.5))
                     p.setBrush(Qt.BrushStyle.NoBrush)
                     p.drawRect(rect.adjusted(-1, -1, 1, 1))
-                if self.highlight != self.HIGHLIGHT_NONE:
-                    lo = bisect.bisect_left(r.mism_pos, bp0)
-                    hi = bisect.bisect_right(r.mism_pos, bp1)
+                if show_marks:
+                    mism_pos, mism_base = self._marks(i, r)
+                    lo = bisect.bisect_left(mism_pos, bp0)
+                    hi = bisect.bisect_right(mism_pos, bp1)
                     for k in range(lo, hi):
-                        p.fillRect(QRectF(self.x_of(r.mism_pos[k]), y + 1,
+                        p.fillRect(QRectF(self.x_of(mism_pos[k]), y + 1,
                                           max(1.0, self.ppb), bh - 3),
-                                   self._colors.get(r.mism_base[k].upper(), _FALLBACK)[0])
+                                   self._colors.get(mism_base[k].upper(), _FALLBACK)[0])
                 for s, e in r.del_runs:
                     if e < bp0 or s > bp1:
                         continue
@@ -1501,7 +1822,6 @@ class ContigCanvas(QAbstractScrollArea):
             else:
                 p.setFont(font)
                 row = r.data["row"]
-                ref = m.reference
                 if sel:
                     p.fillRect(QRectF(self.x_of(max(bp0, r.start)), y,
                                       (min(bp1, r.end) - max(bp0, r.start)) * self.ppb, bh - 2),
@@ -1516,24 +1836,19 @@ class ContigCanvas(QAbstractScrollArea):
                         p.drawText(rect, Qt.AlignmentFlag.AlignCenter, "-")
                         continue
                     differs = bp < len(ref) and not bases_match(ref[bp], c)
-                    bg_c, fg_c = self._colors.get(c.upper(), _FALLBACK)
-                    if self.highlight == self.HIGHLIGHT_ALL:
+                    style = self._base_style(differs)
+                    if style == "colour":
+                        bg_c, fg_c = self._colors.get(c.upper(), _FALLBACK)
                         p.fillRect(rect, bg_c)
                         p.setPen(fg_c)
-                        p.drawText(rect, Qt.AlignmentFlag.AlignCenter, c)
-                    elif self.highlight == self.HIGHLIGHT_DIFF:
-                        if differs:
-                            p.fillRect(rect, bg_c)
-                            p.setPen(fg_c)
-                            bold = QFont(font)
-                            bold.setBold(True)
+                        if differs and self.hl_show == self.SHOW_DISAGREE:
                             p.setFont(bold)
-                            p.drawText(rect, Qt.AlignmentFlag.AlignCenter, c)
-                            p.setFont(font)
-                        else:
-                            # agrees with the reference: a dot, so differences stand out
-                            p.setPen(dot_color)
-                            p.drawText(rect, Qt.AlignmentFlag.AlignCenter, "·")
+                        p.drawText(rect, Qt.AlignmentFlag.AlignCenter, c)
+                        p.setFont(font)
+                    elif style == "dot":
+                        # agrees: a dot, so the differences stand out
+                        p.setPen(dot_color)
+                        p.drawText(rect, Qt.AlignmentFlag.AlignCenter, "·")
                     else:
                         p.setPen(fg)
                         p.drawText(rect, Qt.AlignmentFlag.AlignCenter, c)
@@ -1570,6 +1885,25 @@ def _feature_bar(p: QPainter, rect: QRectF, color: QColor, *, forward: bool, lab
                fm.elidedText(label, Qt.TextElideMode.ElideRight, int(text_rect.width())))
 
 
+def _outside_label(p: QPainter, bar: QRectF, text: str, top: float, height: float,
+                   color: QColor, *, left_edge: float, right_edge: float) -> None:
+    """Annotation name above its bar, within the bar's visible width (left out when
+    it does not fit)."""
+    vis_l, vis_r = max(bar.left(), left_edge), min(bar.right(), right_edge)
+    if not text or vis_r - vis_l < 24:
+        return
+    font = QFont(p.font())
+    font.setPointSize(7)
+    p.setFont(font)
+    fm = QFontMetrics(font)
+    shown = fm.elidedText(text, Qt.TextElideMode.ElideRight, int(vis_r - vis_l - 2))
+    if shown != text and len(shown) < 6:
+        return                       # too little room: leave the label out
+    p.setPen(color)
+    p.drawText(QRectF(vis_l + 1, top, vis_r - vis_l - 2, height),
+               Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, shown)
+
+
 def _paint_read_features_impl(canvas: "ContigCanvas", p: QPainter, r: "ReadView", y0: float,
                               bp0: int, bp1: int) -> None:
     m = canvas.model
@@ -1585,17 +1919,19 @@ def _paint_read_features_impl(canvas: "ContigCanvas", p: QPainter, r: "ReadView"
             continue
         x0, x1 = canvas.x_of(s0), canvas.x_of(e0)
         rect = QRectF(x0, y0 + row * READ_FEAT_H, max(2.0, x1 - x0), READ_FEAT_H - 2)
-        color = QColor(f.color or "#888888")
+        color = canvas.feature_color(f)
         if status == mr.STATUS_LOST:
             color = QColor("#c4c4c0")
         elif status == mr.STATUS_PARTIAL:
             color.setAlpha(120)
         label = f.name if status == mr.STATUS_INTACT else f"{f.name} · " + (
             f"{ndiff} diff" if status == mr.STATUS_CHANGED else status)
+        if canvas.label_mode == canvas.LABELS_NONE:
+            label = ""
         _feature_bar(p, rect, color, forward=f.is_forward(), label=label, point_size=6,
                      left_edge=LABEL_W, right_edge=canvas.viewport().width())
         if status == mr.STATUS_PARTIAL:
-            p.setPen(QPen(QColor(f.color or "#888888"), 1, Qt.PenStyle.DashLine))
+            p.setPen(QPen(canvas.feature_color(f), 1, Qt.PenStyle.DashLine))
             p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawRect(rect)
 
@@ -1609,14 +1945,18 @@ LEGEND_ITEMS = (
 _AMBIGUOUS = set("RYSWKMBDHVNryswkmbdhvn")
 
 
-def legend_items(model: "ContigModel | None", highlight: str = "") -> list[tuple[str, str]]:
+def legend_items(model: "ContigModel | None", highlight: str = "",
+                 target: str = "reference", show: str = "disagree") -> list[tuple[str, str]]:
     """The legend entries that apply to this result: e.g. no 'feature lost' without
-    annotations, no 'reverse' when nothing was reversed."""
+    annotations, no 'reverse' when nothing was reversed. Wording follows the
+    Highlighting settings (compared to the reference or the consensus)."""
     if model is None:
         return []
     reads = [r for r in model.reads if not r.hidden] or list(model.reads)
-    keep = {"T"}
-    if highlight in ("", ContigCanvas.HIGHLIGHT_DIFF):
+    keep = set()
+    if show != ContigCanvas.SHOW_NONE:
+        keep.add("T")
+    if highlight in ("", ContigCanvas.HIGHLIGHT_DIFF) and show == ContigCanvas.SHOW_DISAGREE:
         keep.add("dot")
     if any(r.del_runs or r.data.get("deleted", 0) for r in reads):
         keep.add("-")
@@ -1636,7 +1976,12 @@ def legend_items(model: "ContigModel | None", highlight: str = "") -> list[tuple
             keep.add("partial")
         if "lost" in statuses:
             keep.add("lost")
-    return [(k, t) for k, t in LEGEND_ITEMS if k in keep]
+    words = {
+        "dot": f"matches {target}",
+        "T": (f"agrees with {target}" if show == ContigCanvas.SHOW_AGREE else
+              "base colour" if show == ContigCanvas.SHOW_ALL else f"differs from {target}"),
+    }
+    return [(k, words.get(k, t)) for k, t in LEGEND_ITEMS if k in keep]
 
 
 class ContigLegend(QWidget):
@@ -1672,7 +2017,7 @@ class ContigLegend(QWidget):
             if kind == "dot":
                 p.setPen(QColor("#9a9a96"))
                 p.setFont(mono)
-                p.drawText(box, Qt.AlignmentFlag.AlignCenter, "·")
+                p.drawText(box.adjusted(-3, 0, 3, 0), Qt.AlignmentFlag.AlignCenter, "···")
             elif kind in ("T", "-"):
                 bg_c = colors.get("T", _FALLBACK)[0] if kind == "T" else _DELETE_COLOR
                 p.fillRect(box, bg_c)
@@ -1684,7 +2029,10 @@ class ContigLegend(QWidget):
                 p.setPen(QPen(QColor("#a35f00"), 1, Qt.PenStyle.DashLine))
                 p.drawRect(box.adjusted(0.5, 0.5, -0.5, -0.5))
             elif kind == "hatch":
-                p.fillRect(box, QBrush(_NO_COVERAGE, Qt.BrushStyle.BDiagPattern))
+                p.fillRect(box, QBrush(QColor("#9a9a96"), Qt.BrushStyle.BDiagPattern))
+                p.setPen(QPen(QColor("#9a9a96"), 1))
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.drawRect(box.adjusted(0.5, 0.5, -0.5, -0.5))
             elif kind in ("fwd", "rev"):
                 p.setPen(_ARROW_REV if kind == "rev" else _ARROW_FWD)
                 p.drawText(box, Qt.AlignmentFlag.AlignCenter, "←" if kind == "rev" else "→")
@@ -1779,11 +2127,10 @@ class ContigOverview(QWidget):
                 continue
             fx0, fx1 = x0 + (f.start - 1) * sc, x0 + f.end * sc
             p.fillRect(QRectF(fx0, track.bottom() - 3, max(1.0, fx1 - fx0), 3),
-                       QColor(f.color or "#888888"))
+                       self.canvas.feature_color(f))
         c = self.canvas
         if c.ppb > 0:
-            vis0 = max(0, c.bp_at(LABEL_W))
-            vis1 = min(m.length, c.bp_at(c.viewport().width()))
+            vis0, vis1 = c.visible_span() or (0, m.length)
             # keep the 2 px outline inside the track at both ends
             left = max(x0 + 1.0, x0 + vis0 * sc)
             right = min(x0 + m.length * sc - 1.0, max(left + 4.0, x0 + vis1 * sc))
@@ -1942,6 +2289,52 @@ def _read_list(key: str) -> list[str]:
     return [str(x) for x in v]
 
 
+def _read_text(key: str, default: str) -> str:
+    try:
+        v = _settings().value(f"{_SETTINGS}/{key}", default)
+    except Exception:  # noqa: BLE001
+        return default
+    return str(v) if v not in (None, "") else default
+
+
+def _read_json(key: str, default):
+    import json
+
+    raw = _read_text(key, "")
+    if not raw:
+        return default
+    try:
+        value = json.loads(raw)
+    except ValueError:
+        return default
+    return value if isinstance(value, type(default)) else default
+
+
+def _write_json(key: str, value) -> None:
+    import json
+
+    _write(key, json.dumps(value))
+
+
+def _swatch_icon(color: str):
+    """Rounded colour swatch for a tool button."""
+    from PySide6.QtGui import QIcon, QPixmap
+
+    icon = QIcon()
+    for scale in (1, 2):
+        pix = QPixmap(16 * scale, 12 * scale)
+        pix.setDevicePixelRatio(scale)
+        pix.fill(Qt.GlobalColor.transparent)
+        pt = QPainter(pix)
+        pt.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pt.setPen(QPen(QColor(0, 0, 0, 60), 1))
+        pt.setBrush(QColor(color))
+        pt.drawRoundedRect(QRectF(1.5, 1.5, 13, 9), 2, 2)
+        pt.end()
+        icon.addPixmap(pix)
+    return icon
+
+
 def _swatch(color: str):
     from PySide6.QtGui import QIcon, QPixmap
 
@@ -2096,14 +2489,6 @@ class ContigViewPanel(QWidget):
         self._nav_bar = bar
 
         # ------------------------------------------------ side panel controls
-        self._highlight = NoWheelComboBox(self)
-        for label, value in (("Dots where same", ContigCanvas.HIGHLIGHT_DIFF),
-                             ("Colour all", ContigCanvas.HIGHLIGHT_ALL),
-                             ("Plain letters", ContigCanvas.HIGHLIGHT_NONE)):
-            self._highlight.addItem(label, value)
-        self._highlight.setToolTip("Bases in the sequences: a dot where they match the "
-                                   "reference, every base coloured, or plain letters")
-        self._highlight.currentIndexChanged.connect(self._on_highlight)
         self._layout_mode = NoWheelComboBox(self)
         self._layout_mode.addItem("One per row", True)
         self._layout_mode.addItem("Packed", False)
@@ -2177,37 +2562,81 @@ class ContigViewPanel(QWidget):
         self._g_logo = QCheckBox("Sequence logo", self)
         self._g_logo.setToolTip("Drawn when the bases are written out")
 
-        # one row: shade positions whose coverage is outside [min]–[max]
-        cov_row = QWidget(self)
-        cr = QHBoxLayout(cov_row)
-        cr.setContentsMargins(0, 0, 0, 0)
-        cr.setSpacing(4)
-        self._g_range_box = QCheckBox("Coverage outside", cov_row)
-        self._g_range_box.setToolTip("Shade positions covered by fewer than the first or "
-                                     "more than the second number of sequences")
-        self._g_low = NoWheelSpinBox(cov_row)
-        self._g_high = NoWheelSpinBox(cov_row)
-        for spin, value in ((self._g_low, 5), (self._g_high, 100)):
+        def threshold_row(text: str, value: int, tip: str):
+            host = QWidget(self)
+            row = QHBoxLayout(host)
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(6)
+            box = QCheckBox(text, host)
+            box.setToolTip(tip)
+            spin = NoWheelSpinBox(host)
             spin.setRange(0, 1_000_000)
             spin.setValue(value)
             spin.setEnabled(False)
-            spin.setButtonSymbols(NoWheelSpinBox.ButtonSymbols.NoButtons)
-            spin.setFixedWidth(46)
-            spin.setAlignment(Qt.AlignmentFlag.AlignRight)
-            self._g_range_box.toggled.connect(spin.setEnabled)
-        dash = QLabel("–", cov_row)
-        cr.addWidget(self._g_range_box, 1)
-        cr.addWidget(self._g_low)
-        cr.addWidget(dash)
-        cr.addWidget(self._g_high)
-        # older names (scripts, tests): both ends share the one switch
-        self._g_low_box = self._g_high_box = self._g_range_box
-        for box in (self._g_log, self._g_logo, self._g_range_box):
+            spin.setFixedWidth(84)
+            box.toggled.connect(spin.setEnabled)
+            row.addWidget(box, 1)
+            row.addWidget(spin)
+            return box, spin, host
+
+        self._g_low_box, self._g_low, low_row = threshold_row(
+            "Coverage below", 5, "Mark positions covered by fewer sequences (red)")
+        self._g_high_box, self._g_high, high_row = threshold_row(
+            "Coverage above", 100, "Mark positions covered by more sequences (orange)")
+        for box in (self._g_log, self._g_logo, self._g_low_box, self._g_high_box):
             box.toggled.connect(lambda _on: self._apply_graphs())
         for spin in (self._g_low, self._g_high):
             spin.valueChanged.connect(lambda _v: self._apply_graphs())
 
-        self._side = self._build_side(cov_row)
+        # Highlighting (Geneious): what to colour, compared to what
+        self._hl_show = NoWheelComboBox(self)
+        for text, key in (("Disagreements", ContigCanvas.SHOW_DISAGREE),
+                          ("Agreements", ContigCanvas.SHOW_AGREE),
+                          ("All bases", ContigCanvas.SHOW_ALL),
+                          ("Nothing", ContigCanvas.SHOW_NONE)):
+            self._hl_show.addItem(text, key)
+        self._hl_show.setToolTip("Bases to colour: those that differ, those that agree, "
+                                 "every base, or none (plain letters)")
+        self._hl_target = NoWheelComboBox(self)
+        self._hl_target.addItem("Reference", ContigCanvas.TO_REFERENCE)
+        self._hl_target.addItem("Consensus", ContigCanvas.TO_CONSENSUS)
+        self._hl_target.setToolTip("Compare each sequence with the reference, or with the "
+                                   "consensus of all sequences (shows which copies deviate "
+                                   "from the family). ◀ ▶ in the toolbar steps through "
+                                   "these differences.")
+        self._hl_dots = QCheckBox("Dots where same", self)
+        self._hl_dots.setChecked(True)
+        self._hl_dots.setToolTip("Write a dot instead of the letter where a base agrees")
+        self._hl_show.setCurrentIndex(max(0, self._hl_show.findData(
+            _read_text("highlight_show", ContigCanvas.SHOW_DISAGREE))))
+        self._hl_target.setCurrentIndex(max(0, self._hl_target.findData(
+            _read_text("highlight_target", ContigCanvas.TO_REFERENCE))))
+        self._hl_dots.setChecked(_read_bool("highlight_dots", True))
+        for combo in (self._hl_show, self._hl_target):
+            combo.currentIndexChanged.connect(lambda _i: self._on_highlight())
+        self._hl_dots.toggled.connect(lambda _on: self._on_highlight())
+
+        # Wrap contig (Display)
+        self._wrap = QCheckBox("Wrap contig", self)
+        self._wrap.setToolTip("When the bases are written out, continue the alignment on "
+                              "the next block instead of scrolling sideways")
+        self._wrap.setChecked(_read_bool("wrap", False))
+        self._wrap.toggled.connect(self._on_wrap)
+
+        # Annotation labels
+        self._labels = NoWheelComboBox(self)
+        for text, key in (("Inside", ContigCanvas.LABELS_INSIDE),
+                          ("Outside", ContigCanvas.LABELS_OUTSIDE),
+                          ("None", ContigCanvas.LABELS_NONE)):
+            self._labels.addItem(text, key)
+        self._labels.setToolTip("Names inside the bars, above them, or not at all. "
+                                "Names that do not fit are left out.")
+        self._labels.setCurrentIndex(max(0, self._labels.findData(
+            _read_text("labels", ContigCanvas.LABELS_INSIDE))))
+        self._labels.currentIndexChanged.connect(self._on_labels)
+        self._type_colors: dict[str, str] = _read_json("type_colors", {})
+
+        self._side = self._build_side(low_row, high_row)
 
         # ------------------------------------------------ view page
         view_area = QWidget(self)
@@ -2240,13 +2669,14 @@ class ContigViewPanel(QWidget):
         self._tabs.setDocumentMode(True)
         self._reads_view = _table(self)
         self._features_view = _table(self)
+        self._features_page = self._build_features_page()
         self._variants_view = _table(self)
         self._unused_view = _table(self)
         self._stats_view = _table(self)
         self._stats_view.setSortingEnabled(False)   # fixed order, like a report
         self._report_view = create_html_preview_widget(self)
         for page, text in ((self._view_page, "Contig view"), (self._reads_view, "Sequences"),
-                           (self._features_view, "Features"), (self._variants_view, "Variants"),
+                           (self._features_page, "Features"), (self._variants_view, "Variants"),
                            (self._unused_view, "Not used"), (self._stats_view, "Statistics"),
                            (self._report_view, "Report")):
             self._tabs.addTab(page, text)
@@ -2268,13 +2698,17 @@ class ContigViewPanel(QWidget):
         self._title.setContentsMargins(8, 6, 8, 4)
         self._side_btn.setChecked(_read_bool("side_panel", True))
         self._set_side_visible(self._side_btn.isChecked())
+        self.canvas.type_colors = dict(self._type_colors)
+        self.canvas.set_label_mode(str(self._labels.currentData()))
+        self.canvas.set_wrap(self._wrap.isChecked())
+        self._on_highlight()
         self._apply_annotations()
         if path is not None:
             self.load(path)
 
     # ---------------------------------------------------------------- side panel
 
-    def _build_side(self, cov_row: QWidget) -> QWidget:
+    def _build_side(self, low_row: QWidget, high_row: QWidget) -> QWidget:
         from PySide6.QtWidgets import QFormLayout, QFrame, QScrollArea
 
         from repeatviewer.widgets.sequence_annotation_rail import _CollapsibleSection
@@ -2307,8 +2741,12 @@ class ContigViewPanel(QWidget):
         labels: list[QLabel] = []
 
         s = section("display", "Display")
-        s.add_layout(form(("Layout", self._layout_mode), ("Bases", self._highlight),
-                          ("Sort by", self._sort), ("Colour by", self._color_by)))
+        s.add_layout(form(("Layout", self._layout_mode), ("Sort by", self._sort),
+                          ("Colour by", self._color_by)))
+        s.add_widget(self._wrap)
+        s = section("highlighting", "Highlighting")
+        s.add_layout(form(("Show", self._hl_show), ("Compared to", self._hl_target)))
+        s.add_widget(self._hl_dots)
         s = section("consensus", "Consensus")
         s.add_layout(form(("Threshold", self._threshold)))
         s = section("filters", "Filters")
@@ -2319,11 +2757,13 @@ class ContigViewPanel(QWidget):
         s.add_widget(self._hidden_label)
         s = section("annotations", "Annotations")
         s.add_widget(self._show_ann)
+        self._labels_form = form(("Labels", self._labels))
+        s.add_layout(self._labels_form)
         s.add_widget(self._types_host)
         s.add_widget(self._per_seq)
         s.add_widget(self._no_ann)
         s = section("graphs", "Graphs", default=False)
-        for w in (self._g_log, cov_row, self._g_logo):
+        for w in (self._g_log, low_row, high_row, self._g_logo):
             s.add_widget(w)
         col.addStretch(1)
         # column width from the everyday labels; the rare long one wraps onto two lines
@@ -2331,8 +2771,8 @@ class ContigViewPanel(QWidget):
         label_w = max(lab.sizeHint().width() for lab in labels if lab not in long_labels)
         for lab in long_labels:
             lab.setWordWrap(True)
-        for combo in (self._layout_mode, self._highlight, self._sort, self._color_by,
-                      self._threshold):
+        for combo in (self._layout_mode, self._sort, self._color_by, self._hl_show,
+                      self._hl_target, self._threshold, self._labels):
             combo.setSizeAdjustPolicy(
                 QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
             combo.setMinimumContentsLength(6)
@@ -2357,7 +2797,8 @@ class ContigViewPanel(QWidget):
         has the app's menu look (rounded, theme.py) like every other popup."""
         from PySide6.QtWidgets import QWidgetAction
 
-        items = legend_items(self.canvas.model, str(self.canvas.highlight))
+        c = self.canvas
+        items = legend_items(c.model, str(c.highlight), target=c.hl_target, show=c.hl_show)
         pop = QMenu(self)
         holder = QWidgetAction(pop)
         holder.setDefaultWidget(ContigLegend(items, pop) if items else
@@ -2529,9 +2970,24 @@ class ContigViewPanel(QWidget):
         if not secondary and self._hide_secondary.isChecked():
             self._hide_secondary.setChecked(False)
 
-    def _on_highlight(self, _index: int) -> None:
-        self.canvas.highlight = str(self._highlight.currentData())
-        self.canvas.viewport().update()
+    def _on_highlight(self, *_args) -> None:
+        show = str(self._hl_show.currentData())
+        target = str(self._hl_target.currentData())
+        self._hl_dots.setEnabled(show == ContigCanvas.SHOW_DISAGREE)
+        self.canvas.set_highlighting(show, target, self._hl_dots.isChecked())
+        _write("highlight_show", show)
+        _write("highlight_target", target)
+        _write("highlight_dots", self._hl_dots.isChecked())
+        self._sync_difference_label()
+
+    def _on_wrap(self, on: bool) -> None:
+        _write("wrap", bool(on))
+        self.canvas.set_wrap(bool(on))
+
+    def _on_labels(self, _index: int = 0) -> None:
+        mode = str(self._labels.currentData())
+        _write("labels", mode)
+        self.canvas.set_label_mode(mode)
 
     # ---------------------------------------------------------------- tables
 
@@ -2593,9 +3049,92 @@ class ContigViewPanel(QWidget):
         self._features_view.setModel(model)
         self._features_view.setColumnHidden(len(headers) - 1, True)
         self._features_view.setColumnWidth(0, 200)
+        head_fm = self._features_view.horizontalHeader().fontMetrics()
         for c in range(1, len(headers) - 1):
-            self._features_view.setColumnWidth(c, 70)
-        self._tabs.setTabEnabled(self._tabs.indexOf(self._features_view), bool(feats))
+            # wide enough for the feature name in the header (e.g. Subrepeat_1)
+            self._features_view.setColumnWidth(
+                c, max(70, head_fm.horizontalAdvance(headers[c]) + 22))
+        self._tabs.setTabEnabled(self._tabs.indexOf(self._features_page), bool(feats))
+        self._fill_annotation_list(m)
+
+    def _build_features_page(self) -> QWidget:
+        """Features tab: every annotation of the reference (filterable, click to show it)
+        above the per-sequence table of how each feature came out."""
+        from PySide6.QtCore import QSortFilterProxyModel
+        from PySide6.QtWidgets import QLineEdit
+
+        page = QWidget(self)
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        bar = QWidget(page)
+        bl = QHBoxLayout(bar)
+        bl.setContentsMargins(6, 4, 6, 4)
+        self._ann_filter = QLineEdit(bar)
+        self._ann_filter.setPlaceholderText("Filter annotations by name or type")
+        self._ann_filter.setClearButtonEnabled(True)
+        self._ann_count = QLabel(bar)
+        self._ann_count.setEnabled(False)
+        bl.addWidget(self._ann_filter, 1)
+        bl.addWidget(self._ann_count)
+        self._ann_view = _table(page)
+        self._ann_proxy = QSortFilterProxyModel(self)
+        self._ann_proxy.setFilterCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        self._ann_proxy.setFilterKeyColumn(-1)
+        self._ann_proxy.setSortRole(Qt.ItemDataRole.UserRole)
+        self._ann_view.setModel(self._ann_proxy)
+        self._ann_filter.textChanged.connect(self._on_ann_filter)
+        self._ann_view.clicked.connect(self._on_annotation_row)
+        split = QSplitter(Qt.Orientation.Vertical, page)
+        top = QWidget(split)
+        tl = QVBoxLayout(top)
+        tl.setContentsMargins(0, 0, 0, 0)
+        tl.setSpacing(0)
+        tl.addWidget(bar)
+        tl.addWidget(self._ann_view, 1)
+        split.addWidget(top)
+        split.addWidget(self._features_view)
+        split.setStretchFactor(0, 1)
+        split.setStretchFactor(1, 2)
+        lay.addWidget(split, 1)
+        return page
+
+    def _fill_annotation_list(self, m: ContigModel) -> None:
+        rows = []
+        for k, f in enumerate(m.features):
+            summary = m.feature_summary[k] if k < len(m.feature_summary) else {}
+            rows.append([f.name, str(f.feature_type or "other"), f.start, f.end,
+                         f.end - f.start + 1, "+" if f.is_forward() else "−",
+                         feature_status_text(summary) if summary else "", k])
+        headers = ["Name", "Type", "Start", "End", "Length", "Strand", "In the sequences", "#"]
+        self._ann_rows = _RowsModel(headers, rows, parent=self)
+        self._ann_proxy.setSourceModel(self._ann_rows)
+        self._ann_view.setColumnHidden(len(headers) - 1, True)
+        _even_columns(self._ann_view, first=200)
+        self._on_ann_filter(self._ann_filter.text())
+
+    def _on_ann_filter(self, text: str) -> None:
+        self._ann_proxy.setFilterFixedString(text.strip())
+        total = self._ann_rows.rowCount() if hasattr(self, "_ann_rows") else 0
+        shown = self._ann_proxy.rowCount()
+        self._ann_count.setText(f"{shown:,} of {total:,}" if shown != total else f"{total:,}")
+
+    def _on_annotation_row(self, index) -> None:
+        m = self.canvas.model
+        if m is None:
+            return
+        src = self._ann_proxy.mapToSource(index)
+        k = self._ann_rows.index(src.row(), self._ann_rows.columnCount() - 1).data(
+            Qt.ItemDataRole.UserRole)
+        if k is None or not 0 <= int(k) < len(m.features):
+            return
+        f = m.features[int(k)]
+        t = str(f.feature_type or "other")
+        if t in self._hidden_types or not self._show_ann.isChecked():
+            self._show_ann.setChecked(True)
+            self._toggle_type(t, True)
+        self._show_view()
+        self.canvas.show_range(f.start - 1, f.end)
 
     def _fill_variants(self, m: ContigModel) -> None:
         rows = [[v[0], v[1], v[2], v[3], v[4], (v[3] / v[4]) if v[4] else 0.0, v[5], v[6]]
@@ -2699,9 +3238,14 @@ class ContigViewPanel(QWidget):
 
     def _all_types(self) -> list[tuple[str, int, str]]:
         m = self.canvas.model
-        return feature_type_counts(m.features) if m is not None else []
+        if m is None:
+            return []
+        return [(t, n, self._type_colors.get(t, c)) for t, n, c in feature_type_counts(m.features)]
 
     def _build_annotation_types(self) -> None:
+        """One row per feature type: tick (show / hide), name and count, a colour
+        swatch (click to change, remembered), and ◀ ▶ to jump to the previous / next
+        annotation of that type."""
         from PySide6.QtWidgets import QCheckBox
 
         while self._types_lay.count():
@@ -2709,19 +3253,75 @@ class ContigViewPanel(QWidget):
             if item.widget() is not None:
                 item.widget().deleteLater()
         self._type_boxes.clear()
+        self._type_swatches: dict[str, QToolButton] = {}
         types = self._all_types()
         for name, n, color in types:
-            box = QCheckBox(f"{name}  ({n:,})", self._types_host)
-            box.setIcon(_swatch(color))
+            row = QWidget(self._types_host)
+            rl = QHBoxLayout(row)
+            rl.setContentsMargins(0, 0, 0, 0)
+            rl.setSpacing(2)
+            box = QCheckBox(f"{name}  ({n:,})", row)
             box.setChecked(name not in self._hidden_types)
             box.toggled.connect(lambda on, t=name: self._toggle_type(t, on))
             self._type_boxes[name] = box
-            self._types_lay.addWidget(box)
+            swatch = QToolButton(row)
+            swatch.setAutoRaise(True)
+            swatch.setIcon(_swatch_icon(self._type_colors.get(name, color)))
+            swatch.setToolTip(f"Colour of {name} annotations (click to change)")
+            swatch.clicked.connect(lambda _c=False, t=name: self._pick_type_color(t))
+            self._type_swatches[name] = swatch
+            rl.addWidget(box, 1)
+            rl.addWidget(swatch)
+            for text, step in (("◀", -1), ("▶", 1)):
+                jump = QToolButton(row)
+                jump.setText(text)
+                jump.setAutoRaise(True)
+                jump.setToolTip(("Previous" if step < 0 else "Next") + f" {name}")
+                jump.clicked.connect(lambda _c=False, t=name, d=step: self._jump_type(t, d))
+                rl.addWidget(jump)
+            self._types_lay.addWidget(row)
         has = bool(types)
         for w in (self._show_ann, self._types_host, self._per_seq):
             w.setVisible(has)
+        self._labels_form.setRowVisible(self._labels, has)
         self._no_ann.setVisible(not has)
         self._apply_annotations()
+
+    def _pick_type_color(self, name: str) -> None:
+        from PySide6.QtWidgets import QColorDialog
+
+        current = next((c for t, _n, c in self._all_types() if t == name), "#888888")
+        chosen = QColorDialog.getColor(QColor(current), self, f"Colour for {name}")
+        if not chosen.isValid():
+            return
+        self._type_colors[name] = chosen.name()
+        _write_json("type_colors", self._type_colors)
+        swatch = self._type_swatches.get(name)
+        if swatch is not None:
+            swatch.setIcon(_swatch_icon(chosen.name()))
+        self.canvas.set_type_colors(self._type_colors)
+        self.overview.update()
+
+    def _jump_type(self, name: str, direction: int) -> None:
+        """Show the previous / next annotation of one type, counted from the middle of
+        the view, and switch the type on if it was hidden."""
+        m = self.canvas.model
+        if m is None:
+            return
+        feats = sorted((f for f in m.features if str(f.feature_type or "other") == name),
+                       key=lambda f: (f.start, f.end))
+        if not feats:
+            return
+        if name in self._hidden_types or not self._show_ann.isChecked():
+            self._show_ann.setChecked(True)
+            self._toggle_type(name, True)
+        here = self.canvas.view_center_bp() or 0
+        if direction > 0:
+            nxt = next((f for f in feats if f.start - 1 > here), feats[0])
+        else:
+            nxt = next((f for f in reversed(feats) if f.end - 1 < here), feats[-1])
+        self._show_view()
+        self.canvas.show_range(nxt.start - 1, nxt.end)
 
     def _apply_annotations(self) -> None:
         on = self._show_ann.isChecked()
@@ -2787,10 +3387,10 @@ class ContigViewPanel(QWidget):
     # ---------------------------------------------------------------- differences
 
     def _step_difference(self, direction: int) -> None:
-        m = self.canvas.model
-        if m is None or not m.diff_pos:
+        positions = self.canvas.diff_positions()
+        if not positions:
             return
-        target = step_difference(m.diff_pos, self.canvas.mark_bp, direction)
+        target = step_difference(positions, self.canvas.mark_bp, direction)
         if target is None:
             return
         self._show_view()
@@ -2799,17 +3399,27 @@ class ContigViewPanel(QWidget):
         self._select_variant_row(target + 1)
 
     def _sync_difference_label(self) -> None:
-        m = self.canvas.model
-        n = len(m.diff_pos) if m is not None else 0
+        positions = self.canvas.diff_positions() if self.canvas.model is not None else []
+        n = len(positions)
         self._prev_diff.setEnabled(n > 0)
         self._next_diff.setEnabled(n > 0)
+        to_cons = self.canvas.hl_target == ContigCanvas.TO_CONSENSUS
+        what = "consensus" if to_cons else "reference"
+        for b in (self._prev_diff, self._next_diff):
+            b.setToolTip(("Previous" if b is self._prev_diff else "Next")
+                         + f" difference to the {what}")
         mark = self.canvas.mark_bp
         if not n:
             self._diff_label.setText("No differences")
-        elif mark is not None and mark in m.diff_pos:
-            self._diff_label.setText(f"Difference {m.diff_pos.index(mark) + 1} of {n:,}")
+        elif mark is not None:
+            k = bisect.bisect_left(positions, mark)
+            if k < n and positions[k] == mark:
+                self._diff_label.setText(f"Difference {k + 1} of {n:,}")
+            else:
+                self._diff_label.setText(f"{n:,} differences")
         else:
             self._diff_label.setText(f"{n:,} differences")
+        self._diff_label.setToolTip(f"Positions where a shown sequence differs from the {what}")
 
     def _select_variant_row(self, pos1: int) -> None:
         model = self._variants_view.model()
