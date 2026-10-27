@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
-from PySide6.QtCore import QAbstractTableModel, QEvent, QModelIndex, QPointF, QRectF, Qt, Signal
+from PySide6.QtCore import QAbstractTableModel, QEvent, QModelIndex, QPoint, QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QAction, QColor, QFont, QFontMetrics, QPainter, QPen, QPolygonF
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -1674,12 +1674,20 @@ class ContigOverview(QWidget):
         self.setToolTip("Whole reference. Click or drag to move the view.")
         canvas.viewChanged.connect(self.update)
 
+    INSET = 4.0     # same gap at both ends, so the view box is never cut off
+
     def _x0(self) -> float:
-        return float(LABEL_W)
+        return float(LABEL_W) + self.INSET
+
+    def _track_w(self) -> float:
+        # end where the view's data area ends (left of its scroll bar), not at the edge
+        vp = self.canvas.viewport()
+        data_right = self.mapFromGlobal(vp.mapToGlobal(QPoint(vp.width(), 0))).x()
+        return max(1.0, min(float(self.width()), float(data_right)) - self.INSET - self._x0())
 
     def _scale(self) -> float:
         m = self.canvas.model
-        return max(1.0, self.width() - LABEL_W - 8) / max(1, m.length if m else 1)
+        return self._track_w() / max(1, m.length if m else 1)
 
     def paintEvent(self, event) -> None:  # noqa: N802
         import math
@@ -1733,7 +1741,9 @@ class ContigOverview(QWidget):
         if c.ppb > 0:
             vis0 = max(0, c.bp_at(LABEL_W))
             vis1 = min(m.length, c.bp_at(c.viewport().width()))
-            box = QRectF(x0 + vis0 * sc, 2, max(4.0, (vis1 - vis0) * sc), self.HEIGHT - 4)
+            left = x0 + vis0 * sc
+            right = max(left + 4.0, x0 + vis1 * sc)
+            box = QRectF(left, 2, right - left, self.HEIGHT - 4)
             p.setPen(QPen(_MARK_EDGE, 2))
             p.setBrush(QColor(31, 95, 191, 26))
             p.drawRoundedRect(box, 3, 3)
