@@ -1992,7 +1992,8 @@ class ContigViewPanel(QWidget):
                        lambda: self.canvas.zoom(1.5))
         fit = tool("Fit", "Show the whole reference (or double-click empty space in the view)",
                    self.canvas.fit)
-        bases = tool("Bases", "Zoom in until the bases are written out",
+        bases = tool("Zoom to bases", "Zoom in until every base is written as a letter, "
+                     "centred on the middle of the view",
                      lambda: self.canvas.show_base(self.canvas.bp_at(
                          LABEL_W + self.canvas._data_w() / 2), zoom_to_letters=True))
         self._prev_diff = tool("◀", "Previous difference", lambda: self._step_difference(-1))
