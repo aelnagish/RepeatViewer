@@ -2352,23 +2352,20 @@ class ContigViewPanel(QWidget):
     SIDE_PAD = 10       # left margin of the options panel's sections
 
     def _show_legend(self) -> None:
-        """Popup under the "?" with only the marks this result can show."""
-        from PySide6.QtWidgets import QFrame
+        """Popup under the "?" with only the marks this result can show. A QMenu, so it
+        has the app's menu look (rounded, theme.py) like every other popup."""
+        from PySide6.QtWidgets import QWidgetAction
 
         items = legend_items(self.canvas.model, str(self.canvas.highlight))
-        pop = QFrame(self, Qt.WindowType.Popup)
-        pop.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
-        pop.setFrameShape(QFrame.Shape.StyledPanel)
-        lay = QVBoxLayout(pop)
-        lay.setContentsMargins(2, 2, 2, 2)
-        lay.addWidget(ContigLegend(items, pop) if items else
-                      QLabel("Open a result to see its legend", pop))
-        pop.adjustSize()
+        pop = QMenu(self)
+        holder = QWidgetAction(pop)
+        holder.setDefaultWidget(ContigLegend(items, pop) if items else
+                                QLabel("Open a result to see its legend", pop))
+        pop.addAction(holder)
         btn = self._legend_btn
-        at = btn.mapToGlobal(QPoint(btn.width() - pop.width(), btn.height() + 4))
-        pop.move(at)
-        pop.show()
+        size = pop.sizeHint()
         self._legend_popup = pop
+        pop.popup(btn.mapToGlobal(QPoint(btn.width() - size.width(), btn.height() + 4)))
 
     def _sync_nav_right(self) -> None:
         """Line Go to up with the options panel: its left edge at the section titles,
