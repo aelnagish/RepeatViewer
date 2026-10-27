@@ -2107,8 +2107,7 @@ class ContigViewPanel(QWidget):
         self._layout_mode = NoWheelComboBox(self)
         self._layout_mode.addItem("One per row", True)
         self._layout_mode.addItem("Packed", False)
-        self._layout_mode.currentIndexChanged.connect(
-            lambda _i: self.canvas.set_one_per_row(bool(self._layout_mode.currentData())))
+        self._layout_mode.currentIndexChanged.connect(self._on_layout_mode)
         self._sort = NoWheelComboBox(self)
         for text, k in (("Start", SORT_START), ("Strand", SORT_STRAND),
                         ("Identity", SORT_IDENTITY), ("Name", SORT_NAME)):
@@ -2118,11 +2117,11 @@ class ContigViewPanel(QWidget):
             lambda _i: self.canvas.set_sort(str(self._sort.currentData())))
         self._color_by = NoWheelComboBox(self)
         for text, k in (("Strand", COLOR_STRAND), ("Identity", COLOR_IDENTITY),
-                        ("MAPQ", COLOR_MAPQ)):
+                        ("Mapping quality", COLOR_MAPQ)):
             self._color_by.addItem(text, k)
         self._color_by.setToolTip("Colour of the sequence bars when zoomed out: forward blue / "
                                   "reverse purple, identity red (80 %) to green (100 %), or "
-                                  "MAPQ amber (0) to blue (60)")
+                                  "mapping quality amber (0) to blue (60)")
         self._color_by.currentIndexChanged.connect(
             lambda _i: self.canvas.set_color_by(str(self._color_by.currentData())))
 
@@ -2133,13 +2132,6 @@ class ContigViewPanel(QWidget):
                                    "below it the consensus writes an ambiguity code")
         self._threshold.currentIndexChanged.connect(
             lambda _i: self._set_threshold(self._threshold.currentData()))
-        self._no_cov = NoWheelComboBox(self)
-        for call in NO_COVERAGE_CALLS:
-            self._no_cov.addItem(f"Call {call}", call)
-        self._no_cov.setToolTip("What the consensus writes where no sequence covers "
-                                "the reference")
-        self._no_cov.currentIndexChanged.connect(
-            lambda _i: self._set_no_coverage(str(self._no_cov.currentData())))
         self._threshold_value: float | None = None
         self._no_cov_value = "N"
 
@@ -2151,8 +2143,10 @@ class ContigViewPanel(QWidget):
         self._min_identity.setToolTip("Hide sequences placed with a lower identity")
         self._min_mapq = NoWheelSpinBox(self)
         self._min_mapq.setRange(0, 60)
-        self._min_mapq.setToolTip("Hide placements with a lower mapping quality "
-                                  "(placements without a MAPQ are kept)")
+        self._min_mapq.setPrefix("≥ ")
+        self._min_mapq.setToolTip("Hide placements with a lower mapping quality (MAPQ, "
+                                  "0–60: how sure the mapper is that this is the only "
+                                  "good place). Placements without one are kept.")
         self._hide_secondary = QCheckBox("Hide secondary placements", self)
         self._hide_secondary.setToolTip("Show only each sequence's primary placement")
         self._hidden_label = QLabel(self)
@@ -2180,34 +2174,40 @@ class ContigViewPanel(QWidget):
 
         self._g_log = QCheckBox("Coverage on a log scale", self)
         self._g_log.setChecked(True)
-        self._g_strand = QCheckBox("Highlight single-strand coverage", self)
         self._g_logo = QCheckBox("Sequence logo", self)
         self._g_logo.setToolTip("Drawn when the bases are written out")
 
-        def threshold_row(text: str, value: int) -> tuple[QCheckBox, NoWheelSpinBox, QWidget]:
-            host = QWidget(self)
-            row = QHBoxLayout(host)
-            row.setContentsMargins(0, 0, 0, 0)
-            row.setSpacing(6)
-            box = QCheckBox(text, host)
-            spin = NoWheelSpinBox(host)
+        # one row: shade positions whose coverage is outside [min]–[max]
+        cov_row = QWidget(self)
+        cr = QHBoxLayout(cov_row)
+        cr.setContentsMargins(0, 0, 0, 0)
+        cr.setSpacing(4)
+        self._g_range_box = QCheckBox("Coverage outside", cov_row)
+        self._g_range_box.setToolTip("Shade positions covered by fewer than the first or "
+                                     "more than the second number of sequences")
+        self._g_low = NoWheelSpinBox(cov_row)
+        self._g_high = NoWheelSpinBox(cov_row)
+        for spin, value in ((self._g_low, 5), (self._g_high, 100)):
             spin.setRange(0, 1_000_000)
             spin.setValue(value)
             spin.setEnabled(False)
-            box.toggled.connect(spin.setEnabled)
-            row.addWidget(box, 1)
-            row.addWidget(spin)
-            return box, spin, host
-
-        self._g_low_box, self._g_low, low_row = threshold_row("Coverage below", 5)
-        self._g_high_box, self._g_high, high_row = threshold_row("Coverage above", 100)
-        for box in (self._g_log, self._g_strand, self._g_logo,
-                    self._g_low_box, self._g_high_box):
+            spin.setButtonSymbols(NoWheelSpinBox.ButtonSymbols.NoButtons)
+            spin.setFixedWidth(46)
+            spin.setAlignment(Qt.AlignmentFlag.AlignRight)
+            self._g_range_box.toggled.connect(spin.setEnabled)
+        dash = QLabel("–", cov_row)
+        cr.addWidget(self._g_range_box, 1)
+        cr.addWidget(self._g_low)
+        cr.addWidget(dash)
+        cr.addWidget(self._g_high)
+        # older names (scripts, tests): both ends share the one switch
+        self._g_low_box = self._g_high_box = self._g_range_box
+        for box in (self._g_log, self._g_logo, self._g_range_box):
             box.toggled.connect(lambda _on: self._apply_graphs())
         for spin in (self._g_low, self._g_high):
             spin.valueChanged.connect(lambda _v: self._apply_graphs())
 
-        self._side = self._build_side(low_row, high_row)
+        self._side = self._build_side(cov_row)
 
         # ------------------------------------------------ view page
         view_area = QWidget(self)
@@ -2274,7 +2274,7 @@ class ContigViewPanel(QWidget):
 
     # ---------------------------------------------------------------- side panel
 
-    def _build_side(self, low_row: QWidget, high_row: QWidget) -> QWidget:
+    def _build_side(self, cov_row: QWidget) -> QWidget:
         from PySide6.QtWidgets import QFormLayout, QFrame, QScrollArea
 
         from repeatviewer.widgets.sequence_annotation_rail import _CollapsibleSection
@@ -2310,9 +2310,11 @@ class ContigViewPanel(QWidget):
         s.add_layout(form(("Layout", self._layout_mode), ("Bases", self._highlight),
                           ("Sort by", self._sort), ("Colour by", self._color_by)))
         s = section("consensus", "Consensus")
-        s.add_layout(form(("Threshold", self._threshold), ("No coverage", self._no_cov)))
+        s.add_layout(form(("Threshold", self._threshold)))
         s = section("filters", "Filters")
-        s.add_layout(form(("Min identity", self._min_identity), ("Min MAPQ", self._min_mapq)))
+        self._filters_form = form(("Min identity", self._min_identity),
+                                  ("Mapping quality", self._min_mapq))
+        s.add_layout(self._filters_form)
         s.add_widget(self._hide_secondary)
         s.add_widget(self._hidden_label)
         s = section("annotations", "Annotations")
@@ -2321,12 +2323,16 @@ class ContigViewPanel(QWidget):
         s.add_widget(self._per_seq)
         s.add_widget(self._no_ann)
         s = section("graphs", "Graphs", default=False)
-        for w in (self._g_log, self._g_strand, low_row, high_row, self._g_logo):
+        for w in (self._g_log, cov_row, self._g_logo):
             s.add_widget(w)
         col.addStretch(1)
-        label_w = max(lab.sizeHint().width() for lab in labels)
+        # column width from the everyday labels; the rare long one wraps onto two lines
+        long_labels = [lab for lab in labels if lab.text() == "Mapping quality"]
+        label_w = max(lab.sizeHint().width() for lab in labels if lab not in long_labels)
+        for lab in long_labels:
+            lab.setWordWrap(True)
         for combo in (self._layout_mode, self._highlight, self._sort, self._color_by,
-                      self._threshold, self._no_cov):
+                      self._threshold):
             combo.setSizeAdjustPolicy(
                 QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
             combo.setMinimumContentsLength(6)
@@ -2491,12 +2497,37 @@ class ContigViewPanel(QWidget):
         self._layout_mode.blockSignals(True)
         self._layout_mode.setCurrentIndex(0 if self.canvas.one_per_row else 1)
         self._layout_mode.blockSignals(False)
+        self._sort.setEnabled(self.canvas.one_per_row)
+        self._sync_filter_rows(model)
         self._fill_reads(model)
         self._fill_features(model)
         self._fill_variants(model)
         self._build_annotation_types()
         self._fill_statistics()
         self._sync_difference_label()
+
+    def _on_layout_mode(self, _index: int = 0) -> None:
+        one = bool(self._layout_mode.currentData())
+        self.canvas.set_one_per_row(one)
+        self._sort.setEnabled(one)
+        self._sort.setToolTip("Order of the sequences when shown one per row" if one else
+                              "Sorting applies to One per row; Packed places sequences "
+                              "by position")
+
+    def _sync_filter_rows(self, m: "ContigModel") -> None:
+        """Show Min mapping quality only when the run's placements differ in mapping
+        quality, and Hide secondary only when there are secondary placements."""
+        qualities = {int(r.data.get("mapq", -1)) for r in m.reads
+                     if int(r.data.get("mapq", -1)) >= 0}
+        varied = len(qualities) > 1
+        self._filters_form.setRowVisible(self._min_mapq, varied)
+        if not varied and self._min_mapq.value():
+            self._min_mapq.setValue(0)
+        secondary = any(str(r.data.get("kind", "")) != "primary"
+                        or int(r.data.get("placement", 1) or 1) > 1 for r in m.reads)
+        self._hide_secondary.setVisible(secondary)
+        if not secondary and self._hide_secondary.isChecked():
+            self._hide_secondary.setChecked(False)
 
     def _on_highlight(self, _index: int) -> None:
         self.canvas.highlight = str(self._highlight.currentData())
@@ -2513,7 +2544,7 @@ class ContigViewPanel(QWidget):
                          d.get("inserted", 0), d.get("mapq") if d.get("mapq", -1) >= 0 else None,
                          d.get("kind", ""), i])
         headers = ["Sequence", "Strand", "Start", "End", "Identity", "Mismatches", "Deleted",
-                   "Inserted", "MAPQ", "Kind", "#"]
+                   "Inserted", "Mapping quality", "Kind", "#"]
         self._reads_view.setModel(_RowsModel(headers, rows, parent=self))
         self._reads_view.setColumnHidden(len(headers) - 1, True)
         _even_columns(self._reads_view, first=220)
@@ -2731,7 +2762,7 @@ class ContigViewPanel(QWidget):
             log_scale=self._g_log.isChecked(),
             low=self._g_low.value() if self._g_low_box.isChecked() else None,
             high=self._g_high.value() if self._g_high_box.isChecked() else None,
-            single_strand=self._g_strand.isChecked(),
+            single_strand=False,
             logo=self._g_logo.isChecked())
 
     def _set_threshold(self, value: float | None) -> None:
@@ -2745,14 +2776,6 @@ class ContigViewPanel(QWidget):
             self._threshold.blockSignals(False)
         self.canvas.set_consensus(value, self._no_cov_value)
         self._fill_statistics()
-
-    def _set_no_coverage(self, value: str) -> None:
-        self._no_cov_value = value
-        if self._threshold_value is None:
-            # the saved consensus has its own no-coverage call; switch to majority
-            self._set_threshold(0.0)
-            return
-        self.canvas.set_consensus(self._threshold_value, value)
 
     def _fill_statistics(self) -> None:
         m = self.canvas.model
@@ -2858,6 +2881,13 @@ class ContigViewPanel(QWidget):
                        lambda t=folder: reveal_in_file_manager(t))
 
     def _copy_consensus(self) -> None:
+        """The consensus as shown: at the threshold picked in the Consensus section."""
         m = self.canvas.model
-        if m is not None and m.consensus:
-            QApplication.clipboard().setText(f">{m.ref_id}_consensus\n{m.consensus}\n")
+        if m is None:
+            return
+        seq = self.canvas.consensus_seq() or m.consensus
+        if not seq:
+            return
+        t = self._threshold_value
+        tag = "" if t is None else ("_majority" if t == 0 else f"_{round(t * 100)}pct")
+        QApplication.clipboard().setText(f">{m.ref_id}_consensus{tag}\n{seq}\n")

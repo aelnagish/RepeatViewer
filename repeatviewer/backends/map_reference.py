@@ -2186,7 +2186,7 @@ def report_html(run: MapRun, files: list[Path], title: str) -> str:
          + ({"more": " · more repetitive seeds", "all": " · all repetitive seeds"}
             .get(seeds, "") if run.engine == MAP_ENGINE_MINIMAP2 else "")),
         ("Limits", f"identity ≥ {o.min_identity:.0%} · ≥ {o.min_aligned_bp} aligned bp"
-         + (f" · MAPQ ≥ {o.min_mapq}" if o.min_mapq else "")),
+         + (f" · mapping quality ≥ {o.min_mapq}" if o.min_mapq else "")),
         ("Consensus", threshold_label(o.consensus_threshold)),
     ]
     details = "".join(f"<tr><th>{e(k)}</th><td>{e(v)}</td></tr>" for k, v in rows)

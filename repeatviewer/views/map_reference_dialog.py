@@ -154,15 +154,17 @@ MULTI_MM_INFO = (
     "<code>-N</code> is how many secondary alignments to report (minimap2’s own "
     "default is 5; RepeatViewer allows up to 50). <code>-p 0.95</code> keeps a "
     "secondary only if its score is at least 95% of its primary.<br><br>"
-    "<b>Do not place ambiguous</b>: after mapping, drop low-MAPQ primaries "
-    "(unreliable best hit) instead of placing them."
+    "<b>Do not place ambiguous</b>: after mapping, drop primaries with a low "
+    "mapping quality (MAPQ: the best hit is not clearly better than another place) "
+    "instead of placing them."
 )
 MULTI_HS_INFO = (
     "HISAT2 multi-mapping (<code>-k</code>).<br><br>"
     "<b>Best place only</b> (default): <code>-k 1</code> — one primary alignment.<br><br>"
     "<b>Up to 20 places (-k 20)</b>: report up to 20 distinct alignments and mark "
     "extras as secondary (<code>--secondary</code>).<br><br>"
-    "<b>Do not place ambiguous</b>: after mapping, drop low-MAPQ primaries."
+    "<b>Do not place ambiguous</b>: after mapping, drop primaries with a low "
+    "mapping quality (MAPQ)."
 )
 HISAT2_LIBRARY_INFO = (
     "HISAT2 alignment mode.<br><br>"
