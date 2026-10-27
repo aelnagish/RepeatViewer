@@ -587,6 +587,8 @@ class ContigCanvas(QAbstractScrollArea):
         self._feature_row_count = 0
         self._colors = _base_colors()
         self.viewport().setMouseTracking(True)
+        self.viewport().grabGesture(Qt.GestureType.PinchGesture)
+        self.viewport().setAttribute(Qt.WidgetAttribute.WA_AcceptTouchEvents, True)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
         self.horizontalScrollBar().valueChanged.connect(self.viewport().update)
         self.horizontalScrollBar().valueChanged.connect(lambda _v: self.viewChanged.emit())
@@ -895,26 +897,64 @@ class ContigCanvas(QAbstractScrollArea):
             v.setValue(max(0, y - visible // 2))
         self.viewport().update()
 
+    def _zoom_at(self, factor: float, x: float) -> None:
+        if factor > 0 and abs(factor - 1.0) > 1e-4:
+            self.zoom(min(4.0, max(0.25, factor)), x)
+
+    def event(self, event) -> bool:  # noqa: N802
+        if self._gesture(event):
+            return True
+        return super().event(event)
+
     def viewportEvent(self, event) -> bool:  # noqa: N802
-        """Trackpad pinch (macOS native gesture) zooms around the fingers."""
-        if event.type() == QEvent.Type.NativeGesture:
-            if event.gestureType() == Qt.NativeGestureType.ZoomNativeGesture:
-                self.zoom(max(0.2, 1.0 + float(event.value())), event.position().x())
-                event.accept()
-                return True
+        if self._gesture(event):
+            return True
         return super().viewportEvent(event)
+
+    def _gesture(self, event) -> bool:
+        """Trackpad pinch zooms around the fingers.
+
+        macOS delivers pinch as native gestures (Begin / Zoom / End); the begin and end
+        events must be accepted too, or the zoom steps never arrive. Platforms that only
+        offer Qt's gesture framework send a QPinchGesture instead."""
+        et = event.type()
+        if et == QEvent.Type.NativeGesture:
+            kind = event.gestureType()
+            if kind == Qt.NativeGestureType.ZoomNativeGesture:
+                x = self.viewport().mapFromGlobal(event.globalPosition().toPoint()).x()
+                self._zoom_at(1.0 + float(event.value()), x)
+            elif kind == Qt.NativeGestureType.SmartZoomNativeGesture:
+                self.fit()
+            elif kind not in (Qt.NativeGestureType.BeginNativeGesture,
+                              Qt.NativeGestureType.EndNativeGesture):
+                return False
+            event.accept()
+            return True
+        if et == QEvent.Type.Gesture:
+            pinch = event.gesture(Qt.GestureType.PinchGesture)
+            if pinch is None:
+                return False
+            x = self.viewport().mapFromGlobal(pinch.centerPoint().toPoint()).x()
+            self._zoom_at(float(pinch.scaleFactor()), x)
+            event.accept(pinch)
+            return True
+        return False
 
     def wheelEvent(self, event) -> None:  # noqa: N802
         mods = event.modifiers()
         if mods & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier):
-            delta = event.angleDelta().y()
+            # Cmd/Ctrl + wheel: smooth on a trackpad (many small steps), one notch = 25 %
+            delta = event.angleDelta().y() or event.angleDelta().x()
+            if not delta:
+                delta = (event.pixelDelta().y() or event.pixelDelta().x()) * 2
             if delta:
-                self.zoom(1.25 if delta > 0 else 0.8, event.position().x())
+                self._zoom_at(1.25 ** (delta / 120.0), event.position().x())
             event.accept()
             return
         if mods & Qt.KeyboardModifier.ShiftModifier:
             h = self.horizontalScrollBar()
-            h.setValue(h.value() - event.angleDelta().y())
+            d = event.angleDelta()
+            h.setValue(h.value() - (d.y() or d.x()))
             event.accept()
             return
         super().wheelEvent(event)
@@ -1929,6 +1969,9 @@ class ContigViewPanel(QWidget):
         self._side_btn.toggled.connect(self._set_side_visible)
 
         bar = QWidget(self)
+        bar.setObjectName("contigNavBar")
+        bar.setAutoFillBackground(True)
+        bar.setBackgroundRole(bar.palette().ColorRole.Window)
         bl = QHBoxLayout(bar)
         bl.setContentsMargins(6, 3, 6, 3)
         bl.setSpacing(4)
@@ -2075,6 +2118,8 @@ class ContigViewPanel(QWidget):
         self._view_split.setCollapsible(0, False)
         self._view_split.setChildrenCollapsible(False)
         self._view_page = QWidget(self)
+        self._view_page.setAutoFillBackground(True)
+        self._view_page.setBackgroundRole(self._view_page.palette().ColorRole.Window)
         vp = QVBoxLayout(self._view_page)
         vp.setContentsMargins(0, 0, 0, 0)
         vp.setSpacing(0)
@@ -2221,13 +2266,13 @@ class ContigViewPanel(QWidget):
         s = d.get("summary", {})
         engine = mr.ENGINE_NAMES.get(d.get("engine", ""), d.get("engine", ""))
         mean = s.get("mean_identity")
-        self._title.setText(
-            f"<b>{d.get('title', self._path.name)}</b> &nbsp; {s.get('n_placed', 0):,} of "
-            f"{s.get('n_sequences', 0):,} placed ({s.get('n_reversed', 0):,} reversed, "
-            f"{s.get('n_unused', 0):,} not used)"
-            + (f" · mean identity {mean:.1%}" if mean is not None else "")
-            + f" · {engine} {d.get('engine_version', '')}")
-        self._title.setToolTip("\n".join(d.get("warnings", [])))
+        # Only the title here; the numbers are in the Report and Statistics tabs.
+        self._title.setText(f"<b>{d.get('title', self._path.name)}</b>")
+        summary = (f"{s.get('n_placed', 0):,} of {s.get('n_sequences', 0):,} placed "
+                   f"({s.get('n_reversed', 0):,} reversed, {s.get('n_unused', 0):,} not used)"
+                   + (f" · mean identity {mean:.1%}" if mean is not None else "")
+                   + f" · {engine} {d.get('engine_version', '')}")
+        self._title.setToolTip("\n".join([summary.strip(), *d.get("warnings", [])]))
         self._contig_models.clear()
         self._contig.blockSignals(True)
         self._contig.clear()
