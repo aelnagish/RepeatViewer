@@ -17,11 +17,12 @@ drawing and are tested in ``tests/test_contig_view.py``.
 from __future__ import annotations
 
 import bisect
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
-from PySide6.QtCore import QAbstractTableModel, QModelIndex, QPointF, QRectF, Qt, Signal
+from PySide6.QtCore import QAbstractTableModel, QEvent, QModelIndex, QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QAction, QColor, QFont, QFontMetrics, QPainter, QPen, QPolygonF
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -893,6 +894,15 @@ class ContigCanvas(QAbstractScrollArea):
         if y < v.value() or y > v.value() + visible - self.read_h():
             v.setValue(max(0, y - visible // 2))
         self.viewport().update()
+
+    def viewportEvent(self, event) -> bool:  # noqa: N802
+        """Trackpad pinch (macOS native gesture) zooms around the fingers."""
+        if event.type() == QEvent.Type.NativeGesture:
+            if event.gestureType() == Qt.NativeGestureType.ZoomNativeGesture:
+                self.zoom(max(0.2, 1.0 + float(event.value())), event.position().x())
+                event.accept()
+                return True
+        return super().viewportEvent(event)
 
     def wheelEvent(self, event) -> None:  # noqa: N802
         mods = event.modifiers()
@@ -1797,111 +1807,191 @@ def _table(parent: QWidget) -> QTableView:
 # --------------------------------------------------------------------------
 
 
+_SETTINGS = "contig_view"
+
+
+def _settings():
+    from PySide6.QtCore import QSettings
+
+    return QSettings()
+
+
+def _read_bool(key: str, default: bool) -> bool:
+    try:
+        v = _settings().value(f"{_SETTINGS}/{key}", default)
+    except Exception:  # noqa: BLE001 - settings are a convenience only
+        return default
+    if isinstance(v, str):
+        return v.lower() in ("1", "true", "yes")
+    return bool(v)
+
+
+def _write(key: str, value) -> None:
+    try:
+        _settings().setValue(f"{_SETTINGS}/{key}", value)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _read_list(key: str) -> list[str]:
+    try:
+        v = _settings().value(f"{_SETTINGS}/{key}", [])
+    except Exception:  # noqa: BLE001
+        return []
+    if v is None:
+        return []
+    if isinstance(v, str):
+        return [v] if v else []
+    return [str(x) for x in v]
+
+
+def _swatch(color: str):
+    from PySide6.QtGui import QIcon, QPixmap
+
+    pix = QPixmap(10, 10)
+    pix.fill(QColor(color))
+    return QIcon(pix)
+
+
 class ContigViewPanel(QWidget):
-    """Toolbar + contig canvas + tables for one ``.rvmap`` result."""
+    """A Map to Reference result (``.rvmap``), laid out like Geneious: document tabs along
+    the top (Contig view and its tables), a thin navigation bar, the view, and the display
+    options in collapsible sections on the right."""
 
     openRequested = Signal(object)     # Path of a result file to open (report, consensus…)
     fileWritten = Signal(object)       # Path of a file written from the view
 
+    SIDE_W = 270
+
     def __init__(self, path: Path | None = None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        from PySide6.QtWidgets import QCheckBox, QLineEdit
+
+        from repeatviewer.widgets.combo_boxes import NoWheelComboBox
+        from repeatviewer.widgets.spin_boxes import NoWheelDoubleSpinBox, NoWheelSpinBox
+
         self._path: Path | None = None
         self._data: dict = {}
         self._contig_models: dict[str, ContigModel] = {}
+        self._report_loaded: Path | None = None
         self.canvas = ContigCanvas(self)
         self.overview = ContigOverview(self.canvas, self)
         self._title = QLabel(self)
         self._title.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        self._contig = QComboBox(self)
+
+        # ------------------------------------------------ navigation bar (thin)
+        self._contig = NoWheelComboBox(self)
         self._contig.setMinimumWidth(180)
         self._contig.currentIndexChanged.connect(self._on_contig_changed)
-        self._highlight = QComboBox(self)
-        for label, value in (("Dots where they match", ContigCanvas.HIGHLIGHT_DIFF),
-                             ("Colour all bases", ContigCanvas.HIGHLIGHT_ALL),
-                             ("Plain letters", ContigCanvas.HIGHLIGHT_NONE)):
-            self._highlight.addItem(label, value)
-        self._highlight.currentIndexChanged.connect(self._on_highlight)
-        self._layout_mode = QComboBox(self)
-        self._layout_mode.addItem("One sequence per row", True)
-        self._layout_mode.addItem("Packed", False)
-        self._layout_mode.currentIndexChanged.connect(
-            lambda _i: self.canvas.set_one_per_row(bool(self._layout_mode.currentData())))
 
         def tool(text: str, tip: str, slot) -> QToolButton:
             b = QToolButton(self)
             b.setText(text)
             b.setToolTip(tip)
+            b.setAutoRaise(True)
             b.clicked.connect(slot)
             return b
 
-        zoom_out = tool("−", "Zoom out (Ctrl/Cmd + wheel)", lambda: self.canvas.zoom(0.66))
-        zoom_in = tool("+", "Zoom in (Ctrl/Cmd + wheel)", lambda: self.canvas.zoom(1.5))
-        fit = tool("Fit", "Show the whole reference (double-click the view)", self.canvas.fit)
+        key = "Cmd" if sys.platform == "darwin" else "Ctrl"
+        zoom_out = tool("−", f"Zoom out\n{key} + wheel or pinch zooms around the mouse",
+                        lambda: self.canvas.zoom(0.66))
+        zoom_in = tool("+", f"Zoom in\n{key} + wheel or pinch zooms around the mouse",
+                       lambda: self.canvas.zoom(1.5))
+        fit = tool("Fit", "Show the whole reference (or double-click empty space in the view)",
+                   self.canvas.fit)
         bases = tool("Bases", "Zoom in until the bases are written out",
                      lambda: self.canvas.show_base(self.canvas.bp_at(
                          LABEL_W + self.canvas._data_w() / 2), zoom_to_letters=True))
-        self._prev_diff = tool("◀", "Previous difference (variant position)",
-                               lambda: self._step_difference(-1))
-        self._next_diff = tool("▶", "Next difference (variant position)",
-                               lambda: self._step_difference(1))
+        self._prev_diff = tool("◀", "Previous difference", lambda: self._step_difference(-1))
+        self._next_diff = tool("▶", "Next difference", lambda: self._step_difference(1))
         self._diff_label = QLabel(self)
         self._diff_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._diff_label.setMinimumWidth(130)
-
-        # Tracks / Graphs / Consensus: options kept in three menus, not more rows
-        self._tracks_btn = self._menu_button("Tracks", "Show or hide feature types, and the "
-                                             "features found in each sequence")
-        self._graphs_btn = self._menu_button("Graphs", "Coverage scale and highlights, "
-                                             "sequence logo")
-        self._consensus_btn = self._menu_button("Consensus", "Consensus threshold and the call "
-                                                "where nothing covers the reference")
-        self._build_graphs_menu()
-        self._build_consensus_menu()
+        self._diff_label.setMinimumWidth(140)
+        self._goto = QLineEdit(self)
+        self._goto.setPlaceholderText("Go to, e.g. 103 or 90-130")
+        self._goto.setFixedWidth(190)
+        self._goto.setClearButtonEnabled(True)
+        self._goto.setToolTip("Go to a position or a range on the reference "
+                              "(e.g. 103, 90-130, or CroSat2:90-130). Enter to go.")
+        self._goto.returnPressed.connect(self._go_to)
         self._files_btn = QToolButton(self)
         self._files_btn.setText("Results")
-        self._files_btn.setToolTip("Open the report, the consensus, the placed or unused "
-                                   "sequences, or the tables")
+        self._files_btn.setAutoRaise(True)
+        self._files_btn.setToolTip("Open the consensus, the placed or unused sequences, "
+                                   "the tables, or the aligner output")
         self._files_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self._files_menu = QMenu(self._files_btn)
         self._files_btn.setMenu(self._files_menu)
+        self._side_btn = QToolButton(self)
+        self._side_btn.setCheckable(True)
+        self._side_btn.setAutoRaise(True)
+        self._side_btn.setToolTip("Show or hide the display options on the right")
+        self._side_btn.toggled.connect(self._set_side_visible)
 
         bar = QWidget(self)
         bl = QHBoxLayout(bar)
-        bl.setContentsMargins(6, 4, 6, 4)
-        bl.setSpacing(6)
-        for wdg in (self._contig, zoom_out, zoom_in, fit, bases):
+        bl.setContentsMargins(6, 3, 6, 3)
+        bl.setSpacing(4)
+        bl.addWidget(self._contig)
+        for wdg in (zoom_out, zoom_in, fit, bases):
             bl.addWidget(wdg)
-        bl.addSpacing(10)
-        for wdg in (self._highlight, self._layout_mode):
-            bl.addWidget(wdg)
-        bl.addSpacing(10)
+        bl.addStretch(1)
         for wdg in (self._prev_diff, self._diff_label, self._next_diff):
             bl.addWidget(wdg)
         bl.addStretch(1)
-        for wdg in (self._tracks_btn, self._graphs_btn, self._consensus_btn, self._files_btn):
-            bl.addWidget(wdg)
+        bl.addWidget(self._goto)
+        bl.addSpacing(6)
+        bl.addWidget(self._files_btn)
+        bl.addWidget(self._side_btn)
 
-        # second row: how reads are ordered, coloured and filtered
-        from repeatviewer.widgets.combo_boxes import NoWheelComboBox
-        from repeatviewer.widgets.spin_boxes import NoWheelDoubleSpinBox, NoWheelSpinBox
-        from PySide6.QtWidgets import QCheckBox
-
+        # ------------------------------------------------ side panel controls
+        self._highlight = NoWheelComboBox(self)
+        for label, value in (("Dots where same", ContigCanvas.HIGHLIGHT_DIFF),
+                             ("Colour all", ContigCanvas.HIGHLIGHT_ALL),
+                             ("Plain letters", ContigCanvas.HIGHLIGHT_NONE)):
+            self._highlight.addItem(label, value)
+        self._highlight.setToolTip("Bases in the sequences: a dot where they match the "
+                                   "reference, every base coloured, or plain letters")
+        self._highlight.currentIndexChanged.connect(self._on_highlight)
+        self._layout_mode = NoWheelComboBox(self)
+        self._layout_mode.addItem("One per row", True)
+        self._layout_mode.addItem("Packed", False)
+        self._layout_mode.currentIndexChanged.connect(
+            lambda _i: self.canvas.set_one_per_row(bool(self._layout_mode.currentData())))
         self._sort = NoWheelComboBox(self)
-        for text, key in (("Start", SORT_START), ("Strand", SORT_STRAND),
-                          ("Identity", SORT_IDENTITY), ("Name", SORT_NAME)):
-            self._sort.addItem(text, key)
-        self._sort.setToolTip("Order of the sequences in One sequence per row")
+        for text, k in (("Start", SORT_START), ("Strand", SORT_STRAND),
+                        ("Identity", SORT_IDENTITY), ("Name", SORT_NAME)):
+            self._sort.addItem(text, k)
+        self._sort.setToolTip("Order of the sequences when shown one per row")
         self._sort.currentIndexChanged.connect(
             lambda _i: self.canvas.set_sort(str(self._sort.currentData())))
         self._color_by = NoWheelComboBox(self)
-        for text, key in (("Strand", COLOR_STRAND), ("Identity", COLOR_IDENTITY),
-                          ("MAPQ", COLOR_MAPQ)):
-            self._color_by.addItem(text, key)
+        for text, k in (("Strand", COLOR_STRAND), ("Identity", COLOR_IDENTITY),
+                        ("MAPQ", COLOR_MAPQ)):
+            self._color_by.addItem(text, k)
         self._color_by.setToolTip("Colour of the sequence bars when zoomed out: forward blue / "
                                   "reverse purple, identity red (80 %) to green (100 %), or "
                                   "MAPQ amber (0) to blue (60)")
         self._color_by.currentIndexChanged.connect(
             lambda _i: self.canvas.set_color_by(str(self._color_by.currentData())))
+
+        self._threshold = NoWheelComboBox(self)
+        for value, label in CONSENSUS_THRESHOLDS:
+            self._threshold.addItem(label, value)
+        self._threshold.setToolTip("Share of the sequences a base needs to be called; "
+                                   "below it the consensus writes an ambiguity code")
+        self._threshold.currentIndexChanged.connect(
+            lambda _i: self._set_threshold(self._threshold.currentData()))
+        self._no_cov = NoWheelComboBox(self)
+        for call in NO_COVERAGE_CALLS:
+            self._no_cov.addItem(f"Call {call}", call)
+        self._no_cov.setToolTip("What the consensus writes where no sequence covers "
+                                "the reference")
+        self._no_cov.currentIndexChanged.connect(
+            lambda _i: self._set_no_coverage(str(self._no_cov.currentData())))
+        self._threshold_value: float | None = None
+        self._no_cov_value = "N"
+
         self._min_identity = NoWheelDoubleSpinBox(self)
         self._min_identity.setRange(0.0, 100.0)
         self._min_identity.setDecimals(0)
@@ -1915,80 +2005,202 @@ class ContigViewPanel(QWidget):
         self._hide_secondary = QCheckBox("Hide secondary placements", self)
         self._hide_secondary.setToolTip("Show only each sequence's primary placement")
         self._hidden_label = QLabel(self)
+        self._hidden_label.setEnabled(False)
         for w_ in (self._min_identity, self._min_mapq):
             w_.valueChanged.connect(lambda _v: self._apply_filters())
         self._hide_secondary.toggled.connect(lambda _on: self._apply_filters())
 
-        bar2 = QWidget(self)
-        b2 = QHBoxLayout(bar2)
-        b2.setContentsMargins(6, 0, 6, 4)
-        b2.setSpacing(6)
-        for text, wdg in (("Sort", self._sort), ("Colour by", self._color_by),
-                          ("Min identity", self._min_identity), ("Min MAPQ", self._min_mapq)):
-            b2.addWidget(QLabel(text, self))
-            b2.addWidget(wdg)
-            b2.addSpacing(6)
-        b2.addWidget(self._hide_secondary)
-        b2.addSpacing(8)
-        b2.addWidget(self._hidden_label)
-        b2.addStretch(1)
-        from PySide6.QtWidgets import QLineEdit
+        self._show_ann = QCheckBox("Show annotations", self)
+        self._show_ann.setChecked(_read_bool("annotations_on", True))
+        self._show_ann.toggled.connect(self._on_show_annotations)
+        self._type_boxes: dict[str, QCheckBox] = {}
+        self._types_host = QWidget(self)
+        self._types_lay = QVBoxLayout(self._types_host)
+        self._types_lay.setContentsMargins(18, 0, 0, 0)
+        self._types_lay.setSpacing(2)
+        self._per_seq = QCheckBox("In each sequence", self)
+        self._per_seq.setToolTip("Draw the reference features under every sequence: intact, "
+                                 "changed (\"n diff\"), partial (faded) or lost (grey)")
+        self._per_seq.setChecked(_read_bool("read_features", False))
+        self._per_seq.toggled.connect(self._on_read_features)
+        self._no_ann = QLabel("The reference has no annotations", self)
+        self._no_ann.setEnabled(False)
+        self._hidden_types: set[str] = set(_read_list("hidden_types"))
 
-        self._goto = QLineEdit(self)
-        self._goto.setPlaceholderText("e.g. 103 or 90-130")
-        self._goto.setFixedWidth(150)
-        self._goto.setClearButtonEnabled(True)
-        self._goto.setToolTip("Go to a position or a range on the reference "
-                              "(e.g. 103, 90-130, or CroSat2:90-130). Enter to go.")
-        self._goto.returnPressed.connect(self._go_to)
-        b2.addWidget(QLabel("Go to", self))
-        b2.addWidget(self._goto)
+        self._g_log = QCheckBox("Coverage on a log scale", self)
+        self._g_log.setChecked(True)
+        self._g_strand = QCheckBox("Highlight single-strand coverage", self)
+        self._g_logo = QCheckBox("Sequence logo", self)
+        self._g_logo.setToolTip("Drawn when the bases are written out")
+
+        def threshold_row(text: str, value: int) -> tuple[QCheckBox, NoWheelSpinBox, QWidget]:
+            host = QWidget(self)
+            row = QHBoxLayout(host)
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(6)
+            box = QCheckBox(text, host)
+            spin = NoWheelSpinBox(host)
+            spin.setRange(0, 1_000_000)
+            spin.setValue(value)
+            spin.setEnabled(False)
+            box.toggled.connect(spin.setEnabled)
+            row.addWidget(box, 1)
+            row.addWidget(spin)
+            return box, spin, host
+
+        self._g_low_box, self._g_low, low_row = threshold_row("Coverage below", 5)
+        self._g_high_box, self._g_high, high_row = threshold_row("Coverage above", 100)
+        for box in (self._g_log, self._g_strand, self._g_logo,
+                    self._g_low_box, self._g_high_box):
+            box.toggled.connect(lambda _on: self._apply_graphs())
+        for spin in (self._g_low, self._g_high):
+            spin.valueChanged.connect(lambda _v: self._apply_graphs())
+
+        self._side = self._build_side(low_row, high_row)
+
+        # ------------------------------------------------ view page
+        view_area = QWidget(self)
+        va = QVBoxLayout(view_area)
+        va.setContentsMargins(0, 0, 0, 0)
+        va.setSpacing(0)
+        va.addWidget(self.overview)
+        va.addWidget(self.canvas, 1)
+        self.legend = ContigLegend(view_area)
+        va.addWidget(self.legend)
+        self._view_split = QSplitter(Qt.Orientation.Horizontal, self)
+        self._view_split.addWidget(view_area)
+        self._view_split.addWidget(self._side)
+        self._view_split.setStretchFactor(0, 1)
+        self._view_split.setStretchFactor(1, 0)
+        self._view_split.setCollapsible(0, False)
+        self._view_split.setChildrenCollapsible(False)
+        self._view_page = QWidget(self)
+        vp = QVBoxLayout(self._view_page)
+        vp.setContentsMargins(0, 0, 0, 0)
+        vp.setSpacing(0)
+        vp.addWidget(bar)
+        vp.addWidget(self._view_split, 1)
+
+        # ------------------------------------------------ document tabs
+        from repeatviewer.widgets.html_preview import create_html_preview_widget
 
         self._tabs = QTabWidget(self)
+        self._tabs.setDocumentMode(True)
         self._reads_view = _table(self)
         self._features_view = _table(self)
         self._variants_view = _table(self)
         self._unused_view = _table(self)
         self._stats_view = _table(self)
         self._stats_view.setSortingEnabled(False)   # fixed order, like a report
-        self._tabs.addTab(self._reads_view, "Sequences")
-        self._tabs.addTab(self._features_view, "Features")
-        self._tabs.addTab(self._variants_view, "Variants")
-        self._tabs.addTab(self._unused_view, "Not used")
-        self._tabs.addTab(self._stats_view, "Statistics")
+        self._report_view = create_html_preview_widget(self)
+        for page, text in ((self._view_page, "Contig view"), (self._reads_view, "Sequences"),
+                           (self._features_view, "Features"), (self._variants_view, "Variants"),
+                           (self._unused_view, "Not used"), (self._stats_view, "Statistics"),
+                           (self._report_view, "Report")):
+            self._tabs.addTab(page, text)
+        self._tabs.setTabToolTip(1, "Click a row to show the sequence in the Contig view")
+        self._tabs.setTabToolTip(2, "Click a cell to show the feature in that sequence")
+        self._tabs.setTabToolTip(3, "Click a row to show the position in the Contig view")
+        self._tabs.currentChanged.connect(self._on_tab_changed)
         self._reads_view.clicked.connect(self._on_read_row)
         self._features_view.clicked.connect(self._on_feature_cell)
         self._variants_view.clicked.connect(self._on_variant_row)
         self.canvas.readClicked.connect(self._select_read_row)
         self.canvas.readDoubleClicked.connect(self._open_read_in_rows)
-        hint = QLabel("Click a row to show it in the view", self)
-        hint.setEnabled(False)
-        hint.setContentsMargins(0, 0, 8, 0)
-        self._tabs.setCornerWidget(hint, Qt.Corner.TopRightCorner)
 
-        top = QWidget(self)
-        tl = QVBoxLayout(top)
-        tl.setContentsMargins(0, 0, 0, 0)
-        tl.setSpacing(0)
-        tl.addWidget(self.overview)
-        tl.addWidget(self.canvas, 1)
-        self.legend = ContigLegend(top)
-        tl.addWidget(self.legend)
-        split = QSplitter(Qt.Orientation.Vertical, self)
-        split.addWidget(top)
-        split.addWidget(self._tabs)
-        split.setStretchFactor(0, 3)
-        split.setStretchFactor(1, 2)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
         lay.addWidget(self._title)
-        lay.addWidget(bar)
-        lay.addWidget(bar2)
-        lay.addWidget(split, 1)
-        self._title.setContentsMargins(8, 6, 8, 0)
+        lay.addWidget(self._tabs, 1)
+        self._title.setContentsMargins(8, 6, 8, 4)
+        self._side_btn.setChecked(_read_bool("side_panel", True))
+        self._set_side_visible(self._side_btn.isChecked())
+        self._apply_annotations()
         if path is not None:
             self.load(path)
+
+    # ---------------------------------------------------------------- side panel
+
+    def _build_side(self, low_row: QWidget, high_row: QWidget) -> QWidget:
+        from PySide6.QtWidgets import QFormLayout, QFrame, QScrollArea
+
+        from repeatviewer.widgets.sequence_annotation_rail import _CollapsibleSection
+
+        body = QWidget(self)
+        col = QVBoxLayout(body)
+        col.setContentsMargins(10, 8, 10, 8)
+        col.setSpacing(12)
+        self._sections: dict[str, QWidget] = {}
+
+        def section(key: str, title: str, default: bool = True):
+            s = _CollapsibleSection(title, body, expanded=_read_bool(f"section/{key}", default))
+            s.expandedChanged.connect(lambda on, k=key: _write(f"section/{k}", bool(on)))
+            self._sections[key] = s
+            col.addWidget(s)
+            return s
+
+        def form(*rows) -> QFormLayout:
+            f = QFormLayout()
+            f.setContentsMargins(0, 0, 0, 0)
+            f.setHorizontalSpacing(8)
+            f.setVerticalSpacing(6)
+            f.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+            for label, w in rows:
+                lab = QLabel(label, body)
+                labels.append(lab)
+                f.addRow(lab, w)
+            return f
+
+        labels: list[QLabel] = []
+
+        s = section("display", "Display")
+        s.add_layout(form(("Layout", self._layout_mode), ("Bases", self._highlight),
+                          ("Sort by", self._sort), ("Colour by", self._color_by)))
+        s = section("consensus", "Consensus")
+        s.add_layout(form(("Threshold", self._threshold), ("No coverage", self._no_cov)))
+        s = section("filters", "Filters")
+        s.add_layout(form(("Min identity", self._min_identity), ("Min MAPQ", self._min_mapq)))
+        s.add_widget(self._hide_secondary)
+        s.add_widget(self._hidden_label)
+        s = section("annotations", "Annotations")
+        s.add_widget(self._show_ann)
+        s.add_widget(self._types_host)
+        s.add_widget(self._per_seq)
+        s.add_widget(self._no_ann)
+        s = section("graphs", "Graphs", default=False)
+        for w in (self._g_log, self._g_strand, low_row, high_row, self._g_logo):
+            s.add_widget(w)
+        col.addStretch(1)
+        label_w = max(lab.sizeHint().width() for lab in labels)
+        for combo in (self._layout_mode, self._highlight, self._sort, self._color_by,
+                      self._threshold, self._no_cov):
+            combo.setSizeAdjustPolicy(
+                QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+            combo.setMinimumContentsLength(6)
+        for spin in (self._min_identity, self._min_mapq):
+            spin.setMinimumWidth(60)
+        for lab in labels:                       # fields line up across sections
+            lab.setFixedWidth(label_w)
+
+        scroll = QScrollArea(self)
+        scroll.setWidget(body)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setMinimumWidth(self.SIDE_W - 30)
+        scroll.setMaximumWidth(self.SIDE_W + 120)
+        return scroll
+
+    def _set_side_visible(self, on: bool) -> None:
+        self._side.setVisible(on)
+        self._side_btn.setText("Hide options ▸" if on else "◂ Options")
+        _write("side_panel", bool(on))
+        if on:
+            sizes = self._view_split.sizes()
+            total = sum(sizes) or self.width()
+            if len(sizes) == 2 and sizes[1] < self.SIDE_W - 30:
+                self._view_split.setSizes([max(0, total - self.SIDE_W), self.SIDE_W])
 
     # ---------------------------------------------------------------- loading
 
@@ -1997,6 +2209,7 @@ class ContigViewPanel(QWidget):
 
     def load(self, path: Path) -> None:
         self._path = Path(path)
+        self._report_loaded = None
         try:
             self._data = mr.load_rvmap(self._path)
         except (OSError, ValueError, mr.MapReferenceError) as exc:
@@ -2024,10 +2237,39 @@ class ContigViewPanel(QWidget):
         self._contig.setVisible(self._contig.count() > 1)
         self._build_files_menu()
         self._fill_unused()
+        report = self._report_path()
+        self._tabs.setTabEnabled(self._tabs.indexOf(self._report_view), report is not None)
+        if self._tabs.currentWidget() is self._report_view:
+            self._tabs.setCurrentWidget(self._view_page)
         if self._contig.count():
             self._on_contig_changed(0)
         else:
             self.canvas.set_model(None)
+
+    def _report_path(self) -> Path | None:
+        if self._path is None:
+            return None
+        name = self._data.get("details", {}).get("report")
+        if not name:
+            return None
+        target = self._path.parent / self._data.get("details_dir", "") / name
+        return target if target.is_file() else None
+
+    def _on_tab_changed(self, _index: int) -> None:
+        if self._tabs.currentWidget() is not self._report_view:
+            return
+        report = self._report_path()
+        if report is not None and report != self._report_loaded:
+            self._report_loaded = report
+            try:
+                self._report_view.load_html_file(report)
+            except Exception:  # noqa: BLE001 - the report can still be opened from Results
+                self._report_loaded = None
+
+    def _show_view(self) -> None:
+        if self._tabs.currentWidget() is not self._view_page:
+            self._tabs.setCurrentWidget(self._view_page)
+            QApplication.processEvents()
 
     def _entry(self, ref_id: str) -> dict | None:
         return next((c for c in self._data.get("contigs", []) if c["id"] == ref_id), None)
@@ -2052,7 +2294,7 @@ class ContigViewPanel(QWidget):
         self._fill_reads(model)
         self._fill_features(model)
         self._fill_variants(model)
-        self._build_tracks_menu()
+        self._build_annotation_types()
         self._fill_statistics()
         self._sync_difference_label()
 
@@ -2122,7 +2364,7 @@ class ContigViewPanel(QWidget):
         self._features_view.setColumnWidth(0, 200)
         for c in range(1, len(headers) - 1):
             self._features_view.setColumnWidth(c, 70)
-        self._tabs.setTabText(1, f"Features ({len(feats)})" if feats else "Features")
+        self._tabs.setTabEnabled(self._tabs.indexOf(self._features_view), bool(feats))
 
     def _fill_variants(self, m: ContigModel) -> None:
         rows = [[v[0], v[1], v[2], v[3], v[4], (v[3] / v[4]) if v[4] else 0.0, v[5], v[6]]
@@ -2136,13 +2378,11 @@ class ContigViewPanel(QWidget):
                          "", "Cytosine context of the reference position (CG / CHG), "
                          "where methylation-driven C→T changes are expected", ""]))
         _even_columns(self._variants_view)
-        self._tabs.setTabText(2, f"Variants ({len(rows):,})")
 
     def _fill_unused(self) -> None:
         rows = [[n, r] for n, r in self._data.get("unused", [])]
         self._unused_view.setModel(_RowsModel(["Sequence", "Reason"], rows, parent=self))
         _even_columns(self._unused_view, first=240)
-        self._tabs.setTabText(3, f"Not used ({self._data.get('summary', {}).get('n_unused', 0):,})")
 
     # ---------------------------------------------------------------- interaction
 
@@ -2152,25 +2392,28 @@ class ContigViewPanel(QWidget):
             Qt.ItemDataRole.UserRole))
 
     def _on_read_row(self, index) -> None:
-        self.canvas.show_read(self._read_index_from(self._reads_view, index))
+        read_idx = self._read_index_from(self._reads_view, index)
+        self._show_view()
+        self.canvas.selected = read_idx
+        self.canvas.show_read(read_idx)
 
     def _on_feature_cell(self, index) -> None:
         m = self.canvas.model
         if m is None:
             return
         read_idx = self._read_index_from(self._features_view, index)
+        self._show_view()
         col = index.column()
+        self.canvas.selected = read_idx
+        self.canvas.show_read(read_idx)
         if 1 <= col <= min(len(m.features), mr.MAX_FEATURE_COLUMNS):
             f = m.features[col - 1]
-            self.canvas.selected = read_idx
-            self.canvas.show_read(read_idx)
             self.canvas.show_base((f.start + f.end) // 2)
-        else:
-            self.canvas.show_read(read_idx)
 
     def _on_variant_row(self, index) -> None:
         pos = self._variants_view.model().index(index.row(), 0).data(Qt.ItemDataRole.UserRole)
         if pos:
+            self._show_view()
             self.canvas.show_base(int(pos) - 1, zoom_to_letters=True, mark=True)
             self._sync_difference_label()
 
@@ -2179,7 +2422,8 @@ class ContigViewPanel(QWidget):
                                 min_mapq=self._min_mapq.value(),
                                 hide_secondary=self._hide_secondary.isChecked())
         n = self.canvas.hidden_count()
-        self._hidden_label.setText(f"{n:,} hidden by filters" if n else "")
+        self._hidden_label.setText(f"{n:,} hidden by the filters" if n else "")
+        self._hidden_label.setVisible(bool(n))
         self.overview.update()
         if hasattr(self, "_stats_view"):
             self._fill_statistics()
@@ -2208,6 +2452,7 @@ class ContigViewPanel(QWidget):
             self._goto.setToolTip(f"The reference is {m.length:,} bp long.")
             self._goto.selectAll()
             return
+        self._show_view()
         self.canvas.show_range(start - 1, min(end, m.length))
         self._sync_difference_label()
 
@@ -2219,103 +2464,67 @@ class ContigViewPanel(QWidget):
         self.canvas.show_read(read_idx)
         self._select_read_row(read_idx)
 
-    # ---------------------------------------------------------------- menus
+    # ---------------------------------------------------------------- annotations
 
-    def _menu_button(self, text: str, tip: str) -> QToolButton:
-        b = QToolButton(self)
-        b.setText(text)
-        b.setToolTip(tip)
-        b.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        b.setMenu(QMenu(b))
-        return b
-
-    def _build_tracks_menu(self) -> None:
-        from PySide6.QtGui import QIcon, QPixmap
-
-        menu = self._tracks_btn.menu()
-        menu.clear()
+    def _all_types(self) -> list[tuple[str, int, str]]:
         m = self.canvas.model
-        types = feature_type_counts(m.features) if m is not None else []
-        self._tracks_btn.setEnabled(bool(types))
-        if not types:
-            return
-        head = menu.addAction("Feature types")
-        head.setEnabled(False)
+        return feature_type_counts(m.features) if m is not None else []
+
+    def _build_annotation_types(self) -> None:
+        from PySide6.QtWidgets import QCheckBox
+
+        while self._types_lay.count():
+            item = self._types_lay.takeAt(0)
+            if item.widget() is not None:
+                item.widget().deleteLater()
+        self._type_boxes.clear()
+        types = self._all_types()
         for name, n, color in types:
-            pix = QPixmap(12, 12)
-            pix.fill(QColor(color))
-            act = menu.addAction(QIcon(pix), f"{name}  ({n:,})")
-            act.setCheckable(True)
-            act.setChecked(name not in self.canvas.hidden_types)
-            act.toggled.connect(lambda on, t=name: self._toggle_type(t, on))
-        menu.addSeparator()
-        menu.addAction("Show all types", lambda: self._set_all_types(True))
-        menu.addAction("Hide all types", lambda: self._set_all_types(False))
-        menu.addSeparator()
-        per_seq = menu.addAction("Features in each sequence")
-        per_seq.setCheckable(True)
-        per_seq.setChecked(self.canvas.show_read_features)
-        per_seq.setToolTip("Draw the reference features under every sequence: intact, "
-                           "changed (\"n diff\"), partial (faded) or lost (grey)")
-        per_seq.toggled.connect(self._on_read_features)
+            box = QCheckBox(f"{name}  ({n:,})", self._types_host)
+            box.setIcon(_swatch(color))
+            box.setChecked(name not in self._hidden_types)
+            box.toggled.connect(lambda on, t=name: self._toggle_type(t, on))
+            self._type_boxes[name] = box
+            self._types_lay.addWidget(box)
+        has = bool(types)
+        for w in (self._show_ann, self._types_host, self._per_seq):
+            w.setVisible(has)
+        self._no_ann.setVisible(not has)
+        self._apply_annotations()
+
+    def _apply_annotations(self) -> None:
+        on = self._show_ann.isChecked()
+        names = {t for t, _n, _c in self._all_types()}
+        hidden = set(names) if not on else (self._hidden_types & names)
+        self._types_host.setEnabled(on)
+        self._per_seq.setEnabled(on)
+        self.canvas.set_hidden_types(hidden)
+        self.canvas.set_show_read_features(on and self._per_seq.isChecked())
+        self.overview.update()
+
+    def _on_show_annotations(self, on: bool) -> None:
+        _write("annotations_on", bool(on))
+        self._apply_annotations()
 
     def _toggle_type(self, name: str, on: bool) -> None:
-        hidden = set(self.canvas.hidden_types)
-        (hidden.discard if on else hidden.add)(name)
-        self.canvas.set_hidden_types(hidden)
-        self.overview.update()
+        (self._hidden_types.discard if on else self._hidden_types.add)(name)
+        box = self._type_boxes.get(name)
+        if box is not None and box.isChecked() != on:
+            box.blockSignals(True)
+            box.setChecked(on)
+            box.blockSignals(False)
+        _write("hidden_types", sorted(self._hidden_types))
+        self._apply_annotations()
 
     def _set_all_types(self, on: bool) -> None:
-        m = self.canvas.model
-        names = {t for t, _n, _c in feature_type_counts(m.features)} if m else set()
-        self.canvas.set_hidden_types(set() if on else names)
-        self._build_tracks_menu()
-        self.overview.update()
+        for name, _n, _c in self._all_types():
+            self._toggle_type(name, on)
 
     def _on_read_features(self, on: bool) -> None:
-        self.canvas.set_show_read_features(on)
+        _write("read_features", bool(on))
+        self._apply_annotations()
 
-    def _build_graphs_menu(self) -> None:
-        from PySide6.QtWidgets import QCheckBox, QWidgetAction
-
-        from repeatviewer.widgets.spin_boxes import NoWheelSpinBox
-
-        menu = self._graphs_btn.menu()
-        self._g_log = menu.addAction("Coverage on a log scale")
-        self._g_log.setCheckable(True)
-        self._g_log.setChecked(True)
-        self._g_strand = menu.addAction("Highlight single-strand coverage")
-        self._g_strand.setCheckable(True)
-        self._g_logo = menu.addAction("Sequence logo")
-        self._g_logo.setCheckable(True)
-        menu.addSeparator()
-
-        def threshold_row(text: str, value: int) -> tuple[QCheckBox, NoWheelSpinBox]:
-            host = QWidget(menu)
-            row = QHBoxLayout(host)
-            row.setContentsMargins(10, 2, 10, 2)
-            row.setSpacing(6)
-            box = QCheckBox(text, host)
-            spin = NoWheelSpinBox(host)
-            spin.setRange(0, 1_000_000)
-            spin.setValue(value)
-            spin.setEnabled(False)
-            box.toggled.connect(spin.setEnabled)
-            row.addWidget(box, 1)
-            row.addWidget(spin)
-            act = QWidgetAction(menu)
-            act.setDefaultWidget(host)
-            menu.addAction(act)
-            return box, spin
-
-        self._g_low_box, self._g_low = threshold_row("Highlight coverage below", 5)
-        self._g_high_box, self._g_high = threshold_row("Highlight coverage above", 100)
-        for act in (self._g_log, self._g_strand, self._g_logo):
-            act.toggled.connect(lambda _on: self._apply_graphs())
-        for box in (self._g_low_box, self._g_high_box):
-            box.toggled.connect(lambda _on: self._apply_graphs())
-        for spin in (self._g_low, self._g_high):
-            spin.valueChanged.connect(lambda _v: self._apply_graphs())
+    # ---------------------------------------------------------------- graphs / consensus
 
     def _apply_graphs(self) -> None:
         self.canvas.set_graph_options(
@@ -2325,36 +2534,15 @@ class ContigViewPanel(QWidget):
             single_strand=self._g_strand.isChecked(),
             logo=self._g_logo.isChecked())
 
-    def _build_consensus_menu(self) -> None:
-        from PySide6.QtGui import QActionGroup
-
-        menu = self._consensus_btn.menu()
-        head = menu.addAction("Threshold")
-        head.setEnabled(False)
-        group = QActionGroup(menu)
-        self._threshold_actions: dict = {}
-        for value, label in CONSENSUS_THRESHOLDS:
-            act = menu.addAction(label)
-            self._threshold_actions[value] = act
-            act.setCheckable(True)
-            act.setChecked(value is None)
-            act.setActionGroup(group)
-            act.triggered.connect(lambda _c=False, v=value: self._set_threshold(v))
-        menu.addSeparator()
-        head2 = menu.addAction("Where nothing covers the reference")
-        head2.setEnabled(False)
-        group2 = QActionGroup(menu)
-        for call in NO_COVERAGE_CALLS:
-            act = menu.addAction(f"Call {call}")
-            act.setCheckable(True)
-            act.setChecked(call == "N")
-            act.setActionGroup(group2)
-            act.triggered.connect(lambda _c=False, v=call: self._set_no_coverage(v))
-        self._threshold_value: float | None = None
-        self._no_cov_value = "N"
-
     def _set_threshold(self, value: float | None) -> None:
         self._threshold_value = value
+        i = self._threshold.findData(value)
+        if value is None:
+            i = 0
+        if i >= 0 and i != self._threshold.currentIndex():
+            self._threshold.blockSignals(True)
+            self._threshold.setCurrentIndex(i)
+            self._threshold.blockSignals(False)
         self.canvas.set_consensus(value, self._no_cov_value)
         self._fill_statistics()
 
@@ -2362,8 +2550,8 @@ class ContigViewPanel(QWidget):
         self._no_cov_value = value
         if self._threshold_value is None:
             # the saved consensus has its own no-coverage call; switch to majority
-            self._threshold_value = 0.0
-            self._threshold_actions[0.0].setChecked(True)
+            self._set_threshold(0.0)
+            return
         self.canvas.set_consensus(self._threshold_value, value)
 
     def _fill_statistics(self) -> None:
@@ -2382,6 +2570,7 @@ class ContigViewPanel(QWidget):
         target = step_difference(m.diff_pos, self.canvas.mark_bp, direction)
         if target is None:
             return
+        self._show_view()
         self.canvas.show_base(target, zoom_to_letters=True, mark=True)
         self._sync_difference_label()
         self._select_variant_row(target + 1)

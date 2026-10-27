@@ -260,3 +260,35 @@ def test_go_to_and_double_click_open_in_rows(qapp, tmp_path):
     panel._open_read_in_rows(3)
     assert c.one_per_row and c.selected == 3
     panel.close()
+
+
+def test_panel_tabs_annotation_switch_and_pinch(qapp, tmp_path):
+    """Tables live in top tabs without counts, a table click returns to the view, the
+    annotation master switch hides every type, and a pinch zooms."""
+    from PySide6.QtCore import QPointF, Qt
+    from PySide6.QtGui import QNativeGestureEvent, QPointingDevice
+
+    app = qapp
+    path = tmp_path / "x.fa_map.rvmap"
+    path.write_text(json.dumps(_payload()))
+    panel = cv.ContigViewPanel()
+    panel.resize(1000, 600)
+    panel.show()
+    panel.load(path)
+    app.processEvents()
+    titles = [panel._tabs.tabText(i) for i in range(panel._tabs.count())]
+    assert titles == ["Contig view", "Sequences", "Features", "Variants", "Not used",
+                      "Statistics", "Report"]
+    panel._tabs.setCurrentWidget(panel._reads_view)
+    panel._on_read_row(panel._reads_view.model().index(1, 0))
+    assert panel._tabs.currentIndex() == 0
+    panel._show_ann.setChecked(False)
+    assert panel.canvas.hidden_types == {t for t, _n, _c in panel._all_types()}
+    panel._show_ann.setChecked(True)
+    before = panel.canvas.ppb
+    ev = QNativeGestureEvent(Qt.NativeGestureType.ZoomNativeGesture,
+                             QPointingDevice.primaryPointingDevice(), 2, QPointF(500, 200),
+                             QPointF(500, 200), QPointF(500, 200), 0.5, QPointF(0, 0))
+    app.sendEvent(panel.canvas.viewport(), ev)
+    assert panel.canvas.ppb != before                  # the pinch reached zoom()
+    panel.close()
