@@ -1699,7 +1699,10 @@ class ContigOverview(QWidget):
                    f"Whole reference · {m.length:,} bp")
         x0, sc = self._x0(), self._scale()
         track = QRectF(x0, 4, m.length * sc, self.HEIGHT - 8)
-        p.fillRect(track, QColor("#ececea"))
+        # same background as the bars around it; a thin outline marks the track
+        p.setPen(QPen(pal.color(pal.ColorRole.Mid), 0.6))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRect(track)
         cov = np.asarray(m.coverage, dtype=float)
         if cov.size:
             top = math.log1p(max(4.0, float(cov.max())))
@@ -1906,6 +1909,9 @@ class ContigViewPanel(QWidget):
     def __init__(self, path: Path | None = None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         from PySide6.QtWidgets import QCheckBox, QLineEdit
+        # one background colour for the title, the tab bar, the toolbar and the strips
+        self.setAutoFillBackground(True)
+        self.setBackgroundRole(self.palette().ColorRole.Window)
 
         from repeatviewer.widgets.combo_boxes import NoWheelComboBox
         from repeatviewer.widgets.spin_boxes import NoWheelDoubleSpinBox, NoWheelSpinBox
