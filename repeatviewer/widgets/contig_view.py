@@ -1961,10 +1961,10 @@ class ContigViewPanel(QWidget):
                               "(e.g. 103, 90-130, or CroSat2:90-130). Enter to go.")
         self._goto.returnPressed.connect(self._go_to)
         self._files_btn = QToolButton(self)
-        self._files_btn.setText("Results")
+        self._files_btn.setText("Files")
         self._files_btn.setAutoRaise(True)
-        self._files_btn.setToolTip("Open the consensus, the placed or unused sequences, "
-                                   "the tables, or the aligner output")
+        self._files_btn.setToolTip("Files written by this run: consensus, placed and "
+                                   "unused sequences, aligner output, reference")
         self._files_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self._files_menu = QMenu(self._files_btn)
         self._files_btn.setMenu(self._files_menu)
@@ -2314,7 +2314,7 @@ class ContigViewPanel(QWidget):
             self._report_loaded = report
             try:
                 self._report_view.load_html_file(report)
-            except Exception:  # noqa: BLE001 - the report can still be opened from Results
+            except Exception:  # noqa: BLE001 - the report stays in the details folder
                 self._report_loaded = None
 
     def _show_view(self) -> None:
@@ -2661,32 +2661,48 @@ class ContigViewPanel(QWidget):
                 break
 
     def _build_files_menu(self) -> None:
+        """Files the run wrote, by their real names. Tables and the report are not listed:
+        the tabs show them live; Reveal in Finder gives the files themselves."""
+        import platform
+
+        from repeatviewer.ui.platform import reveal_in_file_manager
+
         self._files_menu.clear()
         if self._path is None:
             return
         details = self._path.parent / self._data.get("details_dir", "")
-        labels = [("report", "Report"), ("consensus", "Consensus"),
-                  ("mapped", "Placed sequences"), ("unused", "Unused sequences"),
-                  ("variants", "Variants table"), ("features", "Features table"),
-                  ("reads", "Sequences table"), ("raw", "Aligner output")]
-        for key, text in labels:
+        tips = {"consensus": "Consensus sequence with the reference features",
+                "mapped": "The placed sequences, turned to the reference strand",
+                "unused": "Sequences that could not be placed",
+                "raw": "The aligner's own output, for other tools"}
+        for key in ("consensus", "mapped", "unused", "raw"):
             name = self._data.get("details", {}).get(key)
             if not name:
                 continue
             target = details / name
-            act = QAction(text, self._files_menu)
+            act = QAction(name, self._files_menu)
+            act.setToolTip(tips[key])
             act.setEnabled(target.is_file())
             act.triggered.connect(lambda _c=False, t=target: self.openRequested.emit(t))
             self._files_menu.addAction(act)
-        self._files_menu.addSeparator()
         ref = Path(self._data.get("reference", ""))
-        act = QAction("Reference", self._files_menu)
-        act.setEnabled(ref.is_file())
-        act.triggered.connect(lambda _c=False, t=ref: self.openRequested.emit(t))
-        self._files_menu.addAction(act)
+        if ref.name:
+            self._files_menu.addSeparator()
+            act = QAction(ref.name, self._files_menu)
+            act.setToolTip("The reference the sequences were mapped to")
+            act.setEnabled(ref.is_file())
+            act.triggered.connect(lambda _c=False, t=ref: self.openRequested.emit(t))
+            self._files_menu.addAction(act)
+        self._files_menu.addSeparator()
         copy = QAction("Copy consensus", self._files_menu)
         copy.triggered.connect(self._copy_consensus)
         self._files_menu.addAction(copy)
+        reveal = QAction("Reveal in Finder" if platform.system() == "Darwin"
+                         else "Show in File Manager", self._files_menu)
+        folder = details if details.is_dir() else self._path
+        reveal.triggered.connect(lambda _c=False, t=folder: reveal_in_file_manager(t))
+        self._files_menu.addAction(reveal)
+        self._files_menu.setToolTipsVisible(True)
 
     def _copy_consensus(self) -> None:
         m = self.canvas.model

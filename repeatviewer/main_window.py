@@ -5165,13 +5165,13 @@ class MainWindow(QMainWindow):
         QMessageBox.warning(self, "Mapping failed", text)
 
     def _on_preview_open_requested(self, path: object) -> None:
-        """A result file asked for from a preview (contig view → Results menu)."""
+        """A result file asked for from a preview (contig view → Files menu).
+
+        Opens in RepeatViewer's own preview, FASTA included (the consensus shows its
+        features there); AliView stays on the Files panel's right-click menu."""
         if not isinstance(path, Path) or not path.is_file():
             return
-        if path.suffix.lower() in _FASTA_SUFFIXES:
-            self._open_in_sequence_viewer(path)
-        else:
-            self._open_preview_tab(path, replace=False)
+        self._open_preview_tab(path, replace=False)
 
     def _close_other_process_monitors(self, keep_tool_key: str) -> None:
         """Close progress windows from other tools when a new job starts."""
