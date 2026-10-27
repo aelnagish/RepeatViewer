@@ -1674,16 +1674,16 @@ class ContigOverview(QWidget):
         self.setToolTip("Whole reference. Click or drag to move the view.")
         canvas.viewChanged.connect(self.update)
 
-    INSET = 4.0     # same gap at both ends, so the view box is never cut off
-
     def _x0(self) -> float:
-        return float(LABEL_W) + self.INSET
+        # where the view's data area starts (its label column ends)
+        vp = self.canvas.viewport()
+        return float(self.mapFromGlobal(vp.mapToGlobal(QPoint(LABEL_W, 0))).x())
 
     def _track_w(self) -> float:
-        # end where the view's data area ends (left of its scroll bar), not at the edge
-        vp = self.canvas.viewport()
-        data_right = self.mapFromGlobal(vp.mapToGlobal(QPoint(vp.width(), 0))).x()
-        return max(1.0, min(float(self.width()), float(data_right)) - self.INSET - self._x0())
+        # to the right edge of the view's frame below, so both boxes end on one line
+        c = self.canvas
+        right = self.mapFromGlobal(c.mapToGlobal(QPoint(c.width(), 0))).x()
+        return max(1.0, min(float(self.width()), float(right)) - 1.0 - self._x0())
 
     def _scale(self) -> float:
         m = self.canvas.model
@@ -1741,8 +1741,9 @@ class ContigOverview(QWidget):
         if c.ppb > 0:
             vis0 = max(0, c.bp_at(LABEL_W))
             vis1 = min(m.length, c.bp_at(c.viewport().width()))
-            left = x0 + vis0 * sc
-            right = max(left + 4.0, x0 + vis1 * sc)
+            # keep the 2 px outline inside the track at both ends
+            left = max(x0 + 1.0, x0 + vis0 * sc)
+            right = min(x0 + m.length * sc - 1.0, max(left + 4.0, x0 + vis1 * sc))
             box = QRectF(left, 2, right - left, self.HEIGHT - 4)
             p.setPen(QPen(_MARK_EDGE, 2))
             p.setBrush(QColor(31, 95, 191, 26))
@@ -1990,7 +1991,7 @@ class ContigViewPanel(QWidget):
         self._diff_label.setMinimumWidth(140)
         self._goto = QLineEdit(self)
         self._goto.setPlaceholderText("Go to, e.g. 103 or 90-130")
-        self._goto.setFixedWidth(190)
+        self._goto.setMinimumWidth(120)
         self._goto.setClearButtonEnabled(True)
         self._goto.setToolTip("Go to a position or a range on the reference "
                               "(e.g. 103, 90-130, or CroSat2:90-130). Enter to go.")
@@ -2028,10 +2029,18 @@ class ContigViewPanel(QWidget):
         for wdg in (self._prev_diff, self._diff_label, self._next_diff):
             bl.addWidget(wdg)
         bl.addStretch(1)
-        bl.addWidget(self._goto)
-        bl.addSpacing(6)
-        bl.addWidget(self._files_btn)
-        bl.addWidget(self._side_btn)
+        # Go to · Files · panel toggle: over the options panel, Go to starting where
+        # its section titles start (see _sync_nav_right)
+        self._nav_right = QWidget(bar)
+        nr = QHBoxLayout(self._nav_right)
+        nr.setContentsMargins(0, 0, 0, 0)
+        nr.setSpacing(4)
+        nr.addWidget(self._goto, 1)
+        nr.addSpacing(2)
+        nr.addWidget(self._files_btn)
+        nr.addWidget(self._side_btn)
+        bl.addWidget(self._nav_right)
+        self._nav_bar = bar
 
         # ------------------------------------------------ side panel controls
         self._highlight = NoWheelComboBox(self)
@@ -2163,6 +2172,7 @@ class ContigViewPanel(QWidget):
         self._view_split.setStretchFactor(1, 0)
         self._view_split.setCollapsible(0, False)
         self._view_split.setChildrenCollapsible(False)
+        self._view_split.splitterMoved.connect(self._queue_nav_sync)
         self._view_page = QWidget(self)
         self._view_page.setAutoFillBackground(True)
         self._view_page.setBackgroundRole(self._view_page.palette().ColorRole.Window)
@@ -2283,6 +2293,38 @@ class ContigViewPanel(QWidget):
         scroll.setMaximumWidth(self.SIDE_W + 120)
         return scroll
 
+    SIDE_PAD = 10       # left margin of the options panel's sections
+
+    def _sync_nav_right(self) -> None:
+        """Line Go to up with the options panel: its left edge at the section titles,
+        the group ending at the bar's right margin. Without the panel: natural size."""
+        right = self._nav_right
+        if not self._side.isVisible() or self._side.width() <= 0:
+            right.setMinimumWidth(0)
+            right.setMaximumWidth(16777215)
+            self._goto.setFixedWidth(190)
+            return
+        self._goto.setMinimumWidth(120)
+        self._goto.setMaximumWidth(16777215)
+        bar = self._nav_bar
+        start = bar.mapFromGlobal(self._side.mapToGlobal(QPoint(0, 0))).x() + self.SIDE_PAD
+        end = bar.width() - bar.layout().contentsMargins().right()
+        if end - start > 160:
+            right.setFixedWidth(end - start)
+
+    def _queue_nav_sync(self, *_args) -> None:
+        from PySide6.QtCore import QTimer
+
+        QTimer.singleShot(0, self._sync_nav_right)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._queue_nav_sync()
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        self._queue_nav_sync()
+
     def _set_side_visible(self, on: bool) -> None:
         self._side.setVisible(on)
         _write("side_panel", bool(on))
@@ -2291,6 +2333,7 @@ class ContigViewPanel(QWidget):
             total = sum(sizes) or self.width()
             if len(sizes) == 2 and sizes[1] < self.SIDE_W - 30:
                 self._view_split.setSizes([max(0, total - self.SIDE_W), self.SIDE_W])
+        self._queue_nav_sync()
 
     # ---------------------------------------------------------------- loading
 
