@@ -44,7 +44,8 @@ from PySide6.QtWidgets import (
 
 from repeatviewer.backends import map_reference as mr
 
-LABEL_W = 150
+LABEL_W = 150             # default width of the name column (draggable)
+LABEL_W_MIN = 80
 RULER_H = 24
 FEATURE_ROW_H = 14
 TRACK_H = 16
@@ -551,6 +552,7 @@ class ContigCanvas(QAbstractScrollArea):
     readClicked = Signal(int)
     readDoubleClicked = Signal(int)
     viewChanged = Signal()       # zoom or scroll (the overview strip follows)
+    labelWidthChanged = Signal(int)   # the name column was resized by the user
 
     HIGHLIGHT_DIFF = "diff"
     HIGHLIGHT_ALL = "all"
@@ -572,6 +574,8 @@ class ContigCanvas(QAbstractScrollArea):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.model: ContigModel | None = None
+        self.label_w = LABEL_W          # name column width; drag its edge to change
+        self._edge_drag = False
         self.ppb = 1.0
         self.highlight = self.HIGHLIGHT_DIFF
         self.hl_show = self.SHOW_DISAGREE
@@ -639,7 +643,7 @@ class ContigCanvas(QAbstractScrollArea):
         result squeezed to one pixel column."""
         if not getattr(self, "_frame_pending", False) or self.model is None:
             return
-        if not self.isVisible() or self.viewport().width() < LABEL_W + 80:
+        if not self.isVisible() or self.viewport().width() < self.label_w + 80:
             return
         self._frame_pending = False
         self.fit()
@@ -841,7 +845,7 @@ class ContigCanvas(QAbstractScrollArea):
             first = v // bh
             last = (v + self.viewport().height()) // bh
             return first * bbp, min(m.length, (last + 1) * bbp)
-        return (max(0, self.bp_at(LABEL_W)),
+        return (max(0, self.bp_at(self.label_w)),
                 min(m.length, self.bp_at(self.viewport().width())))
 
     def _wrap_scroll_to(self, bp: int, lane: int | None = None) -> None:
@@ -961,7 +965,7 @@ class ContigCanvas(QAbstractScrollArea):
         return out
 
     def _data_w(self) -> int:
-        return max(1, self.viewport().width() - LABEL_W)
+        return max(1, self.viewport().width() - self.label_w)
 
     def _update_scrollbars(self) -> None:
         m = self.model
@@ -999,13 +1003,13 @@ class ContigCanvas(QAbstractScrollArea):
 
     def x_of(self, bp: float) -> float:
         if self._wrap_origin is not None:
-            return LABEL_W + (bp - self._wrap_origin) * self.ppb
-        return LABEL_W + bp * self.ppb - self.horizontalScrollBar().value()
+            return self.label_w + (bp - self._wrap_origin) * self.ppb
+        return self.label_w + bp * self.ppb - self.horizontalScrollBar().value()
 
     def bp_at(self, x: float) -> int:
         if self._wrap_origin is not None:
-            return int(self._wrap_origin + (x - LABEL_W) / self.ppb)
-        return int((x - LABEL_W + self.horizontalScrollBar().value()) / self.ppb)
+            return int(self._wrap_origin + (x - self.label_w) / self.ppb)
+        return int((x - self.label_w + self.horizontalScrollBar().value()) / self.ppb)
 
     def _wrap_locate(self, pos: QPointF) -> tuple[int, float] | None:
         """Wrapped view: (block, y inside the block) under ``pos``."""
@@ -1022,7 +1026,7 @@ class ContigCanvas(QAbstractScrollArea):
             loc = self._wrap_locate(pos)
             if loc is None:
                 return -1
-            return int(loc[0] * self._wrap_block_bp() + (pos.x() - LABEL_W) / self.ppb)
+            return int(loc[0] * self._wrap_block_bp() + (pos.x() - self.label_w) / self.ppb)
         return self.bp_at(pos.x())
 
     # ---------------------------------------------------------------- zoom and scroll
@@ -1039,7 +1043,7 @@ class ContigCanvas(QAbstractScrollArea):
     def zoom(self, factor: float, anchor_x: float | None = None) -> None:
         if self.model is None:
             return
-        anchor_x = LABEL_W + self._data_w() / 2 if anchor_x is None else anchor_x
+        anchor_x = self.label_w + self._data_w() / 2 if anchor_x is None else anchor_x
         if self.wrap_active():
             keep = self.view_center_bp()
             fit = (self._data_w() - 12) / max(1, self.model.length)
@@ -1053,14 +1057,14 @@ class ContigCanvas(QAbstractScrollArea):
             self.viewChanged.emit()
             return
         was_letters = self.letters()
-        bp = (anchor_x - LABEL_W + self.horizontalScrollBar().value()) / self.ppb
+        bp = (anchor_x - self.label_w + self.horizontalScrollBar().value()) / self.ppb
         fit = (self._data_w() - 12) / max(1, self.model.length)
         self.ppb = min(MAX_PPB, max(fit, self.ppb * factor))
         self._update_scrollbars()
         if not was_letters and self.wrap_active():
             self._wrap_scroll_to(int(bp))          # just reached the bases: blocks start
         else:
-            self.horizontalScrollBar().setValue(int(bp * self.ppb - (anchor_x - LABEL_W)))
+            self.horizontalScrollBar().setValue(int(bp * self.ppb - (anchor_x - self.label_w)))
         self.viewport().update()
         self.viewChanged.emit()
 
@@ -1200,11 +1204,57 @@ class ContigCanvas(QAbstractScrollArea):
                 continue
             if r.lane == lane and r.start <= bp < r.end:
                 return i
-            if r.lane == lane and self.one_per_row and pos.x() < LABEL_W:
+            if r.lane == lane and self.one_per_row and pos.x() < self.label_w:
                 return i
         return -1
 
+    EDGE_GRIP = 4      # px either side of the name column's edge that grab it
+
+    def _on_edge(self, x: float) -> bool:
+        return abs(x - self.label_w) <= self.EDGE_GRIP
+
+    def set_label_width(self, width: int, *, notify: bool = False) -> None:
+        """Name column width, kept between LABEL_W_MIN and half the view."""
+        hi = max(LABEL_W_MIN, int(self.viewport().width() * 0.5)) if self.isVisible() else 600
+        width = int(min(hi, max(LABEL_W_MIN, width)))
+        if width == self.label_w:
+            return
+        self.label_w = width
+        self._update_scrollbars()
+        self.viewport().update()
+        self.viewChanged.emit()
+        if notify:
+            self.labelWidthChanged.emit(width)
+
+    def fit_label_width(self) -> None:
+        """Wide enough for the longest name (and the track labels), within the limits."""
+        m = self.model
+        f = QFont(self.font())
+        f.setPointSize(9)
+        fm = QFontMetrics(f)
+        names = [r.label for r in (m.reads if m else []) if not r.hidden]
+        widest = max([fm.horizontalAdvance(n) + 34 for n in names]
+                     + [fm.horizontalAdvance("Coverage (max 10,000)") + 16, LABEL_W_MIN])
+        self.set_label_width(widest, notify=True)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        if self._edge_drag:
+            self._edge_drag = False
+            self.labelWidthChanged.emit(self.label_w)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802
+        if not self._edge_drag:
+            self.viewport().unsetCursor()
+        super().leaveEvent(event)
+
     def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton and self._on_edge(event.position().x()):
+            self._edge_drag = True
+            event.accept()
+            return
         i = self.read_at(event.position())
         if i >= 0:
             self.selected = i
@@ -1213,6 +1263,10 @@ class ContigCanvas(QAbstractScrollArea):
         super().mousePressEvent(event)
 
     def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802
+        if self._on_edge(event.position().x()):
+            self.fit_label_width()
+            event.accept()
+            return
         i = self.read_at(event.position())
         if i < 0:
             self.fit()
@@ -1238,8 +1292,28 @@ class ContigCanvas(QAbstractScrollArea):
         self.viewChanged.emit()
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        x = event.position().x()
+        if self._edge_drag:
+            self.set_label_width(int(x))
+            return
+        vp = self.viewport()
+        if self._on_edge(x):
+            vp.setCursor(Qt.CursorShape.SplitHCursor)
+            QToolTip.showText(event.globalPosition().toPoint(),
+                              "Drag to resize the names; double-click to fit the longest",
+                              self)
+            return
+        vp.unsetCursor()
         m = self.model
-        if m is None or event.position().x() < LABEL_W:
+        if m is not None and x < self.label_w:
+            # the name column: the full name of the sequence under the mouse
+            i = self.read_at(event.position())
+            if i >= 0:
+                QToolTip.showText(event.globalPosition().toPoint(), m.reads[i].label, self)
+            else:
+                QToolTip.hideText()
+            return
+        if m is None:
             QToolTip.hideText()
             return
         bp = self.bp_at_pos(event.position())
@@ -1329,7 +1403,7 @@ class ContigCanvas(QAbstractScrollArea):
         if self.wrap_active():
             self._paint_wrapped(p, w, h)
             return
-        bp0 = max(0, self.bp_at(LABEL_W) - 1)
+        bp0 = max(0, self.bp_at(self.label_w) - 1)
         bp1 = min(m.length, self.bp_at(w) + 2)
         self._paint_page(p, w, h, bp0, bp1, self.verticalScrollBar().value())
 
@@ -1358,7 +1432,7 @@ class ContigCanvas(QAbstractScrollArea):
                            pal.color(pal.ColorRole.Base))
                 p.setPen(QPen(pal.color(pal.ColorRole.Midlight), 1))
                 y_sep = top + bh - self.WRAP_GAP / 2
-                p.drawLine(QPointF(LABEL_W, y_sep), QPointF(w, y_sep))
+                p.drawLine(QPointF(self.label_w, y_sep), QPointF(w, y_sep))
         finally:
             self._wrap_origin = None
 
@@ -1376,7 +1450,7 @@ class ContigCanvas(QAbstractScrollArea):
         font.setPointSize(8)
         p.setFont(font)
         header = self.header_h()
-        p.setClipRect(QRectF(LABEL_W, 0, w - LABEL_W, header))
+        p.setClipRect(QRectF(self.label_w, 0, w - self.label_w, header))
         self._paint_ruler(p, bp0, bp1, fg, mid)
         self._paint_features(p, ys["features"], bp0, bp1)
         if m.detailed:
@@ -1392,10 +1466,10 @@ class ContigCanvas(QAbstractScrollArea):
         self._paint_coverage(p, ys["coverage"], bp0, bp1, w)
         if "logo" in ys:
             self._paint_logo(p, ys["logo"], bp0, bp1, fg)
-        p.setClipRect(QRectF(LABEL_W, header, w - LABEL_W, h - header))
+        p.setClipRect(QRectF(self.label_w, header, w - self.label_w, h - header))
         self._paint_reads(p, ys["reads"], bp0, bp1, letters, fg, h, scroll)
         if self.mark_bp is not None and bp0 <= self.mark_bp <= bp1:
-            p.setClipRect(QRectF(LABEL_W, RULER_H, w - LABEL_W, h - RULER_H))
+            p.setClipRect(QRectF(self.label_w, RULER_H, w - self.label_w, h - RULER_H))
             x = self.x_of(self.mark_bp)
             col = QRectF(x, RULER_H, max(2.0, self.ppb), h - RULER_H)
             p.fillRect(col, _MARK_FILL)
@@ -1404,9 +1478,9 @@ class ContigCanvas(QAbstractScrollArea):
             p.drawRect(col)
         # label column
         p.setClipRect(QRectF(0, 0, w, h))
-        p.fillRect(QRectF(0, 0, LABEL_W, h), pal.color(pal.ColorRole.Window))
+        p.fillRect(QRectF(0, 0, self.label_w, h), pal.color(pal.ColorRole.Window))
         p.setPen(QPen(mid, 1))
-        p.drawLine(LABEL_W - 1, 0, LABEL_W - 1, h)
+        p.drawLine(self.label_w - 1, 0, self.label_w - 1, h)
         p.drawLine(0, header - 2, w, header - 2)
         p.setPen(fg)
         label_font = QFont(p.font())
@@ -1414,7 +1488,7 @@ class ContigCanvas(QAbstractScrollArea):
         p.setFont(label_font)
 
         def label(y: float, text: str, height: float = TRACK_H) -> None:
-            p.drawText(QRectF(6, y, LABEL_W - 10, height),
+            p.drawText(QRectF(6, y, self.label_w - 10, height),
                        Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, text)
 
         if self._wrap_origin is not None:
@@ -1428,19 +1502,19 @@ class ContigCanvas(QAbstractScrollArea):
             small = QFont(label_font)
             small.setPointSize(7)
             p.setFont(small)
-            p.drawText(QRectF(6, ys["identity"] - 3, LABEL_W - 10, IDENTITY_H + 6),
+            p.drawText(QRectF(6, ys["identity"] - 3, self.label_w - 10, IDENTITY_H + 6),
                        Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, "Identity")
             p.setFont(label_font)
             fm_ref = QFontMetrics(label_font)
             label(ys["reference"], fm_ref.elidedText(f"Reference · {m.ref_id}",
-                                                     Qt.TextElideMode.ElideRight, LABEL_W - 12))
+                                                     Qt.TextElideMode.ElideMiddle, self.label_w - 12))
         top = max(1.0, float(m.coverage[max(0, bp0 // m.bin_size):
                                          max(1, bp1 // m.bin_size + 1)].max(initial=0)))
         label(ys["coverage"], f"Coverage (max {top:.0f})", COVERAGE_H)
         if "logo" in ys:
             label(ys["logo"], "Logo", LOGO_H)
         if self.one_per_row:
-            p.setClipRect(QRectF(0, header, LABEL_W - 1, h - header))
+            p.setClipRect(QRectF(0, header, self.label_w - 1, h - header))
             rh = self.read_h()
             off = ys["reads"] - scroll
             fm = QFontMetrics(label_font)
@@ -1451,9 +1525,9 @@ class ContigCanvas(QAbstractScrollArea):
                 if y < header - rh or y > h:
                     continue
                 if i == self.selected:
-                    p.fillRect(QRectF(0, y, LABEL_W - 1, rh), _READ_FILL_SEL)
+                    p.fillRect(QRectF(0, y, self.label_w - 1, rh), _READ_FILL_SEL)
                 elif r.strand == "-":
-                    p.fillRect(QRectF(0, y, LABEL_W - 1, rh), _REVERSE_TINT)
+                    p.fillRect(QRectF(0, y, self.label_w - 1, rh), _REVERSE_TINT)
                 bh_ = self.read_base_h()
                 rev = r.strand == "-"
                 p.setPen(_ARROW_REV if rev else _ARROW_FWD)
@@ -1462,9 +1536,9 @@ class ContigCanvas(QAbstractScrollArea):
                 p.setPen(fg)
                 pl = int(r.data.get("placement", 1) or 1)
                 name = r.name if pl == 1 else f"{r.name} #{pl}"
-                p.drawText(QRectF(24, y, LABEL_W - 28, bh_),
+                p.drawText(QRectF(24, y, self.label_w - 28, bh_),
                            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
-                           fm.elidedText(name, Qt.TextElideMode.ElideRight, LABEL_W - 30))
+                           fm.elidedText(name, Qt.TextElideMode.ElideMiddle, self.label_w - 30))
                 if self.read_features_on() and y + rh < h:
                     # light rule between sequences when their features are shown
                     p.setPen(QPen(QColor(0, 0, 0, 28), 1))
@@ -1518,14 +1592,14 @@ class ContigCanvas(QAbstractScrollArea):
             text = f"{f.name} · {status}" if status else f.name
             _feature_bar(p, rect, self.feature_color(f), forward=f.is_forward(),
                          label=text if self.label_mode == self.LABELS_INSIDE else "",
-                         point_size=7, left_edge=LABEL_W, right_edge=self.viewport().width())
+                         point_size=7, left_edge=self.label_w, right_edge=self.viewport().width())
             if outside:
                 limit = self.x_of(next_start[k]) - 6 if k in next_start else \
                     self.viewport().width()
                 room = QRectF(rect.left(), rect.top(), max(rect.width(), limit - rect.left()),
                               rect.height())
                 _outside_label(p, room, text, top, self.OUTSIDE_LABEL_H + 1, text_c,
-                               left_edge=LABEL_W, right_edge=self.viewport().width())
+                               left_edge=self.label_w, right_edge=self.viewport().width())
 
     def _hatch(self, p: QPainter, rect: QRectF) -> None:
         """No coverage: light diagonal hatching, never a difference colour."""
@@ -1656,7 +1730,7 @@ class ContigCanvas(QAbstractScrollArea):
             return
         if self.ppb < LETTER_PPB:
             p.setPen(QColor("#9a9a96"))
-            p.drawText(QRectF(self.x_of(bp0) if bp0 > 0 else LABEL_W, y, 400, LOGO_H),
+            p.drawText(QRectF(self.x_of(bp0) if bp0 > 0 else self.label_w, y, 400, LOGO_H),
                        Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
                        "  Zoom in to see the logo")
             return
@@ -1694,7 +1768,7 @@ class ContigCanvas(QAbstractScrollArea):
         m = self.model
         if m.diff_count.size == 0:
             return
-        x_start = int(max(LABEL_W, self.x_of(bp0)))
+        x_start = int(max(self.label_w, self.x_of(bp0)))
         x_end = int(min(w, self.x_of(bp1)))
         step = max(1, int(round(self.ppb))) if self.ppb >= 1 else 1
         for x in range(x_start, x_end + 1, step):
@@ -1721,7 +1795,7 @@ class ContigCanvas(QAbstractScrollArea):
         cov = m.coverage
         if cov.size == 0:
             return
-        x_start = int(max(LABEL_W, self.x_of(bp0)))
+        x_start = int(max(self.label_w, self.x_of(bp0)))
         x_end = int(min(w, self.x_of(bp1)))
         xs, vals, spans = [], [], []
         for x in range(x_start, x_end + 1, 2):
@@ -1792,7 +1866,7 @@ class ContigCanvas(QAbstractScrollArea):
                 continue
             sel = i == self.selected
             if self.one_per_row and r.strand == "-" and not sel:
-                p.fillRect(QRectF(LABEL_W, y, w - LABEL_W, rh), _REVERSE_TINT)
+                p.fillRect(QRectF(self.label_w, y, w - self.label_w, rh), _REVERSE_TINT)
             if r.end < bp0 or r.start > bp1:
                 continue
             if not letters:
@@ -1929,7 +2003,7 @@ def _paint_read_features_impl(canvas: "ContigCanvas", p: QPainter, r: "ReadView"
         if canvas.label_mode == canvas.LABELS_NONE:
             label = ""
         _feature_bar(p, rect, color, forward=f.is_forward(), label=label, point_size=6,
-                     left_edge=LABEL_W, right_edge=canvas.viewport().width())
+                     left_edge=canvas.label_w, right_edge=canvas.viewport().width())
         if status == mr.STATUS_PARTIAL:
             p.setPen(QPen(canvas.feature_color(f), 1, Qt.PenStyle.DashLine))
             p.setBrush(Qt.BrushStyle.NoBrush)
@@ -2068,7 +2142,7 @@ class ContigOverview(QWidget):
     def _x0(self) -> float:
         # where the view's data area starts (its label column ends)
         vp = self.canvas.viewport()
-        return float(self.mapFromGlobal(vp.mapToGlobal(QPoint(LABEL_W, 0))).x())
+        return float(self.mapFromGlobal(vp.mapToGlobal(QPoint(self.canvas.label_w, 0))).x())
 
     def _track_w(self) -> float:
         # to the right edge of the view's frame below, so both boxes end on one line
@@ -2093,7 +2167,7 @@ class ContigOverview(QWidget):
         f = QFont(p.font())
         f.setPointSize(8)
         p.setFont(f)
-        p.drawText(QRectF(6, 0, LABEL_W - 10, self.HEIGHT),
+        p.drawText(QRectF(6, 0, self.canvas.label_w - 10, self.HEIGHT),
                    Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
                    f"Whole reference · {m.length:,} bp")
         x0, sc = self._x0(), self._scale()
@@ -2394,6 +2468,13 @@ class ContigViewPanel(QWidget):
         self._report_loaded: Path | None = None
         self.canvas = ContigCanvas(self)
         self.overview = ContigOverview(self.canvas, self)
+        # name column width: dragged by the user, remembered between sessions
+        try:
+            saved_w = int(_settings().value(f"{_SETTINGS}/label_width", LABEL_W))
+        except (TypeError, ValueError):
+            saved_w = LABEL_W
+        self.canvas.label_w = max(LABEL_W_MIN, min(600, saved_w))
+        self.canvas.labelWidthChanged.connect(lambda w: _write("label_width", int(w)))
         self._title = QLabel(self)
         self._title.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
 
@@ -2422,7 +2503,7 @@ class ContigViewPanel(QWidget):
         bases = tool("Zoom to bases", "Zoom in until every base is written as a letter, "
                      "centred on the middle of the view",
                      lambda: self.canvas.show_base(self.canvas.bp_at(
-                         LABEL_W + self.canvas._data_w() / 2), zoom_to_letters=True))
+                         self.canvas.label_w + self.canvas._data_w() / 2), zoom_to_letters=True))
         self._prev_diff = tool("◀", "Previous difference", lambda: self._step_difference(-1))
         self._next_diff = tool("▶", "Next difference", lambda: self._step_difference(1))
         self._diff_label = QLabel(self)

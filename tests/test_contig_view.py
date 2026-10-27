@@ -307,3 +307,27 @@ def test_legend_lists_only_marks_that_apply():
     assert "reverse" not in plain and "feature lost" not in plain
     assert "feature partial" not in plain
     assert cv.legend_items(None) == []
+
+
+def test_name_column_resizes_and_fits_longest_name(qapp, tmp_path):
+    """The name column can be resized (within limits) and fitted to the longest name."""
+    payload = _payload()
+    for r in payload["contigs"][0]["reads"]:
+        r["name"] = "Putative_CroSat1_monomer_region_" + r["name"]
+    path = tmp_path / "long.fa_map.rvmap"
+    path.write_text(json.dumps(payload))
+    panel = cv.ContigViewPanel(path)
+    panel.resize(1200, 500)
+    panel.show()
+    qapp.processEvents()
+    c = panel.canvas
+    c.set_label_width(10)
+    assert c.label_w == cv.LABEL_W_MIN                    # never narrower than the minimum
+    c.fit_label_width()
+    longest = max(r.label for r in c.model.reads)
+    from PySide6.QtGui import QFont, QFontMetrics
+    f = QFont(c.font())
+    f.setPointSize(9)
+    assert c.label_w >= QFontMetrics(f).horizontalAdvance(longest)
+    assert c.label_w <= c.viewport().width() * 0.5 + 1   # never more than half the view
+    panel.close()
