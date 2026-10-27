@@ -205,7 +205,7 @@ def collect_annotation_python_deps() -> tuple[
     list,
     list[str],
 ]:
-    """Collect orfipy + pyhmmer for PyInstaller (full package trees, no tests).
+    """Collect orfipy + pyhmmer + primer3 for PyInstaller (full package trees, no tests).
 
     Binary extensions alone are not enough: a ``pyhmmer/`` folder of ``.so`` files
     shadows the pure-Python package in PYZ and ``import pyhmmer`` fails at runtime.
@@ -216,7 +216,9 @@ def collect_annotation_python_deps() -> tuple[
 
     datas: list[tuple[str, str]] = []
     binaries: list = []
-    hidden: list[str] = ["orfipy_core", "ahocorasick", "pyhmmer.platform"]
+    hidden: list[str] = ["orfipy_core", "ahocorasick", "pyhmmer.platform",
+                         # Tools > Primers (primer3-py C extensions)
+                         "primer3.thermoanalysis", "primer3.p3helpers"]
 
     def _without_tests(entries: list[tuple[str, str]]) -> list[tuple[str, str]]:
         kept: list[tuple[str, str]] = []
@@ -226,7 +228,7 @@ def collect_annotation_python_deps() -> tuple[
             kept.append((src, dest))
         return kept
 
-    for pkg in ("pyhmmer", "orfipy"):
+    for pkg in ("pyhmmer", "orfipy", "primer3"):
         try:
             pkg_datas, pkg_binaries, pkg_hidden = collect_all(pkg)
         except Exception as exc:  # noqa: BLE001

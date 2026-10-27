@@ -49,6 +49,9 @@ from repeatviewer.job_options import (
     MAP_HISAT2_STRAND_UNSTRANDED,
     MAP_MINIMAP2_OUT_PAF,
     MAP_MINIMAP2_OUT_SAM,
+    MAP_REPEAT_SEEDS_ALL,
+    MAP_REPEAT_SEEDS_DEFAULT,
+    MAP_REPEAT_SEEDS_MORE,
     MAP_MINIMAP2_PRESET_KW,
     MAP_MINIMAP2_PRESET_LABELS,
     MAP_MINIMAP2_PRESETS,
@@ -130,6 +133,17 @@ KMER_INFO = (
     "fills these numbers; you can still edit them. For noisy Nanopore Direct "
     "RNA-seq, try a smaller <b>-k</b> (e.g. 14) with <b>splice</b>."
 )
+REPEAT_SEEDS_INFO = (
+    "minimap2 places sequences through short seeds (k-mers). By default it ignores "
+    "the most frequent seeds (<code>-f 0.0002</code>), which saves time in genomes "
+    "but inside <b>satellite arrays and other tandem repeats</b> almost every seed is "
+    "frequent: sequences may then stay unplaced or be placed on the wrong copy.<br><br>"
+    "<b>Default</b>: minimap2's setting.<br>"
+    "<b>Keep more</b>: ignore only the very most frequent seeds (<code>-f 0.00002</code>). "
+    "Good first try for satDNA monomers or arrays.<br>"
+    "<b>Keep all</b>: use every seed (<code>-f 1000000</code>). Most thorough; can be "
+    "much slower on large genomes."
+)
 MULTI_MM_INFO = (
     "When a query maps to more than one place on the reference, minimap2 ranks "
     "hits: the best is <b>primary</b>; others are <b>secondary</b> "
@@ -140,15 +154,17 @@ MULTI_MM_INFO = (
     "<code>-N</code> is how many secondary alignments to report (minimap2’s own "
     "default is 5; RepeatViewer allows up to 50). <code>-p 0.95</code> keeps a "
     "secondary only if its score is at least 95% of its primary.<br><br>"
-    "<b>Do not place ambiguous</b>: after mapping, drop low-MAPQ primaries "
-    "(unreliable best hit) instead of placing them."
+    "<b>Do not place ambiguous</b>: after mapping, drop primaries with a low "
+    "mapping quality (MAPQ: the best hit is not clearly better than another place) "
+    "instead of placing them."
 )
 MULTI_HS_INFO = (
     "HISAT2 multi-mapping (<code>-k</code>).<br><br>"
     "<b>Best place only</b> (default): <code>-k 1</code> — one primary alignment.<br><br>"
     "<b>Up to 20 places (-k 20)</b>: report up to 20 distinct alignments and mark "
     "extras as secondary (<code>--secondary</code>).<br><br>"
-    "<b>Do not place ambiguous</b>: after mapping, drop low-MAPQ primaries."
+    "<b>Do not place ambiguous</b>: after mapping, drop primaries with a low "
+    "mapping quality (MAPQ)."
 )
 HISAT2_LIBRARY_INFO = (
     "HISAT2 alignment mode.<br><br>"
@@ -402,6 +418,13 @@ class MapReferenceDialog(QDialog):
         self._mm_window = QSpinBox(self)
         self._mm_window.setRange(1, 1000)
         self._mm_window.setValue(w0)
+        self._mm_repeat_seeds = QComboBox(self)
+        for label, value in (("Default", MAP_REPEAT_SEEDS_DEFAULT),
+                             ("Keep more (satellites)", MAP_REPEAT_SEEDS_MORE),
+                             ("Keep all (slowest)", MAP_REPEAT_SEEDS_ALL)):
+            self._mm_repeat_seeds.addItem(label, value)
+        self._set_combo(self._mm_repeat_seeds,
+                        getattr(opts, "minimap2_repeat_seeds", MAP_REPEAT_SEEDS_DEFAULT))
 
         self._lift = QCheckBox("Check the reference annotations in every sequence", self)
         self._lift.setChecked(opts.lift_annotations)
@@ -473,6 +496,7 @@ class MapReferenceDialog(QDialog):
             self._threads,
             self._mm_kmer,
             self._mm_window,
+            self._mm_repeat_seeds,
             self._hisat2_min_intron,
             self._hisat2_max_intron,
         ):
@@ -610,6 +634,9 @@ class MapReferenceDialog(QDialog):
         self._window_field = field_with_help(self._mm_window, "minimap2 -w", KMER_INFO)
         adv.addRow("K-mer (-k):", self._kmer_field)
         adv.addRow("Window (-w):", self._window_field)
+        self._repeat_seeds_field = field_with_help(
+            self._mm_repeat_seeds, "Repetitive seeds", REPEAT_SEEDS_INFO)
+        adv.addRow("Repetitive seeds:", self._repeat_seeds_field)
         # CIGAR / CS: needed for contig view defaults, rarely toggled → Advanced.
         self._mm_cigar_field = field_with_help(
             self._mm_cigar, "Include CIGAR", CIGAR_INFO
@@ -967,6 +994,7 @@ class MapReferenceDialog(QDialog):
             )
             adv.setRowVisible(self._kmer_field, on_mm)
             adv.setRowVisible(self._window_field, on_mm)
+            adv.setRowVisible(self._repeat_seeds_field, on_mm)
             adv.setRowVisible(self._mm_cigar_field, on_mm)
             adv.setRowVisible(self._mm_cs_field, on_mm)
             adv.setRowVisible(self._hisat2_dta_field, on_hs)
@@ -1196,6 +1224,7 @@ class MapReferenceDialog(QDialog):
         self._min_mapq.setValue(d.min_mapq)
         self._set_combo(self._preset, d.minimap2_preset)
         self._set_combo(self._mm_format, d.minimap2_output)
+        self._set_combo(self._mm_repeat_seeds, d.minimap2_repeat_seeds)
         self._mm_cigar.setChecked(d.minimap2_include_cigar)
         self._mm_cs.setChecked(d.minimap2_include_cs)
         self._update_mm_output_extras()
@@ -1288,6 +1317,8 @@ class MapReferenceDialog(QDialog):
             minimap2_include_cs=bool(self._mm_cs.isChecked()),
             minimap2_kmer=int(self._mm_kmer.value()),
             minimap2_window=int(self._mm_window.value()),
+            minimap2_repeat_seeds=str(self._mm_repeat_seeds.currentData()
+                                      or MAP_REPEAT_SEEDS_DEFAULT),
             min_identity=self._min_identity.value() / 100.0,
             min_aligned_bp=self._min_aligned.value(),
             min_mapq=self._min_mapq.value(),

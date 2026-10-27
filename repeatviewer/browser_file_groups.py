@@ -154,6 +154,8 @@ _PLOT_TAG_RE = re.compile(
     re.IGNORECASE,
 )
 _COMBINE_RE = re.compile(r"_and_(?:\d+|.+)_comb(?:_\d+)?\.fa$", re.IGNORECASE)
+# Primer Design / Map Primers reports (``gene.fa_primers.html``, ``_primer_map_2.html``).
+_PRIMER_REPORT_RE = re.compile(r"_(?:primers|primer_map)(?:_\d+)?\.html$", re.IGNORECASE)
 
 _REGEX_STRIPPERS: tuple[re.Pattern[str], ...] = (
     _PLOT_TAG_RE,
@@ -169,6 +171,7 @@ _REGEX_STRIPPERS: tuple[re.Pattern[str], ...] = (
     _EXTEND_RE,
     _CONSENSUS_RE,
     _COMBINE_RE,
+    _PRIMER_REPORT_RE,
 )
 
 # Stronger than online-BLAST `#fafbfc` so name-family groups read clearly.

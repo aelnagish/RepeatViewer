@@ -365,6 +365,12 @@ class ScaleSliderPopup(QFrame):
         spin.valueChanged.connect(self._on_spin)
         self._reposition(anchor)
 
+    def paintEvent(self, event) -> None:  # noqa: N802
+        # Rounded like every other popup (theme_mode makes the window transparent).
+        from repeatviewer.ui.theme_mode import paint_rounded_popup
+
+        paint_rounded_popup(self)
+
     def hideEvent(self, event) -> None:  # noqa: N802
         super().hideEvent(event)
         # Defer: Popup dismiss runs inside Qt's click handling; syncing the arrow

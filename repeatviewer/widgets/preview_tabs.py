@@ -1069,6 +1069,7 @@ class FilePreviewPage(QWidget):
             self.is_annotation_preview_active()
             or self.is_dotplot_preview_active()
             or self.is_tree_preview_active()
+            or self.is_contig_preview_active()
         ):
             return PreviewZoomKind.TEXT
         if not self._single_fasta_mode:
@@ -1494,6 +1495,15 @@ class FilePreviewPage(QWidget):
 
     def is_tree_preview_active(self) -> bool:
         panel = getattr(self, "_tree_panel", None)
+        return (
+            not self._single_fasta_mode
+            and panel is not None
+            and self._stack.currentWidget() is panel
+        )
+
+    def is_contig_preview_active(self) -> bool:
+        """Mapping result (.rvmap): the contig view zooms itself (−, +, wheel, pinch)."""
+        panel = getattr(self, "_contig_panel", None)
         return (
             not self._single_fasta_mode
             and panel is not None
@@ -3238,7 +3248,9 @@ class PreviewTabWidget(QTabWidget):
             is_annotation = widget.is_annotation_preview_active()
             is_multi_overview = is_annotation and widget.is_multi_fasta_preview()
             is_dotplot = (
-                widget.is_dotplot_preview_active() or widget.is_tree_preview_active()
+                widget.is_dotplot_preview_active()
+                or widget.is_tree_preview_active()
+                or widget.is_contig_preview_active()
             )
             is_cyto = widget.is_cyto_preview_active()
             zoom_kind = widget.preview_zoom_kind()

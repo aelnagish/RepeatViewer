@@ -65,6 +65,24 @@ def find_java_executable() -> str | None:
     if java_home:
         candidates.append(Path(java_home) / "bin" / "java")
 
+    # Java from conda (``conda install -c conda-forge openjdk``): the conda env
+    # set in Preferences, then the env RepeatViewer itself runs in. The app is
+    # often started without that env on PATH, so look there directly.
+    exe = "java.exe" if OS_TYPE == "Windows" else "java"
+    env_dirs: list[Path] = []
+    try:
+        from repeatviewer.conda_tools import resolve_conda_env_prefix
+
+        prefix = resolve_conda_env_prefix()
+        if prefix is not None:
+            env_dirs.append(Path(prefix))
+    except Exception:  # noqa: BLE001 - conda lookup is optional
+        pass
+    env_dirs.append(Path(sys.prefix))
+    for env in env_dirs:
+        candidates.extend([env / "bin" / exe, env / "lib" / "jvm" / "bin" / exe,
+                           env / "Library" / "bin" / exe])
+
     if OS_TYPE == "Darwin":
         # Prefer full JDKs under JavaVirtualMachines over the browser
         # JavaAppletPlugin that ``java_home`` sometimes returns.
@@ -135,9 +153,12 @@ def _open_with_bundled_aliview(path: Path) -> None:
     if java is None:
         raise RuntimeError(
             "AliView needs Java, but no working Java runtime was found.\n\n"
-            "Install a JDK (e.g. Temurin/OpenJDK), or set JAVA_HOME to your JDK, "
-            "then try again.\n\n"
-            "On this Mac, /usr/bin/java is only a stub and cannot run AliView."
+            "Easiest: install it into RepeatViewer's conda environment:\n"
+            "conda install -n repeatviewer -c conda-forge openjdk\n\n"
+            "Or install a JDK (e.g. Temurin/OpenJDK), or set JAVA_HOME to your JDK, "
+            "then try again."
+            + ("\n\nOn this Mac, /usr/bin/java is only a stub and cannot run AliView."
+               if OS_TYPE == "Darwin" else "")
         )
 
     command = [

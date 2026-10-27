@@ -2824,6 +2824,19 @@ MAP_MINIMAP2_OUT_PAF = "paf"
 MAP_MINIMAP2_OUT_SAM = "sam"
 MAP_MINIMAP2_OUTPUTS = (MAP_MINIMAP2_OUT_PAF, MAP_MINIMAP2_OUT_SAM)
 
+# Repetitive seeds (minimap2 -f). minimap2 ignores its most frequent seeds by
+# default; inside satellite arrays and other tandem repeats almost every seed is
+# frequent, so reads can go unplaced or scatter. "more" / "all" keep them.
+MAP_REPEAT_SEEDS_DEFAULT = "default"
+MAP_REPEAT_SEEDS_MORE = "more"
+MAP_REPEAT_SEEDS_ALL = "all"
+MAP_REPEAT_SEEDS_MODES = (MAP_REPEAT_SEEDS_DEFAULT, MAP_REPEAT_SEEDS_MORE, MAP_REPEAT_SEEDS_ALL)
+MAP_REPEAT_SEEDS_ARGS = {
+    MAP_REPEAT_SEEDS_DEFAULT: [],
+    MAP_REPEAT_SEEDS_MORE: ["-f", "0.00002"],     # ignore only the top 0.002 % (default 0.02 %)
+    MAP_REPEAT_SEEDS_ALL: ["-f", "1000000"],      # ignore seeds seen > 1,000,000 times
+}
+
 # Consensus threshold, as a fraction of the sequences covering a position.
 # 0 = majority (the most common base); higher values give IUPAC codes.
 MAP_CONSENSUS_THRESHOLDS = (0.0, 0.5, 0.75, 0.95, 1.0)
@@ -2858,6 +2871,7 @@ class MapOptions:
     # minimap2 -k / -w (concrete numbers; updated from the chosen -x preset)
     minimap2_kmer: int = 15
     minimap2_window: int = 10
+    minimap2_repeat_seeds: str = MAP_REPEAT_SEEDS_DEFAULT   # minimap2 -f
     # HISAT2 Settings / Advanced
     hisat2_library: str = MAP_HISAT2_RNA
     hisat2_reads: str = MAP_HISAT2_READS_SINGLE
@@ -2926,6 +2940,8 @@ def load_map_options() -> MapOptions:
         multiple_hits=_pick("multiple_hits", MAP_MULTI_MODES, d.multiple_hits),
         minimap2_preset=mm_preset,
         minimap2_output=_pick("minimap2_output", MAP_MINIMAP2_OUTPUTS, d.minimap2_output),
+        minimap2_repeat_seeds=_pick("minimap2_repeat_seeds", MAP_REPEAT_SEEDS_MODES,
+                                    d.minimap2_repeat_seeds),
         minimap2_include_cigar=_to_bool(
             v.get("minimap2_include_cigar"), d.minimap2_include_cigar
         ),
@@ -2982,6 +2998,7 @@ def save_map_options(opts: MapOptions) -> None:
             "multiple_hits": opts.multiple_hits,
             "minimap2_preset": opts.minimap2_preset,
             "minimap2_output": opts.minimap2_output,
+            "minimap2_repeat_seeds": opts.minimap2_repeat_seeds,
             "minimap2_include_cigar": opts.minimap2_include_cigar,
             "minimap2_include_cs": opts.minimap2_include_cs,
             "minimap2_kmer": opts.minimap2_kmer,
@@ -3012,5 +3029,107 @@ def save_map_options(opts: MapOptions) -> None:
                 opts.close_process_window_when_finished
             ),
             "use_system_path": opts.use_system_path,
+        },
+    )
+
+
+# --------------------------------------------------------------------------
+# Primers (Tools > Primers)
+# --------------------------------------------------------------------------
+
+PRIMER_DIALOG_TAB_PRIMERS = "primers"
+PRIMER_DIALOG_TAB_REGIONS = "regions"
+PRIMER_DIALOG_TAB_SPECIFICITY = "specificity"
+PRIMER_DIALOG_TABS = (
+    PRIMER_DIALOG_TAB_PRIMERS,
+    PRIMER_DIALOG_TAB_REGIONS,
+    PRIMER_DIALOG_TAB_SPECIFICITY,
+    DIALOG_TAB_OPTIONS,
+)
+PRIMER_RIGHT_CLICK_RUN = "run"
+PRIMER_RIGHT_CLICK_DIALOG = "dialog"
+PRIMER_RIGHT_CLICK_ACTIONS = (PRIMER_RIGHT_CLICK_RUN, PRIMER_RIGHT_CLICK_DIALOG)
+
+
+@dataclass
+class PrimerOptions:
+    """Saved settings of the primer windows (Design Primers, Map Primers, database).
+
+    ``design`` and ``map`` hold the back-end settings as plain dicts so new
+    fields never break older saved settings.
+    """
+
+    design: dict = field(default_factory=dict)
+    map: dict = field(default_factory=dict)
+    database_path: str = ""
+    right_click_action: str = PRIMER_RIGHT_CLICK_RUN
+    map_right_click_action: str = PRIMER_RIGHT_CLICK_DIALOG
+    annotate_design: bool = True
+    save_design_to_database: bool = False
+    show_process_window: bool = DEFAULT_SHOW_PROCESS_WINDOW
+    close_process_window_when_finished: bool = DEFAULT_CLOSE_PROCESS_WINDOW_WHEN_FINISHED
+    last_dialog_tab: str = PRIMER_DIALOG_TAB_PRIMERS
+
+    def design_settings(self):
+        from repeatviewer.backends.primers.design import DesignSettings
+
+        return DesignSettings.from_dict(self.design)
+
+    def map_settings(self):
+        from repeatviewer.backends.primers.jobs import MapSettings
+
+        return MapSettings.from_dict(self.map)
+
+
+def load_primer_options() -> PrimerOptions:
+    v = _load_settings_group("primers")
+    d = PrimerOptions()
+
+    def _dict(key: str) -> dict:
+        try:
+            data = json.loads(str(v.get(key) or "{}"))
+        except (TypeError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _pick(key: str, allowed: tuple, default):
+        value = v.get(key, default)
+        return value if value in allowed else default
+
+    return PrimerOptions(
+        design=_dict("design_json"),
+        map=_dict("map_json"),
+        database_path=str(v.get("database_path", "") or ""),
+        right_click_action=_pick("right_click_action", PRIMER_RIGHT_CLICK_ACTIONS,
+                                 d.right_click_action),
+        map_right_click_action=_pick("map_right_click_action", PRIMER_RIGHT_CLICK_ACTIONS,
+                                     d.map_right_click_action),
+        annotate_design=_to_bool(v.get("annotate_design"), d.annotate_design),
+        save_design_to_database=_to_bool(v.get("save_design_to_database"),
+                                         d.save_design_to_database),
+        show_process_window=_to_bool(v.get("show_process_window"), d.show_process_window),
+        close_process_window_when_finished=_to_bool(
+            v.get("close_process_window_when_finished"), d.close_process_window_when_finished
+        ),
+        last_dialog_tab=_pick("last_dialog_tab", PRIMER_DIALOG_TABS, d.last_dialog_tab),
+    )
+
+
+def save_primer_options(opts: PrimerOptions) -> None:
+    _save_settings_group(
+        "primers",
+        {
+            "design_json": json.dumps(opts.design or {}),
+            "map_json": json.dumps(opts.map or {}),
+            "database_path": opts.database_path or "",
+            "right_click_action": opts.right_click_action,
+            "map_right_click_action": opts.map_right_click_action,
+            "annotate_design": opts.annotate_design,
+            "save_design_to_database": opts.save_design_to_database,
+            "show_process_window": opts.show_process_window,
+            "close_process_window_when_finished": opts.close_process_window_when_finished,
+            "last_dialog_tab": persistable_dialog_tab(
+                opts.last_dialog_tab, first_tab=PRIMER_DIALOG_TAB_PRIMERS
+            ),
         },
     )
