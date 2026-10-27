@@ -46,6 +46,8 @@ from typing import Callable, Iterable, Iterator
 import numpy as np
 
 from repeatviewer.job_options import (
+    MAP_REPEAT_SEEDS_ARGS,
+    MAP_REPEAT_SEEDS_DEFAULT,
     MAP_ENGINE_AUTO,
     MAP_ENGINE_HISAT2,
     MAP_ENGINE_MAFFT,
@@ -525,6 +527,9 @@ def minimap2_arguments(opts: MapOptions, preset: str) -> list[str]:
         if getattr(opts, "minimap2_preset", "") == MAP_MINIMAP2_PRESET_AUTO or w <= 0:
             w = dw
     args += ["-k", str(min(28, k)), "-w", str(w)]
+    args += MAP_REPEAT_SEEDS_ARGS.get(
+        getattr(opts, "minimap2_repeat_seeds", MAP_REPEAT_SEEDS_DEFAULT) or
+        MAP_REPEAT_SEEDS_DEFAULT, [])
     if opts.multiple_hits == MAP_MULTI_ALL:
         args += ["-N", "50", "-p", "0.95", "--secondary=yes"]
     else:
@@ -2063,7 +2068,10 @@ def methods_paragraph(run: MapRun) -> str:
     if run.engine == MAP_ENGINE_MINIMAP2:
         out = getattr(o, "minimap2_output", MAP_MINIMAP2_OUT_PAF) or MAP_MINIMAP2_OUT_PAF
         fmt = "SAM (-a --MD)" if out == MAP_MINIMAP2_OUT_SAM else "PAF (-c --cs=long)"
-        how = f"with {name} (preset {run.preset}, {fmt})"
+        seeds = getattr(o, "minimap2_repeat_seeds", MAP_REPEAT_SEEDS_DEFAULT)
+        seed_note = {"more": ", keeping more repetitive seeds with -f 0.00002",
+                     "all": ", keeping all repetitive seeds with -f 1000000"}.get(seeds, "")
+        how = f"with {name} (preset {run.preset}, {fmt}{seed_note})"
     elif run.engine == MAP_ENGINE_HISAT2:
         how = f"with {name} ({run.preset or 'rna'})"
     else:
@@ -2089,7 +2097,15 @@ def methods_paragraph(run: MapRun) -> str:
     return text
 
 
-def _svg_coverage(c: ContigResult, width: int = 760, height: int = 70) -> str:
+REPORT_STATUS_COLORS = {STATUS_INTACT: "#5fae66", STATUS_CHANGED: "#e0b43a",
+                        STATUS_PARTIAL: "#b9b9b5", STATUS_LOST: "#d0574a"}
+REPORT_VARIABLE_SHARE = 0.25     # same threshold as the contig view's identity bar
+REPORT_MAX_DIFFERENCES = 20
+
+
+def _svg_coverage(c: ContigResult, width: int = 940, height: int = 84) -> str:
+    """Coverage profile with the reference features as a band below; scales to the
+    page width so it lines up with the tables."""
     cov = np.asarray(c.coverage if c.coverage is not None else [], dtype=float)
     if cov.size == 0:
         return ""
@@ -2097,63 +2113,125 @@ def _svg_coverage(c: ContigResult, width: int = 760, height: int = 70) -> str:
     edges = np.linspace(0, cov.size, n + 1).astype(int)
     vals = np.array([cov[a:b].mean() if b > a else 0 for a, b in zip(edges[:-1], edges[1:])])
     top = max(1.0, float(vals.max()))
-    pts = " ".join(f"{i * width / n:.1f},{height - 14 - v / top * (height - 20):.1f}"
+    base = height - 22
+    pts = " ".join(f"{i * width / n:.1f},{base - v / top * (base - 6):.1f}"
                    for i, v in enumerate(vals))
     feats = ""
     L = max(1, c.length)
     for f in c.features[:400]:
         x = (f.start - 1) / L * width
         w = max(1.0, (f.end - f.start + 1) / L * width)
-        feats += (f'<rect x="{x:.1f}" y="{height - 10}" width="{w:.1f}" height="8" '
-                  f'fill="{html.escape(f.color or "#888")}"><title>{html.escape(f.name)}</title></rect>')
-    return (f'<svg viewBox="0 0 {width} {height}" width="{width}" height="{height}">'
-            f'<polyline points="0,{height - 14} {pts} {width},{height - 14}" fill="#cfe0f5" '
-            f'stroke="#3b6fb6" stroke-width="1"/>{feats}'
-            f'<text x="2" y="10" font-size="10" fill="#555">max {top:.0f}×</text></svg>')
+        feats += (f'<rect x="{x:.1f}" y="{base + 4}" width="{w:.1f}" height="6" rx="1" '
+                  f'fill="{html.escape(f.color or "#888")}"><title>{html.escape(f.name)} '
+                  f'{f.start:,}–{f.end:,}</title></rect>')
+    return (f'<svg class="cov" viewBox="0 0 {width} {height}" preserveAspectRatio="none">'
+            f'<polyline points="0,{base} {pts} {width},{base}" fill="#dbe7f6" '
+            f'stroke="#3b6fb6" stroke-width="1" vector-effect="non-scaling-stroke"/>{feats}'
+            f'</svg><div class="axis"><span>1</span><span>max {top:.0f}×</span>'
+            f'<span>{c.length:,} bp</span></div>')
+
+
+def _stamp_text(stamp: str) -> str:
+    """'2026-10-27_0812' → 'Run on 2026-10-27 at 08:12'."""
+    try:
+        day, hm = stamp.split("_", 1)
+        return f"Run on {day} at {hm[:2]}:{hm[2:4]}"
+    except (ValueError, AttributeError):
+        return ""
+
+
+def _status_bar(fs: dict) -> str:
+    total = sum(int(fs.get(k, 0) or 0) for k in REPORT_STATUS_COLORS)
+    if not total:
+        return ""
+    parts = "".join(
+        f'<i style="width:{100 * int(fs.get(k, 0) or 0) / total:.2f}%;background:{col}" '
+        f'title="{int(fs.get(k, 0) or 0)} {k}"></i>'
+        for k, col in REPORT_STATUS_COLORS.items() if int(fs.get(k, 0) or 0))
+    return f'<span class="bar">{parts}</span>'
+
+
+def _type_legend(c: ContigResult) -> str:
+    seen: dict[str, str] = {}
+    for f in c.features:
+        seen.setdefault(str(f.feature_type or "other"), f.color or "#888")
+    return "".join(f'<span><b style="background:{html.escape(col)}"></b>{html.escape(t)}</span>'
+                   for t, col in seen.items())
 
 
 def report_html(run: MapRun, files: list[Path], title: str) -> str:
     e = html.escape
     o = run.opts
     ident = [r.identity for r in run.records]
-    rows = [
-        ("Reference", f"{run.reference.name} ({len(run.contigs)} sequence(s) with placements)"),
-        ("Input", ", ".join(q.name for q in run.queries)),
-        ("Sequences", f"{run.n_queries:,}"),
-        ("Placed", f"{len(run.placed_names):,} ({run.n_placements:,} placements)"),
-        ("Reversed to fit", f"{len(run.reversed_names):,}"),
-        ("Not used", f"{len(run.unused):,}"),
-        ("Mean identity", f"{statistics.mean(ident):.1%}" if ident else "–"),
-        ("Engine", ENGINE_NAMES[run.engine]
-         + (f" {run.engine_version}" if run.engine_version else "")
-         + (f" ({run.preset})" if run.preset else "")),
-        ("Consensus", threshold_label(o.consensus_threshold)),
-        ("Limits", f"identity ≥ {o.min_identity:.0%}, ≥ {o.min_aligned_bp} aligned bp"
-         + (f", MAPQ ≥ {o.min_mapq}" if o.min_mapq else "")),
+    n_var_pos = sum(len({v.pos for v in c.variants}) for c in run.contigs)
+    tiles = [
+        ("Placed", f"{len(run.placed_names):,} / {run.n_queries:,}",
+         f"{run.n_placements:,} placements"),
+        ("Reversed to fit", f"{len(run.reversed_names):,}",
+         f"{len(run.unused):,} not used"),
+        ("Mean identity", f"{statistics.mean(ident):.1%}" if ident else "–",
+         f"min {min(ident):.1%}" if ident else ""),
+        ("Variant positions", f"{n_var_pos:,}",
+         f"{len(run.contigs):,} reference sequence(s)"),
     ]
-    table = "".join(f"<tr><th>{e(k)}</th><td>{e(v)}</td></tr>" for k, v in rows)
+    tile_html = "".join(f'<div class="tile"><div class="k">{e(k)}</div><div class="v">{e(v)}'
+                        f'</div><div class="s">{e(sub)}</div></div>' for k, v, sub in tiles)
+    seeds = getattr(o, "minimap2_repeat_seeds", MAP_REPEAT_SEEDS_DEFAULT)
+    rows = [
+        ("Reference", run.reference.name),
+        ("Input", ", ".join(q.name for q in run.queries)),
+        ("Mapper", ENGINE_NAMES[run.engine]
+         + (f" {run.engine_version}" if run.engine_version else "")
+         + (f" · {run.preset}" if run.preset else "")
+         + ({"more": " · more repetitive seeds", "all": " · all repetitive seeds"}
+            .get(seeds, "") if run.engine == MAP_ENGINE_MINIMAP2 else "")),
+        ("Limits", f"identity ≥ {o.min_identity:.0%} · ≥ {o.min_aligned_bp} aligned bp"
+         + (f" · MAPQ ≥ {o.min_mapq}" if o.min_mapq else "")),
+        ("Consensus", threshold_label(o.consensus_threshold)),
+    ]
+    details = "".join(f"<tr><th>{e(k)}</th><td>{e(v)}</td></tr>" for k, v in rows)
     warn = "".join(f"<li>{e(w)}</li>" for w in run.warnings)
+    one = len(run.contigs) == 1
     contig_rows = ""
     for c in run.contigs[:50]:
         mean_cov = float(np.mean(c.coverage)) if c.coverage is not None and len(c.coverage) else 0
-        contig_rows += (f"<tr><td>{e(c.ref_id)}</td><td>{c.length:,}</td><td>{c.n_reads:,}</td>"
-                        f"<td>{mean_cov:.1f}×</td><td>{c.mean_identity:.1%}</td>"
-                        f"<td>{len(c.variants):,}</td></tr>")
-    plots = "".join(f"<h3>{e(c.ref_id)}</h3>{_svg_coverage(c)}" for c in run.contigs[:5])
+        contig_rows += (f"<tr><td>{e(c.ref_id)}</td><td class=n>{c.length:,}</td>"
+                        f"<td class=n>{c.n_reads:,}</td><td class=n>{mean_cov:.1f}×</td>"
+                        f"<td class=n>{c.mean_identity:.1%}</td>"
+                        f"<td class=n>{len(c.variants):,}</td></tr>")
+    plots = "".join(
+        (f"<h3>{e(c.ref_id)}</h3>" if not one else "") + _svg_coverage(c)
+        + (f'<div class="legend">{_type_legend(c)}</div>' if c.features else "")
+        for c in run.contigs[:5])
     feat_rows = ""
     for c in run.contigs[:5]:
         for fs in c.feature_summary[:MAX_FEATURE_COLUMNS]:
             ident_txt = f"{fs['mean_identity']:.1%}" if fs["mean_identity"] is not None else "–"
-            feat_rows += (f"<tr><td>{e(fs['name'])}</td><td>{e(fs['type'])}</td>"
-                          f"<td>{fs['start']:,}–{fs['end']:,}</td><td>{fs['intact']}</td>"
-                          f"<td>{fs['changed']}</td><td>{fs['partial']}</td><td>{fs['lost']}</td>"
-                          f"<td>{ident_txt}</td></tr>")
-    var_rows = ""
-    for c in run.contigs[:5]:
-        for v in sorted(c.variants, key=lambda v: -v.freq)[:40]:
-            var_rows += (f"<tr><td>{e(c.ref_id)}</td><td>{v.pos:,}</td><td>{e(v.ref)}→{e(v.alt)}"
-                         f"</td><td>{v.count}/{v.depth}</td><td>{v.freq:.0%}</td>"
-                         f"<td>{e(v.context)}</td><td>{e(v.features)}</td></tr>")
+            feat_rows += "<tr>" + ("" if one else f"<td>{e(c.ref_id)}</td>")
+            feat_rows += (f"<td>{e(fs['name'])}</td><td class=m>{e(fs['type'])}</td>"
+                          f"<td class=n>{fs['start']:,}–{fs['end']:,}</td>"
+                          f"<td class=n>{fs['intact']}</td><td class=n>{fs['changed']}</td>"
+                          f"<td class=n>{fs['partial']}</td><td class=n>{fs['lost']}</td>"
+                          f"<td class=n>{ident_txt}</td><td>{_status_bar(fs)}</td></tr>")
+    all_vars = [(c, v) for c in run.contigs for v in c.variants]
+    common = sorted((cv for cv in all_vars if cv[1].freq >= REPORT_VARIABLE_SHARE),
+                    key=lambda cv: (-cv[1].freq, cv[1].pos))
+    var_note = ""
+    if not common and all_vars:
+        common = sorted(all_vars, key=lambda cv: (-cv[1].freq, cv[1].pos))[:10]
+        var_note = ("No position differs in a quarter or more of the sequences; "
+                    "the most frequent differences are listed.")
+    shown_vars = common[:REPORT_MAX_DIFFERENCES]
+    var_rows = "".join(
+        "<tr>" + (f"<td>{e(c.ref_id)}</td>" if not one else "")
+        + f"<td class=n>{v.pos:,}</td><td class=c>{e(v.ref)} → {e(v.alt)}</td>"
+          f"<td class=n>{v.count}/{v.depth}</td><td class=n>{v.freq:.0%}</td>"
+          f"<td class=m>{e(v.context) or '–'}</td><td class=m>{e(v.features) or '–'}</td></tr>"
+        for c, v in shown_vars)
+    var_tsv = next((p.name for p in files if p.name.endswith("_variants.tsv")), "")
+    rest = len(all_vars) - len(shown_vars)
+    var_foot = (f'<p class="note">{e(var_note)} {rest:,} more in {e(var_tsv)}.</p>'
+                if rest > 0 or var_note else "")
     reasons = Counter(run.unused.values())
     unused_rows = "".join(f"<li>{n:,} × {e(r)}</li>" for r, n in reasons.most_common())
     main = [p for p in files if not p.parent.name.endswith("_details")]
@@ -2164,29 +2242,54 @@ def report_html(run: MapRun, files: list[Path], title: str) -> str:
                   + "".join(f"<li>{e(p.name)}</li>" for p in extra) + "</ul></li>")
     cites = "".join(f"<li>{e(c)}</li>" for c in CITATIONS[run.engine])
     cmds = e("\n".join(run.commands))
+    ref_col = "" if one else "<th>Sequence</th>"
+    legend_status = "".join(f'<span><b style="background:{col}"></b>{k}</span>'
+                            for k, col in REPORT_STATUS_COLORS.items())
     return f"""<!doctype html><html><head><meta charset="utf-8"><title>{e(title)}</title>
 <style>
-body{{font-family:-apple-system,Segoe UI,Helvetica,Arial,sans-serif;margin:18px;color:#1d1d1b;background:#fff}}
-h1{{font-size:17px;font-weight:600;margin:0 0 12px}} h2{{font-size:14px;margin:18px 0 6px}} h3{{font-size:12px;margin:10px 0 2px;color:#444}}
-table{{border-collapse:collapse;font-size:13px}} th{{text-align:left;color:#555;font-weight:500;padding:3px 14px 3px 0;vertical-align:top}}
-td{{padding:3px 12px 3px 0}} .grid th{{border-bottom:1px solid #ddd}} .warn{{background:#fff4e0;border:1px solid #f0c36d;border-radius:6px;padding:8px 12px;font-size:13px}}
-.methods{{font-size:13px;line-height:1.5;background:#f6f6f4;border-radius:6px;padding:10px 12px}}
-pre{{font-size:11px;background:#f6f6f4;border-radius:6px;padding:8px;white-space:pre-wrap}}
-ul{{font-size:13px;margin:4px 0 0 18px;padding:0}}
-</style></head><body>
+:root{{--fg:#1d1d1b;--muted:#6b6b67;--line:#e4e4e0;--soft:#f6f6f4}}
+body{{font-family:-apple-system,"Segoe UI",Helvetica,Arial,sans-serif;margin:0;color:var(--fg);background:#fff;font-size:13px}}
+main{{max-width:940px;margin:0 auto;padding:28px 24px 40px}}
+h1{{font-size:19px;font-weight:600;margin:0 0 4px}} .sub{{color:var(--muted);margin:0 0 20px}}
+h2{{font-size:14px;font-weight:600;margin:28px 0 8px;padding-bottom:6px;border-bottom:1px solid var(--line)}}
+h3{{font-size:12px;font-weight:600;color:var(--muted);margin:14px 0 4px}}
+.tiles{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}}
+.tile{{background:var(--soft);border-radius:8px;padding:12px 14px}}
+.tile .k{{color:var(--muted);font-size:12px}} .tile .v{{font-size:21px;font-weight:600;margin:2px 0}}
+.tile .s{{color:var(--muted);font-size:12px}}
+table{{border-collapse:collapse;width:100%}} th,td{{padding:5px 8px;text-align:left;vertical-align:top}}
+.grid th{{color:var(--muted);font-weight:500;border-bottom:1px solid var(--line)}}
+.grid td{{border-bottom:1px solid #f0f0ec}} td.n,th.n{{text-align:right;font-variant-numeric:tabular-nums}}
+td.c{{font-family:Menlo,Consolas,monospace;font-size:12px}} td.m{{color:var(--muted)}}
+.details th{{width:120px;color:var(--muted);font-weight:500;padding-left:0}} .details td{{padding-left:0}}
+svg.cov{{display:block;width:100%;height:84px}}
+.axis{{display:flex;justify-content:space-between;color:var(--muted);font-size:11px;margin-top:2px}}
+.legend{{display:flex;flex-wrap:wrap;gap:14px;color:var(--muted);font-size:12px;margin-top:8px}}
+.legend b{{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;vertical-align:-1px}}
+.bar{{display:flex;width:120px;height:8px;border-radius:4px;overflow:hidden;background:var(--soft);margin-top:4px}}
+.bar i{{display:block;height:100%}}
+.warn{{background:#fff6e5;border:1px solid #f0c36d;border-radius:8px;padding:10px 14px;margin-bottom:16px}}
+.methods{{line-height:1.55;background:var(--soft);border-radius:8px;padding:12px 14px}}
+.note{{color:var(--muted);font-size:12px;margin:6px 0 0}}
+pre{{font-size:11px;background:var(--soft);border-radius:8px;padding:10px 12px;white-space:pre-wrap;word-break:break-all;margin:0}}
+.two{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:24px}}
+ul{{margin:4px 0 0 18px;padding:0}} li{{margin:2px 0}}
+@media (max-width:700px){{.tiles{{grid-template-columns:repeat(2,minmax(0,1fr))}}.two{{grid-template-columns:1fr}}}}
+</style></head><body><main>
 <h1>{e(title)}</h1>
+<p class="sub">{e(_stamp_text(getattr(run, 'stamp', '')))}</p>
 {f'<div class="warn"><b>Check before use</b><ul>{warn}</ul></div>' if warn else ''}
-<h2>Run report</h2><table>{table}</table>
+<div class="tiles">{tile_html}</div>
+<h2>Run</h2><table class="details">{details}</table>
 <h2>Coverage</h2>{plots}
-<h2>Reference sequences</h2><table class="grid"><tr><th>Sequence</th><th>Length</th><th>Placements</th><th>Mean coverage</th><th>Mean identity</th><th>Variants</th></tr>{contig_rows}</table>
-{f'<h2>Reference features in the placed sequences</h2><table class="grid"><tr><th>Feature</th><th>Type</th><th>Reference</th><th>Intact</th><th>Changed</th><th>Partial</th><th>Lost</th><th>Mean identity</th></tr>{feat_rows}</table>' if feat_rows else ''}
-{f'<h2>Most frequent differences</h2><table class="grid"><tr><th>Sequence</th><th>Position</th><th>Change</th><th>Reads</th><th>Frequency</th><th>Context</th><th>In feature</th></tr>{var_rows}</table>' if var_rows else ''}
+{'' if one else f'<h2>Reference sequences</h2><table class="grid"><tr><th>Sequence</th><th class=n>Length</th><th class=n>Placements</th><th class=n>Mean coverage</th><th class=n>Mean identity</th><th class=n>Variants</th></tr>{contig_rows}</table>'}
+{f'<h2>Reference features in the placed sequences</h2><table class="grid"><tr>{ref_col}<th>Feature</th><th>Type</th><th class=n>Reference</th><th class=n>Intact</th><th class=n>Changed</th><th class=n>Partial</th><th class=n>Lost</th><th class=n>Identity</th><th>Status</th></tr>{feat_rows}</table><div class="legend">{legend_status}</div>' if feat_rows else ''}
+{f'<h2>Most frequent differences</h2><table class="grid"><tr>{ref_col}<th class=n>Position</th><th>Change</th><th class=n>Sequences</th><th class=n>Share</th><th>Context</th><th>In feature</th></tr>{var_rows}</table>{var_foot}' if var_rows else ''}
 {f'<h2>Not used</h2><ul>{unused_rows}</ul>' if unused_rows else ''}
 <h2>Methods text</h2><div class="methods">{e(methods_paragraph(run))}</div>
-<h2>Cite</h2><ul>{cites}</ul>
 <h2>Commands</h2><pre>{cmds}</pre>
-<h2>Files written</h2><ul>{flist}</ul>
-</body></html>"""
+<div class="two"><div><h2>Cite</h2><ul>{cites}</ul></div><div><h2>Files written</h2><ul>{flist}</ul></div></div>
+</main></body></html>"""
 
 
 def _lifted_feature_objects(record: ReadRecord, features: list) -> list:

@@ -8,6 +8,7 @@ import json
 import numpy as np
 
 from repeatviewer.backends import map_reference as mr
+from repeatviewer.backends.sequence_features import SequenceFeature
 from repeatviewer.widgets import contig_view as cv
 
 
@@ -172,5 +173,56 @@ def test_read_color_hex_modes():
 def test_feature_status_text():
     assert cv.feature_status_text({"intact": 7}) == "intact"
     assert cv.feature_status_text({"changed": 2}) == "changed"
-    assert cv.feature_status_text({"intact": 3, "partial": 4}) == "3/7 intact"
+    assert cv.feature_status_text({"intact": 3, "partial": 4}) == "mixed"
     assert cv.feature_status_text({}) == ""
+
+
+def _rv(name, start, row, strand="+", lift=None):
+    r = cv.ReadView({"row": row, "lift": lift or []}, name, start, start + len(row), strand, 1.0)
+    return r
+
+
+def test_count_matrix_and_strand_coverage():
+    reads = [_rv("a", 0, "ACGT"), _rv("b", 1, "CG-T", "-"), _rv("c", 2, "GT")]
+    reads[2].hidden = True                                   # filtered out: not counted
+    counts = cv.count_matrix(reads, 6)
+    assert counts[0].tolist() == [1, 0, 0, 0, 0, 0]
+    assert counts[1].tolist() == [0, 2, 0, 0, 0, 0]
+    assert counts[3].tolist() == [0, 0, 0, 1, 0, 1]          # one T, one gap
+    fwd, rev = cv.strand_coverage(reads, 6)
+    assert fwd.tolist() == [1, 1, 1, 1, 0, 0]
+    assert rev.tolist() == [0, 1, 1, 1, 1, 0]
+
+
+def test_consensus_from_counts_thresholds_and_no_coverage():
+    counts = np.zeros((4, 6), dtype=np.int32)
+    counts[0, 0] = 3                       # A A A
+    counts[1, 1], counts[1, 3] = 2, 2      # C/T tie
+    counts[2, 5] = 3                       # deleted
+    assert cv.consensus_from_counts(counts, 0.0, "?") == "AY-?"
+    assert cv.consensus_from_counts(counts, 0.0, "N")[-1] == "N"
+
+
+def test_feature_type_counts_order_and_colour():
+    feats = [SequenceFeature(start=1, end=5, name="R1", feature_type="repeat", color="#111111"),
+             SequenceFeature(start=2, end=3, name="M", feature_type="motif", color="#222222"),
+             SequenceFeature(start=6, end=9, name="R2", feature_type="repeat", color="#333333")]
+    assert cv.feature_type_counts(feats) == [("repeat", 2, "#111111"), ("motif", 1, "#222222")]
+
+
+def test_contig_statistics_rows():
+    reads = [_rv("a", 0, "ACGT"), _rv("b", 0, "ACTT", "-")]
+    reads[1].mism_pos, reads[1].mism_base = [2], ["T"]
+    m = cv.ContigModel(ref_id="r", length=6, detailed=True, reference="ACGTAA",
+                       consensus="ACGT", cons_on_ref="ACGTNN",
+                       coverage=np.array([2, 2, 2, 2, 0, 0]), bin_size=1, features=[],
+                       reads=reads, variants=[[3, "G", "T", 1, 2, "", ""]],
+                       feature_summary=[{"intact": 1, "lost": 1}], n_reads=2)
+    m.diff_count = cv.difference_profile(reads, 6)
+    m.diff_pos = cv.difference_positions(m.variants)
+    rows = dict(cv.contig_statistics(m))
+    assert rows["Forward / reverse"] == "1 / 1"
+    assert rows["Reference covered"].startswith("4 bp")
+    assert rows["Identical sites"].startswith("3 of 4")
+    assert rows["Variant positions"] == "1"
+    assert "1 intact" in rows["Features in sequences"] and "1 lost" in rows["Features in sequences"]

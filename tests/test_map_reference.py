@@ -558,3 +558,14 @@ def test_mapping_refuses_a_reference_with_duplicate_names(tmp_path):
     opts = mr.MapOptions(reference_fasta=str(ref))
     with pytest.raises(mr.MapReferenceError, match="more than one sequence named CroSat2"):
         mr.run_mapping([q], opts)
+
+
+def test_repeat_seeds_reach_minimap2():
+    base = mr.MapOptions(minimap2_preset="map-ont")
+    assert "-f" not in mr.minimap2_arguments(base, "map-ont")
+    more = mr.MapOptions(minimap2_preset="map-ont", minimap2_repeat_seeds="more")
+    args = mr.minimap2_arguments(more, "map-ont")
+    assert args[args.index("-f") + 1] == "0.00002"
+    allk = mr.MapOptions(minimap2_preset="map-ont", minimap2_repeat_seeds="all")
+    args = mr.minimap2_arguments(allk, "map-ont")
+    assert args[args.index("-f") + 1] == "1000000"

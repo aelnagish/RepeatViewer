@@ -49,6 +49,8 @@ FEATURE_ROW_H = 14
 TRACK_H = 16
 COVERAGE_H = 30
 IDENTITY_H = 6
+LOGO_H = 34
+READ_FEAT_H = 10          # one row of lifted features under a sequence
 READ_H = 12
 READ_H_LETTERS = 16
 LETTER_PPB = 6.0
@@ -73,6 +75,10 @@ _IDENTITY_OK = QColor("#5fae66")
 _IDENTITY_SOME = QColor("#e0b43a")
 _IDENTITY_MANY = QColor("#d0574a")
 _CONS_DIFF_MARK = QColor("#e0a020")
+# Identity bar / overview: a position counts as variable when at least this
+# share of the covering sequences differ (single-copy noise stays green).
+VARIABLE_SHARE = 0.25
+STRONG_SHARE = 0.5
 
 # IUPAC codes: which plain bases each letter stands for. A read base "matches"
 # the reference when it is one of the bases the reference letter allows, so an
@@ -230,7 +236,7 @@ def read_color_hex(strand: str, identity: float, mapq: int | None, mode: str) ->
 
 def feature_status_text(summary: dict) -> str:
     """Short status for a reference feature over all placements:
-    "intact", "changed", "3/7 intact"…"""
+    "intact", "changed", … or "mixed" (the details are in the tooltip)."""
     counts = {k: int(summary.get(k, 0) or 0) for k in
               (mr.STATUS_INTACT, mr.STATUS_CHANGED, mr.STATUS_PARTIAL, mr.STATUS_LOST)}
     total = sum(counts.values())
@@ -239,7 +245,118 @@ def feature_status_text(summary: dict) -> str:
     for status, n in counts.items():
         if n == total:
             return status
-    return f"{counts[mr.STATUS_INTACT]}/{total} intact"
+    return "mixed"
+
+
+NO_COVERAGE_CALLS = ("N", "?", "-")
+CONSENSUS_THRESHOLDS = ((None, "As saved"), (0.0, "Majority"), (0.5, "50 %"),
+                        (0.75, "75 %"), (0.95, "95 %"), (1.0, "100 % (strict)"))
+
+
+def count_matrix(reads: list, length: int) -> np.ndarray:
+    """(length, 6) counts of A C G T other gap at every reference position, from the
+    placed rows (shown sequences only)."""
+    counts = np.zeros((max(0, int(length)), 6), dtype=np.int32)
+    for r in reads:
+        if getattr(r, "hidden", False):
+            continue
+        row = r.data.get("row", "") if isinstance(r.data, dict) else ""
+        if not row:
+            continue
+        idx = mr.row_indices(row).astype(np.intp)
+        pos = np.arange(r.start, r.start + len(idx))
+        ok = (pos >= 0) & (pos < length)
+        np.add.at(counts, (pos[ok], idx[ok]), 1)
+    return counts
+
+
+def strand_coverage(reads: list, length: int) -> tuple[np.ndarray, np.ndarray]:
+    """Per-position coverage by forward and by reverse placements (shown only)."""
+    fwd = np.zeros(max(0, int(length)) + 1, dtype=np.int32)
+    rev = np.zeros_like(fwd)
+    for r in reads:
+        if getattr(r, "hidden", False):
+            continue
+        s, e = max(0, r.start), min(length, r.end)
+        if e <= s:
+            continue
+        arr = rev if r.strand == "-" else fwd
+        arr[s] += 1
+        arr[e] -= 1
+    return np.cumsum(fwd)[:length], np.cumsum(rev)[:length]
+
+
+def consensus_from_counts(counts: np.ndarray, threshold: float, no_coverage: str = "N") -> str:
+    """Consensus on reference coordinates at ``threshold`` (0 = majority, else the
+    fewest bases reaching that share, as an IUPAC code). Deleted positions are
+    '-', positions without coverage get ``no_coverage``. Insertions are not shown."""
+    if counts.size == 0:
+        return ""
+    calls = mr.consensus_calls(counts, threshold)
+    out = []
+    for c in calls:
+        if c == "?":
+            out.append(no_coverage or "N")
+        elif c == "":
+            out.append("-")
+        else:
+            out.append(c)
+    return "".join(out)
+
+
+def feature_type_counts(features: list) -> list[tuple[str, int, str]]:
+    """(type, number, colour of the first feature of that type), in first-seen order."""
+    seen: dict[str, list] = {}
+    for f in features:
+        key = str(getattr(f, "feature_type", "") or "other")
+        if key not in seen:
+            seen[key] = [0, str(getattr(f, "color", "") or "#888888")]
+        seen[key][0] += 1
+    return [(k, v[0], v[1]) for k, v in seen.items()]
+
+
+def contig_statistics(m: "ContigModel") -> list[tuple[str, str]]:
+    """Statistics rows for one reference (like Geneious' Statistics panel)."""
+    shown = [r for r in m.reads if not r.hidden]
+    cov = np.asarray(m.coverage, dtype=float)
+    step = max(1, m.bin_size)
+    per_bp = np.repeat(cov, step)[:m.length] if step > 1 else cov[:m.length]
+    covered = int((per_bp > 0).sum()) if per_bp.size else 0
+    rows: list[tuple[str, str]] = [
+        ("Reference length", f"{m.length:,} bp"),
+        ("Sequences placed", f"{len(shown):,}" + (f" of {len(m.reads):,} (filters)"
+                                                   if len(shown) < len(m.reads) else "")),
+        ("Forward / reverse", f"{sum(r.strand != '-' for r in shown):,} / "
+                              f"{sum(r.strand == '-' for r in shown):,}"),
+        ("Reference covered", f"{covered:,} bp ({covered / max(1, m.length):.1%})"),
+    ]
+    if per_bp.size:
+        rows.append(("Coverage mean ± SD", f"{per_bp.mean():.1f} ± {per_bp.std():.1f}"))
+        rows.append(("Coverage min / max", f"{per_bp.min():.0f} / {per_bp.max():.0f}"))
+    if m.detailed and m.diff_count.size and covered:
+        mask = per_bp[:len(m.diff_count)] > 0
+        identical = int(((m.diff_count[:len(mask)] == 0) & mask).sum())
+        rows.append(("Identical sites", f"{identical:,} of {covered:,} covered "
+                                        f"({identical / covered:.1%})"))
+    if shown:
+        ident = np.array([r.identity for r in shown], dtype=float)
+        rows.append(("Identity to reference", f"mean {ident.mean():.1%}, "
+                                              f"min {ident.min():.1%}, max {ident.max():.1%}"))
+    rows.append(("Variant positions", f"{len(m.diff_pos):,}"))
+    cons = "".join(c for c in (m.cons_on_ref or "").upper() if c in "ACGT")
+    if cons:
+        n = len(cons)
+        freq = {b: cons.count(b) for b in "ACGT"}
+        rows.append(("Consensus bases", "  ".join(f"{b} {freq[b] / n:.1%}" for b in "ACGT")))
+        rows.append(("Consensus GC", f"{(freq['G'] + freq['C']) / n:.1%}"))
+    totals = {k: 0 for k in (mr.STATUS_INTACT, mr.STATUS_CHANGED, mr.STATUS_PARTIAL,
+                             mr.STATUS_LOST)}
+    for s_ in m.feature_summary:
+        for k in totals:
+            totals[k] += int(s_.get(k, 0) or 0)
+    if any(totals.values()):
+        rows.append(("Features in sequences", ", ".join(f"{v:,} {k}" for k, v in totals.items())))
+    return rows
 
 
 def difference_marks(row: str, start: int, reference: str) -> tuple[list[int], list[str],
@@ -337,6 +454,27 @@ class ContigModel:
     n_reads: int
     diff_count: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.int32))
     diff_pos: list[int] = field(default_factory=list)
+    cache: dict = field(default_factory=dict, repr=False)
+
+    def counts(self) -> np.ndarray:
+        if "counts" not in self.cache:
+            self.cache["counts"] = count_matrix(self.reads, self.length) if self.detailed \
+                else np.zeros((0, 6), dtype=np.int32)
+        return self.cache["counts"]
+
+    def strands(self) -> tuple[np.ndarray, np.ndarray]:
+        if "strands" not in self.cache:
+            self.cache["strands"] = strand_coverage(self.reads, self.length)
+        return self.cache["strands"]
+
+    def consensus_with(self, threshold: float | None, no_coverage: str) -> str:
+        """Consensus on the reference: as saved (threshold None) or recomputed."""
+        if threshold is None or not self.detailed:
+            return self.cons_on_ref
+        key = ("cons", threshold, no_coverage)
+        if key not in self.cache:
+            self.cache[key] = consensus_from_counts(self.counts(), threshold, no_coverage)
+        return self.cache[key]
 
     @classmethod
     def from_json(cls, entry: dict) -> "ContigModel":
@@ -427,6 +565,19 @@ class ContigCanvas(QAbstractScrollArea):
         self.min_identity = 0.0
         self.min_mapq = 0
         self.hide_secondary = False
+        # Annotations & Tracks
+        self.hidden_types: set[str] = set()
+        self.show_read_features = True
+        self._feat_row: list[int] = []        # row of each reference feature (-1 hidden)
+        # Graphs
+        self.coverage_log = True
+        self.cov_low: int | None = None       # highlight coverage below
+        self.cov_high: int | None = None      # highlight coverage above
+        self.highlight_single_strand = False
+        self.show_logo = False
+        # Consensus (None = as saved by the run)
+        self.consensus_threshold: float | None = None
+        self.no_coverage_call = "N"
         self._lane_count = 0
         self._feature_rows: list[int] = []
         self._feature_row_count = 0
@@ -446,9 +597,7 @@ class ContigCanvas(QAbstractScrollArea):
         self.selected = -1
         self.mark_bp = None
         if model is not None:
-            from repeatviewer.widgets.sequence_map_viewer import _pack_feature_rows
-
-            self._feature_rows, self._feature_row_count = _pack_feature_rows(model.features)
+            self._repack_features()
             self.one_per_row = len(model.reads) <= ONE_PER_ROW_LIMIT
             self._apply_filters()
             self._relayout()
@@ -495,6 +644,64 @@ class ContigCanvas(QAbstractScrollArea):
         self.viewport().update()
         self.viewChanged.emit()
 
+    # ---------------------------------------------------------------- tracks
+
+    def _repack_features(self) -> None:
+        """Rows for the shown feature types only, so hidden types leave no gaps."""
+        from repeatviewer.widgets.sequence_map_viewer import _pack_feature_rows
+
+        m = self.model
+        if m is None:
+            self._feat_row, self._feature_row_count = [], 0
+            return
+        shown = [i for i, f in enumerate(m.features)
+                 if str(f.feature_type or "other") not in self.hidden_types]
+        rows, count = _pack_feature_rows([m.features[i] for i in shown])
+        self._feat_row = [-1] * len(m.features)
+        for i, r in zip(shown, rows):
+            self._feat_row[i] = r
+        self._feature_rows = [r for r in self._feat_row]
+        self._feature_row_count = count
+
+    def set_hidden_types(self, types: set[str]) -> None:
+        self.hidden_types = set(types)
+        self._repack_features()
+        self._update_scrollbars()
+        self.viewport().update()
+        self.viewChanged.emit()
+
+    def set_show_read_features(self, on: bool) -> None:
+        self.show_read_features = bool(on)
+        self._update_scrollbars()
+        self.viewport().update()
+
+    def set_graph_options(self, *, log_scale: bool, low: int | None, high: int | None,
+                          single_strand: bool, logo: bool) -> None:
+        self.coverage_log = bool(log_scale)
+        self.cov_low = low
+        self.cov_high = high
+        self.highlight_single_strand = bool(single_strand)
+        self.show_logo = bool(logo)
+        self._update_scrollbars()
+        self.viewport().update()
+
+    def set_consensus(self, threshold: float | None, no_coverage: str) -> None:
+        self.consensus_threshold = threshold
+        self.no_coverage_call = no_coverage or "N"
+        self.viewport().update()
+
+    def consensus_seq(self) -> str:
+        m = self.model
+        return m.consensus_with(self.consensus_threshold, self.no_coverage_call) if m else ""
+
+    def read_features_on(self) -> bool:
+        m = self.model
+        return bool(m and self.show_read_features and self.one_per_row and m.features
+                    and self._feature_row_count)
+
+    def logo_on(self) -> bool:
+        return bool(self.show_logo and self.model and self.model.detailed)
+
     def set_one_per_row(self, on: bool) -> None:
         self.one_per_row = on
         self._relayout()
@@ -530,6 +737,7 @@ class ContigCanvas(QAbstractScrollArea):
                                        hide_secondary=self.hide_secondary)
             if r.hidden and i == self.selected:
                 self.selected = -1
+        m.cache.clear()    # counts, strands and recomputed consensus follow the filters
 
     def _relayout(self) -> None:
         m = self.model
@@ -560,14 +768,21 @@ class ContigCanvas(QAbstractScrollArea):
     def letters(self) -> bool:
         return self.ppb >= LETTER_PPB and bool(self.model and self.model.detailed)
 
-    def read_h(self) -> int:
+    def read_base_h(self) -> int:
+        """Height of the sequence bar itself."""
         return READ_H_LETTERS if (self.letters() or self.one_per_row) else READ_H
+
+    def read_h(self) -> int:
+        """Lane height: the bar plus its lifted features when they are shown."""
+        extra = self._feature_row_count * READ_FEAT_H + 3 if self.read_features_on() else 0
+        return self.read_base_h() + extra
 
     def header_h(self) -> int:
         detailed = bool(self.model and self.model.detailed)
         n_tracks = 2 if detailed else 0   # consensus + reference
         return (RULER_H + max(1, self._feature_row_count) * FEATURE_ROW_H + 6
-                + n_tracks * TRACK_H + (IDENTITY_H + 3 if detailed else 0) + COVERAGE_H + 8)
+                + n_tracks * TRACK_H + (IDENTITY_H + 3 if detailed else 0) + COVERAGE_H + 8
+                + (LOGO_H + 4 if self.logo_on() else 0))
 
     def _track_y(self) -> dict[str, int]:
         y = RULER_H
@@ -580,6 +795,9 @@ class ContigCanvas(QAbstractScrollArea):
             y += IDENTITY_H + 3
         out["coverage"] = y
         y += COVERAGE_H + 4
+        if self.logo_on():
+            out["logo"] = y
+            y += LOGO_H + 4
         if self.model and self.model.detailed:
             out["reference"] = y
             y += TRACK_H
@@ -734,8 +952,9 @@ class ContigCanvas(QAbstractScrollArea):
         lines = [f"Position {bp + 1:,}"]
         if m.reference and bp < len(m.reference):
             lines[0] += f" · reference {m.reference[bp]}"
-        if m.cons_on_ref and bp < len(m.cons_on_ref):
-            lines[0] += f" · consensus {m.cons_on_ref[bp]}"
+        cons = self.consensus_seq()
+        if cons and bp < len(cons):
+            lines[0] += f" · consensus {cons[bp]}"
         cov = m.coverage_at(bp)
         if cov <= 0:
             lines.append("No coverage")
@@ -748,9 +967,15 @@ class ContigCanvas(QAbstractScrollArea):
             if counts:
                 line += " · " + " ".join(f"{b} {n}" for b, n in counts)
             lines.append(line)
-        feats = [f.name for f in m.features if f.start <= bp + 1 <= f.end]
-        if feats:
-            lines.append("In " + ", ".join(feats[:6]))
+        here = [k for k, f in enumerate(m.features) if f.start <= bp + 1 <= f.end
+                and (k >= len(self._feat_row) or self._feat_row[k] >= 0)]
+        for k in here[:6]:
+            f = m.features[k]
+            s_ = m.feature_summary[k] if k < len(m.feature_summary) else {}
+            counts = ", ".join(f"{int(s_.get(st, 0) or 0)} {st}" for st in
+                               (mr.STATUS_INTACT, mr.STATUS_CHANGED, mr.STATUS_PARTIAL,
+                                mr.STATUS_LOST) if int(s_.get(st, 0) or 0))
+            lines.append(f"{f.name} ({f.start:,}–{f.end:,})" + (f": {counts}" if counts else ""))
         i = self.read_at(event.position())
         if i >= 0:
             r = m.reads[i]
@@ -762,6 +987,12 @@ class ContigCanvas(QAbstractScrollArea):
             row = d.get("row", "")
             if 0 <= k < len(row):
                 lines.append(f"Base here: {row[k]}")
+            for fi, status, ndiff, ident, _s, _e in d.get("lift", []):
+                if 0 <= fi < len(m.features):
+                    f = m.features[fi]
+                    if f.start <= bp + 1 <= f.end and status != mr.STATUS_NOT_COVERED:
+                        extra = f", {ndiff} differences" if status == mr.STATUS_CHANGED else ""
+                        lines.append(f"{f.name} here: {status}{extra}, identity {ident:.1%}")
         QToolTip.showText(event.globalPosition().toPoint(), "\n".join(lines), self)
 
     def _base_counts(self, bp: int, limit: int = 5000) -> list[tuple[str, int]]:
@@ -807,12 +1038,14 @@ class ContigCanvas(QAbstractScrollArea):
         self._paint_ruler(p, bp0, bp1, fg, mid)
         self._paint_features(p, ys["features"], bp0, bp1)
         if m.detailed:
-            self._paint_sequence_track(p, ys["consensus"], m.cons_on_ref, bp0, bp1, letters,
-                                       compare=m.reference, fg=fg)
+            self._paint_sequence_track(p, ys["consensus"], self.consensus_seq(), bp0, bp1,
+                                       letters, compare=m.reference, fg=fg)
             self._paint_identity(p, ys["identity"], bp0, bp1, w)
             self._paint_sequence_track(p, ys["reference"], m.reference, bp0, bp1, letters,
                                        compare="", fg=fg)
         self._paint_coverage(p, ys["coverage"], bp0, bp1, w)
+        if "logo" in ys:
+            self._paint_logo(p, ys["logo"], bp0, bp1, fg)
         p.setClipRect(QRectF(LABEL_W, header, w - LABEL_W, h - header))
         self._paint_reads(p, ys["reads"], bp0, bp1, letters, fg, h)
         if self.mark_bp is not None and bp0 <= self.mark_bp <= bp1:
@@ -854,6 +1087,8 @@ class ContigCanvas(QAbstractScrollArea):
         top = max(1.0, float(m.coverage[max(0, bp0 // m.bin_size):
                                          max(1, bp1 // m.bin_size + 1)].max(initial=0)))
         label(ys["coverage"], f"Coverage (max {top:.0f})", COVERAGE_H)
+        if "logo" in ys:
+            label(ys["logo"], "Logo", LOGO_H)
         if self.one_per_row:
             p.setClipRect(QRectF(0, header, LABEL_W - 1, h - header))
             rh = self.read_h()
@@ -870,9 +1105,13 @@ class ContigCanvas(QAbstractScrollArea):
                 elif r.strand == "-":
                     p.fillRect(QRectF(0, y, LABEL_W - 1, rh), _REVERSE_TINT)
                 p.setPen(fg)
-                p.drawText(QRectF(6, y, LABEL_W - 10, rh),
+                p.drawText(QRectF(6, y, LABEL_W - 10, self.read_base_h()),
                            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
                            fm.elidedText(r.label, Qt.TextElideMode.ElideRight, LABEL_W - 12))
+                if self.read_features_on() and y + rh < h:
+                    # light rule between sequences when their features are shown
+                    p.setPen(QPen(QColor(0, 0, 0, 28), 1))
+                    p.drawLine(QPointF(0, y + rh - 1), QPointF(w, y + rh - 1))
         else:
             shown = len(m.reads) - self.hidden_count()
             label(ys["reads"], f"{shown:,} of {m.n_reads:,} shown"
@@ -897,8 +1136,8 @@ class ContigCanvas(QAbstractScrollArea):
 
         m = self.model
         summary = m.feature_summary
-        for k, (f, row) in enumerate(zip(m.features, self._feature_rows)):
-            if f.end < bp0 or f.start - 1 > bp1:
+        for k, (f, row) in enumerate(zip(m.features, self._feat_row)):
+            if row < 0 or f.end < bp0 or f.start - 1 > bp1:
                 continue
             x0, x1 = self.x_of(f.start - 1), self.x_of(f.end)
             rect = QRectF(x0, y0 + row * FEATURE_ROW_H + 1, max(2.0, x1 - x0), FEATURE_ROW_H - 3)
@@ -993,9 +1232,60 @@ class ContigCanvas(QAbstractScrollArea):
                 p.fillRect(QRectF(rect.left(), rect.bottom() - 2, rect.width(), 2),
                            _CONS_DIFF_MARK)
 
+    def _paint_read_features(self, p: QPainter, r: ReadView, y0: float, bp0: int,
+                             bp1: int) -> None:
+        """The reference features as they came out in this sequence: intact and
+        changed in the feature colour ("n diff" in the label), partial faded and
+        dashed, lost in grey."""
+        _paint_read_features_impl(self, p, r, y0, bp0, bp1)
+
+    def _paint_logo(self, p: QPainter, y: int, bp0: int, bp1: int, fg: QColor) -> None:
+        """Frequency logo: at each position the bases stacked by their share of the
+        shown sequences, most common on top (letters once there is room)."""
+        m = self.model
+        counts = m.counts()
+        if counts.size == 0:
+            return
+        hi = min(bp1, counts.shape[0])
+        if hi <= bp0:
+            return
+        if self.ppb < LETTER_PPB:
+            p.setPen(QColor("#9a9a96"))
+            p.drawText(QRectF(self.x_of(bp0) if bp0 > 0 else LABEL_W, y, 400, LOGO_H),
+                       Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                       "  Zoom in to see the logo")
+            return
+        sub = counts[bp0:hi, :4].astype(float)
+        depth = sub.sum(axis=1)
+        letters = True
+        font = _mono(9)
+        p.setFont(font)
+        step = 1 if self.ppb >= 1 else max(1, int(1 / self.ppb))
+        for k in range(0, hi - bp0, step):
+            d = depth[k]
+            if d <= 0:
+                continue
+            x = self.x_of(bp0 + k)
+            wpx = max(1.0, self.ppb * step)
+            base_y = y + LOGO_H
+            for b in np.argsort(sub[k]):            # smallest first, at the bottom
+                share = sub[k, b] / d
+                if share <= 0:
+                    continue
+                hgt = share * (LOGO_H - 2)
+                base = "ACGT"[b]
+                bg_c, fg_c = self._colors.get(base, _FALLBACK)
+                rect = QRectF(x, base_y - hgt, wpx, hgt)
+                p.fillRect(rect, bg_c)
+                if letters and hgt >= 9:
+                    p.setPen(fg_c)
+                    p.drawText(rect, Qt.AlignmentFlag.AlignCenter, base)
+                base_y -= hgt
+
     def _paint_identity(self, p: QPainter, y: int, bp0: int, bp1: int, w: int) -> None:
-        """Green where all sequences agree with the reference, yellow where a few
-        differ, red where many (>= 30 %) differ; nothing where there is no coverage."""
+        """Green where (almost) all sequences agree with the reference, yellow where a
+        quarter or more differ, red where half or more differ; nothing where there is
+        no coverage. Single-copy differences stay green so real variants stand out."""
         m = self.model
         if m.diff_count.size == 0:
             return
@@ -1012,12 +1302,14 @@ class ContigCanvas(QAbstractScrollArea):
             if cov <= 0:
                 continue
             share = float(m.diff_count[a:b].max(initial=0)) / cov
-            color = _IDENTITY_OK if share == 0 else (_IDENTITY_SOME if share < 0.3
-                                                     else _IDENTITY_MANY)
+            color = _IDENTITY_OK if share < VARIABLE_SHARE else (
+                _IDENTITY_SOME if share < STRONG_SHARE else _IDENTITY_MANY)
             p.fillRect(QRectF(x, y, step, IDENTITY_H), color)
 
     def _paint_coverage(self, p: QPainter, y: int, bp0: int, bp1: int, w: int) -> None:
-        """Coverage on a log scale, so one or two sequences do not fill the track."""
+        """Coverage (log scale by default, so one or two sequences do not fill the
+        track), with optional highlight bands along its foot: red below the low
+        threshold, orange above the high one, purple where only one strand covers."""
         import math
 
         m = self.model
@@ -1026,7 +1318,7 @@ class ContigCanvas(QAbstractScrollArea):
             return
         x_start = int(max(LABEL_W, self.x_of(bp0)))
         x_end = int(min(w, self.x_of(bp1)))
-        xs, vals = [], []
+        xs, vals, spans = [], [], []
         for x in range(x_start, x_end + 1, 2):
             a = max(0, self.bp_at(x))
             b = max(a + 1, self.bp_at(x + 2))
@@ -1034,19 +1326,39 @@ class ContigCanvas(QAbstractScrollArea):
             seg = cov[ia:ib]
             xs.append(x)
             vals.append(float(seg.max()) if seg.size else 0.0)
+            spans.append((a, b))
         if not vals:
             return
         top = max(1.0, max(vals))
-        scale = math.log1p(max(top, 4.0))      # one read stays a low band, not a wall
-        span = COVERAGE_H - 6
-        base = y + COVERAGE_H - 2
+        span = COVERAGE_H - 9
+        base = y + COVERAGE_H - 5
+        if self.coverage_log:
+            scale = math.log1p(max(top, 4.0))
+            height = [math.log1p(v) / scale * span for v in vals]
+        else:
+            height = [v / top * span for v in vals]
         poly = QPolygonF([QPointF(xs[0], base)] + [
-            QPointF(x, base - math.log1p(v) / scale * span) for x, v in zip(xs, vals)]
-            + [QPointF(xs[-1], base)])
+            QPointF(x, base - hv) for x, hv in zip(xs, height)] + [QPointF(xs[-1], base)])
         p.setPen(QPen(QColor("#3b6fb6"), 1))
         p.setBrush(QColor("#cfe0f5"))
         p.drawPolygon(poly)
         p.setBrush(Qt.BrushStyle.NoBrush)
+        band_y = base + 1
+        if self.cov_low is not None or self.cov_high is not None:
+            for x, v in zip(xs, vals):
+                if self.cov_low is not None and v < self.cov_low:
+                    p.fillRect(QRectF(x, band_y, 2, 3), QColor("#d0574a"))
+                elif self.cov_high is not None and v > self.cov_high:
+                    p.fillRect(QRectF(x, band_y, 2, 3), QColor("#e8913a"))
+        if self.highlight_single_strand:
+            fwd, rev = m.strands()
+            for x, (a, b) in zip(xs, spans):
+                b = min(b, len(fwd))
+                if b <= a:
+                    continue
+                f_, r_ = int(fwd[a:b].max(initial=0)), int(rev[a:b].max(initial=0))
+                if (f_ > 0) != (r_ > 0):
+                    p.fillRect(QRectF(x, band_y + 3, 2, 2), QColor("#7b3fb5"))
 
     def _paint_reads(self, p: QPainter, top: int, bp0: int, bp1: int, letters: bool,
                      fg: QColor, h: int) -> None:
@@ -1054,6 +1366,8 @@ class ContigCanvas(QAbstractScrollArea):
 
         m = self.model
         rh = self.read_h()
+        bh = self.read_base_h()
+        feats_on = self.read_features_on()
         off = top - self.verticalScrollBar().value()
         header = self.header_h()
         w = self.viewport().width()
@@ -1072,7 +1386,7 @@ class ContigCanvas(QAbstractScrollArea):
                 continue
             if not letters:
                 rect = QRectF(self.x_of(r.start), y + 1, max(2.0, (r.end - r.start) * self.ppb),
-                              rh - 3)
+                              bh - 3)
                 _draw_directed_feature(p, rect, _READ_FILL_SEL if sel else self._read_fill(r),
                                        forward=r.strand != "-")
                 if sel:
@@ -1084,26 +1398,26 @@ class ContigCanvas(QAbstractScrollArea):
                     hi = bisect.bisect_right(r.mism_pos, bp1)
                     for k in range(lo, hi):
                         p.fillRect(QRectF(self.x_of(r.mism_pos[k]), y + 1,
-                                          max(1.0, self.ppb), rh - 3),
+                                          max(1.0, self.ppb), bh - 3),
                                    self._colors.get(r.mism_base[k].upper(), _FALLBACK)[0])
                 for s, e in r.del_runs:
                     if e < bp0 or s > bp1:
                         continue
                     x0, x1 = self.x_of(s), self.x_of(e)
-                    p.fillRect(QRectF(x0, y + 1, max(1.0, x1 - x0), rh - 3), QColor("#ffffff"))
+                    p.fillRect(QRectF(x0, y + 1, max(1.0, x1 - x0), bh - 3), QColor("#ffffff"))
                     p.setPen(QPen(_DELETE_COLOR, 1))
-                    p.drawLine(QPointF(x0, y + rh / 2 - 0.5), QPointF(x1, y + rh / 2 - 0.5))
+                    p.drawLine(QPointF(x0, y + bh / 2 - 0.5), QPointF(x1, y + bh / 2 - 0.5))
             else:
                 p.setFont(font)
                 row = r.data["row"]
                 ref = m.reference
                 if sel:
                     p.fillRect(QRectF(self.x_of(max(bp0, r.start)), y,
-                                      (min(bp1, r.end) - max(bp0, r.start)) * self.ppb, rh - 2),
+                                      (min(bp1, r.end) - max(bp0, r.start)) * self.ppb, bh - 2),
                                _READ_FILL_SEL)
                 for bp in range(max(bp0, r.start), min(bp1, r.end)):
                     c = row[bp - r.start]
-                    rect = QRectF(self.x_of(bp), y, self.ppb, rh - 2)
+                    rect = QRectF(self.x_of(bp), y, self.ppb, bh - 2)
                     if c == "-":
                         # deleted base: dark cell with a dash
                         p.fillRect(rect.adjusted(0, 1, 0, -1), _DELETE_COLOR)
@@ -1132,12 +1446,46 @@ class ContigCanvas(QAbstractScrollArea):
                     else:
                         p.setPen(fg)
                         p.drawText(rect, Qt.AlignmentFlag.AlignCenter, c)
+            if feats_on:
+                self._paint_read_features(p, r, y + bh + 1, bp0, bp1)
             p.setPen(QPen(_INSERT_COLOR, 2))
             lo = bisect.bisect_left(r.ins_pos, bp0)
             hi = bisect.bisect_right(r.ins_pos, bp1)
             for k in range(lo, hi):
                 x = self.x_of(r.ins_pos[k])
-                p.drawLine(QPointF(x, y), QPointF(x, y + rh - 2))
+                p.drawLine(QPointF(x, y), QPointF(x, y + bh - 2))
+
+
+def _paint_read_features_impl(canvas: "ContigCanvas", p: QPainter, r: "ReadView", y0: float,
+                              bp0: int, bp1: int) -> None:
+    from repeatviewer.widgets.sequence_map_viewer import _draw_directed_feature
+
+    m = canvas.model
+    for fi, status, ndiff, _ident, _s, _e in r.data.get("lift", []):
+        if not 0 <= fi < len(m.features) or status == mr.STATUS_NOT_COVERED:
+            continue
+        row = canvas._feat_row[fi] if fi < len(canvas._feat_row) else -1
+        if row < 0:
+            continue
+        f = m.features[fi]
+        s0, e0 = max(f.start - 1, r.start), min(f.end, r.end)
+        if e0 <= s0 or e0 < bp0 or s0 > bp1:
+            continue
+        x0, x1 = canvas.x_of(s0), canvas.x_of(e0)
+        rect = QRectF(x0, y0 + row * READ_FEAT_H, max(2.0, x1 - x0), READ_FEAT_H - 2)
+        color = QColor(f.color or "#888888")
+        if status == mr.STATUS_LOST:
+            color = QColor("#c4c4c0")
+        elif status == mr.STATUS_PARTIAL:
+            color.setAlpha(120)
+        label = f.name if status == mr.STATUS_INTACT else f"{f.name} · " + (
+            f"{ndiff} diff" if status == mr.STATUS_CHANGED else status)
+        _draw_directed_feature(p, rect, color, forward=f.is_forward(), label=label,
+                               label_point_size=6)
+        if status == mr.STATUS_PARTIAL:
+            p.setPen(QPen(QColor(f.color or "#888888"), 1, Qt.PenStyle.DashLine))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRect(rect)
 
 
 class ContigOverview(QWidget):
@@ -1195,9 +1543,17 @@ class ContigOverview(QWidget):
                 if v <= 0:
                     continue
                 hgt = max(2.0, math.log1p(v) / top * track.height())
-                differs = diff is not None and bool(diff[a:b].max(initial=0))
+                differs = diff is not None and \
+                    float(diff[a:b].max(initial=0)) / v >= VARIABLE_SHARE
                 p.fillRect(QRectF(x0 + k, track.bottom() - hgt, 1.0, hgt),
                            amber if differs else ok)
+        # reference features as thin coloured bands along the foot of the strip
+        for k, f in enumerate(m.features):
+            if k < len(self.canvas._feat_row) and self.canvas._feat_row[k] < 0:
+                continue
+            fx0, fx1 = x0 + (f.start - 1) * sc, x0 + f.end * sc
+            p.fillRect(QRectF(fx0, track.bottom() - 3, max(1.0, fx1 - fx0), 3),
+                       QColor(f.color or "#888888"))
         c = self.canvas
         if c.ppb > 0:
             vis0 = max(0, c.bp_at(LABEL_W))
@@ -1289,6 +1645,16 @@ class _RowsModel(QAbstractTableModel):
         self.layoutChanged.emit()
 
 
+def _even_columns(view: QTableView, first: int | None = None) -> None:
+    """Spread the columns evenly over the width (optionally a fixed first column),
+    so tables line up with the view above instead of ending in a ragged gap."""
+    header = view.horizontalHeader()
+    header.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+    if first is not None:
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
+        view.setColumnWidth(0, first)
+
+
 def _table(parent: QWidget) -> QTableView:
     view = QTableView(parent)
     view.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -1297,6 +1663,8 @@ def _table(parent: QWidget) -> QTableView:
     view.verticalHeader().setVisible(False)
     view.verticalHeader().setDefaultSectionSize(20)
     view.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+    # last column takes the rest of the width: no ragged gap on the right
+    view.horizontalHeader().setStretchLastSection(True)
     view.setSortingEnabled(True)
     view.setAlternatingRowColors(True)
     return view
@@ -1350,12 +1718,23 @@ class ContigViewPanel(QWidget):
         bases = tool("Bases", "Zoom in until the bases are written out",
                      lambda: self.canvas.show_base(self.canvas.bp_at(
                          LABEL_W + self.canvas._data_w() / 2), zoom_to_letters=True))
-        self._prev_diff = tool("◀ Previous difference", "Go to the previous variant position",
+        self._prev_diff = tool("◀", "Previous difference (variant position)",
                                lambda: self._step_difference(-1))
-        self._next_diff = tool("Next difference ▶", "Go to the next variant position",
+        self._next_diff = tool("▶", "Next difference (variant position)",
                                lambda: self._step_difference(1))
         self._diff_label = QLabel(self)
-        self._diff_label.setMinimumWidth(60)
+        self._diff_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._diff_label.setMinimumWidth(130)
+
+        # Tracks / Graphs / Consensus: options kept in three menus, not more rows
+        self._tracks_btn = self._menu_button("Tracks", "Show or hide feature types, and the "
+                                             "features found in each sequence")
+        self._graphs_btn = self._menu_button("Graphs", "Coverage scale and highlights, "
+                                             "sequence logo")
+        self._consensus_btn = self._menu_button("Consensus", "Consensus threshold and the call "
+                                                "where nothing covers the reference")
+        self._build_graphs_menu()
+        self._build_consensus_menu()
         self._files_btn = QToolButton(self)
         self._files_btn.setText("Results")
         self._files_btn.setToolTip("Open the report, the consensus, the placed or unused "
@@ -1368,11 +1747,17 @@ class ContigViewPanel(QWidget):
         bl = QHBoxLayout(bar)
         bl.setContentsMargins(6, 4, 6, 4)
         bl.setSpacing(6)
-        for wdg in (self._contig, zoom_out, zoom_in, fit, bases, self._highlight,
-                    self._layout_mode, self._prev_diff, self._diff_label, self._next_diff):
+        for wdg in (self._contig, zoom_out, zoom_in, fit, bases):
+            bl.addWidget(wdg)
+        bl.addSpacing(10)
+        for wdg in (self._highlight, self._layout_mode):
+            bl.addWidget(wdg)
+        bl.addSpacing(10)
+        for wdg in (self._prev_diff, self._diff_label, self._next_diff):
             bl.addWidget(wdg)
         bl.addStretch(1)
-        bl.addWidget(self._files_btn)
+        for wdg in (self._tracks_btn, self._graphs_btn, self._consensus_btn, self._files_btn):
+            bl.addWidget(wdg)
 
         # second row: how reads are ordered, coloured and filtered
         from repeatviewer.widgets.combo_boxes import NoWheelComboBox
@@ -1431,10 +1816,13 @@ class ContigViewPanel(QWidget):
         self._features_view = _table(self)
         self._variants_view = _table(self)
         self._unused_view = _table(self)
+        self._stats_view = _table(self)
+        self._stats_view.setSortingEnabled(False)   # fixed order, like a report
         self._tabs.addTab(self._reads_view, "Sequences")
         self._tabs.addTab(self._features_view, "Features")
         self._tabs.addTab(self._variants_view, "Variants")
         self._tabs.addTab(self._unused_view, "Not used")
+        self._tabs.addTab(self._stats_view, "Statistics")
         self._reads_view.clicked.connect(self._on_read_row)
         self._features_view.clicked.connect(self._on_feature_cell)
         self._variants_view.clicked.connect(self._on_variant_row)
@@ -1524,6 +1912,8 @@ class ContigViewPanel(QWidget):
         self._fill_reads(model)
         self._fill_features(model)
         self._fill_variants(model)
+        self._build_tracks_menu()
+        self._fill_statistics()
         self._sync_difference_label()
 
     def _on_highlight(self, _index: int) -> None:
@@ -1544,7 +1934,7 @@ class ContigViewPanel(QWidget):
                    "Inserted", "MAPQ", "Kind", "#"]
         self._reads_view.setModel(_RowsModel(headers, rows, parent=self))
         self._reads_view.setColumnHidden(len(headers) - 1, True)
-        self._reads_view.setColumnWidth(0, 220)
+        _even_columns(self._reads_view, first=220)
 
     def _fill_features(self, m: ContigModel) -> None:
         feats = m.features[:mr.MAX_FEATURE_COLUMNS]
@@ -1605,12 +1995,13 @@ class ContigViewPanel(QWidget):
                          "Sequences with this state", "Sequences covering the position",
                          "", "Cytosine context of the reference position (CG / CHG), "
                          "where methylation-driven C→T changes are expected", ""]))
+        _even_columns(self._variants_view)
         self._tabs.setTabText(2, f"Variants ({len(rows):,})")
 
     def _fill_unused(self) -> None:
         rows = [[n, r] for n, r in self._data.get("unused", [])]
         self._unused_view.setModel(_RowsModel(["Sequence", "Reason"], rows, parent=self))
-        self._unused_view.setColumnWidth(0, 240)
+        _even_columns(self._unused_view, first=240)
         self._tabs.setTabText(3, f"Not used ({self._data.get('summary', {}).get('n_unused', 0):,})")
 
     # ---------------------------------------------------------------- interaction
@@ -1650,6 +2041,162 @@ class ContigViewPanel(QWidget):
         n = self.canvas.hidden_count()
         self._hidden_label.setText(f"{n:,} hidden by filters" if n else "")
         self.overview.update()
+        if hasattr(self, "_stats_view"):
+            self._fill_statistics()
+
+    # ---------------------------------------------------------------- menus
+
+    def _menu_button(self, text: str, tip: str) -> QToolButton:
+        b = QToolButton(self)
+        b.setText(text)
+        b.setToolTip(tip)
+        b.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        b.setMenu(QMenu(b))
+        return b
+
+    def _build_tracks_menu(self) -> None:
+        from PySide6.QtGui import QIcon, QPixmap
+
+        menu = self._tracks_btn.menu()
+        menu.clear()
+        m = self.canvas.model
+        types = feature_type_counts(m.features) if m is not None else []
+        self._tracks_btn.setEnabled(bool(types))
+        if not types:
+            return
+        head = menu.addAction("Feature types")
+        head.setEnabled(False)
+        for name, n, color in types:
+            pix = QPixmap(12, 12)
+            pix.fill(QColor(color))
+            act = menu.addAction(QIcon(pix), f"{name}  ({n:,})")
+            act.setCheckable(True)
+            act.setChecked(name not in self.canvas.hidden_types)
+            act.toggled.connect(lambda on, t=name: self._toggle_type(t, on))
+        menu.addSeparator()
+        menu.addAction("Show all types", lambda: self._set_all_types(True))
+        menu.addAction("Hide all types", lambda: self._set_all_types(False))
+        menu.addSeparator()
+        per_seq = menu.addAction("Features in each sequence")
+        per_seq.setCheckable(True)
+        per_seq.setChecked(self.canvas.show_read_features)
+        per_seq.setToolTip("Draw the reference features under every sequence: intact, "
+                           "changed (\"n diff\"), partial (faded) or lost (grey)")
+        per_seq.toggled.connect(self._on_read_features)
+
+    def _toggle_type(self, name: str, on: bool) -> None:
+        hidden = set(self.canvas.hidden_types)
+        (hidden.discard if on else hidden.add)(name)
+        self.canvas.set_hidden_types(hidden)
+        self.overview.update()
+
+    def _set_all_types(self, on: bool) -> None:
+        m = self.canvas.model
+        names = {t for t, _n, _c in feature_type_counts(m.features)} if m else set()
+        self.canvas.set_hidden_types(set() if on else names)
+        self._build_tracks_menu()
+        self.overview.update()
+
+    def _on_read_features(self, on: bool) -> None:
+        self.canvas.set_show_read_features(on)
+
+    def _build_graphs_menu(self) -> None:
+        from PySide6.QtWidgets import QCheckBox, QWidgetAction
+
+        from repeatviewer.widgets.spin_boxes import NoWheelSpinBox
+
+        menu = self._graphs_btn.menu()
+        self._g_log = menu.addAction("Coverage on a log scale")
+        self._g_log.setCheckable(True)
+        self._g_log.setChecked(True)
+        self._g_strand = menu.addAction("Highlight single-strand coverage")
+        self._g_strand.setCheckable(True)
+        self._g_logo = menu.addAction("Sequence logo")
+        self._g_logo.setCheckable(True)
+        menu.addSeparator()
+
+        def threshold_row(text: str, value: int) -> tuple[QCheckBox, NoWheelSpinBox]:
+            host = QWidget(menu)
+            row = QHBoxLayout(host)
+            row.setContentsMargins(10, 2, 10, 2)
+            row.setSpacing(6)
+            box = QCheckBox(text, host)
+            spin = NoWheelSpinBox(host)
+            spin.setRange(0, 1_000_000)
+            spin.setValue(value)
+            spin.setEnabled(False)
+            box.toggled.connect(spin.setEnabled)
+            row.addWidget(box, 1)
+            row.addWidget(spin)
+            act = QWidgetAction(menu)
+            act.setDefaultWidget(host)
+            menu.addAction(act)
+            return box, spin
+
+        self._g_low_box, self._g_low = threshold_row("Highlight coverage below", 5)
+        self._g_high_box, self._g_high = threshold_row("Highlight coverage above", 100)
+        for act in (self._g_log, self._g_strand, self._g_logo):
+            act.toggled.connect(lambda _on: self._apply_graphs())
+        for box in (self._g_low_box, self._g_high_box):
+            box.toggled.connect(lambda _on: self._apply_graphs())
+        for spin in (self._g_low, self._g_high):
+            spin.valueChanged.connect(lambda _v: self._apply_graphs())
+
+    def _apply_graphs(self) -> None:
+        self.canvas.set_graph_options(
+            log_scale=self._g_log.isChecked(),
+            low=self._g_low.value() if self._g_low_box.isChecked() else None,
+            high=self._g_high.value() if self._g_high_box.isChecked() else None,
+            single_strand=self._g_strand.isChecked(),
+            logo=self._g_logo.isChecked())
+
+    def _build_consensus_menu(self) -> None:
+        from PySide6.QtGui import QActionGroup
+
+        menu = self._consensus_btn.menu()
+        head = menu.addAction("Threshold")
+        head.setEnabled(False)
+        group = QActionGroup(menu)
+        self._threshold_actions: dict = {}
+        for value, label in CONSENSUS_THRESHOLDS:
+            act = menu.addAction(label)
+            self._threshold_actions[value] = act
+            act.setCheckable(True)
+            act.setChecked(value is None)
+            act.setActionGroup(group)
+            act.triggered.connect(lambda _c=False, v=value: self._set_threshold(v))
+        menu.addSeparator()
+        head2 = menu.addAction("Where nothing covers the reference")
+        head2.setEnabled(False)
+        group2 = QActionGroup(menu)
+        for call in NO_COVERAGE_CALLS:
+            act = menu.addAction(f"Call {call}")
+            act.setCheckable(True)
+            act.setChecked(call == "N")
+            act.setActionGroup(group2)
+            act.triggered.connect(lambda _c=False, v=call: self._set_no_coverage(v))
+        self._threshold_value: float | None = None
+        self._no_cov_value = "N"
+
+    def _set_threshold(self, value: float | None) -> None:
+        self._threshold_value = value
+        self.canvas.set_consensus(value, self._no_cov_value)
+        self._fill_statistics()
+
+    def _set_no_coverage(self, value: str) -> None:
+        self._no_cov_value = value
+        if self._threshold_value is None:
+            # the saved consensus has its own no-coverage call; switch to majority
+            self._threshold_value = 0.0
+            self._threshold_actions[0.0].setChecked(True)
+        self.canvas.set_consensus(self._threshold_value, value)
+
+    def _fill_statistics(self) -> None:
+        m = self.canvas.model
+        rows = [[k, v] for k, v in contig_statistics(m)] if m is not None else []
+        self._stats_view.setModel(_RowsModel(["Statistic", "Value"], rows, parent=self))
+        self._stats_view.setColumnWidth(0, 220)
+        self._stats_view.horizontalHeader().setStretchLastSection(True)
 
     # ---------------------------------------------------------------- differences
 
@@ -1673,7 +2220,7 @@ class ContigViewPanel(QWidget):
         if not n:
             self._diff_label.setText("No differences")
         elif mark is not None and mark in m.diff_pos:
-            self._diff_label.setText(f"{m.diff_pos.index(mark) + 1} of {n:,}")
+            self._diff_label.setText(f"Difference {m.diff_pos.index(mark) + 1} of {n:,}")
         else:
             self._diff_label.setText(f"{n:,} differences")
 

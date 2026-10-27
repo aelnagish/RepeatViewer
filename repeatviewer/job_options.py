@@ -2824,6 +2824,19 @@ MAP_MINIMAP2_OUT_PAF = "paf"
 MAP_MINIMAP2_OUT_SAM = "sam"
 MAP_MINIMAP2_OUTPUTS = (MAP_MINIMAP2_OUT_PAF, MAP_MINIMAP2_OUT_SAM)
 
+# Repetitive seeds (minimap2 -f). minimap2 ignores its most frequent seeds by
+# default; inside satellite arrays and other tandem repeats almost every seed is
+# frequent, so reads can go unplaced or scatter. "more" / "all" keep them.
+MAP_REPEAT_SEEDS_DEFAULT = "default"
+MAP_REPEAT_SEEDS_MORE = "more"
+MAP_REPEAT_SEEDS_ALL = "all"
+MAP_REPEAT_SEEDS_MODES = (MAP_REPEAT_SEEDS_DEFAULT, MAP_REPEAT_SEEDS_MORE, MAP_REPEAT_SEEDS_ALL)
+MAP_REPEAT_SEEDS_ARGS = {
+    MAP_REPEAT_SEEDS_DEFAULT: [],
+    MAP_REPEAT_SEEDS_MORE: ["-f", "0.00002"],     # ignore only the top 0.002 % (default 0.02 %)
+    MAP_REPEAT_SEEDS_ALL: ["-f", "1000000"],      # ignore seeds seen > 1,000,000 times
+}
+
 # Consensus threshold, as a fraction of the sequences covering a position.
 # 0 = majority (the most common base); higher values give IUPAC codes.
 MAP_CONSENSUS_THRESHOLDS = (0.0, 0.5, 0.75, 0.95, 1.0)
@@ -2858,6 +2871,7 @@ class MapOptions:
     # minimap2 -k / -w (concrete numbers; updated from the chosen -x preset)
     minimap2_kmer: int = 15
     minimap2_window: int = 10
+    minimap2_repeat_seeds: str = MAP_REPEAT_SEEDS_DEFAULT   # minimap2 -f
     # HISAT2 Settings / Advanced
     hisat2_library: str = MAP_HISAT2_RNA
     hisat2_reads: str = MAP_HISAT2_READS_SINGLE
@@ -2926,6 +2940,8 @@ def load_map_options() -> MapOptions:
         multiple_hits=_pick("multiple_hits", MAP_MULTI_MODES, d.multiple_hits),
         minimap2_preset=mm_preset,
         minimap2_output=_pick("minimap2_output", MAP_MINIMAP2_OUTPUTS, d.minimap2_output),
+        minimap2_repeat_seeds=_pick("minimap2_repeat_seeds", MAP_REPEAT_SEEDS_MODES,
+                                    d.minimap2_repeat_seeds),
         minimap2_include_cigar=_to_bool(
             v.get("minimap2_include_cigar"), d.minimap2_include_cigar
         ),
@@ -2982,6 +2998,7 @@ def save_map_options(opts: MapOptions) -> None:
             "multiple_hits": opts.multiple_hits,
             "minimap2_preset": opts.minimap2_preset,
             "minimap2_output": opts.minimap2_output,
+            "minimap2_repeat_seeds": opts.minimap2_repeat_seeds,
             "minimap2_include_cigar": opts.minimap2_include_cigar,
             "minimap2_include_cs": opts.minimap2_include_cs,
             "minimap2_kmer": opts.minimap2_kmer,
