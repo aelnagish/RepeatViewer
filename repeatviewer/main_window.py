@@ -3713,6 +3713,7 @@ class MainWindow(NcbiDownloadActionsMixin, PrimerActionsMixin, QMainWindow):
         self._preview_tabs.fileWritten.connect(self._on_preview_file_written)
         self._preview_tabs.saveSelectionAsFileRequested.connect(self._group_sequences)
         self._preview_tabs.openFileRequested.connect(self._on_preview_open_requested)
+        self._preview_tabs.blastRequested.connect(self._on_preview_blast_requested)
         self._preview_tabs.dotplotRegionSelected.connect(self._on_dotplot_region_selected)
         self._preview_tabs.currentPathChanged.connect(
             self._on_preview_current_path_changed
@@ -5171,6 +5172,16 @@ class MainWindow(NcbiDownloadActionsMixin, PrimerActionsMixin, QMainWindow):
             show_hisat2_not_configured_dialog(self)
             return
         QMessageBox.warning(self, "Mapping failed", text)
+
+    def _on_preview_blast_requested(self, path: object) -> None:
+        """Sequences sent from a preview (contig view right-click > BLAST): open the BLAST
+        window with them under Define inputs."""
+        if not isinstance(path, Path) or not path.is_file():
+            return
+        self._open_blast_dialog()
+        dialog = self._blast_params_dialog
+        if dialog is not None and hasattr(dialog, "use_query_file"):
+            dialog.use_query_file(path)
 
     def _on_preview_open_requested(self, path: object) -> None:
         """A result file asked for from a preview (contig view → Files menu).

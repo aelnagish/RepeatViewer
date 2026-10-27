@@ -430,7 +430,8 @@ class ReadView:
     del_runs: list[tuple[int, int]] = field(default_factory=list)
     ins_pos: list[int] = field(default_factory=list)
     lane: int = 0
-    hidden: bool = False    # filtered out (identity / MAPQ / secondary)
+    hidden: bool = False    # filtered out (identity / MAPQ / secondary) or hidden by the user
+    user_hidden: bool = False   # right-click > Hide (this session only, not the file)
 
     @property
     def label(self) -> str:
@@ -549,10 +550,12 @@ _FALLBACK = (QColor("#dddddd"), QColor("#000000"))
 
 
 class ContigCanvas(QAbstractScrollArea):
+    INFO_H = 48          # details of the selected sequence, foot of the name column
     readClicked = Signal(int)
     readDoubleClicked = Signal(int)
     viewChanged = Signal()       # zoom or scroll (the overview strip follows)
     labelWidthChanged = Signal(int)   # the name column was resized by the user
+    readContextMenu = Signal(int, object)  # sequence index (-1: none), global QPoint
 
     HIGHLIGHT_DIFF = "diff"
     HIGHLIGHT_ALL = "all"
@@ -892,11 +895,13 @@ class ContigCanvas(QAbstractScrollArea):
         if m is None:
             return
         for i, r in enumerate(m.reads):
-            r.hidden = not read_passes(r.data, r.identity, min_identity=self.min_identity,
-                                       min_mapq=self.min_mapq,
-                                       hide_secondary=self.hide_secondary)
-            if r.hidden and i == self.selected:
-                self.selected = -1
+            r.hidden = r.user_hidden or not read_passes(
+                r.data, r.identity, min_identity=self.min_identity, min_mapq=self.min_mapq,
+                hide_secondary=self.hide_secondary)
+            if r.hidden:
+                self.selection.discard(i)
+                if i == self._selected:
+                    self._selected = -1
         m.cache.clear()    # counts, strands and recomputed consensus follow the filters
 
     def _relayout(self) -> None:
@@ -975,7 +980,7 @@ class ContigCanvas(QAbstractScrollArea):
             # blocks stacked down the page: no sideways scrolling
             h = self.horizontalScrollBar()
             h.setRange(0, 0)
-            total = self._wrap_blocks() * self._wrap_block_h()
+            total = self._wrap_blocks() * self._wrap_block_h() + self.INFO_H
             v = self.verticalScrollBar()
             v.setRange(0, max(0, total - self.viewport().height()))
             v.setPageStep(max(1, self.viewport().height()))
@@ -986,7 +991,7 @@ class ContigCanvas(QAbstractScrollArea):
         h.setRange(0, max(0, content - self._data_w()))
         h.setPageStep(self._data_w())
         h.setSingleStep(max(1, int(10 * self.ppb)))
-        reads_h = self._lane_count * self.read_h() + 10
+        reads_h = self._lane_count * self.read_h() + 10 + self.INFO_H
         v = self.verticalScrollBar()
         v.setRange(0, max(0, reads_h - (self.viewport().height() - self.header_h())))
         v.setPageStep(max(1, self.viewport().height() - self.header_h()))
@@ -1250,16 +1255,100 @@ class ContigCanvas(QAbstractScrollArea):
             self.viewport().unsetCursor()
         super().leaveEvent(event)
 
+    # ---------------------------------------------------------------- selection
+
+    @property
+    def selected(self) -> int:
+        """The current (last clicked) sequence, or -1."""
+        return getattr(self, "_selected", -1)
+
+    @selected.setter
+    def selected(self, index: int) -> None:
+        self._selected = int(index)
+        self.selection = {self._selected} if self._selected >= 0 else set()
+
+    def display_order(self) -> list[int]:
+        """Shown sequences top to bottom (lane, then start), for Shift-click ranges."""
+        m = self.model
+        if m is None:
+            return []
+        return sorted((i for i, r in enumerate(m.reads) if not r.hidden),
+                      key=lambda i: (m.reads[i].lane, m.reads[i].start))
+
+    def select_at(self, i: int, *, add: bool = False, extend: bool = False) -> None:
+        """Click: select one. Cmd/Ctrl-click: add or remove. Shift-click: the range
+        from the current one."""
+        if extend and self._selected >= 0:
+            order = self.display_order()
+            if i in order and self._selected in order:
+                a, b = sorted((order.index(self._selected), order.index(i)))
+                self.selection = set(self.selection) | set(order[a:b + 1])
+                self.viewport().update()
+                return
+        if add:
+            if i in self.selection:
+                self.selection.discard(i)
+                self._selected = next(iter(self.selection), -1) if self._selected == i \
+                    else self._selected
+            else:
+                self.selection.add(i)
+                self._selected = i
+        else:
+            self.selected = i
+        self.viewport().update()
+
+    def hide_reads(self, indices) -> None:
+        """Right-click > Hide: out of the view until Show hidden (not the file)."""
+        m = self.model
+        if m is None:
+            return
+        for i in indices:
+            if 0 <= i < len(m.reads):
+                m.reads[i].user_hidden = True
+        self.selected = -1
+        self._apply_filters()
+        self._relayout()
+        self.viewport().update()
+
+    def show_hidden_reads(self) -> None:
+        m = self.model
+        if m is None:
+            return
+        for r in m.reads:
+            r.user_hidden = False
+        self._apply_filters()
+        self._relayout()
+        self.viewport().update()
+
+    def user_hidden_count(self) -> int:
+        return sum(1 for r in self.model.reads if r.user_hidden) if self.model else 0
+
+    def contextMenuEvent(self, event) -> None:  # noqa: N802
+        i = self.read_at(QPointF(event.pos()))
+        if i >= 0 and i not in self.selection:
+            self.selected = i
+            self.viewport().update()
+        self.readContextMenu.emit(i, event.globalPos())
+        event.accept()
+
     def mousePressEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton and self._on_edge(event.position().x()):
             self._edge_drag = True
             event.accept()
             return
         i = self.read_at(event.position())
+        mods = event.modifiers()
         if i >= 0:
-            self.selected = i
+            if event.button() == Qt.MouseButton.RightButton:
+                if i not in self.selection:     # right-click outside the selection
+                    self.selected = i
+                    self.viewport().update()
+            else:
+                self.select_at(
+                    i, add=bool(mods & (Qt.KeyboardModifier.ControlModifier
+                                        | Qt.KeyboardModifier.MetaModifier)),
+                    extend=bool(mods & Qt.KeyboardModifier.ShiftModifier))
             self.readClicked.emit(i)
-            self.viewport().update()
         super().mousePressEvent(event)
 
     def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802
@@ -1402,10 +1491,61 @@ class ContigCanvas(QAbstractScrollArea):
         w, h = self.viewport().width(), self.viewport().height()
         if self.wrap_active():
             self._paint_wrapped(p, w, h)
-            return
-        bp0 = max(0, self.bp_at(self.label_w) - 1)
-        bp1 = min(m.length, self.bp_at(w) + 2)
-        self._paint_page(p, w, h, bp0, bp1, self.verticalScrollBar().value())
+        else:
+            bp0 = max(0, self.bp_at(self.label_w) - 1)
+            bp1 = min(m.length, self.bp_at(w) + 2)
+            self._paint_page(p, w, h, bp0, bp1, self.verticalScrollBar().value())
+        self._paint_info(p, h)
+
+    def info_lines(self) -> tuple[str, str, str]:
+        """Three short lines for the foot of the name column: the selected sequence, or
+        how many are shown."""
+        m = self.model
+        if m is None:
+            return "", "", ""
+        n_sel = len(self.selection)
+        if n_sel > 1:
+            return f"{n_sel:,} sequences selected", "Right-click to copy,", "extract, hide or BLAST"
+        if 0 <= self._selected < len(m.reads):
+            r = m.reads[self._selected]
+            mapq = r.data.get("mapq", -1)
+            third = "reverse" if r.strand == "-" else "forward"
+            if mapq is not None and int(mapq) >= 0:
+                third += f" · mapping quality {int(mapq)}"
+            return (r.label.replace(" (reversed)", ""),
+                    f"{r.start + 1:,}–{r.end:,} · identity {r.identity:.1%}", third)
+        shown = len(m.reads) - self.hidden_count()
+        first = (f"{shown:,} of {m.n_reads:,} shown" if shown < m.n_reads
+                 else f"{m.n_reads:,} sequences")
+        hidden = self.user_hidden_count()
+        if hidden:
+            return first, f"{hidden:,} hidden", "Right-click to show them"
+        return first, "Click a sequence", "for its details"
+
+    def _paint_info(self, p: QPainter, h: int) -> None:
+        p.setClipping(False)
+        pal = self.palette()
+        rect = QRectF(0, h - self.INFO_H, self.label_w - 1, self.INFO_H)
+        p.fillRect(rect, pal.color(pal.ColorRole.Window))
+        p.setPen(QPen(pal.color(pal.ColorRole.Mid), 1))
+        p.drawLine(QPointF(0, rect.top()), QPointF(self.label_w - 1, rect.top()))
+        first, second, third = self.info_lines()
+        f = QFont(self.font())
+        f.setPointSize(9)
+        small = QFont(f)
+        small.setPointSize(8)
+        width = self.label_w - 12
+        p.setPen(pal.color(pal.ColorRole.Text))
+        p.setFont(f)
+        p.drawText(QRectF(6, rect.top() + 2, width, 16),
+                   Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                   QFontMetrics(f).elidedText(first, Qt.TextElideMode.ElideMiddle, width))
+        p.setPen(pal.color(pal.ColorRole.PlaceholderText))
+        p.setFont(small)
+        for k, text in enumerate((second, third)):
+            p.drawText(QRectF(6, rect.top() + 17 + 14 * k, width, 14),
+                       Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                       QFontMetrics(small).elidedText(text, Qt.TextElideMode.ElideRight, width))
 
     def _paint_wrapped(self, p: QPainter, w: int, h: int) -> None:
         """Wrap contig: the alignment in blocks one view wide, stacked down the page,
@@ -1524,7 +1664,7 @@ class ContigCanvas(QAbstractScrollArea):
                 y = off + r.lane * rh
                 if y < header - rh or y > h:
                     continue
-                if i == self.selected:
+                if i in self.selection:
                     p.fillRect(QRectF(0, y, self.label_w - 1, rh), _READ_FILL_SEL)
                 elif r.strand == "-":
                     p.fillRect(QRectF(0, y, self.label_w - 1, rh), _REVERSE_TINT)
@@ -1544,9 +1684,29 @@ class ContigCanvas(QAbstractScrollArea):
                     p.setPen(QPen(QColor(0, 0, 0, 28), 1))
                     p.drawLine(QPointF(0, y + rh - 1), QPointF(w, y + rh - 1))
         else:
-            shown = len(m.reads) - self.hidden_count()
-            label(ys["reads"], f"{shown:,} of {m.n_reads:,} shown"
-                  if shown < m.n_reads else f"{m.n_reads:,} sequences")
+            # Packed: several sequences share a line, so only the selected ones are named
+            p.setClipRect(QRectF(0, header, self.label_w - 1, h - header))
+            rh = self.read_h()
+            off = ys["reads"] - scroll
+            fm = QFontMetrics(label_font)
+            bh_ = self.read_base_h()
+            for i in sorted(self.selection)[:200]:
+                if not 0 <= i < len(m.reads) or m.reads[i].hidden:
+                    continue
+                r = m.reads[i]
+                y = off + r.lane * rh
+                if y < header - rh or y > h:
+                    continue
+                p.fillRect(QRectF(0, y, self.label_w - 1, rh), _READ_FILL_SEL)
+                rev = r.strand == "-"
+                p.setPen(_ARROW_REV if rev else _ARROW_FWD)
+                p.drawText(QRectF(6, y, 14, bh_), Qt.AlignmentFlag.AlignCenter,
+                           "←" if rev else "→")
+                p.setPen(fg)
+                p.drawText(QRectF(24, y, self.label_w - 28, bh_),
+                           Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                           fm.elidedText(r.label.replace(" (reversed)", ""),
+                                         Qt.TextElideMode.ElideMiddle, self.label_w - 30))
         p.setClipping(False)
 
     def _paint_ruler(self, p: QPainter, bp0: int, bp1: int, fg: QColor, mid: QColor) -> None:
@@ -1864,7 +2024,7 @@ class ContigCanvas(QAbstractScrollArea):
             y = off + r.lane * rh
             if y + rh < header or y > h:
                 continue
-            sel = i == self.selected
+            sel = i in self.selection
             if self.one_per_row and r.strand == "-" and not sel:
                 p.fillRect(QRectF(self.label_w, y, w - self.label_w, rh), _REVERSE_TINT)
             if r.end < bp0 or r.start > bp1:
@@ -2058,6 +2218,81 @@ def legend_items(model: "ContigModel | None", highlight: str = "",
     return [(k, words.get(k, t)) for k, t in LEGEND_ITEMS if k in keep]
 
 
+_BAR_FWD, _BAR_REV = "#8fb3e6", "#a98bd6"
+
+
+def _gradient(mode: str):
+    """Colour stops of a Colour by scale (identity or mapping quality)."""
+    from PySide6.QtGui import QLinearGradient
+
+    g = QLinearGradient(0, 0, 1, 0)
+    g.setCoordinateMode(QLinearGradient.CoordinateMode.ObjectBoundingMode)
+    if mode == COLOR_IDENTITY:
+        g.setColorAt(0, QColor(read_color_hex("+", 0.8, None, COLOR_IDENTITY)))
+        g.setColorAt(1, QColor(read_color_hex("+", 1.0, None, COLOR_IDENTITY)))
+    else:
+        g.setColorAt(0, QColor(read_color_hex("+", 1.0, 0, COLOR_MAPQ)))
+        g.setColorAt(1, QColor(read_color_hex("+", 1.0, 60, COLOR_MAPQ)))
+    return g
+
+
+class ColourKey(QWidget):
+    """The scale of the chosen Colour by, under its box: forward / reverse swatches,
+    or a gradient with its ends labelled (identity 80–100 %, mapping quality 0–60)."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.mode = COLOR_STRAND
+        self.setFixedHeight(18)
+
+    def set_mode(self, mode: str) -> None:
+        self.mode = mode
+        self.update()
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pal = self.palette()
+        f = QFont(self.font())
+        f.setPointSize(8)
+        p.setFont(f)
+        fm = QFontMetrics(f)
+        muted = pal.color(pal.ColorRole.PlaceholderText)
+        h = self.height()
+        if self.mode == COLOR_STRAND:
+            x = 0.0
+            for color, text in ((_BAR_FWD, "forward"), (_BAR_REV, "reverse")):
+                p.fillRect(QRectF(x, h / 2 - 4, 16, 8), QColor(color))
+                p.setPen(muted)
+                p.drawText(QRectF(x + 20, 0, 80, h),
+                           Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, text)
+                x += 20 + fm.horizontalAdvance(text) + 14
+            p.end()
+            return
+        lo, hi = ("≤ 80 %", "100 %") if self.mode == COLOR_IDENTITY else ("0", "60")
+        lw, hw = fm.horizontalAdvance(lo) + 6, fm.horizontalAdvance(hi) + 6
+        bar = QRectF(lw, h / 2 - 4, max(20.0, self.width() - lw - hw), 8)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(_gradient(self.mode))
+        p.drawRoundedRect(bar, 2, 2)
+        p.setPen(muted)
+        p.drawText(QRectF(0, 0, lw, h), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, lo)
+        p.drawText(QRectF(bar.right() + 6, 0, hw, h),
+                   Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, hi)
+        p.end()
+
+
+def bar_colour_items(mode: str) -> list[tuple[str, str]]:
+    """Legend rows for the bar colour of the current Colour by."""
+    if mode == COLOR_IDENTITY:
+        rows = [("grad_identity", "identity ≤ 80 % → 100 %")]
+    elif mode == COLOR_MAPQ:
+        rows = [("grad_mapq", "mapping quality 0 → 60"), ("bar_none", "no mapping quality")]
+    else:
+        rows = [("bar_fwd", "forward"), ("bar_rev", "reverse")]
+    return [("heading", "Bar colour, zoomed out")] + rows
+
+
 class ContigLegend(QWidget):
     """The key to the view's marks, one entry per row; shown from the "?" button."""
 
@@ -2118,6 +2353,22 @@ class ContigLegend(QWidget):
                 p.drawRect(box.adjusted(0, 3, 0, -3))
             elif kind == "lost":
                 p.fillRect(box.adjusted(0, 3, 0, -3), QColor("#c4c4c0"))
+            elif kind == "heading":
+                bold = QFont(f)
+                bold.setBold(True)
+                p.setFont(bold)
+                p.setPen(text_c)
+                p.drawText(QRectF(self.PAD, y, self.width(), self.ROW_H),
+                           Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignLeft, text)
+                continue
+            elif kind in ("bar_fwd", "bar_rev", "bar_none"):
+                color = {"bar_fwd": _BAR_FWD, "bar_rev": _BAR_REV, "bar_none": "#cfcfcf"}[kind]
+                p.fillRect(box.adjusted(0, 3, 0, -3), QColor(color))
+            elif kind in ("grad_identity", "grad_mapq"):
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(_gradient(COLOR_IDENTITY if kind == "grad_identity" else COLOR_MAPQ))
+                p.drawRect(box.adjusted(0, 3, 0, -3))
+                p.setBrush(Qt.BrushStyle.NoBrush)
             p.setFont(f)
             p.setPen(text_c)
             p.drawText(QRectF(self.PAD + sw + 8, y, self.width(), self.ROW_H),
@@ -2449,6 +2700,7 @@ class ContigViewPanel(QWidget):
 
     openRequested = Signal(object)     # Path of a result file to open (report, consensus…)
     fileWritten = Signal(object)       # Path of a file written from the view
+    blastRequested = Signal(object)    # Path of a FASTA to BLAST (right-click > BLAST)
 
     SIDE_W = 270
 
@@ -2588,6 +2840,9 @@ class ContigViewPanel(QWidget):
         self._color_by.setToolTip("Colour of the sequence bars when zoomed out: forward blue / "
                                   "reverse purple, identity red (80 %) to green (100 %), or "
                                   "mapping quality amber (0) to blue (60)")
+        self._color_key = ColourKey(self)
+        self._color_by.currentIndexChanged.connect(
+            lambda _i: self._color_key.set_mode(str(self._color_by.currentData())))
         self._color_by.currentIndexChanged.connect(
             lambda _i: self.canvas.set_color_by(str(self._color_by.currentData())))
 
@@ -2770,6 +3025,7 @@ class ContigViewPanel(QWidget):
         self._variants_view.clicked.connect(self._on_variant_row)
         self.canvas.readClicked.connect(self._select_read_row)
         self.canvas.readDoubleClicked.connect(self._open_read_in_rows)
+        self.canvas.readContextMenu.connect(self._read_menu)
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -2823,7 +3079,7 @@ class ContigViewPanel(QWidget):
 
         s = section("display", "Display")
         s.add_layout(form(("Layout", self._layout_mode), ("Sort by", self._sort),
-                          ("Colour by", self._color_by)))
+                          ("Colour by", self._color_by), ("", self._color_key)))
         s.add_widget(self._wrap)
         s = section("highlighting", "Highlighting")
         s.add_layout(form(("Show", self._hl_show), ("Compared to", self._hl_target)))
@@ -2834,7 +3090,16 @@ class ContigViewPanel(QWidget):
         self._filters_form = form(("Min identity", self._min_identity),
                                   ("Mapping quality", self._min_mapq))
         s.add_layout(self._filters_form)
-        s.add_widget(self._hide_secondary)
+        from repeatviewer.widgets.help_button import field_with_help
+
+        self._hide_secondary_row = field_with_help(
+            self._hide_secondary, "Secondary placements",
+            "A sequence can be placed in several spots when the Mapping run keeps more than "
+            "one place (Mapping window, Minimap2 tab, <b>Secondaries: Up to 50 places</b>). "
+            "Its best spot is the <b>primary</b> placement; the others are "
+            "<b>secondary</b> and are shown with #2, #3… after the name.<br><br>"
+            "Tick to keep only each sequence's primary placement.", parent=body)
+        s.add_widget(self._hide_secondary_row)
         s.add_widget(self._hidden_label)
         s = section("annotations", "Annotations")
         s.add_widget(self._show_ann)
@@ -2880,6 +3145,8 @@ class ContigViewPanel(QWidget):
 
         c = self.canvas
         items = legend_items(c.model, str(c.highlight), target=c.hl_target, show=c.hl_show)
+        if items:
+            items = items + bar_colour_items(c.color_by)
         pop = QMenu(self)
         holder = QWidgetAction(pop)
         holder.setDefaultWidget(ContigLegend(items, pop) if items else
@@ -3047,7 +3314,7 @@ class ContigViewPanel(QWidget):
             self._min_mapq.setValue(0)
         secondary = any(str(r.data.get("kind", "")) != "primary"
                         or int(r.data.get("placement", 1) or 1) > 1 for r in m.reads)
-        self._hide_secondary.setVisible(secondary)
+        self._hide_secondary_row.setVisible(secondary)
         if not secondary and self._hide_secondary.isChecked():
             self._hide_secondary.setChecked(False)
 
@@ -3570,6 +3837,158 @@ class ContigViewPanel(QWidget):
         menu.addAction("Reveal in Finder" if platform.system() == "Darwin"
                        else "Show in File Manager",
                        lambda t=folder: reveal_in_file_manager(t))
+
+    # ---------------------------------------------------------------- right-click on reads
+
+    def _selected_reads(self) -> list[int]:
+        c = self.canvas
+        order = c.display_order()
+        rank = {i: k for k, i in enumerate(order)}
+        return sorted((i for i in c.selection if i in rank), key=lambda i: rank[i])
+
+    def _read_menu(self, index: int, global_pos) -> None:
+        """Geneious-style right-click on sequences: copy, extract, zoom, show, hide, BLAST."""
+        c = self.canvas
+        m = c.model
+        if m is None:
+            return
+        menu = QMenu(self)
+        picked = self._selected_reads() if index >= 0 else []
+        n = len(picked)
+        if n:
+            one = n == 1
+            what = "sequence" if one else f"{n:,} sequences"
+            menu.addAction("Copy name" if one else "Copy names", lambda: self._copy_names(picked))
+            menu.addAction(f"Copy {what} (FASTA)", lambda: self._copy_fasta(picked))
+            menu.addAction(f"Extract {what} to a file…", lambda: self._extract_reads(picked))
+            menu.addSeparator()
+            if one:
+                menu.addAction("Zoom to this sequence", lambda: self._zoom_to_read(picked[0]))
+                if not c.one_per_row:
+                    menu.addAction("Show in One per row",
+                                   lambda: self._open_read_in_rows(picked[0]))
+                menu.addAction("Show in the Sequences table",
+                               lambda: self._show_in_table(picked[0]))
+            menu.addAction(f"Hide {what}", lambda: self._hide_reads(picked))
+        hidden = c.user_hidden_count()
+        if hidden:
+            menu.addAction(f"Show hidden sequences ({hidden:,})", self._show_hidden)
+        if n:
+            menu.addSeparator()
+            menu.addAction(f"BLAST {what}…", lambda: self._blast_reads(picked))
+        if not menu.actions():
+            return
+        menu.exec(global_pos)
+
+    def _mapped_sequences(self) -> dict[str, str]:
+        """Placed sequences as written by the run (_mapped.fa: whole sequences, turned to
+        the reference strand), read once on first use."""
+        cache = getattr(self, "_mapped_cache", None)
+        if cache is not None and cache[0] == self._path:
+            return cache[1]
+        seqs: dict[str, str] = {}
+        name = self._data.get("details", {}).get("mapped")
+        if self._path is not None and name:
+            target = self._path.parent / self._data.get("details_dir", "") / name
+            try:
+                with open(target, encoding="utf-8", errors="replace") as fh:
+                    key, parts = None, []
+                    for line in fh:
+                        if line.startswith(">"):
+                            if key is not None:
+                                seqs.setdefault(key, "".join(parts))
+                            key, parts = line[1:].split()[0] if line[1:].split() else "", []
+                        else:
+                            parts.append(line.strip())
+                    if key is not None:
+                        seqs.setdefault(key, "".join(parts))
+            except OSError:
+                seqs = {}
+        self._mapped_cache = (self._path, seqs)
+        return seqs
+
+    def _read_fasta(self, indices: list[int]) -> str:
+        """FASTA of the sequences: from _mapped.fa when the run wrote it, else the aligned
+        part from the view (without insertions, which the title says)."""
+        m = self.canvas.model
+        whole = self._mapped_sequences()
+        out = []
+        for i in indices:
+            r = m.reads[i]
+            # same id as the run's _mapped.fa (map_reference.fasta_id)
+            pl = int(r.data.get("placement", 1) or 1)
+            rid = r.name + ("_reversed" if r.strand == "-" else "")
+            rid = rid if pl == 1 else f"{rid}_p{pl}"
+            seq = whole.get(rid)
+            title = f"{rid} mapped to {m.ref_id}:{r.start + 1}-{r.end} ({r.strand})"
+            if not seq:
+                seq = str(r.data.get("row", "")).replace("-", "")
+                title += " aligned part only, insertions not included"
+            out.append(f">{title}\n" + "\n".join(seq[k:k + 70] for k in range(0, len(seq), 70)))
+        return "\n".join(out) + "\n"
+
+    def _copy_names(self, indices: list[int]) -> None:
+        m = self.canvas.model
+        QApplication.clipboard().setText("\n".join(m.reads[i].name for i in indices))
+
+    def _copy_fasta(self, indices: list[int]) -> None:
+        QApplication.clipboard().setText(self._read_fasta(indices))
+
+    def _extract_reads(self, indices: list[int]) -> None:
+        """Selected sequences into <result>_selected.fa next to the result, opened in
+        Preview (file-exists question per the app's rule)."""
+        from repeatviewer.widgets.file_conflict import confirm_existing_file_path
+
+        if self._path is None or not indices:
+            return
+        proposed = self._path.with_name(f"{self._path.stem}_selected.fa")
+        target = confirm_existing_file_path(self, proposed, title="Extract sequences",
+                                            required_suffix=".fa")
+        if target is None:
+            return
+        try:
+            target.write_text(self._read_fasta(indices), encoding="utf-8")
+        except OSError as exc:
+            from PySide6.QtWidgets import QMessageBox
+
+            QMessageBox.warning(self, "Extract sequences", f"Could not write {target.name}: {exc}")
+            return
+        self.fileWritten.emit(target)
+        self.openRequested.emit(target)
+
+    def _blast_reads(self, indices: list[int]) -> None:
+        """Write the sequences as a query next to the run's other files and hand it to the
+        BLAST window (Define inputs)."""
+        if self._path is None or not indices:
+            return
+        folder = self._path.parent / self._data.get("details_dir", "")
+        if not folder.is_dir():
+            folder = self._path.parent
+        target = folder / f"{self._path.stem}_blast_query.fa"
+        try:
+            target.write_text(self._read_fasta(indices), encoding="utf-8")
+        except OSError:
+            return
+        self.fileWritten.emit(target)
+        self.blastRequested.emit(target)
+
+    def _zoom_to_read(self, i: int) -> None:
+        r = self.canvas.model.reads[i]
+        self.canvas.show_range(r.start, r.end)
+        self.canvas.selected = i
+        self.canvas.show_read(i)
+
+    def _show_in_table(self, i: int) -> None:
+        self._tabs.setCurrentWidget(self._reads_view)
+        self._select_read_row(i)
+
+    def _hide_reads(self, indices: list[int]) -> None:
+        self.canvas.hide_reads(indices)
+        self._apply_filters()
+
+    def _show_hidden(self) -> None:
+        self.canvas.show_hidden_reads()
+        self._apply_filters()
 
     def _copy_consensus(self) -> None:
         """The consensus as shown: at the threshold picked in the Consensus section."""

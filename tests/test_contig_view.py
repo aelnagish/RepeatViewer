@@ -331,3 +331,37 @@ def test_name_column_resizes_and_fits_longest_name(qapp, tmp_path):
     assert c.label_w >= QFontMetrics(f).horizontalAdvance(longest)
     assert c.label_w <= c.viewport().width() * 0.5 + 1   # never more than half the view
     panel.close()
+
+
+def test_multi_select_hide_and_info(qapp, tmp_path):
+    """Cmd-click adds, Shift-click extends, Hide takes sequences out of the view only,
+    and the foot of the name column describes the selection."""
+    path = tmp_path / "x.fa_map.rvmap"
+    path.write_text(json.dumps(_payload()))
+    panel = cv.ContigViewPanel(path)
+    panel.resize(1000, 500)
+    panel.show()
+    qapp.processEvents()
+    c = panel.canvas
+    c.select_at(0)
+    assert c.selection == {0} and c.info_lines()[0]
+    c.select_at(1, add=True)
+    assert c.selection == {0, 1} and "2 sequences selected" in c.info_lines()[0]
+    c.select_at(1, add=True)                      # Cmd-click again removes it
+    assert c.selection == {0}
+    c.select_at(1, extend=True)                   # Shift-click: the range
+    assert c.selection == {0, 1}
+    fasta = panel._read_fasta([0])
+    assert fasta.startswith(">") and len(fasta.splitlines()) >= 2
+    panel._hide_reads([0])
+    assert c.model.reads[0].hidden and c.user_hidden_count() == 1
+    assert "hidden" in c.info_lines()[1]
+    panel._show_hidden()
+    assert not c.model.reads[0].hidden and c.user_hidden_count() == 0
+    panel.close()
+
+
+def test_bar_colour_legend_rows():
+    assert [k for k, _t in cv.bar_colour_items(cv.COLOR_STRAND)][1:] == ["bar_fwd", "bar_rev"]
+    assert "grad_identity" in [k for k, _t in cv.bar_colour_items(cv.COLOR_IDENTITY)]
+    assert "grad_mapq" in [k for k, _t in cv.bar_colour_items(cv.COLOR_MAPQ)]

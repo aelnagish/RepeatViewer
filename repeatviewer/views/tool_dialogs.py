@@ -7750,6 +7750,14 @@ class BlastParamsDialog(QDialog):
             ref_label=self._SETTINGS_LABEL_REF,
         )
 
+    def use_query_file(self, path: Path) -> bool:
+        """Fill Define inputs with ``path`` (sequences sent from the contig view), on the
+        BLASTn tab unless a nucleotide-query tab is already open."""
+        self._input_define.setChecked(True)
+        if self._tabs.currentIndex() in (1, self._options_tab_index):   # BLASTp / Options
+            self._tabs.setCurrentIndex(0)
+        return self.apply_path_from_panel(path)
+
     def apply_path_from_panel(self, path: Path) -> bool:
         if self.input_source() != ALIGN_INPUT_DEFINE:
             return False
