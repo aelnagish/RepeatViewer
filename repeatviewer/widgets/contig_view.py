@@ -1896,6 +1896,31 @@ def _swatch(color: str):
     return QIcon(pix)
 
 
+def _sidebar_icon(widget: QWidget):
+    """A window outline with its right column filled: the usual 'right panel' toggle."""
+    from PySide6.QtGui import QIcon, QPixmap
+
+    icon = QIcon()
+    color = widget.palette().color(widget.palette().ColorRole.WindowText)
+    for scale in (1, 2):
+        pix = QPixmap(18 * scale, 14 * scale)
+        pix.setDevicePixelRatio(scale)
+        pix.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pix)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        frame = QRectF(1.5, 1.5, 15, 11)
+        p.setPen(QPen(color, 1.2))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRoundedRect(frame, 2, 2)
+        fill = QColor(color)
+        fill.setAlphaF(0.55)
+        p.fillRect(QRectF(11, 2.2, 5, 9.6), fill)
+        p.drawLine(QPointF(11, 1.5), QPointF(11, 12.5))
+        p.end()
+        icon.addPixmap(pix)
+    return icon
+
+
 class ContigViewPanel(QWidget):
     """A Map to Reference result (``.rvmap``), laid out like Geneious: document tabs along
     the top (Contig view and its tables), a thin navigation bar, the view, and the display
@@ -1960,18 +1985,23 @@ class ContigViewPanel(QWidget):
         self._goto.setToolTip("Go to a position or a range on the reference "
                               "(e.g. 103, 90-130, or CroSat2:90-130). Enter to go.")
         self._goto.returnPressed.connect(self._go_to)
+        # Files ▾: the arrow is part of the label (Qt's own menu arrow sits low on macOS),
+        # and the menu opens under the button.
         self._files_btn = QToolButton(self)
-        self._files_btn.setText("Files")
+        self._files_btn.setText("Files ▾")
         self._files_btn.setAutoRaise(True)
         self._files_btn.setToolTip("Files written by this run: consensus, placed and "
                                    "unused sequences, aligner output, reference")
-        self._files_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self._files_menu = QMenu(self._files_btn)
-        self._files_btn.setMenu(self._files_menu)
+        self._files_btn.clicked.connect(
+            lambda: self._files_menu.exec(
+                self._files_btn.mapToGlobal(self._files_btn.rect().bottomLeft())))
+        # panel toggle: sidebar icon, highlighted while the options panel is open
         self._side_btn = QToolButton(self)
         self._side_btn.setCheckable(True)
         self._side_btn.setAutoRaise(True)
-        self._side_btn.setToolTip("Show or hide the display options on the right")
+        self._side_btn.setIcon(_sidebar_icon(self))
+        self._side_btn.setToolTip("Show or hide the options panel")
         self._side_btn.toggled.connect(self._set_side_visible)
 
         bar = QWidget(self)
@@ -2245,7 +2275,6 @@ class ContigViewPanel(QWidget):
 
     def _set_side_visible(self, on: bool) -> None:
         self._side.setVisible(on)
-        self._side_btn.setText("Hide options ▸" if on else "◂ Options")
         _write("side_panel", bool(on))
         if on:
             sizes = self._view_split.sizes()
