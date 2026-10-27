@@ -292,3 +292,18 @@ def test_panel_tabs_annotation_switch_and_pinch(qapp, tmp_path):
     app.sendEvent(panel.canvas.viewport(), ev)
     assert panel.canvas.ppb != before                  # the pinch reached zoom()
     panel.close()
+
+
+def test_legend_lists_only_marks_that_apply():
+    """No 'feature' entries without annotations, no 'reverse' without reversed reads."""
+    payload = _payload()
+    entry = dict(payload["contigs"][0])
+    model = cv.ContigModel.from_json(entry)
+    full = [t for _k, t in cv.legend_items(model)]
+    assert "differs" in full
+    entry_plain = dict(entry, features=[], feature_summary=[],
+                       reads=[dict(r, strand="+", lift=[]) for r in entry["reads"]])
+    plain = [t for _k, t in cv.legend_items(cv.ContigModel.from_json(entry_plain))]
+    assert "reverse" not in plain and "feature lost" not in plain
+    assert "feature partial" not in plain
+    assert cv.legend_items(None) == []

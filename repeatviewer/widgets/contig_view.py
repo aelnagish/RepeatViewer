@@ -1600,40 +1600,75 @@ def _paint_read_features_impl(canvas: "ContigCanvas", p: QPainter, r: "ReadView"
             p.drawRect(rect)
 
 
+LEGEND_ITEMS = (
+    ("dot", "matches reference"), ("T", "differs"), ("-", "deleted"),
+    ("Y", "ambiguity code"), ("hatch", "no coverage"),
+    ("fwd", "forward"), ("rev", "reverse"),
+    ("partial", "feature partial"), ("lost", "feature lost"),
+)
+_AMBIGUOUS = set("RYSWKMBDHVNryswkmbdhvn")
+
+
+def legend_items(model: "ContigModel | None", highlight: str = "") -> list[tuple[str, str]]:
+    """The legend entries that apply to this result: e.g. no 'feature lost' without
+    annotations, no 'reverse' when nothing was reversed."""
+    if model is None:
+        return []
+    reads = [r for r in model.reads if not r.hidden] or list(model.reads)
+    keep = {"T"}
+    if highlight in ("", ContigCanvas.HIGHLIGHT_DIFF):
+        keep.add("dot")
+    if any(r.del_runs or r.data.get("deleted", 0) for r in reads):
+        keep.add("-")
+    if any(ch in _AMBIGUOUS for ch in (model.consensus or "")[:2_000_000]) or any(
+            not _AMBIGUOUS.isdisjoint(str(r.data.get("row", ""))) for r in reads[:5000]):
+        keep.add("Y")
+    cov = np.asarray(model.coverage, dtype=float)
+    if cov.size and float(cov.min()) <= 0:
+        keep.add("hatch")
+    if any(r.strand != "-" for r in reads):
+        keep.add("fwd")
+    if any(r.strand == "-" for r in reads):
+        keep.add("rev")
+    if model.features:
+        statuses = {lf[1] for r in reads for lf in r.data.get("lift", [])}
+        if "partial" in statuses:
+            keep.add("partial")
+        if "lost" in statuses:
+            keep.add("lost")
+    return [(k, t) for k, t in LEGEND_ITEMS if k in keep]
+
+
 class ContigLegend(QWidget):
-    """One quiet line under the view explaining its marks (centred)."""
+    """The key to the view's marks, one entry per row; shown from the "?" button."""
 
-    HEIGHT = 22
+    ROW_H = 22
+    PAD = 10
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, items: list[tuple[str, str]], parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setFixedHeight(self.HEIGHT)
+        self._items = list(items)
+        f = QFont(self.font())
+        fm = QFontMetrics(f)
+        text_w = max((fm.horizontalAdvance(t) for _k, t in self._items), default=80)
+        self.setFixedSize(self.PAD * 2 + 14 + 8 + text_w + 4,
+                          self.PAD * 2 + self.ROW_H * max(1, len(self._items)))
 
     def paintEvent(self, event) -> None:  # noqa: N802
         from PySide6.QtGui import QBrush
 
         p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
         pal = self.palette()
-        p.fillRect(self.rect(), pal.color(pal.ColorRole.Window))
-        f = QFont(p.font())
-        f.setPointSize(8)
+        f = QFont(self.font())
         p.setFont(f)
-        fm = QFontMetrics(f)
-        muted = pal.color(pal.ColorRole.PlaceholderText)
-        mono = _mono(8)
+        text_c = pal.color(pal.ColorRole.WindowText)
+        mono = _mono(9)
         colors = _base_colors()
-        items = [
-            ("dot", "matches reference"), ("T", "differs"), ("-", "deleted"),
-            ("Y", "ambiguity code"), ("hatch", "no coverage"),
-            ("fwd", "forward"), ("rev", "reverse"),
-            ("partial", "feature partial"), ("lost", "feature lost"),
-        ]
-        sw, gap, pad = 14, 6, 18
-        widths = [sw + gap + fm.horizontalAdvance(t) for _k, t in items]
-        x = max(8.0, (self.width() - (sum(widths) + pad * (len(items) - 1))) / 2)
-        cy = self.HEIGHT / 2
-        for (kind, text), wdt in zip(items, widths):
-            box = QRectF(x, cy - 6, sw, 12)
+        sw = 14
+        for i, (kind, text) in enumerate(self._items):
+            y = self.PAD + i * self.ROW_H
+            box = QRectF(self.PAD, y + (self.ROW_H - 12) / 2, sw, 12)
             if kind == "dot":
                 p.setPen(QColor("#9a9a96"))
                 p.setFont(mono)
@@ -1662,10 +1697,9 @@ class ContigLegend(QWidget):
             elif kind == "lost":
                 p.fillRect(box.adjusted(0, 3, 0, -3), QColor("#c4c4c0"))
             p.setFont(f)
-            p.setPen(muted)
-            p.drawText(QRectF(x + sw + gap, 0, wdt, self.HEIGHT),
+            p.setPen(text_c)
+            p.drawText(QRectF(self.PAD + sw + 8, y, self.width(), self.ROW_H),
                        Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, text)
-            x += wdt + pad
         p.end()
 
 
@@ -2002,7 +2036,7 @@ class ContigViewPanel(QWidget):
         self._diff_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._diff_label.setMinimumWidth(140)
         self._goto = QLineEdit(self)
-        self._goto.setPlaceholderText("Go to, e.g. 103 or 90-130")
+        self._goto.setPlaceholderText("Go to, e.g. 90-130")
         self._goto.setMinimumWidth(120)
         self._goto.setClearButtonEnabled(True)
         self._goto.setToolTip("Go to a position or a range on the reference "
@@ -2051,6 +2085,18 @@ class ContigViewPanel(QWidget):
         nr.addSpacing(2)
         nr.addWidget(self._files_btn)
         nr.addWidget(self._side_btn)
+        # legend: the app's round "?" (help_button style), click shows the key as a popup
+        from repeatviewer.widgets.help_button import HELP_BUTTON_SIZE, HELP_BUTTON_STYLE
+
+        self._legend_btn = QToolButton(self)
+        self._legend_btn.setText("?")
+        self._legend_btn.setFixedSize(HELP_BUTTON_SIZE, HELP_BUTTON_SIZE)
+        self._legend_btn.setStyleSheet(HELP_BUTTON_STYLE)
+        self._legend_btn.setToolTip("What the colours and marks mean")
+        self._legend_btn.setAccessibleName("Legend")
+        self._legend_btn.clicked.connect(self._show_legend)
+        nr.addSpacing(2)
+        nr.addWidget(self._legend_btn)
         bl.addWidget(self._nav_right)
         self._nav_bar = bar
 
@@ -2175,8 +2221,6 @@ class ContigViewPanel(QWidget):
         va.setSpacing(0)
         va.addWidget(self.overview)
         va.addWidget(self.canvas, 1)
-        self.legend = ContigLegend(view_area)
-        va.addWidget(self.legend)
         self._view_split = QSplitter(Qt.Orientation.Horizontal, self)
         self._view_split.addWidget(view_area)
         self._view_split.addWidget(self._side)
@@ -2306,6 +2350,25 @@ class ContigViewPanel(QWidget):
         return scroll
 
     SIDE_PAD = 10       # left margin of the options panel's sections
+
+    def _show_legend(self) -> None:
+        """Popup under the "?" with only the marks this result can show."""
+        from PySide6.QtWidgets import QFrame
+
+        items = legend_items(self.canvas.model, str(self.canvas.highlight))
+        pop = QFrame(self, Qt.WindowType.Popup)
+        pop.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        pop.setFrameShape(QFrame.Shape.StyledPanel)
+        lay = QVBoxLayout(pop)
+        lay.setContentsMargins(2, 2, 2, 2)
+        lay.addWidget(ContigLegend(items, pop) if items else
+                      QLabel("Open a result to see its legend", pop))
+        pop.adjustSize()
+        btn = self._legend_btn
+        at = btn.mapToGlobal(QPoint(btn.width() - pop.width(), btn.height() + 4))
+        pop.move(at)
+        pop.show()
+        self._legend_popup = pop
 
     def _sync_nav_right(self) -> None:
         """Line Go to up with the options panel: its left edge at the section titles,
