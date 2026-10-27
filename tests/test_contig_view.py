@@ -362,6 +362,6 @@ def test_multi_select_hide_and_info(qapp, tmp_path):
 
 
 def test_bar_colour_legend_rows():
-    assert [k for k, _t in cv.bar_colour_items(cv.COLOR_STRAND)][1:] == ["bar_fwd", "bar_rev"]
+    assert cv.bar_colour_items(cv.COLOR_STRAND) == []       # arrows rows already say it
     assert "grad_identity" in [k for k, _t in cv.bar_colour_items(cv.COLOR_IDENTITY)]
     assert "grad_mapq" in [k for k, _t in cv.bar_colour_items(cv.COLOR_MAPQ)]

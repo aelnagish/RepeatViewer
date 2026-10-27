@@ -2236,52 +2236,6 @@ def _gradient(mode: str):
     return g
 
 
-class ColourKey(QWidget):
-    """The scale of the chosen Colour by, under its box: forward / reverse swatches,
-    or a gradient with its ends labelled (identity 80–100 %, mapping quality 0–60)."""
-
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.mode = COLOR_STRAND
-        self.setFixedHeight(18)
-
-    def set_mode(self, mode: str) -> None:
-        self.mode = mode
-        self.update()
-
-    def paintEvent(self, event) -> None:  # noqa: N802
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        pal = self.palette()
-        f = QFont(self.font())
-        f.setPointSize(8)
-        p.setFont(f)
-        fm = QFontMetrics(f)
-        muted = pal.color(pal.ColorRole.PlaceholderText)
-        h = self.height()
-        if self.mode == COLOR_STRAND:
-            x = 0.0
-            for color, text in ((_BAR_FWD, "forward"), (_BAR_REV, "reverse")):
-                p.fillRect(QRectF(x, h / 2 - 4, 16, 8), QColor(color))
-                p.setPen(muted)
-                p.drawText(QRectF(x + 20, 0, 80, h),
-                           Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, text)
-                x += 20 + fm.horizontalAdvance(text) + 14
-            p.end()
-            return
-        lo, hi = ("≤ 80 %", "100 %") if self.mode == COLOR_IDENTITY else ("0", "60")
-        lw, hw = fm.horizontalAdvance(lo) + 6, fm.horizontalAdvance(hi) + 6
-        bar = QRectF(lw, h / 2 - 4, max(20.0, self.width() - lw - hw), 8)
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(_gradient(self.mode))
-        p.drawRoundedRect(bar, 2, 2)
-        p.setPen(muted)
-        p.drawText(QRectF(0, 0, lw, h), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, lo)
-        p.drawText(QRectF(bar.right() + 6, 0, hw, h),
-                   Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, hi)
-        p.end()
-
-
 def bar_colour_items(mode: str) -> list[tuple[str, str]]:
     """Legend rows for the bar colour of the current Colour by."""
     if mode == COLOR_IDENTITY:
@@ -2289,7 +2243,7 @@ def bar_colour_items(mode: str) -> list[tuple[str, str]]:
     elif mode == COLOR_MAPQ:
         rows = [("grad_mapq", "mapping quality 0 → 60"), ("bar_none", "no mapping quality")]
     else:
-        rows = [("bar_fwd", "forward"), ("bar_rev", "reverse")]
+        return []          # Strand: the forward / reverse rows already show the colours
     return [("heading", "Bar colour, zoomed out")] + rows
 
 
@@ -2299,9 +2253,11 @@ class ContigLegend(QWidget):
     ROW_H = 22
     PAD = 10
 
-    def __init__(self, items: list[tuple[str, str]], parent: QWidget | None = None) -> None:
+    def __init__(self, items: list[tuple[str, str]], parent: QWidget | None = None, *,
+                 strand_bars: bool = True) -> None:
         super().__init__(parent)
         self._items = list(items)
+        self._strand_bars = strand_bars     # bars are coloured by strand (Colour by)
         f = QFont(self.font())
         fm = QFontMetrics(f)
         text_w = max((fm.horizontalAdvance(t) for _k, t in self._items), default=80)
@@ -2343,8 +2299,13 @@ class ContigLegend(QWidget):
                 p.setBrush(Qt.BrushStyle.NoBrush)
                 p.drawRect(box.adjusted(0.5, 0.5, -0.5, -0.5))
             elif kind in ("fwd", "rev"):
+                # arrow (name column) over a bar in the strand colour (zoomed out)
                 p.setPen(_ARROW_REV if kind == "rev" else _ARROW_FWD)
-                p.drawText(box, Qt.AlignmentFlag.AlignCenter, "←" if kind == "rev" else "→")
+                p.drawText(box.adjusted(0, -3, 0, -3), Qt.AlignmentFlag.AlignCenter,
+                           "←" if kind == "rev" else "→")
+                if self._strand_bars:
+                    p.fillRect(QRectF(box.left(), box.bottom() - 1, box.width(), 3),
+                               QColor(_BAR_REV if kind == "rev" else _BAR_FWD))
             elif kind == "partial":
                 c = QColor("#4caf50")
                 c.setAlpha(120)
@@ -2837,12 +2798,10 @@ class ContigViewPanel(QWidget):
         for text, k in (("Strand", COLOR_STRAND), ("Identity", COLOR_IDENTITY),
                         ("Mapping quality", COLOR_MAPQ)):
             self._color_by.addItem(text, k)
-        self._color_by.setToolTip("Colour of the sequence bars when zoomed out: forward blue / "
+        self._color_by.setToolTip("Colour of the sequence bars when zoomed out (the scale is in "
+                                  "the ? legend): forward blue / "
                                   "reverse purple, identity red (80 %) to green (100 %), or "
                                   "mapping quality amber (0) to blue (60)")
-        self._color_key = ColourKey(self)
-        self._color_by.currentIndexChanged.connect(
-            lambda _i: self._color_key.set_mode(str(self._color_by.currentData())))
         self._color_by.currentIndexChanged.connect(
             lambda _i: self.canvas.set_color_by(str(self._color_by.currentData())))
 
@@ -3079,7 +3038,7 @@ class ContigViewPanel(QWidget):
 
         s = section("display", "Display")
         s.add_layout(form(("Layout", self._layout_mode), ("Sort by", self._sort),
-                          ("Colour by", self._color_by), ("", self._color_key)))
+                          ("Colour by", self._color_by)))
         s.add_widget(self._wrap)
         s = section("highlighting", "Highlighting")
         s.add_layout(form(("Show", self._hl_show), ("Compared to", self._hl_target)))
@@ -3149,7 +3108,8 @@ class ContigViewPanel(QWidget):
             items = items + bar_colour_items(c.color_by)
         pop = QMenu(self)
         holder = QWidgetAction(pop)
-        holder.setDefaultWidget(ContigLegend(items, pop) if items else
+        holder.setDefaultWidget(ContigLegend(items, pop, strand_bars=c.color_by == COLOR_STRAND)
+                                if items else
                                 QLabel("Open a result to see its legend", pop))
         pop.addAction(holder)
         btn = self._legend_btn
