@@ -618,11 +618,19 @@ def detect_sequence_is_protein(sequence: str, *, path: Path | None = None) -> bo
     """Guess protein vs nucleotide from suffix and residue composition."""
     if path is not None and path.suffix.lower() == ".faa":
         return True
-    upper = sequence.upper()
-    residues = [ch for ch in upper if ch.isalpha() or ch == "*"]
-    if not residues:
+    # Only the first 50,000 residues are looked at. Read the sequence in
+    # slices so a whole genome is never upper-cased or copied (that took
+    # seconds per Mb and froze the window when a genome opened in Preview).
+    sample: list[str] = []
+    step = 100_000
+    for start in range(0, len(sequence), step):
+        chunk = sequence[start:start + step].upper()
+        sample.extend(ch for ch in chunk if ch.isalpha() or ch == "*")
+        if len(sample) >= 50_000:
+            break
+    if not sample:
         return False
-    sample = residues[: min(len(residues), 50_000)]
+    sample = sample[:50_000]
     n_nuc = sum(1 for ch in sample if ch in _NUCLEOTIDE_CHARS)
     n_aa = sum(1 for ch in sample if ch in _AMINO_ACID_CHARS)
     if n_nuc / max(1, len(sample)) >= 0.95:

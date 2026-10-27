@@ -250,3 +250,12 @@ def test_dialog_ticks_names_and_options(qapp, tmp_path):
     assert opts.database == nd.DB_PROTEIN and opts.one_file is False
     assert missing_accessions(["MG815809", "XX999999"], [_rec("MG815809.1")]) == ["XX999999"]
     dlg.reject()
+
+
+def test_progress_detail_for_the_status_bar():
+    from repeatviewer.ncbi_download_actions import split_progress_detail
+
+    assert split_progress_detail("GCF_1.1: 161.0 MB downloaded (0 done, 3 left)") == (
+        "GCF_1.1", "161.0 MB")
+    assert split_progress_detail("NC_045512.2 (0 done, 1 left)") == ("NC_045512.2", "")
+    assert split_progress_detail("GCF_1.1: unpacking (1 done, 2 left)") == ("GCF_1.1", "unpacking")

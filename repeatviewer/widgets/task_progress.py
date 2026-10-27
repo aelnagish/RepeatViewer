@@ -155,6 +155,14 @@ class TaskProgressPanel(QWidget):
             self._bar.setFormat("%v / %m")
         self._set_running_label(current_file)
 
+    def completed(self) -> int:
+        return int(self._bar.value())
+
+    def set_bar_suffix(self, text: str) -> None:
+        """Extra text inside the bar after "N / M" (e.g. MB downloaded)."""
+        base = "%v / %m" if self._total > 1 else ""
+        self._bar.setFormat((base + str(text or "")).strip() if base else str(text or "").strip())
+
     def reset(self) -> None:
         self._bar.setValue(0)
         self._label.clear()

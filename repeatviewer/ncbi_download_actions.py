@@ -1,14 +1,20 @@
 """Tools > Download from NCBI in the main window.
 
 Kept out of ``main_window.py``: :class:`NcbiDownloadActionsMixin` is mixed
-into ``MainWindow`` and only uses the window's shared job / dialog helpers
-(``_present_te_viz_dialog``, ``_start_background_job``,
-``_attach_process_monitor``, ``_populate_file_list`` ...).
+into ``MainWindow``.
+
+Downloads do NOT use the window's single job slot (``_start_background_job``):
+a genome can take an hour, and that slot greys out every tool. Instead each
+download runs on its own daemon thread with its own progress bar and Stop
+button in the status bar, so browsing, previews and other tools keep working.
+Further downloads wait in a queue and start one after another.
 """
 
 from __future__ import annotations
 
+import re
 import threading
+import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -29,12 +35,43 @@ NCBI_TOOL_KEY = "ncbi_download"
 NCBI_TITLE = "Download from NCBI"
 # Above this many existing files, ask once instead of once per file.
 _MAX_SINGLE_CONFLICT_QUESTIONS = 3
+# The genome FASTA is not opened in Preview above this size (it would stall the window).
+_AUTO_OPEN_MAX_BYTES = 10 * 1024 * 1024
+# At most this many progress updates per second reach the window.
+_PROGRESS_INTERVAL = 0.25
+_DETAIL_RE = re.compile(r"^(?P<acc>[^\s:]+):?\s*(?P<rest>.*?)\s*(\(\d+ done, \d+ left\))?$")
+
+
+def split_progress_detail(detail: str) -> tuple[str, str]:
+    """``"GCF_1: 161.0 MB downloaded (0 done, 3 left)"`` → ``("GCF_1", "161.0 MB")``."""
+    m = _DETAIL_RE.match(str(detail or "").strip())
+    if not m:
+        return str(detail or ""), ""
+    rest = m.group("rest") or ""
+    rest = rest.replace(" downloaded", "")
+    if rest.endswith("done, 0 left"):
+        rest = ""
+    return m.group("acc"), rest
+
+
+class _CancelFlag:
+    """Stop button of one download (independent of the main job's Stop)."""
+
+    def __init__(self) -> None:
+        self._event = threading.Event()
+
+    def request(self) -> None:
+        self._event.set()
+
+    @property
+    def requested(self) -> bool:
+        return self._event.is_set()
 
 
 class NcbiDownloadWorker(QObject):
     """Download NCBI records off the UI thread."""
 
-    progress = Signal(int, str)
+    progress = Signal(int, int, str, str)
     log_line = Signal(str)
     finished = Signal(object)
     failed = Signal(str)
@@ -60,10 +97,16 @@ class NcbiDownloadWorker(QObject):
     @Slot()
     def run(self) -> None:
         client = nd.NcbiClient(email=self._email, api_key=self._api_key, timeout=120.0)
-        last = {"detail": ""}
+        last = {"detail": "", "done": -1, "at": 0.0}
 
         def _progress(done: int, total: int, detail: str) -> None:
-            self.progress.emit(int(done), f"Downloading {detail}")
+            # Throttled: a fast connection reports every MB, the window needs a few per second.
+            now = time.monotonic()
+            if done == last["done"] and now - last["at"] < _PROGRESS_INTERVAL:
+                return
+            last["done"], last["at"] = done, now
+            acc, extra = split_progress_detail(detail)
+            self.progress.emit(int(done), int(total), acc, extra)
             if detail != last["detail"] and "downloaded" not in detail:
                 self.log_line.emit(detail)
             last["detail"] = detail
@@ -119,10 +162,55 @@ class NcbiDownloadWorker(QObject):
 
 
 class _LookupBridge(QObject):
-    """Right-click: accession lookup result back on the GUI thread."""
+    """Right-click: accession lookup result back on the GUI thread.
+
+    The slots live on this QObject (not on the mixin) so Qt queues them to the
+    GUI thread; a mixin method has no receiver object and would run on the
+    lookup thread.
+    """
 
     done = Signal(object)
     failed = Signal(str)
+
+    def __init__(self, window) -> None:
+        super().__init__(window)
+        self._window = window
+        self.done.connect(self._on_done)
+        self.failed.connect(self._on_failed)
+
+    @Slot(object)
+    def _on_done(self, payload) -> None:
+        self._window._on_ncbi_lookup_done(payload)
+
+    @Slot(str)
+    def _on_failed(self, message: str) -> None:
+        self._window._on_ncbi_lookup_failed(message)
+
+
+class _JobRelay(QObject):
+    """Delivers one download's signals to the window, on the GUI thread."""
+
+    def __init__(self, window, worker: NcbiDownloadWorker) -> None:
+        super().__init__(window)
+        self._window = window
+        self._worker = worker
+        worker.progress.connect(self._on_progress)
+        worker.finished.connect(self._on_finished)
+        worker.failed.connect(self._on_failed)
+
+    @Slot(int, int, str, str)
+    def _on_progress(self, done: int, total: int, accession: str, extra: str) -> None:
+        self._window._on_ncbi_progress(self._worker, done, total, accession, extra)
+
+    @Slot(object)
+    def _on_finished(self, result) -> None:
+        self._window._on_ncbi_download_finished(self._worker, result)
+        self.deleteLater()
+
+    @Slot(str)
+    def _on_failed(self, error: str) -> None:
+        self._window._on_ncbi_download_failed(self._worker, error)
+        self.deleteLater()
 
 
 class NcbiDownloadActionsMixin:
@@ -132,9 +220,13 @@ class NcbiDownloadActionsMixin:
 
     def _init_ncbi_download_actions(self) -> None:
         self._ncbi_options = load_ncbi_download_options()
+        self._ncbi_worker: NcbiDownloadWorker | None = None
+        self._ncbi_cancel: _CancelFlag | None = None
+        self._ncbi_queue: list[dict] = []
+        self._ncbi_progress = None
+        self._ncbi_stop_btn = None
+        self._ncbi_job_title = ""
         self._ncbi_lookup_bridge = _LookupBridge(self)
-        self._ncbi_lookup_bridge.done.connect(self._on_ncbi_lookup_done)
-        self._ncbi_lookup_bridge.failed.connect(self._on_ncbi_lookup_failed)
 
     def _save_ncbi_options(self, opts: NcbiDownloadOptions) -> None:
         self._ncbi_options = opts
@@ -219,7 +311,6 @@ class NcbiDownloadActionsMixin:
 
         threading.Thread(target=_work, name="ncbi-lookup", daemon=True).start()
 
-    @Slot(object)
     def _on_ncbi_lookup_done(self, payload) -> None:
         records = list(payload.get("records") or [])
         if not records:
@@ -251,7 +342,6 @@ class NcbiDownloadActionsMixin:
             query_text=wanted_text,
         )
 
-    @Slot(str)
     def _on_ncbi_lookup_failed(self, message: str) -> None:
         self._set_status_message("Ready", 1000)
         QMessageBox.warning(self, NCBI_TITLE, message or "NCBI lookup failed.")
@@ -323,41 +413,129 @@ class NcbiDownloadActionsMixin:
             if not records:
                 self._set_status_message("Nothing to download: every file already exists", 6000)
                 return
+        job = {"database": database, "records": records, "fmt": fmt, "one_file": one_file,
+               "file_name": file_name, "out_dir": out_dir, "targets": targets}
+        if self._ncbi_worker is not None:
+            self._ncbi_queue.append(job)
+            self._set_status_message(
+                f"NCBI download queued; it starts when the current one finishes "
+                f"({len(self._ncbi_queue)} waiting)", 6000)
+            self._sync_ncbi_progress_label()
+            return
+        self._run_ncbi_job(job)
+
+    def _run_ncbi_job(self, job: dict) -> None:
+        """Start one download on its own thread; the window stays free."""
         opts = self._ncbi_options
+        records = job["records"]
+        database = job["database"]
         noun = nd.DATABASE_LABELS.get(database, database)
         title = (f"{NCBI_TITLE}: {records[0].accession}" if len(records) == 1
                  else f"{NCBI_TITLE}: {len(records)} {noun} records")
+        cancel = _CancelFlag()
         worker = NcbiDownloadWorker(
-            database=database, records=records, fmt=fmt, one_file=one_file,
-            file_name=file_name, out_dir=out_dir, targets=targets,
-            email=opts.email, api_key=opts.api_key, cancel=self._job_cancel,
+            database=database, records=records, fmt=job["fmt"], one_file=job["one_file"],
+            file_name=job["file_name"], out_dir=job["out_dir"], targets=job["targets"],
+            email=opts.email, api_key=opts.api_key, cancel=cancel,
         )
-        self._attach_process_monitor(
-            worker,
-            title=title,
-            enabled=bool(opts.show_process_window),
-            tool_key=NCBI_TOOL_KEY,
-            mirror_progress=False,
-            close_when_finished=bool(opts.close_process_window_when_finished),
-        )
-        self._start_background_job(
-            worker,
-            job_title=title,
-            # One slot per record plus the last one, kept until the files show.
-            total_steps=len(records) + 1,
-            source_files=[],
-            on_finished=self._on_ncbi_download_finished,
-            on_failed=self._on_ncbi_download_failed,
-        )
+        # The worker QObject stays on the GUI thread; signals emitted from the
+        # download thread are queued to it automatically.
+        _JobRelay(self, worker)
+        if opts.show_process_window:
+            self._attach_process_monitor(
+                worker,
+                title=title,
+                enabled=True,
+                tool_key=NCBI_TOOL_KEY,
+                mirror_progress=False,
+                close_when_finished=bool(opts.close_process_window_when_finished),
+            )
+        self._ncbi_worker = worker
+        self._ncbi_cancel = cancel
+        self._ncbi_job_title = title
+        self._show_ncbi_progress(len(records))
+        # Daemon thread: quitting RepeatViewer mid-download never waits for NCBI.
+        threading.Thread(target=worker.run, name="ncbi-download", daemon=True).start()
 
-    @Slot(object)
-    def _on_ncbi_download_finished(self, result) -> None:
+    # ------------------------------------------------------------ progress
+
+    def _ensure_ncbi_progress_widgets(self) -> None:
+        if self._ncbi_progress is not None:
+            return
+        from PySide6.QtWidgets import QPushButton
+
+        from repeatviewer.widgets.task_progress import TaskProgressPanel
+
+        status = self.statusBar()
+        panel = TaskProgressPanel()
+        stop = QPushButton("Stop")
+        stop.setToolTip("Stop the NCBI download")
+        stop.setMaximumHeight(22)
+        stop.clicked.connect(self._stop_ncbi_download)
+        stop.hide()
+        # Left of the main job's progress bar and Stop button (index 0 is the
+        # status-text file link, a normal widget; permanent ones come after it).
+        status.insertPermanentWidget(1, panel)
+        status.insertPermanentWidget(2, stop)
+        self._ncbi_progress = panel
+        self._ncbi_stop_btn = stop
+
+    def _show_ncbi_progress(self, total: int) -> None:
+        self._ensure_ncbi_progress_widgets()
+        self._ncbi_progress.start("Downloading", max(1, int(total)))
+        self._ncbi_stop_btn.setEnabled(True)
+        self._ncbi_stop_btn.show()
+        self._sync_ncbi_progress_label()
+
+    def _sync_ncbi_progress_label(self, accession: str = "", extra: str = "") -> None:
+        panel = self._ncbi_progress
+        if panel is None or self._ncbi_worker is None:
+            return
+        waiting = len(self._ncbi_queue)
+        suffix = f"  {extra}" if extra else ""
+        if waiting:
+            suffix += f"  (+{waiting} queued)"
+        panel.set_bar_suffix(suffix)
+        if accession:
+            panel.update(panel.completed(), accession)
+
+    def _hide_ncbi_progress(self) -> None:
+        if self._ncbi_progress is not None:
+            self._ncbi_progress.reset()
+        if self._ncbi_stop_btn is not None:
+            self._ncbi_stop_btn.hide()
+
+    def _on_ncbi_progress(self, worker, done: int, total: int, accession: str, extra: str) -> None:
+        panel = self._ncbi_progress
+        if panel is None or worker is not self._ncbi_worker:
+            return
+        panel.update(min(done, max(0, total - 1)) if total > 1 else 0, accession)
+        self._sync_ncbi_progress_label(extra=extra)
+
+    def _stop_ncbi_download(self) -> None:
+        """Stop the running download and drop the queued ones."""
+        self._ncbi_queue.clear()
+        if self._ncbi_cancel is not None:
+            self._ncbi_cancel.request()
+        if self._ncbi_stop_btn is not None:
+            self._ncbi_stop_btn.setEnabled(False)
+        if self._ncbi_progress is not None:
+            self._ncbi_progress.update(self._ncbi_progress.completed(), "stopping…")
+
+    def _ncbi_job_done(self) -> None:
+        self._ncbi_worker = None
+        self._ncbi_cancel = None
+        if self._ncbi_queue:
+            self._run_ncbi_job(self._ncbi_queue.pop(0))
+        else:
+            self._hide_ncbi_progress()
+
+    def _on_ncbi_download_finished(self, worker, result) -> None:
+        if worker is not self._ncbi_worker:
+            return
+        self._ncbi_job_done()
         created = [Path(p).resolve() for p in result.get("files", []) if Path(p).is_file()]
-        if created:
-            self._refresh_folders_after_job(created, [])
-        sequences = [p for p in created if p.suffix.lower() not in (".gff3", ".gff")]
-        if sequences:
-            self._auto_open_outputs(sequences[:1])
+        self._show_ncbi_outputs(created)
         n = len(created)
         msg = f"Download from NCBI finished: {n} file{'s' if n != 1 else ''}"
         if result.get("features"):
@@ -366,8 +544,34 @@ class NcbiDownloadActionsMixin:
             msg += f" ({len(result['warnings'])} warning(s), see the process window)"
         self._set_status_message(msg, 12000, override_file_link=True)
 
-    @Slot(str)
-    def _on_ncbi_download_failed(self, error: str) -> None:
+    def _show_ncbi_outputs(self, created: list[Path]) -> None:
+        """New files: green in the Files panel; open the first one when it is small.
+
+        While another tool's job runs, only the file list is refreshed so that
+        job's own results and highlights are left alone.
+        """
+        if not created:
+            return
+        current = self._current_folder.resolve() if getattr(self, "_current_folder", None) else None
+        if self._any_background_job_running():
+            if current is not None and any(p.parent == current for p in created):
+                self._populate_file_list(current, open_preview=False)
+            return
+        if current is not None and all(p.parent != current for p in created):
+            # The user browsed elsewhere meanwhile: do not pull them back.
+            self._refresh_subfolders_under(created[0].parent)
+            return
+        self._refresh_folders_after_job(created, [])
+        sequences = [p for p in created if p.suffix.lower() not in (".gff3", ".gff")]
+        small = [p for p in sequences if p.stat().st_size <= _AUTO_OPEN_MAX_BYTES]
+        if small:
+            self._auto_open_outputs(small[:1])
+
+    def _on_ncbi_download_failed(self, worker, error: str) -> None:
+        if worker is not self._ncbi_worker:
+            return
+        self._ncbi_job_done()
         if error.strip() == CANCELLED_MESSAGE:
+            self._set_status_message("NCBI download stopped", 6000)
             return
         QMessageBox.warning(self, NCBI_TITLE, error.strip() or "Unknown error.")
