@@ -530,8 +530,8 @@ def run_design(inputs: list[Path], s: dz.DesignSettings, *, progress: ProgressFn
                 elif s.mode == dz.MODE_MSP:
                     found = dz.design_msp(rid, seq, s)
                     if not found:
-                        explain.append(f"{rid}: no MSP pair. It needs CpGs near both ends of a "
-                                       "product in the size range; try a wider size / Tm range.")
+                        explain.append(f"{rid}: no MSP pair. It needs {s.msp_context} sites near both "
+                                       "ends of a product in the size range; try a wider size / Tm range.")
                 elif s.mode == dz.MODE_INSERTION:
                     te = _te_interval(s, feats.get(rid) or [], len(seq))
                     entry["te"] = list(te)

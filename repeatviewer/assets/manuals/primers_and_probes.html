@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Primers and Probes Manual</title>
+<style>
+:root{--bg:#fbfbfa;--fg:#1f2328;--muted:#5f6670;--line:#d9dce0;--soft:#f1f3f5;--accent:#2f6fb2;--warn:#9a5b00}
+@media (prefers-color-scheme: dark){:root{--bg:#1c1d1f;--fg:#e6e6e6;--muted:#a3a8ae;--line:#3a3d42;--soft:#26282b;--accent:#7fb2e8;--warn:#e0a54a}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+.wrap{max-width:880px;margin:0 auto;padding:28px 20px 60px}
+h1{font-size:26px;margin:0 0 4px}
+h2{font-size:20px;margin:36px 0 8px;padding-top:8px;border-top:1px solid var(--line)}
+h3{font-size:16px;margin:22px 0 6px}
+p,li{margin:6px 0}
+.sub{color:var(--muted);margin:0 0 18px}
+nav{background:var(--soft);border-radius:8px;padding:10px 16px;margin:16px 0}
+nav a{color:var(--accent);text-decoration:none}
+nav ol{margin:4px 0;padding-left:20px}
+code,kbd{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:13px;background:var(--soft);padding:1px 5px;border-radius:4px}
+pre{background:var(--soft);padding:10px 12px;border-radius:6px;overflow-x:auto;font-size:13px;line-height:1.45}
+table{border-collapse:collapse;width:100%;margin:8px 0;font-size:14px}
+th,td{border-bottom:1px solid var(--line);padding:6px 8px;text-align:left;vertical-align:top}
+th{color:var(--muted);font-weight:600}
+.tip{border-left:3px solid var(--accent);background:var(--soft);padding:8px 12px;border-radius:0 6px 6px 0;margin:10px 0}
+.warn{border-left:3px solid var(--warn);background:var(--soft);padding:8px 12px;border-radius:0 6px 6px 0;margin:10px 0}
+.tree{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:13px;white-space:pre;background:var(--soft);padding:10px 12px;border-radius:6px;overflow-x:auto}
+</style>
+</head>
+<body>
+<div class="wrap">
+<h1>Primers and Probes</h1>
+<p class="sub">RepeatViewer manual: design PCR primers and FISH probes for repeats, test primers on sequences, and keep your primers in one place.</p>
+
+<nav><b>Contents</b>
+<ol>
+<li><a href="#start">Quick start</a></li>
+<li><a href="#menu">Where to find it</a></li>
+<li><a href="#design">The Design window</a></li>
+<li><a href="#modes">Choosing a Mode</a></li>
+<li><a href="#regions">Regions and Specificity tabs</a></li>
+<li><a href="#painting">Chromosome painting (Chorus2)</a></li>
+<li><a href="#results">Results</a></li>
+<li><a href="#map">Map: test primers on sequences</a></li>
+<li><a href="#database">Database: your saved primers</a></li>
+<li><a href="#methylation">Methylation (BSP and MSP) in plants</a></li>
+<li><a href="#trouble">When nothing is found</a></li>
+<li><a href="#engine">How it works</a></li>
+</ol></nav>
+
+<h2 id="start">1. Quick start</h2>
+<ol>
+<li>Click the FASTA you want primers for in the <b>Files</b> panel.</li>
+<li>Open <b>Tools › Primers and Probes › Design</b>.</li>
+<li>Under <b>Settings</b>, pick the <b>Mode</b> (for an ordinary pair keep <i>Standard PCR</i>).</li>
+<li>Click <b>Run</b>. A report <code>&lt;your file&gt;_primers.html</code> opens next to your FASTA, and the best pair is drawn on the sequence.</li>
+</ol>
+<div class="tip">Every window has <b>Cancel</b>, <b>Save</b> (keep the settings without running) and <b>Run</b>. A <b>?</b> next to a field explains it. Clicking a file in the Files panel fills the path field you are editing.</div>
+
+<h2 id="menu">2. Where to find it</h2>
+<div class="tree">Tools
+└─ Primers and Probes
+   ├─ Design      design PCR primers or FISH probes
+   ├─ Map         test primers against sequences
+   └─ Database    your saved primers
+Help
+└─ Primers and Probes Manual   (this page)</div>
+<p>The toolbar can also show <b>Primers</b> (Design) and <b>Map Primers</b> (Map). Add them with the toolbar customisation. A <b>right-click</b> on a toolbar button runs it with the saved settings, or opens the window (choose which on the <b>Options</b> tab).</p>
+
+<h2 id="design">3. The Design window</h2>
+<p>Tabs: <b>Primers</b> | <b>Regions</b> | <b>Specificity</b> | <b>Options</b>. You can run from the first tab; the others are optional.</p>
+<h3>Inputs</h3>
+<ul>
+<li><b>Use selected sequences</b> (default): the FASTA selected in the Files panel. Its name is shown under the button. Click another file to switch.</li>
+<li><b>Define inputs</b>: type or Browse a <b>Template</b> FASTA for this run, or click it in the Files panel while the field is active.</li>
+</ul>
+<p>Every sequence in the template file is used (up to 20). For the TE alignment modes the file must be an alignment (same length rows, with gaps).</p>
+<h3>Settings</h3>
+<p><b>Mode</b> is the kind of design. The list is grouped; the grey headings are only labels:</p>
+<div class="tree">PCR primers
+  General       Standard PCR
+                qPCR copy number
+  Satellites    Ladder PCR
+  TEs           Conserved in a family
+                Subfamily-specific
+                TE present or absent
+  Methylation   Bisulfite (BSP)
+                Methylation-specific (MSP)
+FISH probes
+  Satellites    Satellite repeat oligos
+  Chromosomes   Chromosome painting (Chorus2)</div>
+<p>Changing the Mode loads sensible starting values (size, Tm, product size) for that kind of design. <b>Restore Defaults</b> brings them back. The fields that only apply to one Mode appear when it is chosen.</p>
+<h3>Primer Conditions</h3>
+<table>
+<tr><th>Field</th><th>Meaning</th></tr>
+<tr><td>Primer size</td><td>Min, optimum and max length (nt).</td></tr>
+<tr><td>Tm (°C)</td><td>Min, optimum and max melting temperature of the binding part.</td></tr>
+<tr><td>GC</td><td>Allowed GC content (%).</td></tr>
+<tr><td>Product size</td><td>Allowed amplicon length (bp).</td></tr>
+<tr><td>Max Tm difference</td><td>Largest Tm gap between the two primers of a pair.</td></tr>
+<tr><td>Pairs to return</td><td>How many pairs the report lists.</td></tr>
+</table>
+<p><b>Advanced Settings ▸</b> (bottom left) shows poly-X, GC clamp, 3′ stability, probe size and Tm, 5′ tails (M13, T7, restriction sites, or your own) and the Tm calculation (salt, Mg²⁺, dNTP, oligo concentration).</p>
+<h3>Options tab</h3>
+<ul>
+<li>What a right-click on the toolbar button does.</li>
+<li><b>Add the best pair to the sequence annotations</b> (on by default): the primers and the product appear on the sequence view. A new run replaces the old primer annotations.</li>
+<li><b>Add the designed primers to the Primer Database</b> and which database file to use.</li>
+<li>Process window behaviour.</li>
+</ul>
+
+<h2 id="modes">4. Choosing a Mode</h2>
+<table>
+<tr><th>Mode</th><th>Use it for</th><th>Template</th><th>You get</th></tr>
+<tr><td>Standard PCR</td><td>An ordinary pair, kept out of repeats.</td><td>Any sequence.</td><td>Ranked pairs, virtual gel.</td></tr>
+<tr><td>qPCR copy number</td><td>Counting copies of a repeat by qPCR.</td><td>The repeat; optional single-copy <b>Reference gene</b> FASTA.</td><td>Short amplicons (70 to 180 bp), optional TaqMan probe, and a matched pair on the reference gene for ΔCt.</td></tr>
+<tr><td>Ladder PCR</td><td>Showing a satellite is in tandem arrays.</td><td>Monomers (one or many).</td><td>Outward-facing primers inside one monomer. On genomic DNA you see a ladder: 1×, 2×, 3× … monomer.</td></tr>
+<tr><td>Conserved in a family</td><td>Amplifying (almost) every copy of a TE family.</td><td>Alignment of copies.</td><td>Primers that bind ≥ <i>Min coverage</i> of copies, degenerate (IUPAC) where copies differ.</td></tr>
+<tr><td>Subfamily-specific</td><td>Amplifying one subfamily and not the others.</td><td>Alignment; type the <b>Target sequences</b> name pattern (e.g. <code>TEfamA</code>).</td><td>Primers that bind the targets, with the share of off-targets they still catch.</td></tr>
+<tr><td>TE present or absent</td><td>Telling plants with and without an insertion apart.</td><td>The locus with the TE annotated, or give the TE position.</td><td>Two flanking primers (empty site product) and one primer inside the TE (occupied site product). Gel shows empty/empty, empty/TE, TE/TE.</td></tr>
+<tr><td>Bisulfite (BSP)</td><td>Bisulfite sequencing of a region.</td><td>The genomic sequence (not converted).</td><td>Primers on the converted strand that amplify methylated and unmethylated DNA alike.</td></tr>
+<tr><td>Methylation-specific (MSP)</td><td>A quick yes/no methylation test.</td><td>The genomic sequence.</td><td>An <b>M</b> pair (methylated) and a <b>U</b> pair (unmethylated) at the same place.</td></tr>
+<tr><td>Satellite repeat oligos</td><td>FISH probes for a satellite or repeat family.</td><td>Monomers or copies.</td><td>30 to 45 nt oligos present in ≥ <i>Min coverage</i> of copies, without hairpins, ready to order with a 5′ label (FAM, Cy3, Cy5 …).</td></tr>
+<tr><td>Chromosome painting (Chorus2)</td><td>Oligo pools that paint whole chromosomes or regions.</td><td>The genome FASTA (Chorus2 tab).</td><td>Thousands of single-copy 45 nt oligos along the chromosomes, an order file and a density plot. See <a href="#painting">section 6</a>.</td></tr>
+</table>
+<div class="tip">For ladder PCR and FISH oligos, use many monomers (e.g. extracted from an array) rather than one: the tool then keeps the parts shared by most copies.</div>
+
+<h2 id="regions">5. Regions and Specificity tabs</h2>
+<h3>Regions</h3>
+<ul>
+<li><b>Target region</b>: the product must span these coordinates (1-based).</li>
+<li><b>Included region</b>: primers only inside these coordinates.</li>
+<li><b>Repeat Masking</b>: keep primers out of soft-masked (lower case) bases, annotated repeats, tandem repeats, a RepeatMasker <code>.out</code> / GFF / BED file, and test against a <b>Mispriming library</b> (a FASTA of repeats).</li>
+</ul>
+<h3>Specificity</h3>
+<p><b>Check every pair against a genome</b> counts binding sites and products of each pair in a genome FASTA (both strands, with the mismatches and 3′ rule you set). With <b>Drop pairs with more than N products</b> unspecific pairs are removed. A 3.5 Gb genome takes about 3 minutes.</p>
+
+<h2 id="painting">6. Chromosome painting (Chorus2)</h2>
+<p>Choose <b>Mode › FISH probes › Chromosome painting (Chorus2)</b>. The tabs change to <b>Chorus2</b> | <b>Selection</b> | <b>Options</b> (the Mode box is on the Chorus2 tab too, to switch back).</p>
+<p><b>Chorus2</b> (Zhang et al. 2021) finds oligos that occur once in the genome, along every chromosome. RepeatViewer runs it, or reads what it produced on a server, and then picks the pool you order.</p>
+<h3>Chorus2 tab</h3>
+<ul>
+<li><b>Run Chorus2 here</b>: give the <b>Genome</b>; optionally <b>Paint only</b> one chromosome or region (a FASTA with the same names). A genome of a few Gb takes hours and much memory: a server is better.</li>
+<li><b>Import results from the server</b>: choose the <b>Chorus2 BED</b>. The genome is optional here (it only gives chromosome lengths for the plot).</li>
+<li><b>Chorus2</b> settings (as in Chorus2): probe length (45 nt), max homology (75 %), min dTm (10 °C), k-mer step (5 bp), ploidy, threads, and the conda env.</li>
+<li><b>NGS Filter</b> (optional): genomic reads give each probe a k-mer score; probes in the lowest and highest score quantiles (default 10 % and 90 %) are dropped.</li>
+<li><b>Copy Server Command</b>: the exact command lines for the server, with your settings.</li>
+</ul>
+<h3>Install Chorus2 (once)</h3>
+<p>Chorus2 needs an older pandas than RepeatViewer, so it lives in its own conda env called <code>chorus2</code> (on your Mac / Linux, or on the server):</p>
+<pre>conda create -n chorus2 -c conda-forge -c bioconda python=3.9 "pandas&lt;2" numpy cython pyfasta "primer3-py&lt;2" pybigwig pybedtools kmer-jellyfish bwa
+conda run -n chorus2 pip install --no-deps git+https://github.com/zhangtaolab/Chorus2.git</pre>
+<p>The Chorus2 tab shows a ✓ when the env is found. On Windows run Chorus2 on a Linux server and import.</p>
+<h3>On the server</h3>
+<pre>conda activate chorus2
+Chorus2 -g genome.fa -i genome.fa -s chorus2_out -t 16 -l 45 --homology 75 -d 10 --step 5 --ploidy 2 --docker True</pre>
+<p>Copy <code>chorus2_out/genome.fa.bed</code> back (or <code>probes_kmer_score.bed</code> after the NGS filter) and import it. <code>--docker True</code> only stops Chorus2 from asking questions when an index already exists.</p>
+<h3>Selection tab</h3>
+<table>
+<tr><th>Field</th><th>Meaning</th></tr>
+<tr><td>Min gap between probes</td><td>Neighbouring probes at least this far apart (25 bp).</td></tr>
+<tr><td>Strand</td><td><b>Both</b>: every second probe reverse-complemented (Chorus2 default); <b>Plus</b>: one strand.</td></tr>
+<tr><td>Amount</td><td><b>All probes</b>, a <b>Density</b> (probes per kb, evenly along each chromosome; painting usually needs 0.1 to 1 per kb), or a <b>Pool size</b> (total number, spread evenly).</td></tr>
+<tr><td>Regions</td><td>Keep probes only here: <code>chr1, chr2:1-5000000</code>. Empty = everything.</td></tr>
+<tr><td>Pool name, 5′ / 3′ adapter</td><td>Used in oligo names; adapters (for example T7) are added in the order file only.</td></tr>
+</table>
+<h3>Painting results</h3>
+<pre>genome.fa_painting.html             report: counts, density plot, per chromosome, methods
+genome.fa_painting_details/
+   genome.fa_painting_probes.bed      probes (standard BED, e.g. for IGV)
+   genome.fa_painting_probes.fa       probe sequences
+   genome.fa_painting_order.tsv       order file (adapter + probe + adapter)
+   genome.fa_painting.json            all results
+   chorus2/                           Chorus2's own files (when run here)</pre>
+<p>Painting pools are not added to the Primer Database (they hold thousands of oligos); use the order file.</p>
+
+<h2 id="results">7. Results</h2>
+<p>Next to the input file:</p>
+<pre>gene.fa_primers.html            the report (opens in RepeatViewer)
+gene.fa_primers_details/
+   gene.fa_primers_primers.fa     every primer (FASTA, order-ready names)
+   gene.fa_primers_pairs.tsv      table of pairs
+   gene.fa_primers_gel.svg        virtual gel
+   gene.fa_primers.json           all results (for re-use)</pre>
+<p>The report shows the pairs (Tm, GC, hairpin and dimer ΔG, product size, notes), the virtual gel, genome counts when checked, and a <b>Methods text</b> paragraph you can paste into a paper. A second run gets <code>_2</code>; if you choose the same name, you are asked before it is replaced.</p>
+
+<h2 id="map">8. Map: test primers on sequences</h2>
+<p>Like Geneious' <i>Map Primers</i>. Tabs: <b>Map Primers</b> | <b>Options</b>.</p>
+<ul>
+<li><b>Inputs</b>: <i>Use selected sequences</i> or <i>Define inputs</i>, as in Design. <b>Test primers on</b>: every sequence, or the consensus of an alignment.</li>
+<li><b>Primers</b>: either <i>Test specific primers</i> (type a sequence or pick a saved primer with the list button) or <i>Search for saved primers that match</i> (from the Primer Database or a primers FASTA; Forward / Reverse / Probe, <i>Pairs only</i>).</li>
+<li><b>Products</b>: optional included region, target region, product size range, optimal size.</li>
+<li><b>Mismatches</b>: maximum mismatches, and how many 3′ bases must match exactly.</li>
+<li><b>Advanced Settings</b>: Tm conditions, and counting sites and products in a genome.</li>
+</ul>
+<p>Output: <code>&lt;file&gt;_primer_map.html</code> with binding sites, predicted products and a gel; sites and products are added to the sequence annotations.</p>
+
+<h2 id="database">9. Database: your saved primers</h2>
+<p>A plain FASTA file (by default in the RepeatViewer settings folder; choose another on the Options tab). The window lists every primer with Tm, GC, hairpin and self-dimer. Select two to see their heterodimer. Use <b>Add…</b> (paste FASTA or <code>name sequence</code> lines), <b>Import FASTA…</b>, <b>Export…</b> and <b>Delete</b>; double-click a cell to edit it; the filter box searches names, sequences and notes.</p>
+<p>Designed primers are added when <i>Add the designed primers to the Primer Database</i> is on. The same sequence is never added twice.</p>
+
+<h2 id="methylation">10. Methylation (BSP and MSP) in plants</h2>
+<p>Bisulfite turns unmethylated C into T; methylated C stays C. The <b>Methylation</b> field says which C may be methylated:</p>
+<table>
+<tr><th>Setting</th><th>C that may stay C</th><th>C counted as converted</th></tr>
+<tr><td><b>Plant (CG, CHG, CHH)</b> (default)</td><td>CG and CHG (often fully methylated). CHH is only partly methylated.</td><td>CHH</td></tr>
+<tr><td><b>Animal (CG only)</b></td><td>CG</td><td>CHG and CHH</td></tr>
+</table>
+<ul>
+<li><b>BSP</b> primers contain no C that may be methylated, so both forms amplify. <b>Min converted C</b> asks each primer to cover some converted C, so unconverted DNA is not amplified.</li>
+<li><b>MSP</b> places the 3′ end of the M and U primers on a site. <b>MSP 3′ end on</b>: <b>CG</b> (classic) or <b>CHG</b> (plants only, tests the CMT3 / KYP pathway).</li>
+<li><b>Converted strand</b>: after conversion the two strands are no longer complementary; pick the one to amplify.</li>
+</ul>
+<div class="warn">In plant mode fewer C count as converted, so in GC-rich or CHG-rich regions BSP may find nothing with <i>Min converted C</i> = 3. Lower it to 1 or 2, allow longer primers, or try the other strand.</div>
+
+<h2 id="trouble">11. When nothing is found</h2>
+<p>The report then explains why (for example how many primers failed on Tm, GC or overlap with masked regions). Common fixes:</p>
+<ul>
+<li>Widen the Tm range or the Product size.</li>
+<li>Turn off some Repeat Masking options (Regions tab) if the template is mostly repeat.</li>
+<li>Conserved / Subfamily-specific: lower <i>Min coverage</i>, allow more <i>Mismatches tolerated</i> or a higher <i>Max degeneracy</i>.</li>
+<li>TE present or absent: annotate the TE on the locus, or fill <i>TE position</i>; increase <i>Max flank distance</i>.</li>
+<li>MSP: needs CG (or CHG) sites near both ends of a product; widen the size or Tm range.</li>
+<li>Genome check dropped everything: allow more products, or design in a less repetitive part.</li>
+<li>Painting: too few probes for the pool size: lower the gap, widen the regions or the NGS score window, or rerun Chorus2 with a smaller k-mer step or higher max homology.</li>
+</ul>
+
+<h2 id="engine">12. How it works</h2>
+<p>Primer picking, Tm and the thermodynamic hairpin and dimer checks use <b>Primer3</b> (primer3-py). Binding-site search (Map, coverage on copies, genome check) is RepeatViewer's own: an exact 3′ seed search with mismatches allowed on the rest, on both strands. Degenerate primers, ladder, FISH oligos, TE present or absent, BSP and MSP are built on top of these. Chromosome painting uses <b>Chorus2</b> (MIT licence) in its own conda env. Everything runs on your computer (or your server); nothing is sent online.</p>
+<p class="sub">Primer3: Untergasser et al. (2012) Nucleic Acids Research 40:e115.<br>Chorus2: Zhang T, Liu G, Zhao H, Braz GT, Jiang J (2021) Plant Biotechnology Journal 19:1967-1978.</p>
+</div>
+</body>
+</html>

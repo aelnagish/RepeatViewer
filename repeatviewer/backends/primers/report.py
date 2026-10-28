@@ -212,6 +212,16 @@ def methods_text(d: dict) -> str:
             f"{s.get('tm_min')}–{s.get('tm_max')} °C (optimum {s.get('tm_opt')} °C), GC "
             f"{s.get('gc_min')}–{s.get('gc_max')} %, products {s.get('product_min')}–"
             f"{s.get('product_max')} bp; {d.get('thermo', '')}.")
+    if d.get("mode") in ("bsp", "msp"):
+        plant = s.get("methylation_system", "plant") == "plant"
+        ctx = "CG and CHG" if plant else "CG"
+        text += (f" Primers were designed on the in silico bisulfite-converted "
+                 f"{s.get('bisulfite_strand', 'top')} strand; C in {ctx} context was treated "
+                 f"as possibly methylated ({'plant' if plant else 'animal'} model)")
+        if d.get("mode") == "msp":
+            text += f", and MSP primer 3′ ends were placed on {s.get('msp_context', 'CG')} sites."
+        else:
+            text += " and kept out of the primers."
     masked = [t for t in d.get("templates", []) if t.get("mask_sources")]
     if masked:
         kinds = sorted({k for t in masked for k in t["mask_sources"]})

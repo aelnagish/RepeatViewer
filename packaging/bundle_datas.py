@@ -59,6 +59,9 @@ def _add_aliview(datas: list[tuple[str, str]]) -> None:
 def _add_icons(datas: list[tuple[str, str]]) -> None:
     if ASSETS.is_dir():
         datas.append((str(ASSETS), "repeatviewer/assets/icons"))
+    manuals = PKG / "assets" / "manuals"
+    if manuals.is_dir():
+        datas.append((str(manuals), "repeatviewer/assets/manuals"))
 
 
 def collect_datas_for(target: str) -> list[tuple[str, str]]:

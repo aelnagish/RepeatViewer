@@ -3040,10 +3040,14 @@ def save_map_options(opts: MapOptions) -> None:
 PRIMER_DIALOG_TAB_PRIMERS = "primers"
 PRIMER_DIALOG_TAB_REGIONS = "regions"
 PRIMER_DIALOG_TAB_SPECIFICITY = "specificity"
+PRIMER_DIALOG_TAB_CHORUS2 = "chorus2"
+PRIMER_DIALOG_TAB_SELECTION = "selection"
 PRIMER_DIALOG_TABS = (
     PRIMER_DIALOG_TAB_PRIMERS,
     PRIMER_DIALOG_TAB_REGIONS,
     PRIMER_DIALOG_TAB_SPECIFICITY,
+    PRIMER_DIALOG_TAB_CHORUS2,
+    PRIMER_DIALOG_TAB_SELECTION,
     DIALOG_TAB_OPTIONS,
 )
 PRIMER_RIGHT_CLICK_RUN = "run"
@@ -3061,6 +3065,7 @@ class PrimerOptions:
 
     design: dict = field(default_factory=dict)
     map: dict = field(default_factory=dict)
+    painting: dict = field(default_factory=dict)
     database_path: str = ""
     right_click_action: str = PRIMER_RIGHT_CLICK_RUN
     map_right_click_action: str = PRIMER_RIGHT_CLICK_DIALOG
@@ -3079,6 +3084,11 @@ class PrimerOptions:
         from repeatviewer.backends.primers.jobs import MapSettings
 
         return MapSettings.from_dict(self.map)
+
+    def painting_settings(self):
+        from repeatviewer.backends.primers.painting import PaintingSettings
+
+        return PaintingSettings.from_dict(self.painting)
 
 
 def load_primer_options() -> PrimerOptions:
@@ -3099,6 +3109,7 @@ def load_primer_options() -> PrimerOptions:
     return PrimerOptions(
         design=_dict("design_json"),
         map=_dict("map_json"),
+        painting=_dict("painting_json"),
         database_path=str(v.get("database_path", "") or ""),
         right_click_action=_pick("right_click_action", PRIMER_RIGHT_CLICK_ACTIONS,
                                  d.right_click_action),
@@ -3121,6 +3132,7 @@ def save_primer_options(opts: PrimerOptions) -> None:
         {
             "design_json": json.dumps(opts.design or {}),
             "map_json": json.dumps(opts.map or {}),
+            "painting_json": json.dumps(opts.painting or {}),
             "database_path": opts.database_path or "",
             "right_click_action": opts.right_click_action,
             "map_right_click_action": opts.map_right_click_action,

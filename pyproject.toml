@@ -47,4 +47,4 @@ where = ["."]
 include = ["repeatviewer*"]
 
 [tool.setuptools.package-data]
-repeatviewer = ["backends/blast/*", "backends/mafft/**/*", "backends/muscle/**/*", "backends/iqtree/**/*", "backends/minimap2/**/*", "backends/aliview/*", "assets/icons/*", "assets/icons/**/*", "assets/*.png", "database/*"]
+repeatviewer = ["backends/blast/*", "backends/mafft/**/*", "backends/muscle/**/*", "backends/iqtree/**/*", "backends/minimap2/**/*", "backends/aliview/*", "assets/icons/*", "assets/icons/**/*", "assets/manuals/*", "assets/*.png", "database/*"]

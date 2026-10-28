@@ -285,11 +285,13 @@ def test_qpcr_probe_inside_product(data):
 
 
 def test_bsp_primers_avoid_cpg_and_cover_converted_c(data):
+    """Animal mode: only CG may be methylated, so only CG stays out of the primers."""
     (rid, seq), = _records(data.promoter)
-    s = _settings(dz.MODE_BSP)
+    s = _settings(dz.MODE_BSP, methylation_system=dz.METH_ANIMAL)
     run = dz.design_bsp(rid, seq, s, [])
     assert run.pairs
-    conv = dz.bisulfite_convert(seq, keep_cpg=True)
+    conv = dz.bisulfite_convert(seq, keep_contexts={"CG"})
+    assert conv == dz.bisulfite_convert(seq, keep_cpg=True)
     cpg = set(dz.cpg_positions(seq))
     for p in run.pairs:
         _check_on_template(p, conv)
@@ -297,14 +299,54 @@ def test_bsp_primers_avoid_cpg_and_cover_converted_c(data):
             assert not any(o.start - 1 <= i < o.end for i in cpg), o.name
         assert p.extra["converted_c_forward"] >= s.min_converted
         assert p.extra["converted_c_reverse"] >= s.min_converted
+        assert p.extra["methylation_system"] == dz.METH_ANIMAL
+
+
+def test_bsp_plant_mode_keeps_cg_and_chg_out_of_primers(data):
+    """Plant mode (default): CG and CHG may be methylated; only CHH counts as converted."""
+    (rid, seq), = _records(data.promoter)
+    assert dz.DesignSettings().methylation_system == dz.METH_PLANT
+    s = _settings(dz.MODE_BSP, min_converted=1)
+    run = dz.design_bsp(rid, seq, s, [])
+    assert run.pairs
+    keep = dz.methylatable_contexts(dz.METH_PLANT)
+    assert keep == {"CG", "CHG"}
+    conv = dz.bisulfite_convert(seq, keep_contexts=keep)
+    up = seq.upper()
+    for p in run.pairs:
+        _check_on_template(p, conv)
+        for o in (p.forward, p.reverse):
+            for i in range(o.start - 1, o.end):
+                assert dz.c_context(up, i) not in ("CG", "CHG"), (o.name, i)
+            # The G of a CpG is never the last base under the primer either.
+            assert not any(o.start - 1 <= i + 1 < o.end for i in dz.cpg_positions(seq))
+
+
+def test_bisulfite_contexts():
+    seq = "ACGTCAGTCATTCCGG"
+    #      0123456789012345
+    assert dz.c_context(seq, 1) == "CG"
+    assert dz.c_context(seq, 4) == "CHG"
+    assert dz.c_context(seq, 8) == "CHH"
+    assert dz.c_context(seq, 0) == ""
+    assert dz.c_context(seq, 12) == "CHG" and dz.c_context(seq, 13) == "CG"
+    assert dz.context_positions(seq, {"CHG"}) == [4, 12]
+    assert dz.bisulfite_convert(seq, keep_contexts=set()) == "ATGTTAGTTATTTTGG"
+    assert dz.bisulfite_convert(seq, keep_contexts={"CG", "CHG"}) == "ACGTCAGTTATTCCGG"
+    assert dz.converted_c_count(seq, 0, len(seq), {"CG", "CHG"}) == 1
+    assert dz.methylatable_contexts(dz.METH_ANIMAL) == {"CG"}
+    # Unknown saved values fall back to the defaults instead of breaking.
+    assert dz.DesignSettings(methylation_system="fungus").methylation_system == dz.METH_PLANT
+    assert dz.DesignSettings(msp_context="CHH").msp_context == "CG"
 
 
 def test_msp_gives_matching_m_and_u_pairs(data):
     (rid, seq), = _records(data.promoter)
-    pairs = dz.design_msp(rid, seq, _settings(dz.MODE_MSP))
+    s = _settings(dz.MODE_MSP)
+    pairs = dz.design_msp(rid, seq, s)
     assert pairs and len(pairs) % 2 == 0
-    meth = dz.bisulfite_convert(seq, keep_cpg=True)
-    unmeth = dz.bisulfite_convert(seq, keep_cpg=False)
+    meth = dz.bisulfite_convert(seq, keep_contexts=dz.methylatable_contexts(dz.METH_PLANT))
+    unmeth = dz.bisulfite_convert(seq, keep_contexts=set())
     for m, u in zip(pairs[::2], pairs[1::2]):
         assert (m.group, u.group) == ("M", "U")
         assert (m.forward.start, m.reverse.end) == (u.forward.start, u.reverse.end)
@@ -312,6 +354,16 @@ def test_msp_gives_matching_m_and_u_pairs(data):
         _check_on_template(u, unmeth)
         # The forward 3' end sits on a CpG C.
         assert seq.upper()[m.forward.end - 1:m.forward.end + 1] == "CG"
+
+
+def test_msp_chg_context(data):
+    (rid, seq), = _records(data.promoter)
+    pairs = dz.design_msp(rid, seq, _settings(dz.MODE_MSP, msp_context="CHG"))
+    assert pairs
+    up = seq.upper()
+    for m in pairs[::2]:
+        assert dz.c_context(up, m.forward.end - 1) == "CHG"
+        assert m.extra["msp_context"] == "CHG"
 
 
 def test_conserved_family_primers_cover_every_copy(data):

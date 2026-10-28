@@ -9,7 +9,7 @@ import pytest
 
 pytest.importorskip("primer3")
 
-from PySide6.QtCore import QCoreApplication, QSettings  # noqa: E402
+from PySide6.QtCore import QCoreApplication, QSettings, Qt  # noqa: E402
 from PySide6.QtWidgets import QCheckBox, QLabel, QPushButton  # noqa: E402
 
 from primer_testdata import make_data  # noqa: E402
@@ -210,12 +210,137 @@ def test_worker_cancel(qapp, isolated_settings, data):
 
 
 def test_menu_texts_and_file_family(qapp):
-    from repeatviewer.browser_file_groups import file_family_key
-    from repeatviewer.primer_actions import PRIMER_MODE_MENU
+    from PySide6.QtWidgets import QMenu
 
-    # Rule 11: nouns start upper case in menu items.
-    for label, _mode in PRIMER_MODE_MENU:
-        first = label.split()[0]
-        assert first[0].isupper() or first == "qPCR", label
+    from repeatviewer.browser_file_groups import file_family_key
+    from repeatviewer.primer_actions import PRIMER_MANUAL, PRIMER_MENU_ITEMS, PrimerActionsMixin
+
+    class _Host(PrimerActionsMixin):
+        pass
+
+    menu = QMenu()
+    _Host()._populate_primers_menu(menu)
+    texts = [a.text() for a in menu.actions() if not a.isSeparator()]
+    assert texts == list(PRIMER_MENU_ITEMS) == ["Design", "Map", "Database"]
+    assert all("." not in t and "…" not in t for t in texts)
+    assert PRIMER_MANUAL.is_file()
+    html = PRIMER_MANUAL.read_text(encoding="utf-8")
+    assert "—" not in html
+    for label in dz.MODE_LABELS.values():
+        assert label in html, label
     assert file_family_key("gene.fa_primers.html") == "gene.fa"
     assert file_family_key("gene.fa_primer_map_2.html") == "gene.fa"
+
+
+def test_mode_list_is_grouped_and_headers_not_selectable(qapp, isolated_settings, data):
+    from repeatviewer.views.primer_dialogs import PrimerDesignDialog
+
+    grouped = [m for _f, groups in dz.MODE_FAMILIES for _g, modes in groups for m in modes]
+    assert sorted(grouped) == sorted(dz.ALL_MODES) and len(grouped) == len(set(grouped))
+    d = PrimerDesignDialog(initial=PrimerOptions(), files=[data.gene])
+    model = d._mode.model()
+    rows = [(model.item(i).text(), model.item(i).data(Qt.ItemDataRole.UserRole),
+             bool(model.item(i).flags() & Qt.ItemFlag.ItemIsSelectable))
+            for i in range(model.rowCount())]
+    assert [r[0] for r in rows[:3]] == ["PCR primers", "General", "Standard PCR"]
+    for text, mode, selectable in rows:
+        assert selectable == bool(mode), text
+    assert [m for _t, m, _s in rows if m] == grouped
+    assert "FISH probes" in [r[0] for r in rows]
+    assert d._mode.currentData() == dz.MODE_PCR
+
+
+def test_inputs_define_template(qapp, isolated_settings, data):
+    from repeatviewer.views.primer_dialogs import MapPrimersDialog, PrimerDesignDialog
+
+    d = PrimerDesignDialog(initial=PrimerOptions(), files=[data.gene])
+    d.show()
+    qapp.processEvents()
+    form = d._primers_form.form
+    assert d._input_selected.isChecked()
+    assert form.isRowVisible(d._template_label_field) and not form.isRowVisible(d._template_field)
+    d._input_define.setChecked(True)
+    qapp.processEvents()
+    assert form.isRowVisible(d._template_field) and not form.isRowVisible(d._template_label_field)
+    assert d.template_files() == []
+    assert d.apply_path_from_panel(data.locus)
+    assert [p.name for p in d.template_files()] == ["locus.fa"]
+    d._input_selected.setChecked(True)
+    assert [p.name for p in d.template_files()] == ["gene.fa"]
+    d.close()
+    # No selection: the window opens on Define inputs.
+    e = PrimerDesignDialog(initial=PrimerOptions(), files=[])
+    assert e._input_define.isChecked()
+    m = MapPrimersDialog(initial=PrimerOptions(), files=[])
+    assert m._input_define.isChecked() and m.run_files() == []
+    assert m.apply_path_from_panel(data.array)
+    assert [p.name for p in m.run_files()] == ["array.fa"]
+
+
+def test_methylation_fields(qapp, isolated_settings, data):
+    from repeatviewer.views.primer_dialogs import PrimerDesignDialog
+
+    d = PrimerDesignDialog(initial=PrimerOptions(), files=[data.promoter])
+    d.show()
+    form = d._primers_form.form
+    d._mode.setCurrentIndex(d._mode.findData(dz.MODE_MSP))
+    qapp.processEvents()
+    assert form.isRowVisible(d._meth_system.parentWidget()) or d._meth_system.isVisible()
+    assert d.design_settings().methylation_system == dz.METH_PLANT
+    _set = d._msp_context.findData("CHG")
+    d._msp_context.setCurrentIndex(_set)
+    assert d.design_settings().msp_context == "CHG"
+    # Animal: CHG is not offered, the site falls back to CG.
+    d._meth_system.setCurrentIndex(d._meth_system.findData(dz.METH_ANIMAL))
+    s = d.design_settings()
+    assert s.methylation_system == dz.METH_ANIMAL and s.msp_context == "CG"
+    d._mode.setCurrentIndex(d._mode.findData(dz.MODE_PCR))
+    qapp.processEvents()
+    assert not d._meth_system.isVisible()
+    d.close()
+
+
+def test_painting_mode_swaps_tabs_and_round_trips(qapp, isolated_settings, data, tmp_path):
+    from repeatviewer.backends.primers import painting as pt
+    from repeatviewer.views.primer_dialogs import PrimerDesignDialog
+
+    d = PrimerDesignDialog(initial=PrimerOptions(), files=[data.gene])
+    d.show()
+    qapp.processEvents()
+    tabs = lambda: [d._tab_bar.tabText(i) for i in range(d._tab_bar.count())  # noqa: E731
+                    if d._tab_bar.isTabVisible(i)]
+    assert tabs() == ["Primers", "Regions", "Specificity", "Options"]
+    d._mode.setCurrentIndex(d._mode.findData(dz.MODE_PAINTING))
+    qapp.processEvents()
+    assert tabs() == ["Chorus2", "Selection", "Options"]
+    assert d._tab_bar.currentIndex() == d._TAB_CHORUS2 and d.is_painting()
+    assert d._paint_mode.currentData() == dz.MODE_PAINTING
+    # Import: a BED click fills the BED field, a FASTA click the genome.
+    d._pt_import.setChecked(True)
+    bed = tmp_path / "chorus.bed"
+    bed.write_text("chr1\t1\t45\t" + "A" * 45 + "\n")
+    assert d.apply_path_from_panel(bed)
+    assert d.apply_path_from_panel(data.genome)
+    d._pt_target.setCurrentIndex(d._pt_target.findData(pt.TARGET_POOL))
+    d._pt_pool.setValue(1234)
+    d._pt_regions.setText("chr1, chr2:1-5000")
+    d._pt_p5.setText("TAATACGACTCACTATAGGG")
+    opts = d.options()
+    ps = opts.painting_settings()
+    assert (ps.source, ps.import_bed, ps.genome_fasta) == (pt.SOURCE_IMPORT, str(bed),
+                                                           str(data.genome))
+    assert (ps.target, ps.pool_size, ps.regions, ps.primer5) == (
+        pt.TARGET_POOL, 1234, "chr1, chr2:1-5000", "TAATACGACTCACTATAGGG")
+    assert opts.design_settings().mode == dz.MODE_PAINTING
+    assert opts.last_dialog_tab == "chorus2"
+    d.close()
+    # Reopen: comes back on painting, Chorus2 tab, same values.
+    e = PrimerDesignDialog(initial=opts, files=[data.gene])
+    assert e.is_painting() and e._tab_bar.currentIndex() == e._TAB_CHORUS2
+    assert e.painting_settings() == ps
+    # Back to a primer mode from the Chorus2 tab's Mode box.
+    e._paint_mode.setCurrentIndex(e._paint_mode.findData(dz.MODE_PCR))
+    assert not e.is_painting() and e._tab_bar.currentIndex() == e._TAB_PRIMERS
+    assert e._mode.currentData() == dz.MODE_PCR
+    for label in e.findChildren(QLabel):
+        assert "—" not in label.text()

@@ -5942,7 +5942,7 @@ class MainWindow(NcbiDownloadActionsMixin, PrimerActionsMixin, QMainWindow):
         self._populate_align_menu(tools_menu.addMenu("&Align"))
         self._populate_tree_menu(tools_menu.addMenu("T&ree"))
         self._populate_map_menu(tools_menu.addMenu("&Mapping"))
-        self._populate_primers_menu(tools_menu.addMenu("&Primers"))
+        self._populate_primers_menu(tools_menu.addMenu("&Primers and Probes"))
         self._populate_extend_menu(tools_menu.addMenu("MSA &Extend"))
         self._populate_tsd_search_menu(tools_menu.addMenu("TSD &search"))
         self._populate_teaid_menu(tools_menu.addMenu("&TE-Aid"))
@@ -5982,6 +5982,7 @@ class MainWindow(NcbiDownloadActionsMixin, PrimerActionsMixin, QMainWindow):
         )
 
         help_menu = self.menuBar().addMenu("&Help")
+        help_menu.addAction("&Primers and Probes Manual", self._open_primers_manual)
         help_menu.addAction(f"&About {APP_DISPLAY_NAME}", self._show_about)
         self._connect_menu_operation_logging()
         self._rebuild_top_toolbar()
