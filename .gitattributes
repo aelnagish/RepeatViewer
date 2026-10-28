@@ -1,0 +1,13 @@
+# Bundled third-party tools: never convert line endings.
+# Git for Windows otherwise rewrites MAFFT's Cygwin shell scripts to CRLF,
+# bash then fails with "$'\r': command not found" and MAFFT silently
+# produces no alignment.
+repeatviewer/backends/blast/** -text
+repeatviewer/backends/mafft/** -text
+repeatviewer/backends/muscle/** -text
+repeatviewer/backends/iqtree/** -text
+repeatviewer/backends/minimap2/** -text
+repeatviewer/backends/aliview/** -text
+
+# Build scripts must keep LF so they run in CI and on Linux/macOS.
+*.sh text eol=lf
