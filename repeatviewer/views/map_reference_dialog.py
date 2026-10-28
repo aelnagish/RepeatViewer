@@ -212,6 +212,10 @@ _RIGHT_CLICK_ENGINE_HELP = (
 )
 
 
+_PANEL_TARGET_INPUTS = "inputs"
+_PANEL_TARGET_REFERENCE = "reference"
+
+
 def _is_fasta(path: Path) -> bool:
     name = path.name.lower()
     if name.endswith(".gz"):
@@ -303,8 +307,21 @@ class MapReferenceDialog(QDialog):
         self._define_inputs = self._mm_define_inputs
         self._input_selected.toggled.connect(self._sync_inputs)
         self._input_define.toggled.connect(self._sync_inputs)
+        self._input_define.toggled.connect(
+            lambda on: on and self._set_panel_target(_PANEL_TARGET_INPUTS)
+        )
         self._mm_define_inputs.paths_changed.connect(self._on_define_paths_changed)
         self._hs_define_inputs.paths_changed.connect(self._on_define_paths_changed)
+        # Which field a Files-panel click fills when Define inputs is on: the
+        # one the user clicked into last (Reference or a query row).
+        self._panel_target = _PANEL_TARGET_INPUTS
+        self._reference.activated.connect(
+            lambda _row=None: self._set_panel_target(_PANEL_TARGET_REFERENCE)
+        )
+        for define in (self._mm_define_inputs, self._hs_define_inputs):
+            define.field_activated.connect(
+                lambda: self._set_panel_target(_PANEL_TARGET_INPUTS)
+            )
 
         self._hisat2_library = QComboBox(self)
         for label, value in (
@@ -843,6 +860,8 @@ class MapReferenceDialog(QDialog):
         QTimer.singleShot(0, self._clear_startup_path_focus)
 
     def _clear_startup_path_focus(self) -> None:
+        # Opening focus is not a user click: it must not aim panel clicks at Reference.
+        self._panel_target = _PANEL_TARGET_INPUTS
         focused = self.focusWidget()
         if focused is None or focused.objectName() != "PathField":
             return
@@ -1267,12 +1286,23 @@ class MapReferenceDialog(QDialog):
     def files(self) -> list[Path]:
         return self.run_files()
 
+    def _set_panel_target(self, target: str) -> None:
+        self._panel_target = target
+
     def apply_path_from_panel(self, path: Path) -> bool:
-        """FASTA click: fills Define inputs when that mode is on, else Reference."""
+        """Files-panel click fills the field the user clicked into last.
+
+        With Define inputs on, a click goes to the query rows unless the
+        Reference field was clicked last (then it fills Reference). With Use
+        selected sequences, a click always fills Reference.
+        """
         resolved = Path(path).expanduser()
         if not resolved.is_file():
             return False
-        if self.input_source() == ALIGN_INPUT_DEFINE:
+        if (
+            self.input_source() == ALIGN_INPUT_DEFINE
+            and self._panel_target != _PANEL_TARGET_REFERENCE
+        ):
             return bool(self._active_define_inputs().accept_path(resolved))
         if not _is_fasta(resolved):
             return False

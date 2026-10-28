@@ -144,7 +144,22 @@ class _PopupPainter(QObject):
         return False
 
 
-_POPUP_PAINTER = _PopupPainter()
+_POPUP_PAINTER: _PopupPainter | None = None
+
+
+def _popup_painter() -> _PopupPainter:
+    """One shared painter, owned by the application so Qt deletes it with the app
+    (a module-level QObject outliving QApplication crashed Python at exit)."""
+    global _POPUP_PAINTER
+    try:
+        from shiboken6 import isValid
+
+        alive = _POPUP_PAINTER is not None and isValid(_POPUP_PAINTER)
+    except Exception:  # noqa: BLE001
+        alive = _POPUP_PAINTER is not None
+    if not alive:
+        _POPUP_PAINTER = _PopupPainter(QApplication.instance())
+    return _POPUP_PAINTER
 
 
 class _MenuStyle(QProxyStyle):
@@ -167,7 +182,7 @@ class _MenuStyle(QProxyStyle):
                 rounded = True
                 if not target.styleSheet():
                     target.setStyleSheet(_POPUP_LIST_CSS)
-                target.installEventFilter(_POPUP_PAINTER)
+                target.installEventFilter(_popup_painter())
             if isinstance(target, QComboBox):
                 # The internal combo delegates ignore the stylesheet's rounded item
                 # highlight; the standard one follows it. Custom delegates are kept.
@@ -175,7 +190,7 @@ class _MenuStyle(QProxyStyle):
                 if name in ("QComboMenuDelegate", "QComboBoxDelegate"):
                     target.setItemDelegate(QStyledItemDelegate(target))
             if target.metaObject().className() == "QComboBoxPrivateContainer":
-                target.installEventFilter(_POPUP_PAINTER)
+                target.installEventFilter(_popup_painter())
             if rounded and not target.testAttribute(
                     Qt.WidgetAttribute.WA_TranslucentBackground):
                 target.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)

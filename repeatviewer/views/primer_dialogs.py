@@ -717,10 +717,10 @@ class PrimerDesignDialog(_TabbedToolDialog):
         mrow((dz.MODE_INSERTION,), "Max flank distance:", self._flank, "Flank",
              "How far from the TE ends the flanking primers may sit.")
 
-        f.section("Primer Conditions")
+        self._conditions_title = f.section("Primer Conditions")[-1]
         self._size = RangeEdit(5, 60)
         self._size.set_values(s.size_min, s.size_opt, s.size_max)
-        f.row("Primer size:", self._size, "Primer size", "Length in bases (min, optimum, max).",
+        self._size_field = f.row("Primer size:", self._size, "Primer size", "Length in bases (min, optimum, max).",
               fixed=False)
         self._tm = RangeEdit(20, 95, decimals=1, step=0.5)
         self._tm.set_values(s.tm_min, s.tm_opt, s.tm_max)
@@ -734,17 +734,18 @@ class PrimerDesignDialog(_TabbedToolDialog):
             b.setFixedWidth(96)
             b.setSuffix(" bp")
         self._product.set_values(s.product_min, s.product_max)
-        f.row("Product size:", self._product, "Product size", PRODUCT_HELP, fixed=False)
+        self._product_field = f.row("Product size:", self._product, "Product size", PRODUCT_HELP,
+                                    fixed=False)
         self._tm_diff = QDoubleSpinBox(self)
         self._tm_diff.setRange(0, 20)
         self._tm_diff.setDecimals(1)
         self._tm_diff.setSuffix(" °C")
         self._tm_diff.setValue(s.max_tm_diff)
-        f.row("Max Tm difference:", self._tm_diff)
+        self._tm_diff_field = f.row("Max Tm difference:", self._tm_diff)
         self._num = QSpinBox(self)
         self._num.setRange(1, 100)
         self._num.setValue(s.num_return)
-        f.row("Pairs to return:", self._num)
+        self._num_field = f.row("Pairs to return:", self._num)
 
         # Advanced
         self._adv_fields: list[QWidget] = []
@@ -996,7 +997,18 @@ class PrimerDesignDialog(_TabbedToolDialog):
         every = {id(w): w for rows in self._mode_rows.values() for w in rows}
         for key, w in every.items():
             self._primers_form.set_visible(w, key in shown)
-        # probe sizes only matter with a probe
+        # FISH designs single probes: no product, no pair Tm difference.
+        probes = mode == dz.MODE_FISH
+        self._primers_form.set_visible(self._product_field, not probes)
+        self._primers_form.set_visible(self._tm_diff_field, not probes)
+        self._conditions_title.setText(
+            "<b>Probe Conditions</b>" if probes else "<b>Primer Conditions</b>")
+        form = self._primers_form.form
+        for field, text in ((self._size_field, "Probe size:" if probes else "Primer size:"),
+                            (self._num_field, "Probes to return:" if probes else "Pairs to return:")):
+            label = form.labelForField(field)
+            if label is not None:
+                label.setText(text)
         self._refresh_template_label()
         if self.isVisible():
             QTimer.singleShot(0, self._fit)
@@ -1272,6 +1284,10 @@ class _PrimerField(QWidget):
         self.combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
         self.combo.lineEdit().setPlaceholderText("Saved primer name, or type 5′→3′ sequence")
         self.combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        # Long saved names must not widen the Map Primers window.
+        self.combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.combo.setMinimumContentsLength(14)
         self.choose = QPushButton("Choose…", self)
         self.choose.clicked.connect(self._pick)
         row = QHBoxLayout(self)
@@ -1387,6 +1403,9 @@ class MapPrimersDialog(_TabbedToolDialog):
         self._src.addItem("FASTA file", "file")
         self._src.setFixedWidth(150)
         self._src_file = _path_row(self, "Primers FASTA", "Choose a primers FASTA")
+        # Shares the row with the source combo: a smaller minimum keeps the window
+        # at the same width as Primer Design.
+        self._src_file.line_edit().setMinimumWidth(160)
         if ms.primer_file:
             self._src.setCurrentIndex(1)
             self._src_file.set_path(ms.primer_file, emit=False)

@@ -239,6 +239,45 @@ def test_minimap2_and_hisat2_define_inputs_are_independent(qapp, tmp_path):
 
 
 
+@pytest.mark.parametrize("tab", ["minimap2", "hisat2"])
+def test_define_inputs_panel_click_follows_clicked_field(qapp, tmp_path, tab):
+    """Define inputs on: a Files click fills the field clicked last, Reference included."""
+    from PySide6.QtCore import QEvent, Qt
+    from PySide6.QtGui import QFocusEvent
+    from PySide6.QtWidgets import QApplication
+
+    def _click_into(line_edit) -> None:
+        QApplication.sendEvent(
+            line_edit, QFocusEvent(QEvent.Type.FocusIn, Qt.FocusReason.MouseFocusReason)
+        )
+
+    dlg, ref, q = _dialog(qapp, tmp_path)
+    dlg._reference.clear()
+    # Focus landing in Reference on open (not a user click) must not steal clicks.
+    _click_into(dlg._reference.line_edit())
+    dlg._clear_startup_path_focus()
+    if tab == "hisat2":
+        dlg._tab_bar.setCurrentIndex(dlg._TAB_HISAT2)
+    dlg._input_define.setChecked(True)
+    dlg._sync_inputs()
+    define = dlg._active_define_inputs()
+
+    assert dlg.apply_path_from_panel(q)
+    assert define.paths() == [q]
+
+    _click_into(dlg._reference.line_edit())
+    assert dlg.apply_path_from_panel(ref)
+    assert dlg._reference.path() == ref
+    assert define.paths() == [q]
+
+    other = tmp_path / "reads2.fa"
+    other.write_text(">r\nACGT\n")
+    _click_into(define._rows[0]._row.line_edit())
+    assert dlg.apply_path_from_panel(other)
+    assert define.paths() == [other]
+    assert dlg._reference.path() == ref
+
+
 def test_settings_use_align_field_width(qapp, tmp_path):
     from PySide6.QtCore import Qt
     from PySide6.QtWidgets import QLabel

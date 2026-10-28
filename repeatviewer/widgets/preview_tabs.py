@@ -722,6 +722,7 @@ class FilePreviewPage(QWidget):
     dotplotRegionSelected = Signal(dict)  # payload from window.__flexidotLastClick
     fileWritten = Signal(object)  # Path of a file written from the preview (e.g. tree export)
     openFileRequested = Signal(object)  # Path a preview asks to open (contig view → Results)
+    blastRequested = Signal(object)  # FASTA a preview sends to BLAST (contig view right-click)
     # Source FASTAs of a temporary multi-file preview, to combine into a real file.
     saveSelectionAsFileRequested = Signal(list)
 
@@ -1480,6 +1481,7 @@ class FilePreviewPage(QWidget):
                 QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
             )
             self._contig_panel.openRequested.connect(self.openFileRequested.emit)
+            self._contig_panel.blastRequested.connect(self.blastRequested.emit)
             self._contig_panel.fileWritten.connect(self.fileWritten.emit)
             self._stack.addWidget(self._contig_panel)
         self._stack.setCurrentWidget(self._contig_panel)
@@ -2761,6 +2763,7 @@ class PreviewTabWidget(QTabWidget):
     dotplotRegionSelected = Signal(dict)  # payload from window.__flexidotLastClick
     fileWritten = Signal(object)  # Path of a file written from a preview (e.g. tree export)
     openFileRequested = Signal(object)  # Path a preview asks to open (contig view → Results)
+    blastRequested = Signal(object)  # FASTA a preview sends to BLAST (contig view right-click)
     # Source FASTAs of a temporary multi-file preview, to combine into a real file.
     saveSelectionAsFileRequested = Signal(list)
     # Active preview file path (``Path``) or ``None`` when no tab is open.
@@ -3120,6 +3123,7 @@ class PreviewTabWidget(QTabWidget):
         page.dotplotRegionSelected.connect(self.dotplotRegionSelected.emit)
         page.fileWritten.connect(self.fileWritten.emit)
         page.openFileRequested.connect(self.openFileRequested.emit)
+        page.blastRequested.connect(self.blastRequested.emit)
         page.saveSelectionAsFileRequested.connect(self.saveSelectionAsFileRequested.emit)
         self._wheel_zoom_filter.register_page(page)
 

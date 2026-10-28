@@ -3133,3 +3133,93 @@ def save_primer_options(opts: PrimerOptions) -> None:
             ),
         },
     )
+
+
+# ---------------------------------------------------------------- NCBI download
+
+NCBI_DIALOG_TAB_SEARCH = "search"
+NCBI_DIALOG_TABS = (NCBI_DIALOG_TAB_SEARCH, DIALOG_TAB_OPTIONS)
+NCBI_RIGHT_CLICK_CLIPBOARD = "clipboard"
+NCBI_RIGHT_CLICK_DIALOG = "dialog"
+NCBI_RIGHT_CLICK_ACTIONS = (NCBI_RIGHT_CLICK_CLIPBOARD, NCBI_RIGHT_CLICK_DIALOG)
+NCBI_DATABASES = ("nuccore", "protein", "assembly")
+NCBI_FORMATS = ("fasta", "fasta_features", "genbank", "genome", "genome_gff")
+
+
+@dataclass
+class NcbiDownloadOptions:
+    """Saved settings of Tools > Download from NCBI."""
+
+    database: str = "nuccore"
+    nucleotide_format: str = "fasta"
+    protein_format: str = "fasta"
+    assembly_format: str = "genome"
+    one_file: bool = True
+    page_size: int = 100
+    email: str = ""
+    api_key: str = ""
+    right_click_action: str = NCBI_RIGHT_CLICK_DIALOG
+    show_process_window: bool = False
+    close_process_window_when_finished: bool = DEFAULT_CLOSE_PROCESS_WINDOW_WHEN_FINISHED
+    last_dialog_tab: str = NCBI_DIALOG_TAB_SEARCH
+
+    def format_for(self, database: str) -> str:
+        if database == "protein":
+            return self.protein_format
+        if database == "assembly":
+            return self.assembly_format
+        return self.nucleotide_format
+
+
+def load_ncbi_download_options() -> NcbiDownloadOptions:
+    v = _load_settings_group("ncbi_download")
+    d = NcbiDownloadOptions()
+
+    def _pick(key: str, allowed: tuple, default):
+        value = v.get(key, default)
+        return value if value in allowed else default
+
+    try:
+        page = int(v.get("page_size", d.page_size))
+    except (TypeError, ValueError):
+        page = d.page_size
+    return NcbiDownloadOptions(
+        database=_pick("database", NCBI_DATABASES, d.database),
+        nucleotide_format=_pick("nucleotide_format", ("fasta", "fasta_features", "genbank"),
+                                d.nucleotide_format),
+        protein_format=_pick("protein_format", ("fasta", "genbank"), d.protein_format),
+        assembly_format=_pick("assembly_format", ("genome", "genome_gff"), d.assembly_format),
+        one_file=_to_bool(v.get("one_file"), d.one_file),
+        page_size=max(20, min(500, page)),
+        email=str(v.get("email", "") or ""),
+        api_key=str(v.get("api_key", "") or ""),
+        right_click_action=_pick("right_click_action", NCBI_RIGHT_CLICK_ACTIONS,
+                                 d.right_click_action),
+        show_process_window=_to_bool(v.get("show_process_window"), d.show_process_window),
+        close_process_window_when_finished=_to_bool(
+            v.get("close_process_window_when_finished"), d.close_process_window_when_finished
+        ),
+        last_dialog_tab=_pick("last_dialog_tab", NCBI_DIALOG_TABS, d.last_dialog_tab),
+    )
+
+
+def save_ncbi_download_options(opts: NcbiDownloadOptions) -> None:
+    _save_settings_group(
+        "ncbi_download",
+        {
+            "database": opts.database,
+            "nucleotide_format": opts.nucleotide_format,
+            "protein_format": opts.protein_format,
+            "assembly_format": opts.assembly_format,
+            "one_file": opts.one_file,
+            "page_size": int(opts.page_size),
+            "email": opts.email or "",
+            "api_key": opts.api_key or "",
+            "right_click_action": opts.right_click_action,
+            "show_process_window": opts.show_process_window,
+            "close_process_window_when_finished": opts.close_process_window_when_finished,
+            "last_dialog_tab": persistable_dialog_tab(
+                opts.last_dialog_tab, first_tab=NCBI_DIALOG_TAB_SEARCH
+            ),
+        },
+    )

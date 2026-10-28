@@ -300,10 +300,68 @@ def test_legend_lists_only_marks_that_apply():
     entry = dict(payload["contigs"][0])
     model = cv.ContigModel.from_json(entry)
     full = [t for _k, t in cv.legend_items(model)]
-    assert "differs" in full
+    assert "differs from reference" in full
     entry_plain = dict(entry, features=[], feature_summary=[],
                        reads=[dict(r, strand="+", lift=[]) for r in entry["reads"]])
     plain = [t for _k, t in cv.legend_items(cv.ContigModel.from_json(entry_plain))]
     assert "reverse" not in plain and "feature lost" not in plain
     assert "feature partial" not in plain
     assert cv.legend_items(None) == []
+
+
+def test_name_column_resizes_and_fits_longest_name(qapp, tmp_path):
+    """The name column can be resized (within limits) and fitted to the longest name."""
+    payload = _payload()
+    for r in payload["contigs"][0]["reads"]:
+        r["name"] = "Putative_CroSat1_monomer_region_" + r["name"]
+    path = tmp_path / "long.fa_map.rvmap"
+    path.write_text(json.dumps(payload))
+    panel = cv.ContigViewPanel(path)
+    panel.resize(1200, 500)
+    panel.show()
+    qapp.processEvents()
+    c = panel.canvas
+    c.set_label_width(10)
+    assert c.label_w == cv.LABEL_W_MIN                    # never narrower than the minimum
+    c.fit_label_width()
+    longest = max(r.label for r in c.model.reads)
+    from PySide6.QtGui import QFont, QFontMetrics
+    f = QFont(c.font())
+    f.setPointSize(9)
+    assert c.label_w >= QFontMetrics(f).horizontalAdvance(longest)
+    assert c.label_w <= c.viewport().width() * 0.5 + 1   # never more than half the view
+    panel.close()
+
+
+def test_multi_select_hide_and_info(qapp, tmp_path):
+    """Cmd-click adds, Shift-click extends, Hide takes sequences out of the view only,
+    and the foot of the name column describes the selection."""
+    path = tmp_path / "x.fa_map.rvmap"
+    path.write_text(json.dumps(_payload()))
+    panel = cv.ContigViewPanel(path)
+    panel.resize(1000, 500)
+    panel.show()
+    qapp.processEvents()
+    c = panel.canvas
+    c.select_at(0)
+    assert c.selection == {0} and c.info_lines()[0]
+    c.select_at(1, add=True)
+    assert c.selection == {0, 1} and "2 sequences selected" in c.info_lines()[0]
+    c.select_at(1, add=True)                      # Cmd-click again removes it
+    assert c.selection == {0}
+    c.select_at(1, extend=True)                   # Shift-click: the range
+    assert c.selection == {0, 1}
+    fasta = panel._read_fasta([0])
+    assert fasta.startswith(">") and len(fasta.splitlines()) >= 2
+    panel._hide_reads([0])
+    assert c.model.reads[0].hidden and c.user_hidden_count() == 1
+    assert "hidden" in c.info_lines()[1]
+    panel._show_hidden()
+    assert not c.model.reads[0].hidden and c.user_hidden_count() == 0
+    panel.close()
+
+
+def test_bar_colour_legend_rows():
+    assert cv.bar_colour_items(cv.COLOR_STRAND) == []       # arrows rows already say it
+    assert "grad_identity" in [k for k, _t in cv.bar_colour_items(cv.COLOR_IDENTITY)]
+    assert "grad_mapq" in [k for k, _t in cv.bar_colour_items(cv.COLOR_MAPQ)]

@@ -468,6 +468,7 @@ from repeatviewer.views.settings_dialog import (
     load_root_folders,
     save_workspace,
 )
+from repeatviewer.ncbi_download_actions import NcbiDownloadActionsMixin
 from repeatviewer.primer_actions import PrimerActionsMixin
 from repeatviewer.views.toolbar_dialog import (
     DEFAULT_TOOLBAR_ORDER,
@@ -584,6 +585,7 @@ _TOOLBAR_TOOLTIPS = {
     "reverse_complement": "Reverse-complement selected FASTA sequences",
     "orf_prediction": "Predict ORFs in selected FASTA sequences",
     "translate": "Translate selected DNA FASTA to protein",
+    "ncbi_download": "Search NCBI and download sequences or genomes",
     "aliview": "Open selected FASTA in AliView",
     "align": "Align FASTA using default parameters",
     "fastga": "FastGA whole-genome alignment (each file against itself, against each other, or against a reference)",
@@ -2306,7 +2308,7 @@ class _ToolbarActionButton(QToolButton):
         super().mouseReleaseEvent(event)
 
 
-class MainWindow(PrimerActionsMixin, QMainWindow):
+class MainWindow(NcbiDownloadActionsMixin, PrimerActionsMixin, QMainWindow):
     """Browser panel with folders, files, and preview."""
 
     def __init__(self) -> None:
@@ -2405,6 +2407,7 @@ class MainWindow(PrimerActionsMixin, QMainWindow):
         self._tree_options = load_tree_options()
         self._map_options = load_map_options()
         self._init_primer_actions()
+        self._init_ncbi_download_actions()
         self._extend_options = load_extend_options()
         self._tsd_search_options = load_tsd_search_options()
         self._teaid_options = load_teaid_options()
@@ -3710,6 +3713,7 @@ class MainWindow(PrimerActionsMixin, QMainWindow):
         self._preview_tabs.fileWritten.connect(self._on_preview_file_written)
         self._preview_tabs.saveSelectionAsFileRequested.connect(self._group_sequences)
         self._preview_tabs.openFileRequested.connect(self._on_preview_open_requested)
+        self._preview_tabs.blastRequested.connect(self._on_preview_blast_requested)
         self._preview_tabs.dotplotRegionSelected.connect(self._on_dotplot_region_selected)
         self._preview_tabs.currentPathChanged.connect(
             self._on_preview_current_path_changed
@@ -5169,6 +5173,16 @@ class MainWindow(PrimerActionsMixin, QMainWindow):
             return
         QMessageBox.warning(self, "Mapping failed", text)
 
+    def _on_preview_blast_requested(self, path: object) -> None:
+        """Sequences sent from a preview (contig view right-click > BLAST): open the BLAST
+        window with them under Define inputs."""
+        if not isinstance(path, Path) or not path.is_file():
+            return
+        self._open_blast_dialog()
+        dialog = self._blast_params_dialog
+        if dialog is not None and hasattr(dialog, "use_query_file"):
+            dialog.use_query_file(path)
+
     def _on_preview_open_requested(self, path: object) -> None:
         """A result file asked for from a preview (contig view → Files menu).
 
@@ -5920,6 +5934,7 @@ class MainWindow(PrimerActionsMixin, QMainWindow):
         tools_menu = self.menuBar().addMenu("&Tools")
         tools_menu.setObjectName("ToolsMenu")
         self._tools_menu = tools_menu
+        tools_menu.addAction("Download from &NCBI", lambda: self._open_ncbi_download_dialog())
         tools_menu.addAction("Open in &AliView", self._open_selected_in_aliview)
         tools_menu.addSeparator()
         self._populate_blast_menu(tools_menu.addMenu("&BLAST"))
@@ -7483,6 +7498,18 @@ class MainWindow(PrimerActionsMixin, QMainWindow):
                     "(default: design with saved parameters)."
                 ),
                 right_click_slot=self._quick_primer_design_right_click,
+            )
+        elif tool_id == "ncbi_download":
+            self._add_toolbar_action_button(
+                bar,
+                "NCBI Download",
+                lambda: self._open_ncbi_download_dialog(),
+                tooltip=(
+                    "Click: search NCBI and download.\n"
+                    "Right-click: action chosen in the Options tab "
+                    "(default: open this window)."
+                ),
+                right_click_slot=self._quick_ncbi_download_right_click,
             )
         elif tool_id == "primer_map":
             self._add_toolbar_action_button(
@@ -10462,6 +10489,8 @@ class MainWindow(PrimerActionsMixin, QMainWindow):
         if not callable(current_tab):
             return
         if self._remember_primer_dialog_tab(dialog):
+            return
+        if self._remember_ncbi_dialog_tab(dialog):
             return
         tab = current_tab()
         # Align / FastGA
