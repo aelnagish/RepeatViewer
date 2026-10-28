@@ -32,23 +32,29 @@ jobs:
     runs-on: ubuntu-latest
     # glibc 2.28 base (AlmaLinux 8): the build runs on RHEL/Rocky 8+,
     # Ubuntu 20.04+ and Debian 11+, which covers most HPC servers.
-    container: quay.io/pypa/manylinux_2_28_x86_64
+    # Plain AlmaLinux, not manylinux: manylinux Pythons have no libpython
+    # shared library, which PyInstaller needs.
+    container: almalinux:8
     timeout-minutes: 60
+    env:
+      PIP_CACHE_DIR: /tmp/pip-cache
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Qt runtime libraries
+      - name: Install Python, build tools and Qt runtime libraries
         run: |
           dnf install -y --setopt=strict=0 \
+            git tar gzip findutils which \
+            python3.11 python3.11-devel gcc gcc-c++ make \
             mesa-libGL mesa-libEGL libxkbcommon libxkbcommon-x11 \
             fontconfig freetype dbus-libs nss nspr alsa-lib \
             libXcomposite libXdamage libXrandr libXtst libxshmfence \
             xcb-util-wm xcb-util-image xcb-util-keysyms xcb-util-renderutil \
             xcb-util-cursor
 
+      - uses: actions/checkout@v4
+
       - name: Create build environment
         run: |
-          /opt/python/cp311-cp311/bin/python -m venv venv
+          python3.11 -m venv venv
           venv/bin/python -m pip install --upgrade pip
           venv/bin/python -m pip install -e .
 
