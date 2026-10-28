@@ -5,8 +5,8 @@ Modes (``DesignSettings.mode``):
 * ``pcr``        – standard PCR pair (Primer3), repeat-aware masking.
 * ``qpcr``       – qPCR pair (+ optional hydrolysis probe), and a matching pair
                    on a single-copy reference gene for copy-number ΔCt.
-* ``bsp``        – bisulfite PCR: primers on the converted strand, no CpG inside.
-* ``msp``        – methylation-specific PCR: M and U pairs whose 3' ends sit on CpGs.
+* ``bsp``        – bisulfite PCR: primers on the converted strand, no possibly methylated C (CG; plants also CHG) inside.
+* ``msp``        – methylation-specific PCR: M and U pairs whose 3' ends sit on CG (or CHG) sites.
 * ``conserved``  – primers that catch a whole TE / repeat family (from an MSA),
                    degenerate where needed.
 * ``specific``   – primers that catch one subfamily of an MSA and not the rest.
@@ -55,15 +55,44 @@ DESIGN_MODES = (MODE_PCR, MODE_QPCR, MODE_BSP, MODE_MSP, MODE_CONSERVED, MODE_SP
                 MODE_LADDER, MODE_FISH, MODE_INSERTION)
 MODE_LABELS = {
     MODE_PCR: "Standard PCR",
-    MODE_QPCR: "qPCR (copy number)",
-    MODE_BSP: "Bisulfite PCR (BSP)",
-    MODE_MSP: "Methylation-specific PCR (MSP)",
-    MODE_CONSERVED: "Conserved in a family (MSA)",
-    MODE_SPECIFIC: "Subfamily-specific (MSA)",
-    MODE_LADDER: "Satellite ladder PCR",
-    MODE_FISH: "FISH oligo probes",
-    MODE_INSERTION: "TE insertion (presence / absence)",
+    MODE_QPCR: "qPCR copy number",
+    MODE_BSP: "Bisulfite (BSP)",
+    MODE_MSP: "Methylation-specific (MSP)",
+    MODE_CONSERVED: "Conserved in a family",
+    MODE_SPECIFIC: "Subfamily-specific",
+    MODE_LADDER: "Ladder PCR",
+    MODE_FISH: "Satellite repeat oligos",
+    MODE_INSERTION: "TE present or absent",
+    "painting": "Chromosome painting (Chorus2)",
 }
+# Chromosome painting is a FISH-probe mode run by Chorus2 (see ``painting.py``),
+# not by the primer engine: it is in the Mode list but not in DESIGN_MODES.
+MODE_PAINTING = "painting"
+ALL_MODES = DESIGN_MODES + (MODE_PAINTING,)
+# Mode dropdown: family > group > modes (headers are not selectable).
+MODE_FAMILIES: tuple[tuple[str, tuple[tuple[str, tuple[str, ...]], ...]], ...] = (
+    ("PCR primers", (
+        ("General", (MODE_PCR, MODE_QPCR)),
+        ("Satellites", (MODE_LADDER,)),
+        ("TEs", (MODE_CONSERVED, MODE_SPECIFIC, MODE_INSERTION)),
+        ("Methylation", (MODE_BSP, MODE_MSP)),
+    )),
+    ("FISH probes", (
+        ("Satellites", (MODE_FISH,)),
+        ("Chromosomes", (MODE_PAINTING,)),
+    )),
+)
+FISH_MODES = (MODE_FISH, MODE_PAINTING)
+
+# Methylation system for BSP / MSP.
+METH_PLANT = "plant"      # C methylated in CG, CHG and CHH contexts
+METH_ANIMAL = "animal"    # C methylated in CG only
+METHYLATION_SYSTEMS = (METH_PLANT, METH_ANIMAL)
+METHYLATION_LABELS = {
+    METH_PLANT: "Plant (CG, CHG, CHH)",
+    METH_ANIMAL: "Animal (CG only)",
+}
+MSP_CONTEXTS = ("CG", "CHG")
 MSA_MODES = (MODE_CONSERVED, MODE_SPECIFIC)
 MAX_TEMPLATE_BP = 2_000_000
 
@@ -128,6 +157,8 @@ class DesignSettings:
     # Bisulfite
     bisulfite_strand: str = "top"          # top / bottom
     min_converted: int = 3
+    methylation_system: str = METH_PLANT   # plant: CG + CHG may stay C; animal: CG only
+    msp_context: str = "CG"                # MSP primers end on this context
     # MSA modes
     min_coverage: float = 0.90
     max_degeneracy: int = 16
@@ -148,8 +179,12 @@ class DesignSettings:
     def __post_init__(self) -> None:
         if isinstance(self.thermo, dict):
             self.thermo = ThermoSettings.from_dict(self.thermo)
-        if self.mode not in DESIGN_MODES:
+        if self.mode not in ALL_MODES:
             self.mode = MODE_PCR
+        if self.methylation_system not in METHYLATION_SYSTEMS:
+            self.methylation_system = METH_PLANT
+        if self.msp_context not in MSP_CONTEXTS:
+            self.msp_context = "CG"
         self.size_min = max(5, int(self.size_min))
         self.size_max = max(self.size_min, int(self.size_max))
         self.size_opt = min(max(int(self.size_opt), self.size_min), self.size_max)
@@ -700,16 +735,45 @@ def pair_bands_on(pair: DesignedPair, records: list[tuple[str, str]],
 # --------------------------------------------------------------------------
 
 
-def bisulfite_convert(seq: str, *, keep_cpg: bool) -> str:
-    """Top-strand bisulfite conversion: C → T, CpG C kept when ``keep_cpg``."""
+def c_context(seq: str, i: int) -> str:
+    """Context of the C at ``i`` on this strand: "CG", "CHG", "CHH" ("" if not C)."""
+    if seq[i] != "C":
+        return ""
+    n = len(seq)
+    if i + 1 < n and seq[i + 1] == "G":
+        return "CG"
+    if i + 2 < n and seq[i + 2] == "G" and seq[i + 1] in "ACT":
+        return "CHG"
+    return "CHH"
+
+
+def context_positions(seq: str, contexts) -> list[int]:
+    """Positions of C in any of ``contexts`` ("CG", "CHG", "CHH")."""
+    s = seq.upper()
+    wanted = set(contexts)
+    return [i for i in range(len(s)) if s[i] == "C" and c_context(s, i) in wanted]
+
+
+def methylatable_contexts(system: str) -> frozenset[str]:
+    """Contexts whose C may stay C after conversion (kept, and kept out of BSP primers).
+
+    Plants methylate CG and CHG heavily; CHH is mostly unmethylated, so its C
+    is treated as converted (that is what makes a primer bisulfite-specific).
+    """
+    return frozenset({"CG", "CHG"}) if system == METH_PLANT else frozenset({"CG"})
+
+
+def bisulfite_convert(seq: str, *, keep_cpg: bool = False, keep_contexts=None) -> str:
+    """Conversion of one strand: C becomes T except C in ``keep_contexts``.
+
+    ``keep_cpg=True`` is the old CpG-only form (``keep_contexts={"CG"}``).
+    """
+    keep = set(keep_contexts) if keep_contexts is not None else ({"CG"} if keep_cpg else set())
     s = seq.upper()
     out = []
     for i, ch in enumerate(s):
         if ch == "C":
-            if keep_cpg and i + 1 < len(s) and s[i + 1] == "G":
-                out.append("C")
-            else:
-                out.append("T")
+            out.append("C" if keep and c_context(s, i) in keep else "T")
         else:
             out.append(ch)
     return "".join(out)
@@ -735,34 +799,39 @@ def _strand_template(seq: str, strand: str) -> tuple[str, Callable]:
     return seq.upper(), same
 
 
-def converted_c_count(original: str, start0: int, end0: int) -> int:
-    """Non-CpG C in the original strand inside [start0, end0): they become T."""
+def converted_c_count(original: str, start0: int, end0: int, keep_contexts=("CG",)) -> int:
+    """C in the original strand inside [start0, end0) that become T (not in ``keep_contexts``)."""
     s = original.upper()
-    return sum(1 for i in range(start0, end0)
-               if s[i] == "C" and not (i + 1 < len(s) and s[i + 1] == "G"))
+    keep = set(keep_contexts)
+    return sum(1 for i in range(start0, end0) if s[i] == "C" and c_context(s, i) not in keep)
 
 
 def design_bsp(rid: str, seq: str, s: DesignSettings, excluded: list[tuple[int, int]],
                misprime: dict | None = None) -> Primer3Run:
     strand_seq, back = _strand_template(seq, s.bisulfite_strand)
-    conv = bisulfite_convert(strand_seq, keep_cpg=True)
+    keep = methylatable_contexts(s.methylation_system)
+    conv = bisulfite_convert(strand_seq, keep_contexts=keep)
     ex = list(excluded) if s.bisulfite_strand == "top" else [
         (len(seq) - b, len(seq) - a) for a, b in excluded]
+    # C that may be methylated (CG; plants also CHG) must not sit under a primer.
     ex += [(i, i + 2) for i in cpg_positions(strand_seq)]
+    ex += [(i, i + 1) for i in context_positions(strand_seq, keep - {"CG"})]
     run = run_primer3(rid, conv, s, excluded=merge_intervals(ex), num_return=max(40, s.num_return * 8),
                       misprime_lib=misprime, name_prefix="BSP", coord_map=back)
     kept = []
     for p in run.pairs:
         f0 = p.forward.start - 1 if s.bisulfite_strand == "top" else len(seq) - p.forward.end
         r0 = p.reverse.start - 1 if s.bisulfite_strand == "top" else len(seq) - p.reverse.end
-        fc = converted_c_count(strand_seq, f0, f0 + p.forward.length)
+        fc = converted_c_count(strand_seq, f0, f0 + p.forward.length, keep)
         # a reverse primer gains specificity from converted C on the strand it copies
-        rc = converted_c_count(strand_seq, r0, r0 + p.reverse.length)
+        rc = converted_c_count(strand_seq, r0, r0 + p.reverse.length, keep)
         p.extra.update({"converted_c_forward": fc, "converted_c_reverse": rc,
-                        "strand": s.bisulfite_strand})
+                        "strand": s.bisulfite_strand,
+                        "methylation_system": s.methylation_system})
         if fc < s.min_converted or rc < s.min_converted:
             continue
-        p.notes.append(f"{fc}/{rc} converted C (F/R); no CpG in primers")
+        avoided = " / ".join(sorted(keep))
+        p.notes.append(f"{fc}/{rc} converted C (F/R); no {avoided} C in primers")
         kept.append(p)
     kept = rerank(kept[: s.num_return])
     for p in kept:
@@ -771,16 +840,24 @@ def design_bsp(rid: str, seq: str, s: DesignSettings, excluded: list[tuple[int, 
     explain = run.explain
     if run.pairs and not kept:
         explain = explain + [f"Primer3 found {len(run.pairs)} pairs, but none had ≥ "
-                             f"{s.min_converted} converted C in both primers."]
+                             f"{s.min_converted} converted C in both primers."
+                             + (" In plant mode only CHH C count as converted; lower "
+                                "Min converted C or use a longer primer size."
+                                if s.methylation_system == METH_PLANT else "")]
     return Primer3Run(pairs=kept, explain=explain)
 
 
 def design_msp(rid: str, seq: str, s: DesignSettings) -> list[DesignedPair]:
-    """MSP: an M pair and a U pair at the same place, 3' ends on CpG C."""
+    """MSP: an M pair and a U pair at the same place, 3' ends on a C of ``msp_context``.
+
+    The M template keeps every C that may be methylated (CG, plus CHG for
+    plants, plus the tested context); the U template converts every C.
+    """
     strand_seq, back = _strand_template(seq, s.bisulfite_strand)
-    tm_seq = bisulfite_convert(strand_seq, keep_cpg=True)
-    tu_seq = bisulfite_convert(strand_seq, keep_cpg=False)
-    cpgs = cpg_positions(strand_seq)
+    keep = set(methylatable_contexts(s.methylation_system)) | {s.msp_context}
+    tm_seq = bisulfite_convert(strand_seq, keep_contexts=keep)
+    tu_seq = bisulfite_convert(strand_seq, keep_contexts=())
+    cpgs = context_positions(strand_seq, {s.msp_context})
     cpg_set = set(cpgs)
     th = s.thermo
     fwd_c: list[tuple[float, int, int, str, float]] = []
@@ -794,7 +871,7 @@ def design_msp(rid: str, seq: str, s: DesignSettings) -> list[DesignedPair]:
                 tm = calc_tm(f, th)
                 if s.tm_min <= tm <= s.tm_max and s.gc_min <= gc_percent(f) <= s.gc_max:
                     k = sum(1 for i in range(a, c + 1) if i in cpg_set)
-                    conv = converted_c_count(strand_seq, a, c + 1)
+                    conv = converted_c_count(strand_seq, a, c + 1, keep)
                     pen = abs(tm - s.tm_opt) + abs(L - s.size_opt) * 0.3 - min(k, 3) * 0.8 \
                         - min(conv, 5) * 0.4
                     fwd_c.append((pen, a, c + 1, f, tm))
@@ -804,7 +881,7 @@ def design_msp(rid: str, seq: str, s: DesignSettings) -> list[DesignedPair]:
                 tm = calc_tm(r, th)
                 if s.tm_min <= tm <= s.tm_max and s.gc_min <= gc_percent(r) <= s.gc_max:
                     k = sum(1 for i in range(c, b) if i in cpg_set)
-                    conv = converted_c_count(strand_seq, c, b)
+                    conv = converted_c_count(strand_seq, c, b, keep)
                     pen = abs(tm - s.tm_opt) + abs(L - s.size_opt) * 0.3 - min(k, 3) * 0.8 \
                         - min(conv, 5) * 0.4
                     rev_c.append((pen, c, b, r, tm))
@@ -845,8 +922,10 @@ def design_msp(rid: str, seq: str, s: DesignSettings) -> list[DesignedPair]:
             n_cpg = sum(1 for i in list(range(fp[1], fp[2])) + list(range(rp[1], rp[2]))
                         if i in cpg_set)
             pair.notes.append(("methylated" if group == "M" else "unmethylated")
-                              + f" template; {n_cpg} CpG under the primers")
+                              + f" template; {n_cpg} {s.msp_context} sites under the primers")
             pair.extra["strand"] = s.bisulfite_strand
+            pair.extra["methylation_system"] = s.methylation_system
+            pair.extra["msp_context"] = s.msp_context
             pairs.append(finish_pair(pair, th))
     return pairs
 

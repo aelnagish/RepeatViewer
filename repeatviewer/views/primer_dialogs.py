@@ -15,7 +15,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QFont, QFontDatabase
+from PySide6.QtGui import QFont, QFontDatabase, QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
@@ -35,6 +35,8 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSplitter,
     QStackedWidget,
+    QStyledItemDelegate,
+    QStyleOptionViewItem,
     QTabBar,
     QTableWidget,
     QTableWidgetItem,
@@ -44,6 +46,7 @@ from PySide6.QtWidgets import (
 
 from repeatviewer.backends.primers import design as dz
 from repeatviewer.backends.primers import jobs as pj
+from repeatviewer.backends.primers import painting as pt
 from repeatviewer.backends.primers.oligos import (
     KIND_LABELS,
     PRIMER_KINDS,
@@ -66,8 +69,10 @@ from repeatviewer.backends.primers.thermo import (
 )
 from repeatviewer.job_options import (
     DIALOG_TAB_OPTIONS,
+    PRIMER_DIALOG_TAB_CHORUS2,
     PRIMER_DIALOG_TAB_PRIMERS,
     PRIMER_DIALOG_TAB_REGIONS,
+    PRIMER_DIALOG_TAB_SELECTION,
     PRIMER_DIALOG_TAB_SPECIFICITY,
     PRIMER_DIALOG_TABS,
     PRIMER_RIGHT_CLICK_DIALOG,
@@ -133,33 +138,160 @@ def _set_combo(combo, value) -> None:
         combo.setCurrentIndex(idx)
 
 
+_INDENT_ROLE = Qt.ItemDataRole.UserRole + 7
+
+
+class _IndentDelegate(QStyledItemDelegate):
+    """Indents the popup rows of the grouped Mode list (the closed box shows no indent)."""
+
+    _STEP = 14
+
+    def paint(self, painter, option, index) -> None:
+        level = int(index.data(_INDENT_ROLE) or 0)
+        if level:
+            moved = QStyleOptionViewItem(option)
+            moved.rect = option.rect.adjusted(self._STEP * level, 0, 0, 0)
+            option = moved
+        super().paint(painter, option, index)
+
+    def sizeHint(self, option, index):  # noqa: N802
+        size = super().sizeHint(option, index)
+        size.setWidth(size.width() + self._STEP * int(index.data(_INDENT_ROLE) or 0))
+        return size
+
+
+def _fill_grouped_modes(combo) -> None:
+    """Mode list grouped as Family > Group > modes; the headers cannot be chosen."""
+    model = QStandardItemModel(combo)
+    for family, groups in dz.MODE_FAMILIES:
+        head = QStandardItem(family)
+        font = QFont(combo.font())
+        font.setBold(True)
+        head.setFont(font)
+        head.setFlags(Qt.ItemFlag.NoItemFlags)
+        head.setData(0, _INDENT_ROLE)
+        model.appendRow(head)
+        for group, modes in groups:
+            sub = QStandardItem(group)
+            sfont = QFont(combo.font())
+            sfont.setItalic(True)
+            sub.setFont(sfont)
+            sub.setFlags(Qt.ItemFlag.NoItemFlags)
+            sub.setData(1, _INDENT_ROLE)
+            model.appendRow(sub)
+            for mode in modes:
+                item = QStandardItem(dz.MODE_LABELS[mode])
+                item.setData(mode, Qt.ItemDataRole.UserRole)
+                item.setData(2, _INDENT_ROLE)
+                item.setToolTip(f"{family} / {group}")
+                model.appendRow(item)
+    combo.setModel(model)
+    combo.setItemDelegate(_IndentDelegate(combo))
+    first = next(i for i in range(model.rowCount())
+                 if model.item(i).data(Qt.ItemDataRole.UserRole))
+    combo.setCurrentIndex(first)
+
+
 # --------------------------------------------------------------------------
 # Help texts
 # --------------------------------------------------------------------------
 
 MODE_HELP = (
+    "<b>PCR primers</b><br>"
     "<b>Standard PCR</b>: a primer pair by Primer3, kept out of repeats (Regions tab).<br>"
-    "<b>qPCR (copy number)</b>: short amplicons, matched Tm, optional hydrolysis probe; add a "
+    "<b>qPCR copy number</b>: short amplicons, matched Tm, optional hydrolysis probe; add a "
     "single-copy reference gene to get a pair for ΔCt copy-number estimates.<br>"
-    "<b>Bisulfite PCR (BSP)</b>: primers on the bisulfite-converted strand with no CpG inside, "
-    "so methylated and unmethylated DNA amplify alike.<br>"
-    "<b>Methylation-specific PCR (MSP)</b>: an M pair and a U pair at the same place, their 3′ "
-    "ends on CpG sites.<br>"
-    "<b>Conserved in a family (MSA)</b>: on an alignment of copies, primers that catch (nearly) "
-    "all of them, degenerate where needed.<br>"
-    "<b>Subfamily-specific (MSA)</b>: primers that catch the sequences whose names match "
+    "<b>Ladder PCR</b> (satellites): outward-facing primers in one monomer. A tandem array "
+    "then gives a ladder of 1×, 2×, 3× … monomer bands.<br>"
+    "<b>Conserved in a family</b> (TEs): on an alignment of copies, primers that catch "
+    "(nearly) all of them, degenerate where needed.<br>"
+    "<b>Subfamily-specific</b> (TEs): primers that catch the sequences whose names match "
     "<i>Target sequences</i> and not the rest.<br>"
-    "<b>Satellite ladder PCR</b>: outward-facing primers in one monomer. A tandem array then "
-    "gives a ladder of 1×, 2×, 3× … monomer bands.<br>"
-    "<b>FISH oligo probes</b>: 30–45 nt oligos found in every monomer / copy, without hairpins, "
-    "ready to order with a 5′ label.<br>"
-    "<b>TE insertion</b>: a flanking pair (empty site) and a primer inside the TE (occupied "
-    "site) for presence / absence genotyping."
+    "<b>TE present or absent</b>: a flanking pair (empty site) and a primer inside the TE "
+    "(occupied site), to tell plants with and without the insertion apart.<br>"
+    "<b>Bisulfite (BSP)</b>: primers on the bisulfite-converted strand that avoid every C "
+    "that may be methylated, so methylated and unmethylated DNA amplify alike.<br>"
+    "<b>Methylation-specific (MSP)</b>: an M pair and a U pair at the same place, their 3′ "
+    "ends on a CG (or CHG) site.<br><br>"
+    "<b>FISH probes</b><br>"
+    "<b>Satellite repeat oligos</b>: 30–45 nt oligos found in every monomer / copy, without "
+    "hairpins, ready to order with a 5′ label."
+)
+INPUTS_HELP = (
+    "<b>Use selected sequences</b> (default): design on the FASTA selected in the Files "
+    "panel. Clicking another file in the Files panel changes it.<br>"
+    "<b>Define inputs</b>: choose the template FASTA for this run here. Click a file in the "
+    "Files panel to fill the field, or use Browse."
+)
+PAINT_SOURCE_HELP = (
+    "<b>Run Chorus2 here</b>: RepeatViewer runs Chorus2 from its conda env on this "
+    "computer. A plant genome of a few Gb takes hours and needs a lot of memory.<br>"
+    "<b>Import results from the server</b>: run Chorus2 on a Linux server (Copy Server "
+    "Command), copy back its BED and choose it here. Selection and the order file are then "
+    "made here."
+)
+PAINT_GENOME_HELP = (
+    "The whole genome FASTA. Chorus2 checks every probe against it, so probes are unique in "
+    "the genome. When importing, it is optional and only gives the chromosome lengths."
+)
+PAINT_INPUT_HELP = (
+    "Leave empty to design along the whole genome. Give one chromosome or region (FASTA, "
+    "with the same sequence names as the genome) to paint only that part."
+)
+PAINT_BED_HELP = (
+    "The probe BED written by Chorus2 (<code>chorus2_out/&lt;input&gt;.bed</code>) or by "
+    "ChorusNGSfilter (with a k-mer score column)."
+)
+PAINT_NGS_HELP = (
+    "Optional. Genomic reads (WGS, a few x coverage) give each probe a k-mer score. Probes "
+    "missing from the reads (deleted or mis-assembled) or too frequent (repeats missed by "
+    "the assembly) are dropped. Needs jellyfish.<br>"
+    "<b>Import</b>: tick it to use the score column of a BED made by ChorusNGSfilter; the "
+    "quantile window is applied here."
+)
+PAINT_SERVER_HELP = (
+    "Copies the Chorus2 command lines with these settings. On the server: put the genome "
+    "(and reads) in one folder, <code>conda activate chorus2</code>, paste. Then copy "
+    "<code>chorus2_out/*.bed</code> back and use <b>Import results from the server</b>."
+)
+PAINT_AMOUNT_HELP = (
+    "<b>All probes</b>: every probe that passes the spacing.<br>"
+    "<b>Density</b>: about this many probes per kb, evenly along each chromosome (painting "
+    "usually needs 0.1 to 1 per kb).<br>"
+    "<b>Pool size</b>: about this many probes in total, spread evenly (for example the size "
+    "of an oligo pool you order)."
+)
+PAINT_REGIONS_HELP = (
+    "Keep probes only here. Separate items with a comma and a space or with a semicolon: "
+    "<code>chr1, chr2:1-5000000</code>. A name alone means the whole sequence. Empty = "
+    "everything."
+)
+PAINT_ADAPTER_HELP = (
+    "Added to every oligo in the order file, for amplifying the pool (for example a T7 "
+    "promoter or the Chorus2 5′ primer). The BED and FASTA keep the bare probe."
+)
+MAP_INPUTS_HELP = (
+    "<b>Use selected sequences</b> (default): test the primers on the FASTA files selected "
+    "in the Files panel. Clicking another file changes it.<br>"
+    "<b>Define inputs</b>: choose the FASTA for this run here. Click a file in the Files "
+    "panel to fill the field, or use Browse."
 )
 TEMPLATE_HELP = (
-    "The FASTA the primers are designed on. Click a file in the Files panel to change it. "
-    "Every sequence in the file is a template (up to 20); for the MSA modes the file must be "
-    "an alignment, for ladder / FISH a set of monomers or copies (aligned or not)."
+    "The FASTA the primers are designed on. Every sequence in the file is a template (up to "
+    "20).<br><b>MSA modes</b> (Conserved, Subfamily-specific): the file must be an "
+    "alignment.<br><b>Ladder / Satellite oligos</b>: a set of monomers or copies, aligned or "
+    "not.<br><b>BSP / MSP</b>: the genomic (unconverted) sequence; RepeatViewer converts it."
+)
+METHYLATION_HELP = (
+    "Which C may carry a methyl group, and so stay C after bisulfite treatment.<br>"
+    "<b>Plant</b> (default): CG and CHG are often fully methylated, CHH only partly. "
+    "Primers avoid C in CG and CHG; only CHH C count as converted.<br>"
+    "<b>Animal</b>: only CG is methylated; every other C counts as converted."
+)
+MSP_CONTEXT_HELP = (
+    "The C the 3′ end of the M and U primers sits on.<br>"
+    "<b>CG</b>: the classic MSP site (plants and animals).<br>"
+    "<b>CHG</b>: plants only; tests CHG methylation (CMT3 / KYP pathway)."
 )
 COVERAGE_HELP = (
     "A primer counts as binding a sequence when it has at most <b>Mismatches tolerated</b> "
@@ -574,7 +706,11 @@ class _TabbedToolDialog(QDialog):
 class PrimerDesignDialog(_TabbedToolDialog):
     """Design primers: mode, conditions, repeat-aware regions, genome check, options."""
 
-    _TAB_PRIMERS, _TAB_REGIONS, _TAB_SPECIFICITY, _TAB_OPTIONS = range(4)
+    (_TAB_PRIMERS, _TAB_REGIONS, _TAB_SPECIFICITY, _TAB_CHORUS2, _TAB_SELECTION,
+     _TAB_OPTIONS) = range(6)
+    _TAB_NAMES = (PRIMER_DIALOG_TAB_PRIMERS, PRIMER_DIALOG_TAB_REGIONS,
+                  PRIMER_DIALOG_TAB_SPECIFICITY, PRIMER_DIALOG_TAB_CHORUS2,
+                  PRIMER_DIALOG_TAB_SELECTION, DIALOG_TAB_OPTIONS)
 
     def __init__(self, *, initial: PrimerOptions, files: list[Path] | None = None,
                  project_genome: Path | None = None, parent: QWidget | None = None) -> None:
@@ -591,13 +727,29 @@ class PrimerDesignDialog(_TabbedToolDialog):
         f = _Form(body)
         self._forms.append(f)
         f.section("Inputs")
+        self._input_group = QButtonGroup(self)
+        self._input_selected = QRadioButton("Use selected sequences", self)
+        self._input_define = QRadioButton("Define inputs", self)
+        self._input_group.addButton(self._input_selected)
+        self._input_group.addButton(self._input_define)
+        (self._input_selected if self._templates else self._input_define).setChecked(True)
+        f.check(self._input_selected, "Inputs", INPUTS_HELP)
         self._template_label = QLabel(self)
         self._template_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self._template_label.setWordWrap(True)
-        f.row("Template:", self._template_label, "Template", TEMPLATE_HELP, fixed=False)
+        self._template_label.setIndent(22)  # under the radio text, not its circle
+        self._template_label_field = f.widget_row(self._template_label)
+        f.check(self._input_define)
+        self._template_row = _path_row(self, "Template FASTA: click it in Files, or Browse",
+                                       "Choose the template FASTA")
+        self._template_field = f.row("Template:", self._template_row, "Template", TEMPLATE_HELP,
+                                     fixed=False)
+        self._input_selected.toggled.connect(self._sync_inputs)
+        self._template_row.path_changed.connect(lambda *_a: self._on_template_changed())
+
+        f.section("Settings")
         self._mode = QComboBox(self)
-        for m in dz.DESIGN_MODES:
-            self._mode.addItem(dz.MODE_LABELS[m], m)
+        _fill_grouped_modes(self._mode)
         _set_combo(self._mode, s.mode)
         f.row("Mode:", self._mode, "Design mode", MODE_HELP)
 
@@ -630,6 +782,18 @@ class PrimerDesignDialog(_TabbedToolDialog):
         self._bs_strand.addItem("Top strand", "top")
         self._bs_strand.addItem("Bottom strand", "bottom")
         _set_combo(self._bs_strand, s.bisulfite_strand)
+        self._meth_system = QComboBox(self)
+        for m in dz.METHYLATION_SYSTEMS:
+            self._meth_system.addItem(dz.METHYLATION_LABELS[m], m)
+        _set_combo(self._meth_system, s.methylation_system)
+        mrow((dz.MODE_BSP, dz.MODE_MSP), "Methylation:", self._meth_system, "Methylation",
+             METHYLATION_HELP)
+        self._msp_context = QComboBox(self)
+        for c in dz.MSP_CONTEXTS:
+            self._msp_context.addItem(c, c)
+        _set_combo(self._msp_context, s.msp_context)
+        mrow((dz.MODE_MSP,), "MSP 3′ end on:", self._msp_context, "MSP site", MSP_CONTEXT_HELP)
+        self._meth_system.currentIndexChanged.connect(self._sync_msp_context)
         mrow((dz.MODE_BSP, dz.MODE_MSP), "Converted strand:", self._bs_strand, "Strand",
              "After bisulfite treatment the two strands are no longer complementary: choose "
              "which converted strand the primers amplify.")
@@ -637,8 +801,9 @@ class PrimerDesignDialog(_TabbedToolDialog):
         self._min_conv.setRange(0, 15)
         self._min_conv.setValue(s.min_converted)
         mrow((dz.MODE_BSP,), "Min converted C:", self._min_conv, "Converted C",
-             "Each primer must cover at least this many non-CpG C (T after conversion), so "
-             "unconverted DNA is not amplified.")
+             "Each primer must cover at least this many converted C (T after conversion), "
+             "so unconverted DNA is not amplified.<br>In <b>Plant</b> mode only CHH C count; "
+             "lower this (1 or 2) for GC-poor or CHG-rich regions.")
         self._target_pattern = QLineEdit(s.target_pattern, self)
         self._target_pattern.setPlaceholderText("e.g. TEfamA or ^CroSat2_")
         self._target_pattern.setClearButtonEnabled(True)
@@ -901,6 +1066,8 @@ class PrimerDesignDialog(_TabbedToolDialog):
         lay.addWidget(body)
         self._add_page("Specificity", page)
 
+        self._build_painting_pages(initial.painting_settings(), s, project_genome)
+
         # ---------------- Options tab
         page, lay = _page(self)
         lay.setContentsMargins(16, 14, 16, 14)
@@ -949,27 +1116,364 @@ class PrimerDesignDialog(_TabbedToolDialog):
         self._adv_btn.toggled.connect(self._toggle_advanced)
         self._finish(make_cancel_save_run_bar(self, left_widgets=[restore, self._adv_btn]))
         self._mode.currentIndexChanged.connect(self._on_mode)
+        self._paint_mode.currentIndexChanged.connect(self._on_paint_mode)
+        self._apply_tab_family(select=False)
         open_tab = opening_dialog_tab(initial.last_dialog_tab, allowed=PRIMER_DIALOG_TABS,
                                       first_tab=PRIMER_DIALOG_TAB_PRIMERS)
-        self._tab_bar.setCurrentIndex({PRIMER_DIALOG_TAB_PRIMERS: 0, PRIMER_DIALOG_TAB_REGIONS: 1,
-                                       PRIMER_DIALOG_TAB_SPECIFICITY: 2}.get(open_tab, 0))
+        index = self._TAB_NAMES.index(open_tab) if open_tab in self._TAB_NAMES else 0
+        if not self._tab_bar.isTabVisible(index):
+            index = self._TAB_CHORUS2 if self._painting() else self._TAB_PRIMERS
+        self._tab_bar.setCurrentIndex(index)
         self._apply_mode_rows()
         self._toggle_advanced(False)
         self._sync_genome()
         self._drop_n.setEnabled(self._drop.isChecked())
-        self._refresh_template_label()
+        self._sync_msp_context()
+        self._sync_inputs()
         self._load_template_features()
 
     # ------------------------------------------------------------- behaviour
 
+    def _sync_msp_context(self, *_a) -> None:
+        """CHG as MSP site only makes sense for plants."""
+        plant = self._meth_system.currentData() == dz.METH_PLANT
+        model = self._msp_context.model()
+        idx = self._msp_context.findData("CHG")
+        item = model.item(idx) if hasattr(model, "item") else None
+        if item is not None:
+            flags = item.flags()
+            on = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
+            item.setFlags(flags | on if plant else flags & ~on)
+        if not plant and self._msp_context.currentData() == "CHG":
+            _set_combo(self._msp_context, "CG")
+
+    def _sync_inputs(self, *_a) -> None:
+        define = self._input_define.isChecked()
+        self._primers_form.set_visible(self._template_label_field, not define)
+        self._primers_form.set_visible(self._template_field, define)
+        self._refresh_template_label()
+        self._load_template_features()
+        if self.isVisible():
+            QTimer.singleShot(0, self._fit)
+
+    def _on_template_changed(self) -> None:
+        self._load_template_features()
+
     def _all_path_rows(self) -> list[PathBrowseRow]:
-        return [self._reference, self._fish_avoid, self._mask_file, self._misprime,
-                self._genome, self._db_path]
+        return [self._template_row, self._reference, self._fish_avoid, self._mask_file,
+                self._misprime, self._genome, self._db_path, self._pt_genome, self._pt_input,
+                self._pt_bed, self._pt_fastq]
 
     def _on_tab(self, index: int) -> None:
         if hasattr(self, "_adv_btn"):
             self._adv_btn.setVisible(index == self._TAB_PRIMERS)
         super()._on_tab(index)
+
+    # ------------------------------------------------------------- painting
+
+    def _painting(self) -> bool:
+        return self._mode.currentData() == dz.MODE_PAINTING
+
+    def is_painting(self) -> bool:
+        """Chromosome painting (Chorus2) is chosen: Run starts a painting job."""
+        return self._painting()
+
+    def _apply_tab_family(self, *, select: bool) -> None:
+        """Painting shows Chorus2 | Selection | Options; the rest Primers | Regions |
+        Specificity | Options."""
+        paint = self._painting()
+        was = self._tab_bar.currentIndex()
+        first = self._TAB_CHORUS2 if paint else self._TAB_PRIMERS
+        # Show the new family first, so hiding the old one never jumps to Options.
+        self._tab_bar.setTabVisible(first, True)
+        if was != self._TAB_OPTIONS or not select:
+            self._tab_bar.setCurrentIndex(first)
+        for i in (self._TAB_PRIMERS, self._TAB_REGIONS, self._TAB_SPECIFICITY):
+            self._tab_bar.setTabVisible(i, not paint)
+        for i in (self._TAB_CHORUS2, self._TAB_SELECTION):
+            self._tab_bar.setTabVisible(i, paint)
+        if was == self._TAB_OPTIONS and select:
+            self._tab_bar.setCurrentIndex(self._TAB_OPTIONS)
+
+    def _on_paint_mode(self, index: int) -> None:
+        if self._mode.currentIndex() != index:
+            self._mode.setCurrentIndex(index)
+
+    def _build_painting_pages(self, ps: pt.PaintingSettings, s: dz.DesignSettings,
+                              project_genome: Path | None) -> None:
+        # ---------------- Chorus2 tab
+        page, lay = _page(self)
+        body = QWidget(page)
+        c = _Form(body)
+        self._forms.append(c)
+        c.section("Inputs")
+        grp = QButtonGroup(self)
+        self._pt_run = QRadioButton("Run Chorus2 here", self)
+        self._pt_import = QRadioButton("Import results from the server", self)
+        grp.addButton(self._pt_run)
+        grp.addButton(self._pt_import)
+        (self._pt_import if ps.source == pt.SOURCE_IMPORT else self._pt_run).setChecked(True)
+        c.check(self._pt_run, "Where Chorus2 runs", PAINT_SOURCE_HELP)
+        c.check(self._pt_import)
+        self._pt_genome = _path_row(self, "Genome FASTA: click it in Files, or Browse",
+                                    "Choose the genome FASTA")
+        genome = ps.genome_fasta or (str(project_genome) if project_genome else "")
+        self._pt_genome.set_path(genome or None, emit=False)
+        self._pt_genome_field = c.row("Genome:", self._pt_genome, "Genome", PAINT_GENOME_HELP,
+                                      fixed=False)
+        self._pt_input = _path_row(self, "Optional: one chromosome or region (FASTA)",
+                                   "Choose the chromosome or region FASTA")
+        self._pt_input.set_path(ps.input_fasta or None, emit=False)
+        self._pt_input_field = c.row("Paint only:", self._pt_input, "Paint only",
+                                     PAINT_INPUT_HELP, fixed=False)
+        self._pt_bed = _path_row(self, "Chorus2 BED: click it in Files, or Browse",
+                                 "Choose the Chorus2 probe BED",
+                                 file_filter="BED (*.bed);;All files (*)")
+        self._pt_bed.set_path(ps.import_bed or None, emit=False)
+        self._pt_bed_field = c.row("Chorus2 BED:", self._pt_bed, "Chorus2 BED", PAINT_BED_HELP,
+                                   fixed=False)
+        c.section("Settings")
+        self._paint_mode = QComboBox(self)
+        self._paint_mode.setModel(self._mode.model())
+        self._paint_mode.setItemDelegate(_IndentDelegate(self._paint_mode))
+        self._paint_mode.setCurrentIndex(self._mode.currentIndex())
+        c.row("Mode:", self._paint_mode, "Design mode", MODE_HELP)
+
+        self._pt_chorus_fields = c.section("Chorus2")
+
+        def spin(lo, hi, value, suffix=""):
+            b = QSpinBox(self)
+            b.setRange(lo, hi)
+            b.setValue(int(value))
+            if suffix:
+                b.setSuffix(suffix)
+            return b
+
+        def dspin(lo, hi, value, suffix="", step=1.0):
+            b = QDoubleSpinBox(self)
+            b.setRange(lo, hi)
+            b.setDecimals(0 if step >= 1 else 2)
+            b.setSingleStep(step)
+            b.setValue(float(value))
+            if suffix:
+                b.setSuffix(suffix)
+            return b
+
+        self._pt_len = spin(30, 100, ps.length, " nt")
+        self._pt_hom = dspin(50, 100, ps.homology, " %")
+        self._pt_dtm = dspin(0, 37, ps.dtm, " °C")
+        self._pt_step = spin(1, 100, ps.step, " bp")
+        self._pt_ploidy = spin(1, 12, ps.ploidy)
+        self._pt_threads = spin(1, 256, ps.threads)
+        for label, w, title, text in (
+                ("Probe length:", self._pt_len, "Probe length",
+                 "Oligo length (Chorus2 <code>-l</code>, default 45 nt)."),
+                ("Max homology:", self._pt_hom, "Homology",
+                 "A probe is dropped when another genome position matches more than this "
+                 "share of it (<code>--homology</code>, default 75 %). Lower = more unique."),
+                ("Min dTm:", self._pt_dtm, "dTm",
+                 "Hybrid Tm minus hairpin Tm must be at least this (<code>-d</code>, default "
+                 "10 °C)."),
+                ("k-mer step:", self._pt_step, "Step",
+                 "Sliding-window step of the k-mer search (<code>--step</code>, default 5 bp). "
+                 "Smaller = more candidates, slower."),
+                ("Ploidy:", self._pt_ploidy, "Ploidy",
+                 "Of the genome (<code>--ploidy</code>, default 2)."),
+                ("Threads:", self._pt_threads, "Threads", "CPU threads for Chorus2.")):
+            self._pt_chorus_fields.append(c.row(label, w, title, text))
+        self._pt_env = QLineEdit(ps.conda_env, self)
+        self._pt_env.setPlaceholderText(pt.DEFAULT_ENV)
+        self._pt_env_field = c.row("Conda env:", self._pt_env, "Chorus2 env",
+                                            "The conda env (name or path) with Chorus2, bwa "
+                                            "and jellyfish.<br><br>" + pt.install_help(rich=True),
+                                            fixed=False)
+        self._pt_status = QLabel(self)
+        self._pt_status.setWordWrap(True)
+        self._pt_status.setMinimumWidth(420)
+        self._pt_status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self._pt_status_field = c.widget_row(self._pt_status)
+        self._pt_env.editingFinished.connect(self._refresh_chorus_status)
+
+        self._pt_ngs_fields = c.section("NGS Filter")
+        self._pt_ngs = QCheckBox("Score probes with genomic reads (ChorusNGSfilter)", self)
+        self._pt_ngs.setToolTip("With an imported BED: use its k-mer score column")
+        self._pt_ngs.setChecked(ps.use_ngs)
+        self._pt_ngs_fields.append(c.check(self._pt_ngs, "NGS filter", PAINT_NGS_HELP))
+        self._pt_fastq = _path_row(self, "Reads FASTQ (.fq.gz); several: separate with commas",
+                                   "Choose the FASTQ reads",
+                                   file_filter="FASTQ (*.fq *.fastq *.fq.gz *.fastq.gz);;"
+                                               "All files (*)")
+        self._pt_fastq.set_path(ps.ngs_fastq or None, emit=False)
+        self._pt_ngs_fields.append(c.row("Reads:", self._pt_fastq, fixed=False))
+        self._pt_kmer = spin(13, 31, ps.ngs_kmer)
+        self._pt_ngs_fields.append(c.row("k-mer:", self._pt_kmer, "k-mer",
+                                         "k-mer length for counting the reads (default 17)."))
+        self._pt_q = RangeEdit(0, 100, opt=False, suffix=" %")
+        self._pt_q.set_values(round(ps.ngs_low_quantile * 100), round(ps.ngs_high_quantile * 100))
+        self._pt_ngs_fields.append(c.row("Keep score quantiles:", self._pt_q, "Score window",
+                                         "Probes with a k-mer score in the lowest or highest "
+                                         "quantiles are dropped: too low = not in the reads, "
+                                         "too high = repetitive (default 10 % to 90 %).",
+                                         fixed=False))
+        srv = QPushButton("Copy Server Command", self)
+        srv.setToolTip("Copy the Chorus2 command for a Linux server to the clipboard")
+        srv.clicked.connect(self._copy_server_command)
+        srv.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self._pt_server_field = c.check(srv, "Run on a server", PAINT_SERVER_HELP)
+        lay.addWidget(body)
+        self._paint_form = c
+        self._add_page("Chorus2", page)
+
+        # ---------------- Selection tab
+        page, lay = _page(self)
+        body = QWidget(page)
+        g = _Form(body)
+        self._forms.append(g)
+        g.section("Pool")
+        self._pt_spacing = spin(0, 100_000, ps.spacing, " bp")
+        g.row("Min gap between probes:", self._pt_spacing, "Spacing",
+              "Neighbouring probes are at least this far apart (default 25 bp).")
+        self._pt_strand = QComboBox(self)
+        self._pt_strand.addItem("Both (alternate + / −)", pt.STRAND_BOTH)
+        self._pt_strand.addItem("Plus strand only", pt.STRAND_PLUS)
+        _set_combo(self._pt_strand, ps.strand)
+        g.row("Strand:", self._pt_strand, "Strand",
+              "<b>Both</b> (Chorus2 default): every second probe is reverse-complemented, so "
+              "neighbouring probes do not anneal to each other.<br><b>Plus</b>: all from one "
+              "strand.")
+        self._pt_target = QComboBox(self)
+        self._pt_target.addItem("All probes", pt.TARGET_ALL)
+        self._pt_target.addItem("Density (probes per kb)", pt.TARGET_DENSITY)
+        self._pt_target.addItem("Pool size (number of probes)", pt.TARGET_POOL)
+        _set_combo(self._pt_target, ps.target)
+        g.row("Amount:", self._pt_target, "Amount", PAINT_AMOUNT_HELP)
+        self._pt_density = dspin(0.01, 100, ps.density_per_kb, " per kb", step=0.1)
+        self._pt_density_field = g.row("Density:", self._pt_density)
+        self._pt_pool = spin(1, 10_000_000, ps.pool_size)
+        self._pt_pool_field = g.row("Pool size:", self._pt_pool)
+        self._pt_regions = QLineEdit(ps.regions, self)
+        self._pt_regions.setPlaceholderText("All; or e.g. chr1, chr2:1-5000000")
+        self._pt_regions.setClearButtonEnabled(True)
+        g.row("Regions:", self._pt_regions, "Regions", PAINT_REGIONS_HELP, fixed=False)
+        g.section("Order")
+        self._pt_pool_name = QLineEdit(ps.pool_name, self)
+        g.row("Pool name:", self._pt_pool_name, "Pool name",
+              "Used in every oligo name and in the order file.", fixed=False)
+        self._pt_p5 = QLineEdit(ps.primer5, self)
+        self._pt_p5.setPlaceholderText("None")
+        g.row("5′ adapter:", self._pt_p5, "Adapters", PAINT_ADAPTER_HELP, fixed=False)
+        self._pt_p3 = QLineEdit(ps.primer3, self)
+        self._pt_p3.setPlaceholderText("None")
+        g.row("3′ adapter:", self._pt_p3, fixed=False)
+        lay.addWidget(body)
+        self._select_form = g
+        self._add_page("Selection", page)
+
+        for w in (self._pt_run, self._pt_ngs):
+            w.toggled.connect(self._sync_painting)
+        self._pt_target.currentIndexChanged.connect(self._sync_painting)
+        self._sync_painting()
+        self._refresh_chorus_status()
+
+    def _sync_painting(self, *_a) -> None:
+        run = self._pt_run.isChecked()
+        c = self._paint_form
+        c.set_visible(self._pt_input_field, run)
+        c.set_visible(self._pt_bed_field, not run)
+        # Import: the Chorus2 values still feed the server command and the methods text;
+        # only the local env is irrelevant.
+        c.set_visible(self._pt_env_field, run)
+        c.set_visible(self._pt_status_field, run)
+        ngs = self._pt_ngs.isChecked()
+        for w in (self._pt_fastq, self._pt_kmer, self._pt_q):
+            w.setEnabled(ngs)
+        target = self._pt_target.currentData()
+        self._select_form.set_visible(self._pt_density_field, target == pt.TARGET_DENSITY)
+        self._select_form.set_visible(self._pt_pool_field, target == pt.TARGET_POOL)
+        label = c.form.labelForField(self._pt_genome_field)
+        if label is not None:
+            label.setText("Genome:" if run else "Genome (optional):")
+        if self.isVisible():
+            QTimer.singleShot(0, self._fit)
+
+    def _refresh_chorus_status(self) -> None:
+        inst = pt.find_chorus2(self._pt_env.text().strip() or pt.DEFAULT_ENV)
+        if inst.ok:
+            self._pt_status.setText(f"<span style='color:palette(mid)'>✓ {inst.message}</span>")
+        else:
+            self._pt_status.setText(
+                f"<span style='color:#b45309'>{inst.message}</span> "
+                "<span style='color:palette(mid)'>Install it (see ?), or run it on a server "
+                "and import the BED.</span>")
+
+    def _copy_server_command(self) -> None:
+        from PySide6.QtWidgets import QApplication
+
+        ps = self.painting_settings()
+        if not ps.genome_fasta:
+            QMessageBox.information(self, "Chromosome painting",
+                                    "Choose the genome FASTA first.")
+            return
+        try:
+            text = pt.server_command_text(ps)
+        except PrimerError as exc:
+            QMessageBox.information(self, "Chromosome painting", str(exc))
+            return
+        QApplication.clipboard().setText(text)
+        QMessageBox.information(self, "Chromosome painting",
+                                "Copied to the clipboard:\n\n" + text)
+
+    def _load_painting(self, ps: pt.PaintingSettings) -> None:
+        (self._pt_import if ps.source == pt.SOURCE_IMPORT else self._pt_run).setChecked(True)
+        self._pt_genome.set_path(ps.genome_fasta or None, emit=False)
+        self._pt_input.set_path(ps.input_fasta or None, emit=False)
+        self._pt_bed.set_path(ps.import_bed or None, emit=False)
+        self._pt_len.setValue(ps.length)
+        self._pt_hom.setValue(ps.homology)
+        self._pt_dtm.setValue(ps.dtm)
+        self._pt_step.setValue(ps.step)
+        self._pt_ploidy.setValue(ps.ploidy)
+        self._pt_threads.setValue(ps.threads)
+        self._pt_env.setText(ps.conda_env)
+        self._pt_ngs.setChecked(ps.use_ngs)
+        self._pt_fastq.set_path(ps.ngs_fastq or None, emit=False)
+        self._pt_kmer.setValue(ps.ngs_kmer)
+        self._pt_q.set_values(round(ps.ngs_low_quantile * 100), round(ps.ngs_high_quantile * 100))
+        self._pt_spacing.setValue(ps.spacing)
+        _set_combo(self._pt_strand, ps.strand)
+        _set_combo(self._pt_target, ps.target)
+        self._pt_density.setValue(ps.density_per_kb)
+        self._pt_pool.setValue(ps.pool_size)
+        self._pt_regions.setText(ps.regions)
+        self._pt_pool_name.setText(ps.pool_name)
+        self._pt_p5.setText(ps.primer5)
+        self._pt_p3.setText(ps.primer3)
+        self._sync_painting()
+
+    def painting_settings(self) -> pt.PaintingSettings:
+        def path(row: PathBrowseRow) -> str:
+            p = row.path()
+            return str(p) if p else ""
+
+        lo, hi = self._pt_q.values()
+        fastq = self._pt_fastq.line_edit().text().strip()
+        return pt.PaintingSettings(
+            source=pt.SOURCE_IMPORT if self._pt_import.isChecked() else pt.SOURCE_RUN,
+            genome_fasta=path(self._pt_genome), input_fasta=path(self._pt_input),
+            import_bed=path(self._pt_bed),
+            conda_env=self._pt_env.text().strip() or pt.DEFAULT_ENV,
+            threads=self._pt_threads.value(), length=self._pt_len.value(),
+            homology=self._pt_hom.value(), dtm=self._pt_dtm.value(), step=self._pt_step.value(),
+            ploidy=self._pt_ploidy.value(), use_ngs=self._pt_ngs.isChecked(),
+            ngs_fastq=fastq, ngs_kmer=self._pt_kmer.value(),
+            ngs_low_quantile=lo / 100.0, ngs_high_quantile=hi / 100.0,
+            spacing=self._pt_spacing.value(), strand=str(self._pt_strand.currentData()),
+            target=str(self._pt_target.currentData()),
+            density_per_kb=self._pt_density.value(), pool_size=self._pt_pool.value(),
+            regions=self._pt_regions.text().strip(), primer5=self._pt_p5.text().strip(),
+            primer3=self._pt_p3.text().strip(),
+            pool_name=self._pt_pool_name.text().strip() or "Pool1",
+        )
 
     def _toggle_advanced(self, on: bool) -> None:
         self._adv_btn.setText("Advanced Settings ▾" if on else "Advanced Settings ▸")
@@ -988,8 +1492,14 @@ class PrimerDesignDialog(_TabbedToolDialog):
 
     def _on_mode(self, _i: int) -> None:
         mode = str(self._mode.currentData())
-        self._apply_preset(mode)
+        if self._paint_mode.currentIndex() != self._mode.currentIndex():
+            self._paint_mode.blockSignals(True)
+            self._paint_mode.setCurrentIndex(self._mode.currentIndex())
+            self._paint_mode.blockSignals(False)
+        if mode != dz.MODE_PAINTING:
+            self._apply_preset(mode)
         self._apply_mode_rows()
+        self._apply_tab_family(select=True)
 
     def _apply_mode_rows(self) -> None:
         mode = str(self._mode.currentData())
@@ -1009,7 +1519,6 @@ class PrimerDesignDialog(_TabbedToolDialog):
             label = form.labelForField(field)
             if label is not None:
                 label.setText(text)
-        self._refresh_template_label()
         if self.isVisible():
             QTimer.singleShot(0, self._fit)
 
@@ -1033,6 +1542,13 @@ class PrimerDesignDialog(_TabbedToolDialog):
 
     def _restore_defaults(self) -> None:
         mode = str(self._mode.currentData())
+        if mode == dz.MODE_PAINTING:
+            keep = self.painting_settings()
+            self._load_painting(pt.PaintingSettings(
+                source=keep.source, genome_fasta=keep.genome_fasta,
+                input_fasta=keep.input_fasta, import_bed=keep.import_bed,
+                ngs_fastq=keep.ngs_fastq, conda_env=keep.conda_env))
+            return
         d = dz.DesignSettings(mode=mode, **dz.mode_preset(mode))
         self._load_settings(d)
 
@@ -1069,6 +1585,8 @@ class PrimerDesignDialog(_TabbedToolDialog):
         self._max_deg.setValue(s.max_degeneracy)
         self._deg_freq.setValue(int(round(s.degenerate_min_freq * 100)))
         self._min_conv.setValue(s.min_converted)
+        _set_combo(self._meth_system, s.methylation_system)
+        _set_combo(self._msp_context, s.msp_context)
         self._flank.setValue(s.flank_max)
         self._apply_mode_rows()
 
@@ -1077,17 +1595,27 @@ class PrimerDesignDialog(_TabbedToolDialog):
     def _refresh_template_label(self) -> None:
         if not self._templates:
             self._template_label.setText(
-                "<span style='color:palette(mid)'>Click a FASTA in the Files panel</span>")
+                "<span style='color:palette(mid)'>No FASTA selected in the Files panel</span>")
+            self._template_label.setToolTip("")
             return
         names = ", ".join(p.name for p in self._templates[:3])
         more = f" +{len(self._templates) - 3}" if len(self._templates) > 3 else ""
         self._template_label.setText(f"<b>{names}</b>{more}")
         self._template_label.setToolTip("\n".join(str(p) for p in self._templates))
 
+    def uses_selected(self) -> bool:
+        """Use selected sequences (the Files-panel selection) is on."""
+        return self._input_selected.isChecked()
+
     def template_files(self) -> list[Path]:
+        """The FASTA files to design on (Define inputs, else the Files-panel selection)."""
+        if self._input_define.isChecked():
+            p = self._template_row.path()
+            return [Path(p)] if p else []
         return list(self._templates)
 
     def set_templates(self, files: list[Path]) -> None:
+        """Files-panel selection (used with Use selected sequences)."""
         self._templates = [Path(p) for p in files if _is_fasta(Path(p))]
         self._refresh_template_label()
         self._load_template_features()
@@ -1095,8 +1623,12 @@ class PrimerDesignDialog(_TabbedToolDialog):
     def _load_template_features(self) -> None:
         """Annotated features of the template, offered as TE candidates."""
         names: list[str] = []
-        if self._templates:
-            feats = pj.record_features(self._templates[0])
+        files = self.template_files()
+        if files and files[0].is_file():
+            try:
+                feats = pj.record_features(files[0])
+            except Exception:  # noqa: BLE001 - a broken sidecar must not break the window
+                feats = {}
             skip = {"primer_bind", "pcr product", "probe", "orf", "domain"}
             for flist in feats.values():
                 for feat in sorted(flist, key=lambda x: x.start - x.end):
@@ -1111,7 +1643,8 @@ class PrimerDesignDialog(_TabbedToolDialog):
         self._te_feature.blockSignals(False)
 
     def apply_path_from_panel(self, path: Path) -> bool:
-        """Files-panel click: fills the path field being edited, else the template."""
+        """Files-panel click: fills the path field being edited, else the template
+        (the Template field with Define inputs, the selection otherwise)."""
         resolved = Path(path).expanduser()
         if not resolved.is_file():
             return False
@@ -1119,15 +1652,27 @@ class PrimerDesignDialog(_TabbedToolDialog):
         if row is not None:
             row.set_path(resolved)
             return True
+        if self._painting():
+            # Painting: a BED fills the import field, a FASTA the genome.
+            if self._pt_import.isChecked() and resolved.suffix.lower() == ".bed":
+                self._pt_bed.set_path(resolved)
+                return True
+            if _is_fasta(resolved):
+                self._pt_genome.set_path(resolved)
+                return True
+            return False
         if not _is_fasta(resolved):
             return False
-        self.set_templates([resolved])
+        if self._input_define.isChecked():
+            self._template_row.set_path(resolved)
+            self._load_template_features()
+        else:
+            self.set_templates([resolved])
         return True
 
     def current_dialog_tab(self) -> str:
-        return {0: PRIMER_DIALOG_TAB_PRIMERS, 1: PRIMER_DIALOG_TAB_REGIONS,
-                2: PRIMER_DIALOG_TAB_SPECIFICITY}.get(self._tab_bar.currentIndex(),
-                                                      DIALOG_TAB_OPTIONS)
+        i = self._tab_bar.currentIndex()
+        return self._TAB_NAMES[i] if 0 <= i < len(self._TAB_NAMES) else DIALOG_TAB_OPTIONS
 
     def design_settings(self) -> dz.DesignSettings:
         smin, sopt, smax = self._size.values()
@@ -1168,6 +1713,8 @@ class PrimerDesignDialog(_TabbedToolDialog):
             reference_fasta=path(self._reference),
             bisulfite_strand=str(self._bs_strand.currentData()),
             min_converted=self._min_conv.value(),
+            methylation_system=str(self._meth_system.currentData()),
+            msp_context=str(self._msp_context.currentData()),
             min_coverage=self._min_cov.value() / 100.0,
             max_degeneracy=self._max_deg.value(),
             degenerate_min_freq=self._deg_freq.value() / 100.0,
@@ -1186,6 +1733,7 @@ class PrimerDesignDialog(_TabbedToolDialog):
         return replace(
             self._opts,
             design=self.design_settings().to_dict(),
+            painting=self.painting_settings().to_dict(),
             database_path=str(db) if db else "",
             right_click_action=(PRIMER_RIGHT_CLICK_DIALOG if self._rc_dialog.isChecked()
                                 else PRIMER_RIGHT_CLICK_RUN),
@@ -1344,11 +1892,25 @@ class MapPrimersDialog(_TabbedToolDialog):
         f = _Form(body)
         self._forms.append(f)
         f.section("Inputs")
+        self._input_group = QButtonGroup(self)
+        self._input_selected = QRadioButton("Use selected sequences", self)
+        self._input_define = QRadioButton("Define inputs", self)
+        self._input_group.addButton(self._input_selected)
+        self._input_group.addButton(self._input_define)
+        (self._input_selected if self._files else self._input_define).setChecked(True)
+        f.check(self._input_selected, "Inputs", MAP_INPUTS_HELP)
         self._seq_label = QLabel(self)
         self._seq_label.setWordWrap(True)
-        f.row("Sequences:", self._seq_label, "Sequences",
-              "The FASTA files selected in the Files panel when you click Run (click a file "
-              "to choose it). Each sequence is tested.", fixed=False)
+        self._seq_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self._seq_label.setIndent(22)  # under the radio text, not its circle
+        self._seq_label_field = f.widget_row(self._seq_label)
+        f.check(self._input_define)
+        self._seq_row = _path_row(self, "Sequences FASTA: click it in Files, or Browse",
+                                  "Choose the FASTA to test the primers on")
+        self._seq_field = f.row("Sequences:", self._seq_row, "Sequences",
+                                "The FASTA the primers are tested on. Each sequence in it is "
+                                "searched on both strands.", fixed=False)
+        self._input_selected.toggled.connect(self._sync_inputs)
         self._test_on = QComboBox(self)
         self._test_on.addItem("Sequences", pj.TEST_ON_SEQUENCES)
         self._test_on.addItem("Consensus (alignments)", pj.TEST_ON_CONSENSUS)
@@ -1559,7 +2121,15 @@ class MapPrimersDialog(_TabbedToolDialog):
         self._reload_db()
         self._toggle_advanced(False)
         self._sync()
+        self._sync_inputs()
+
+    def _sync_inputs(self, *_a) -> None:
+        define = self._input_define.isChecked()
+        self._form_main.set_visible(self._seq_label_field, not define)
+        self._form_main.set_visible(self._seq_field, define)
         self._refresh_seq_label()
+        if self.isVisible():
+            QTimer.singleShot(0, self._fit)
 
     def _database_obj(self) -> PrimerDatabase | None:
         return self._db
@@ -1615,7 +2185,7 @@ class MapPrimersDialog(_TabbedToolDialog):
 
     def _refresh_seq_label(self) -> None:
         if not self._files:
-            self._seq_label.setText("<span style='color:palette(mid)'>The files selected in the "
+            self._seq_label.setText("<span style='color:palette(mid)'>No FASTA selected in the "
                                     "Files panel</span>")
             return
         names = ", ".join(p.name for p in self._files[:3])
@@ -1626,14 +2196,22 @@ class MapPrimersDialog(_TabbedToolDialog):
         self._files = [Path(p) for p in files if _is_fasta(Path(p))]
         self._refresh_seq_label()
 
+    def uses_selected(self) -> bool:
+        return self._input_selected.isChecked()
+
     def run_files(self) -> list[Path]:
+        """FASTA files to test on (Define inputs, else the Files-panel selection)."""
+        if self._input_define.isChecked():
+            p = self._seq_row.path()
+            return [Path(p)] if p else []
         return list(self._files)
 
     def apply_path_from_panel(self, path: Path) -> bool:
         resolved = Path(path).expanduser()
         if not resolved.is_file():
             return False
-        row = self._focused_path_row([self._src_file, self._genome, self._db_path])
+        row = self._focused_path_row([self._seq_row, self._src_file, self._genome,
+                                      self._db_path])
         if row is not None:
             row.set_path(resolved)
             if row is self._db_path:
@@ -1641,7 +2219,10 @@ class MapPrimersDialog(_TabbedToolDialog):
             return True
         if not _is_fasta(resolved):
             return False
-        self.set_files([resolved])
+        if self._input_define.isChecked():
+            self._seq_row.set_path(resolved)
+        else:
+            self.set_files([resolved])
         return True
 
     def current_dialog_tab(self) -> str:

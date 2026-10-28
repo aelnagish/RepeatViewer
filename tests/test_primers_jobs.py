@@ -78,7 +78,7 @@ def test_design_without_annotation_leaves_input_alone(data):
 
 @pytest.mark.parametrize("mode,attr,kw", [
     (dz.MODE_QPCR, "gene", {"pick_probe": True}),
-    (dz.MODE_BSP, "promoter", {}),
+    (dz.MODE_BSP, "promoter", {"min_converted": 1}),
     (dz.MODE_MSP, "promoter", {}),
     (dz.MODE_CONSERVED, "te_aln", {}),
     (dz.MODE_SPECIFIC, "te_aln", {"target_pattern": "TEfamB"}),

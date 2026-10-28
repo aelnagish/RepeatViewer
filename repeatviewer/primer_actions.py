@@ -26,6 +26,7 @@ from repeatviewer.job_options import (
 
 PRIMER_JOB_DESIGN = "design"
 PRIMER_JOB_MAP = "map"
+PRIMER_JOB_PAINTING = "painting"
 PRIMER_TOOL_KEY = "primers"
 _FASTA_SUFFIXES = (".fa", ".fasta", ".fna", ".fas", ".fsa", ".ffn", ".seq", ".aln", ".mfa")
 
@@ -38,21 +39,15 @@ _PHASES = (
     ("Testing", 1),
     ("Searching", 2),
     ("Checking", 2),
+    ("Running Chorus2", 1),
+    ("Selecting", 2),
     ("Writing", 3),
 )
 PRIMER_JOB_STEPS = 4
 
-# Tools > Primers shortcuts that open Design Primers on one mode.
-PRIMER_MODE_MENU: tuple[tuple[str, str], ...] = (
-    ("qPCR Copy Number Primers", "qpcr"),
-    ("Satellite Ladder PCR Primers", "ladder"),
-    ("FISH Oligo Probes", "fish"),
-    ("Primers Conserved in a TE Family", "conserved"),
-    ("Subfamily-Specific Primers", "specific"),
-    ("TE Insertion Genotyping Primers", "insertion"),
-    ("Bisulfite Primers (BSP)", "bsp"),
-    ("Methylation-Specific Primers (MSP)", "msp"),
-)
+# Tools > Primers and Probes: three items; the design type is the Mode inside Design.
+PRIMER_MENU_ITEMS: tuple[str, ...] = ("Design", "Map", "Database")
+PRIMER_MANUAL = Path(__file__).resolve().parent / "assets" / "manuals" / "primers_and_probes.html"
 
 
 def is_primer_fasta(path: Path) -> bool:
@@ -111,7 +106,13 @@ class PrimerJobWorker(QObject):
         try:
             with process_log_sink(_log):
                 self.progress.emit(0, "Reading templates…")
-                if self._kind == PRIMER_JOB_MAP:
+                if self._kind == PRIMER_JOB_PAINTING:
+                    from repeatviewer.backends.primers import painting as pt
+
+                    main, files, payload = pt.run_painting(
+                        self._settings, report_path=self._report_path,
+                        cancel=self._cancel, progress=_progress)
+                elif self._kind == PRIMER_JOB_MAP:
                     main, files, payload = pj.run_map(
                         self._seq_files, self._settings, database_path=db_path,
                         progress=_progress, cancel=self._cancelled,
@@ -131,6 +132,8 @@ class PrimerJobWorker(QObject):
                 "files": [str(f) for f in files],
                 "annotated": list(payload.get("annotated", [])),
                 "pairs": len(payload.get("pairs", [])),
+                "selected": int(payload.get("selected", 0)),
+                "chorus_input": int(payload.get("input", 0)),
                 "products": int((payload.get("counts") or {}).get("products", 0)),
                 "sites": int((payload.get("counts") or {}).get("sites", 0)),
                 "warnings": list(payload.get("warnings", [])),
@@ -163,15 +166,24 @@ class PrimerActionsMixin:
     # ------------------------------------------------------------- menu
 
     def _populate_primers_menu(self, menu: QMenu) -> None:
-        menu.addAction("Design Primers with default parameters", self._run_primer_design_default)
-        menu.addAction("Change Design Primers parameters",
-                       lambda: self._open_primer_design_dialog())
-        menu.addSeparator()
-        menu.addAction("Map Primers to Sequences", lambda: self._open_map_primers_dialog())
-        menu.addAction("Primer Database", self._open_primer_database)
-        menu.addSeparator()
-        for label, mode in PRIMER_MODE_MENU:
-            menu.addAction(label, lambda _checked=False, m=mode: self._open_primer_design_dialog(mode=m))
+        design, map_, database = PRIMER_MENU_ITEMS
+        a = menu.addAction(design, lambda: self._open_primer_design_dialog())
+        a.setToolTip("Design PCR primers or FISH probes (choose the type in Mode)")
+        a = menu.addAction(map_, lambda: self._open_map_primers_dialog())
+        a.setToolTip("Test primers against sequences: binding sites and products")
+        a = menu.addAction(database, self._open_primer_database)
+        a.setToolTip("Your saved primers, with Tm, hairpin and dimer checks")
+        menu.setToolTipsVisible(True)
+
+    def _open_primers_manual(self) -> None:
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+
+        if not PRIMER_MANUAL.is_file():
+            QMessageBox.warning(self, "Primers and Probes Manual",
+                                f"The manual is missing:\n{PRIMER_MANUAL}")
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(PRIMER_MANUAL)))
 
     # ------------------------------------------------------------- inputs
 
@@ -187,6 +199,11 @@ class PrimerActionsMixin:
 
     def _run_primer_design_default(self) -> None:
         if not self._primers_ready():
+            return
+        from repeatviewer.backends.primers import design as dz
+
+        if self._primer_options.design_settings().mode == dz.MODE_PAINTING:
+            self._start_painting_job(self._primer_options, open_dialog_on_error=True)
             return
         files = self._primer_candidate_files()
         if not files:
@@ -230,12 +247,23 @@ class PrimerActionsMixin:
             if not d.should_run():
                 self._set_status_message("Primer Design settings saved", 4000)
                 return
-            files = d.template_files() or self._primer_candidate_files()
+            if d.is_painting():
+                self._start_painting_job(self._primer_options)
+                return
+            # What the window shows; with Use selected and nothing shown yet, the panel.
+            files = d.template_files() or (
+                self._primer_candidate_files() if d.uses_selected() else [])
             if not files:
                 QMessageBox.information(
                     self, "Primer Design",
-                    "Click the FASTA to design on in the Files panel, then Run.",
+                    "Choose the template: click a FASTA in the Files panel (or fill "
+                    "Template with Define inputs), then Run.",
                 )
+                return
+            missing = [p for p in files if not Path(p).is_file()]
+            if missing:
+                QMessageBox.warning(self, "Primer Design",
+                                    f"The template does not exist:\n{missing[0]}")
                 return
             self._start_primer_job(PRIMER_JOB_DESIGN, files, self._primer_options)
 
@@ -260,12 +288,19 @@ class PrimerActionsMixin:
             if not d.should_run():
                 self._set_status_message("Map Primers settings saved", 4000)
                 return
-            files = d.run_files() or self._primer_candidate_files()
+            files = d.run_files() or (
+                self._primer_candidate_files() if d.uses_selected() else [])
             if not files:
                 QMessageBox.information(
                     self, "Map Primers",
-                    "Click the sequences to test in the Files panel, then Run.",
+                    "Choose the sequences: click a FASTA in the Files panel (or fill "
+                    "Sequences with Define inputs), then Run.",
                 )
+                return
+            missing = [p for p in files if not Path(p).is_file()]
+            if missing:
+                QMessageBox.warning(self, "Map Primers",
+                                    f"The file does not exist:\n{missing[0]}")
                 return
             self._start_primer_job(PRIMER_JOB_MAP, files, self._primer_options)
 
@@ -332,14 +367,45 @@ class PrimerActionsMixin:
 
     # ------------------------------------------------------------- jobs
 
+    def _start_painting_job(self, opts: PrimerOptions, *, open_dialog_on_error: bool = False) -> None:
+        """Chromosome painting: run Chorus2 here or import its BED, then select."""
+        from repeatviewer.backends.primers import painting as pt
+
+        ps = opts.painting_settings()
+        if ps.source == pt.SOURCE_IMPORT:
+            anchor = ps.import_bed
+            problem = ("Choose the Chorus2 BED to import (Design, Chorus2 tab)." if not anchor
+                       else "" if Path(anchor).expanduser().is_file()
+                       else f"The Chorus2 BED does not exist:\n{anchor}")
+        else:
+            anchor = ps.genome_fasta
+            problem = ("Choose the genome FASTA (Design, Chorus2 tab)." if not anchor
+                       else "" if Path(anchor).expanduser().is_file()
+                       else f"The genome FASTA does not exist:\n{anchor}")
+            if not problem:
+                inst = pt.find_chorus2(ps.conda_env)
+                if not inst.ok:
+                    problem = (inst.message + "\n\n" + pt.install_help()
+                               + "\n\nOr run it on a server and choose \u201cImport results "
+                               "from the server\u201d.")
+        if problem:
+            if open_dialog_on_error:
+                self._open_primer_design_dialog()
+            QMessageBox.information(self, "Chromosome painting", problem)
+            return
+        self._start_primer_job(PRIMER_JOB_PAINTING, [Path(anchor).expanduser()], opts)
+
     def _confirm_primer_report_path(self, kind: str, files: list[Path]) -> Path | None | bool:
         """Rule 9: ask before an existing report is replaced. False = cancelled."""
         from repeatviewer.backends.primers import jobs as pj
+        from repeatviewer.backends.primers import painting as pt
         from repeatviewer.widgets.file_conflict import confirm_existing_file_path
 
-        tag = pj.MAP_TAG if kind == PRIMER_JOB_MAP else pj.DESIGN_TAG
+        tag = {PRIMER_JOB_MAP: pj.MAP_TAG, PRIMER_JOB_PAINTING: pt.PAINTING_TAG}.get(
+            kind, pj.DESIGN_TAG)
         proposed = pj.default_report_path(files[0], tag)
-        title = "Map Primers" if kind == PRIMER_JOB_MAP else "Primer Design"
+        title = {PRIMER_JOB_MAP: "Map Primers", PRIMER_JOB_PAINTING: "Chromosome painting"}.get(
+            kind, "Primer Design")
         chosen = confirm_existing_file_path(self, proposed, title=title,
                                             required_suffix=pj.REPORT_SUFFIX)
         if chosen is None:
@@ -351,7 +417,10 @@ class PrimerActionsMixin:
         report_path = self._confirm_primer_report_path(kind, files)
         if report_path is False:
             return
-        if kind == PRIMER_JOB_MAP:
+        if kind == PRIMER_JOB_PAINTING:
+            settings = opts.painting_settings()
+            title = f"Chromosome painting (Chorus2) on {files[0].name}"
+        elif kind == PRIMER_JOB_MAP:
             settings = opts.map_settings()
             title = (f"Map Primers on {files[0].name}" if len(files) == 1
                      else f"Map Primers on {len(files)} files")
@@ -401,7 +470,10 @@ class PrimerActionsMixin:
             )
         if created:
             self._auto_open_outputs(created)
-        if result.get("kind") == PRIMER_JOB_MAP:
+        if result.get("kind") == PRIMER_JOB_PAINTING:
+            msg = (f"Chromosome painting finished: {result.get('selected', 0):,} probes selected "
+                   f"from {result.get('chorus_input', 0):,} ({report.name})")
+        elif result.get("kind") == PRIMER_JOB_MAP:
             msg = (f"Map Primers finished: {result.get('sites', 0):,} binding sites, "
                    f"{result.get('products', 0):,} products ({report.name})")
         else:
