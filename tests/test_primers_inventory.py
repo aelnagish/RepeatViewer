@@ -677,3 +677,28 @@ def test_lab_window(qapp, settings, shared, monkeypatch):
     d._refill_choices()
     assert d._fields["box"].findText("Z-1") >= 0     # offered in the form now
     d.close()
+
+
+def test_check_only_the_selected_primers(shared, tmp_path, qapp, settings):
+    db = _imported(shared)
+    fasta = _new_plant(db, tmp_path / "new_plant.fa")
+    ms = pj.MapSettings(mode=pj.MAP_DATABASE, max_mismatches=2, product_max=3000,
+                        primer_names=["pBV1_for", "pBV1_rev"])
+    _main, _f, payload = pj.run_map([fasta], ms, database_path=shared)
+    st = payload["stock"]
+    assert st["primers"] == 2
+    assert [(r["forward"], r["reverse"]) for r in st["ready"]] == [("pBV1_for", "pBV1_rev")]
+    # The Map window shows what it will test, and can go back to all primers.
+    from repeatviewer.job_options import PrimerOptions
+    from repeatviewer.views.primer_dialogs import MapPrimersDialog
+
+    m = MapPrimersDialog(initial=PrimerOptions(map=ms.to_dict()), files=[])
+    m.show()
+    qapp.processEvents()
+    assert m._form_main.form.isRowVisible(m._only_field)
+    assert "2 selected" in m._only_label.text()
+    assert m.map_settings().primer_names == ["pBV1_for", "pBV1_rev"]
+    m._clear_only()
+    assert m.map_settings().primer_names == []
+    assert not m._form_main.form.isRowVisible(m._only_field)
+    m.close()

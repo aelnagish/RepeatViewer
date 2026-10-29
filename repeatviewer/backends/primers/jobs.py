@@ -658,6 +658,9 @@ class MapSettings:
     use_probe: bool = False
     probe: str = ""
     primer_file: str = ""           # database mode: FASTA; empty = Primer Database
+    # Database mode: only these saved primers (empty = all), e.g. the ones selected
+    # in the Database window for "Check a Sequence".
+    primer_names: list = field(default_factory=list)
     search_forward: bool = True
     search_reverse: bool = True
     search_probe: bool = True
@@ -754,6 +757,12 @@ def map_primer_list(ms: MapSettings, db: PrimerDatabase | None) -> list[Primer]:
         where = "the Primer Database"
     if not primers:
         raise PrimerError(f"No primers in {where}.")
+    if ms.primer_names and not ms.primer_file:
+        names = set(ms.primer_names)
+        chosen = [p for p in primers if p.name in names]
+        if not chosen:
+            raise PrimerError("The selected primers are no longer in the Primer Database.")
+        return chosen
     wanted = set()
     if ms.search_forward:
         wanted |= {KIND_FORWARD, KIND_OLIGO}

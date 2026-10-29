@@ -31,6 +31,9 @@ from PySide6.QtWidgets import (
     QRadioButton,
     QSizePolicy,
     QStackedWidget,
+    QScrollArea,
+    QFrame,
+    QApplication,
     QStyledItemDelegate,
     QStyleOptionViewItem,
     QTabBar,
@@ -635,8 +638,17 @@ class _TabbedToolDialog(QDialog):
         self._tab_bar.currentChanged.connect(self._on_tab)
 
     def _add_page(self, title: str, page: QWidget) -> int:
+        # Each page scrolls when it is taller than the screen (Advanced Settings
+        # on a laptop), so the buttons always stay visible.
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setWidget(page)
+        scroll.viewport().setAutoFillBackground(False)
+        page.setAutoFillBackground(False)
         self._tab_bar.addTab(title)
-        self._stack.addWidget(page)
+        self._stack.addWidget(scroll)
         return self._tab_bar.count() - 1
 
     def _finish(self, bar: QWidget) -> None:
@@ -658,13 +670,34 @@ class _TabbedToolDialog(QDialog):
 
     def _fit(self) -> None:
         self._sync_columns()
-        page = self._stack.currentWidget()
-        if page is None:
+        scroll = self._stack.currentWidget()
+        if scroll is None:
             return
+        page = scroll.widget() if isinstance(scroll, QScrollArea) else scroll
         page.adjustSize()
-        self._stack.setFixedHeight(page.sizeHint().height())
+        wanted = page.sizeHint().height()
+        # Room on this screen for the page: screen height minus the title bar,
+        # tab bar, button bar and margins.
+        screen = self.screen() or QApplication.primaryScreen()
+        avail = screen.availableGeometry() if screen is not None else None
+        if avail is not None:
+            chrome = (self._tab_bar.sizeHint().height() + 2 * self._layout.spacing()
+                      + self._layout.contentsMargins().top()
+                      + self._layout.contentsMargins().bottom() + 44 + 40)
+            room = max(240, avail.height() - chrome)
+        else:
+            room = wanted
+        self._stack.setFixedHeight(min(wanted, room))
         self.adjustSize()
         self.resize(self._width, self.sizeHint().height())
+        if avail is not None:
+            # Keep the whole window, buttons included, on the screen.
+            frame = self.frameGeometry()
+            top = frame.top()
+            if frame.bottom() > avail.bottom():
+                top = max(avail.top(), avail.bottom() - frame.height())
+            if top != frame.top():
+                self.move(frame.left(), top)
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
@@ -1981,6 +2014,19 @@ class MapPrimersDialog(_TabbedToolDialog):
         self._kinds_field = f.row("Search for:", kinds, "Search for",
                                   "Which saved primers to test. <b>Pairs only</b> keeps primers "
                                   "that form a product with another saved primer.", fixed=False)
+        # From the Database window: only the primers selected there.
+        self._only_names: list[str] = list(ms.primer_names or [])
+        only = QWidget(self)
+        ol = QHBoxLayout(only)
+        ol.setContentsMargins(0, 0, 0, 0)
+        ol.setSpacing(8)
+        self._only_label = QLabel(self)
+        self._only_label.setWordWrap(True)
+        self._only_all = QPushButton("Use All Saved Primers", self)
+        self._only_all.clicked.connect(self._clear_only)
+        ol.addWidget(self._only_label, 1)
+        ol.addWidget(self._only_all)
+        self._only_field = f.row("Testing:", only, fixed=False)
         self._specific.toggled.connect(self._sync)
         self._src.currentIndexChanged.connect(self._sync)
 
@@ -2150,8 +2196,21 @@ class MapPrimersDialog(_TabbedToolDialog):
         if self.isVisible():
             QTimer.singleShot(0, self._fit)
 
+    def _clear_only(self) -> None:
+        self._only_names = []
+        self._sync()
+
     def _sync(self, *_a) -> None:
         spec = self._specific.isChecked()
+        only = bool(self._only_names) and not spec and self._src.currentData() != "file"
+        self._form_main.set_visible(self._only_field, only)
+        if only:
+            names = ", ".join(self._only_names[:6]) + (" …" if len(self._only_names) > 6 else "")
+            self._only_label.setText(f"<b>{len(self._only_names)} selected in the Primer "
+                                     f"Database</b>: {names}")
+        for w in (self._s_f, self._s_r, self._s_p, self._pairs_only):
+            w.setVisible(not only)
+        self._form_main.set_visible(self._kinds_field, not only)
         for b, fld in ((self._use_f, self._f), (self._use_r, self._r), (self._use_p, self._p)):
             b.setEnabled(spec)
             fld.setEnabled(spec and b.isChecked())
@@ -2233,6 +2292,7 @@ class MapPrimersDialog(_TabbedToolDialog):
             use_reverse=self._use_r.isChecked(), reverse=self._r.text(),
             use_probe=self._use_p.isChecked(), probe=self._p.text(),
             primer_file=str(src) if src else "",
+            primer_names=list(self._only_names) if not self._specific.isChecked() else [],
             search_forward=self._s_f.isChecked(), search_reverse=self._s_r.isChecked(),
             search_probe=self._s_p.isChecked(), pairs_only=self._pairs_only.isChecked(),
             use_included=self._use_inc.isChecked(), included_start=inc[0], included_end=inc[1],

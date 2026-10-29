@@ -277,7 +277,8 @@ class PrimerActionsMixin:
 
     # ------------------------------------------------------------- map
 
-    def _open_map_primers_dialog(self, *, check_stock: bool = False) -> None:
+    def _open_map_primers_dialog(self, *, check_stock: bool = False,
+                                 primer_names: list[str] | None = None) -> None:
         """Map Primers; ``check_stock``: preset to test every saved primer (Database ›
         Check a Sequence)."""
         if not self._primers_ready():
@@ -294,8 +295,12 @@ class PrimerActionsMixin:
                         search_reverse=True, search_probe=False, pairs_only=False,
                         use_max_mismatches=True, max_mismatches=max(2, ms.max_mismatches),
                         three_prime_exact=3, use_product_range=True, product_min=40,
-                        product_max=max(3000, ms.product_max), test_on=pj.TEST_ON_SEQUENCES)
+                        product_max=max(3000, ms.product_max), test_on=pj.TEST_ON_SEQUENCES,
+                        primer_names=list(primer_names or []))
             opts = replace(opts, map=data)
+        elif opts.map.get("primer_names"):
+            # A selection from the Database window is for that one check only.
+            opts = replace(opts, map={**opts.map, "primer_names": []})
         dialog = MapPrimersDialog(
             initial=opts,
             files=self._primer_candidate_files(),
@@ -303,9 +308,15 @@ class PrimerActionsMixin:
             parent=self,
         )
 
+        def _forget_selection() -> None:
+            if self._primer_options.map.get("primer_names"):
+                self._save_primer_options(replace(
+                    self._primer_options, map={**self._primer_options.map, "primer_names": []}))
+
         def _accepted(d) -> None:
             self._save_primer_options(d.options())
             if not d.should_run():
+                _forget_selection()
                 self._set_status_message("Map Primers settings saved", 4000)
                 return
             files = d.run_files() or (
@@ -323,6 +334,7 @@ class PrimerActionsMixin:
                                     f"The file does not exist:\n{missing[0]}")
                 return
             self._start_primer_job(PRIMER_JOB_MAP, files, self._primer_options)
+            _forget_selection()   # the job already has its own copy of the settings
 
         self._present_te_viz_dialog(dialog, _accepted)
 
@@ -369,7 +381,8 @@ class PrimerActionsMixin:
 
         dialog.databasePathChanged.connect(_path_changed)
         dialog.checkSequenceRequested.connect(
-            lambda _p: self._open_map_primers_dialog(check_stock=True))
+            lambda _p, names: self._open_map_primers_dialog(check_stock=True,
+                                                            primer_names=list(names)))
 
         def _closed(_code: int) -> None:
             if self._primer_database_dialog is dialog:
