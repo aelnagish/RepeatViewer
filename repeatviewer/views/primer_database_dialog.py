@@ -26,6 +26,8 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMenu,
     QMessageBox,
     QPlainTextEdit,
@@ -81,7 +83,7 @@ _FORM: tuple[tuple[str, str, str], ...] = (
     ("room", "Room:", "combo"), ("status", "Status:", "status"),
     ("tested", "Tested:", "tested"), ("anneal_temp", "Annealing °C:", "line"),
     ("tm_supplier", "Tm (supplier):", "line"), ("concentration", "Concentration:", "line"),
-    ("ordered_by", "Ordered by:", "combo"), ("ordered_on", "Ordered on:", "line"),
+    ("ordered_by", "Ordered by:", "people"), ("ordered_on", "Ordered on:", "line"),
     ("aliases", "Other names:", "line"), ("dissolved", "", "check"),
     ("note", "Note:", "line"),
 )
@@ -94,6 +96,37 @@ def lab_user_setting() -> str:
 
 def apply_lab_user_setting() -> None:
     inv.set_lab_user(lab_user_setting())
+
+
+def _keeps_front(method):
+    """After a file dialog or message box closes, macOS activates the main window
+    and this (non-modal) window falls behind it: bring it back to the front."""
+    import functools
+
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        try:
+            return method(self, *args, **kwargs)
+        finally:
+            self.bring_to_front()
+
+    return wrapper
+
+
+def _keeps_front_of_parent(method):
+    """Same as :func:`_keeps_front`, for small dialogs opened from this window."""
+    import functools
+
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        try:
+            return method(self, *args, **kwargs)
+        finally:
+            for delay in (0, 120, 350):
+                QTimer.singleShot(delay, lambda w=self: (w.raise_(), w.activateWindow())
+                                  if w.isVisible() else None)
+
+    return wrapper
 
 
 class PrimerDatabaseDialog(QDialog):
@@ -131,10 +164,15 @@ class PrimerDatabaseDialog(QDialog):
         for v in inv.STATUS_VALUES[1:]:
             self._status.addItem(inv.STATUS_LABELS[v], v)
         self._status.currentIndexChanged.connect(self._fill)
+        self._person = QComboBox(self)
+        self._person.setMinimumWidth(140)
+        self._person.setToolTip("Show the primers ordered by one person")
+        self._person.currentIndexChanged.connect(self._fill)
         top = QHBoxLayout()
         top.setSpacing(8)
         top.addWidget(self._filter, 1)
         top.addWidget(self._organism)
+        top.addWidget(self._person)
         top.addWidget(self._status)
 
         self._where = QLabel(self)
@@ -142,11 +180,16 @@ class PrimerDatabaseDialog(QDialog):
         self._where.setWordWrap(True)
         self._change_btn = QPushButton("Change…", self)
         menu = QMenu(self._change_btn)
-        menu.addAction("Use a Shared Folder (Sciebo)…", self._use_shared_folder)
-        menu.addAction("Open Another Database…", self._open_other)
-        menu.addAction("Use the Database on This Computer", self._use_local)
+        # Run after the menu has closed: a file chooser opened while the menu is
+        # still closing hands the focus back to the main window on macOS, and
+        # this window drops behind it.
+        later = lambda slot: (lambda: QTimer.singleShot(0, slot))  # noqa: E731
+        menu.addAction("Use a Shared Folder (Sciebo)…", later(self._use_shared_folder))
+        menu.addAction("Open Another Database…", later(self._open_other))
+        menu.addAction("Use the Database on This Computer", later(self._use_local))
         menu.addSeparator()
-        menu.addAction("Your Name in the History…", lambda: self._ask_user(force=True))
+        menu.addAction("Your Name in the History…",
+                       later(lambda: self._ask_user(force=True)))
         self._change_btn.setMenu(menu)
         where_row = QHBoxLayout()
         where_row.addWidget(self._where, 1)
@@ -252,6 +295,11 @@ class PrimerDatabaseDialog(QDialog):
         dups.setToolTip("Same sequence under two names, reverse complements, one primer "
                         "inside another")
         dups.clicked.connect(self._find_duplicates)
+        people = QPushButton("People…", self)
+        people.setToolTip("The lab members: add people, set their role, mark who has left, "
+                          "merge two entries for one person")
+        people.clicked.connect(self._open_people)
+        self._people_btn = people
         check = QPushButton("Check a Sequence…", self)
         check.setToolTip("Test every saved primer against a new sequence: which pairs "
                          "already give a product, where the tubes are")
@@ -260,7 +308,7 @@ class PrimerDatabaseDialog(QDialog):
         close.clicked.connect(self.close)
         bar = QHBoxLayout()
         bar.setSpacing(8)
-        for b in (add, imp, exp, self._delete, dups, check):
+        for b in (add, imp, exp, self._delete, dups, people, check):
             bar.addWidget(b)
         bar.addStretch(1)
         bar.addWidget(close)
@@ -293,9 +341,15 @@ class PrimerDatabaseDialog(QDialog):
     @staticmethod
     def _open(path) -> PrimerDatabase:
         try:
-            return inv.open_database(path)
+            db = inv.open_database(path)
         except PrimerError:
-            return inv.open_database(None)
+            db = inv.open_database(None)
+        if isinstance(db, inv.PrimerInventory):
+            try:
+                db.migrate_people()   # older "Anna & Nusrat" text -> two people
+            except (OSError, PrimerError):
+                pass
+        return db
 
     def _switch_to(self, path: str) -> None:
         self._db = self._open(path or None)
@@ -316,7 +370,7 @@ class PrimerDatabaseDialog(QDialog):
                 "</span>")
             return
         shared = db.path.resolve() != inv.default_inventory_folder().resolve()
-        people = db.people()
+        people = db.writers()
         who = (f" · {len(people)} people have made changes" if len(people) > 1 else "")
         kind = "shared folder" if shared else "on this computer only"
         self._where.setText(
@@ -340,22 +394,34 @@ class PrimerDatabaseDialog(QDialog):
         self._refill_choices()
         self._fill(select_ids=keep)
 
+    @_keeps_front
     def _ask_user(self, *, force: bool = False) -> bool:
-        """The name written into the history; asked once."""
+        """Who is making changes (written into the history); asked once.
+
+        Chosen from the lab's people; a new name is added as a person."""
         name = lab_user_setting()
         if name and not force:
             return True
-        text, ok = QInputDialog.getText(
-            self, "Your Name",
-            "Your name, as it should appear in the history and in “Ordered by”:",
-            text=name or inv.default_user())
-        if not ok or not text.strip():
-            return bool(name)
-        QSettings().setValue(LAB_USER_KEY, text.strip())
-        apply_lab_user_setting()
         db = self._inventory()
+        names = [p.name for p in db.people(include_former=False)] if db is not None else []
+        start = name or inv.default_user()
+        if start not in names:
+            names = [start] + names
+        text, ok = QInputDialog.getItem(
+            self, "Who Are You?",
+            "Your name, for the history and for \u201cOrdered by\u201d.\n"
+            "Pick yourself, or type your name if you are new:",
+            names, max(0, names.index(start)), True)
+        text = (text or "").strip()
+        if not ok or not text:
+            return bool(name)
+        QSettings().setValue(LAB_USER_KEY, text)
+        apply_lab_user_setting()
         if db is not None:
-            db.set_user(text.strip())
+            db.set_user(text)
+            if db.person_by_name(text) is None:
+                db.ensure_people([text])
+            self._refill_choices()
         self._refresh_where()
         return True
 
@@ -388,7 +454,10 @@ class PrimerDatabaseDialog(QDialog):
             for p in db.primers:
                 rec = db.records.get(p.extra.get("id", ""))
                 if rec is not None:
-                    out.append((rec.rid, p, dict(rec.data)))
+                    d = dict(rec.data)
+                    d["ordered_by"] = db.ordered_by_ids(rec)
+                    d["_ordered_names"] = db.ordered_by_text(rec)
+                    out.append((rec.rid, p, d))
         else:
             for p in self._db.primers:
                 out.append((p.name, p, {"name": p.name, "sequence": p.sequence,
@@ -407,6 +476,21 @@ class PrimerDatabaseDialog(QDialog):
         idx = self._organism.findData(current)
         self._organism.setCurrentIndex(max(0, idx))
         self._organism.blockSignals(False)
+        current = self._person.currentData()
+        self._person.blockSignals(True)
+        self._person.clear()
+        self._person.addItem("Anyone", _ALL)
+        db = self._inventory()
+        for person in (db.people() if db is not None else []):
+            n = len(db.primers_of(person.pid))
+            self._person.addItem(f"{person.label} ({n})", person.pid)
+        idx = self._person.findData(current)
+        self._person.setCurrentIndex(max(0, idx))
+        self._person.setEnabled(db is not None)
+        self._person.blockSignals(False)
+        self._people_btn.setEnabled(db is not None) if hasattr(self, "_people_btn") else None
+        if "ordered_by" in self._fields:
+            self._fields["ordered_by"].set_database(db)
         for key, _lab, kind in _FORM:
             if kind != "combo":
                 continue
@@ -426,6 +510,7 @@ class PrimerDatabaseDialog(QDialog):
         text = self._filter.text().strip().lower()
         org = self._organism.currentData()
         status = self._status.currentData()
+        who = self._person.currentData()
         rows = self._rows()
         pairs = inv.partners([p for _i, p, _d in rows])
         shown = []
@@ -433,6 +518,8 @@ class PrimerDatabaseDialog(QDialog):
             if org not in (None, _ALL) and str(d.get("organism", "")).strip() != org:
                 continue
             if status not in (None, _ALL) and d.get("status", "") != status:
+                continue
+            if who not in (None, _ALL) and who not in (d.get("ordered_by") or []):
                 continue
             if text:
                 hay = " ".join(str(v) for v in d.values()).lower() + " " + p.sequence.lower()
@@ -452,6 +539,7 @@ class PrimerDatabaseDialog(QDialog):
                 "tm": round(st.tm, 1) if st else "",
                 "status": inv.STATUS_LABELS.get(d.get("status", ""), d.get("status", "")),
                 "tested": inv.TESTED_LABELS.get(d.get("tested", ""), d.get("tested", "")),
+                "ordered_by": d.get("_ordered_names", ""),
             }
             for key, _lab in _COLUMNS:
                 v = vals[key] if key in vals else str(d.get(key, "") or "")
@@ -537,6 +625,11 @@ class PrimerDatabaseDialog(QDialog):
                     w.addItem(labels[v] or "–", v)
             w.currentIndexChanged.connect(self._form_touched)
             return w
+        if kind == "people":
+            w = PeopleField(self, before_add=self._before_write)
+            w.changed.connect(self._form_touched)
+            w.peopleAdded.connect(self._refill_choices)
+            return w
         if kind == "combo":
             w = QComboBox(self)
             w.setEditable(True)
@@ -558,6 +651,8 @@ class PrimerDatabaseDialog(QDialog):
 
     def _get_field(self, key: str):
         w = self._fields[key]
+        if isinstance(w, PeopleField):
+            return w.value()
         if isinstance(w, QCheckBox):
             return w.isChecked()
         if isinstance(w, QComboBox):
@@ -566,6 +661,9 @@ class PrimerDatabaseDialog(QDialog):
 
     def _set_field(self, key: str, value) -> None:
         w = self._fields[key]
+        if isinstance(w, PeopleField):
+            w.set_value(list(value) if isinstance(value, list) else [])
+            return
         w.blockSignals(True)
         if isinstance(w, QCheckBox):
             w.setChecked(bool(value))
@@ -574,6 +672,7 @@ class PrimerDatabaseDialog(QDialog):
             w.setCurrentIndex(max(0, idx))
         elif isinstance(w, QComboBox):
             w.setEditText(str(value or ""))
+            w.lineEdit().setCursorPosition(0)   # show the start of long values
         else:
             w.setText(str(value or ""))
             w.setCursorPosition(0)
@@ -621,6 +720,7 @@ class PrimerDatabaseDialog(QDialog):
         self._form_touched()
         self._show_details()
 
+    @_keeps_front
     def _save_form(self) -> None:
         if not self._form_dirty():
             return
@@ -710,7 +810,7 @@ class PrimerDatabaseDialog(QDialog):
             rec = db.records.get(sel[0].extra.get("id", ""))
             if rec is not None and rec.history:
                 lines.append("History")
-                lines.extend("  " + inv.describe_change(ch) for ch in reversed(rec.history[-30:]))
+                lines.extend("  " + inv.describe_change(ch, db) for ch in reversed(rec.history[-30:]))
         self._details.setPlainText("\n".join(lines))
 
     # ------------------------------------------------------------ actions
@@ -728,6 +828,7 @@ class PrimerDatabaseDialog(QDialog):
             self._fill(select_ids=ids)
         return len(added)
 
+    @_keeps_front
     def _add(self) -> None:
         dlg = QDialog(self)
         dlg.setWindowTitle("Add Primers")
@@ -811,6 +912,7 @@ class PrimerDatabaseDialog(QDialog):
         primers = load_primers(path)
         return self.add_primers(primers)
 
+    @_keeps_front
     def _import(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self, "Import primers", str(Path.home()),
@@ -826,6 +928,7 @@ class PrimerDatabaseDialog(QDialog):
             QMessageBox.information(self, "Import", f"Added {n} primer(s) from "
                                                     f"{Path(path).name}.")
 
+    @_keeps_front
     def _export(self) -> None:
         ids = self._selected_ids()
         path, chosen = QFileDialog.getSaveFileName(
@@ -850,6 +953,7 @@ class PrimerDatabaseDialog(QDialog):
             p.write_text("\n".join("\t".join(c.replace("\t", " ") for c in r) for r in rows)
                          + "\n", encoding="utf-8")
 
+    @_keeps_front
     def _delete_selected(self) -> None:
         sel = self._selected()
         if not sel:
@@ -869,6 +973,7 @@ class PrimerDatabaseDialog(QDialog):
         self._fill(select_ids=[])
         self._on_selection()
 
+    @_keeps_front
     def _find_duplicates(self) -> None:
         dups = inv.find_duplicates(self._db.primers)
         if not dups:
@@ -888,6 +993,7 @@ class PrimerDatabaseDialog(QDialog):
 
     # ------------------------------------------------------------ location
 
+    @_keeps_front
     def _use_shared_folder(self) -> None:
         start = str(Path.home() / "Sciebo") if (Path.home() / "Sciebo").is_dir() \
             else str(Path.home())
@@ -902,6 +1008,7 @@ class PrimerDatabaseDialog(QDialog):
             return
         self._move_to(target)
 
+    @_keeps_front
     def _open_other(self) -> None:
         folder = QFileDialog.getExistingDirectory(
             self, f"Choose a “{inv.FOLDER_NAME}” folder", str(Path.home()))
@@ -917,6 +1024,7 @@ class PrimerDatabaseDialog(QDialog):
     def _use_local(self) -> None:
         self._switch_to("")
 
+    @_keeps_front
     def _move_to(self, target: Path) -> None:
         if not self._ask_user():
             return
@@ -936,6 +1044,34 @@ class PrimerDatabaseDialog(QDialog):
             "Change… › Open Another Database…, and choose this folder in their own Sciebo "
             "folder. Changes appear on the other computers once Sciebo has synced.")
 
+    @_keeps_front
+    def _open_people(self) -> None:
+        db = self._inventory()
+        if db is None:
+            return
+        if not self._before_write():
+            return
+        dlg = PeopleDialog(db, self)
+        dlg.exec()
+        self._refill_choices()
+        self._fill()
+        self._on_selection()
+
+    def bring_to_front(self) -> None:
+        def _go() -> None:
+            try:
+                if self.isVisible():
+                    self.raise_()
+                    self.activateWindow()
+            except RuntimeError:
+                pass
+
+        _go()
+        # macOS re-activates the main window a moment after a native panel closes
+        # (its closing animation): raise again after it.
+        for delay in (0, 120, 350, 700):
+            QTimer.singleShot(delay, _go)
+
     def closeEvent(self, event) -> None:  # noqa: N802
         if self._form_dirty():
             ans = QMessageBox.question(
@@ -951,4 +1087,329 @@ class PrimerDatabaseDialog(QDialog):
         super().closeEvent(event)
 
 
-__all__ = ["PrimerDatabaseDialog", "apply_lab_user_setting", "lab_user_setting"]
+# --------------------------------------------------------------------------
+# People
+# --------------------------------------------------------------------------
+
+
+class PeopleField(QWidget):
+    """``Ordered by``: one or more lab members, chosen from the list of people."""
+
+    changed = Signal()
+    peopleAdded = Signal()
+
+    def __init__(self, parent: QWidget, *, before_add=None) -> None:
+        super().__init__(parent)
+        self._db: inv.PrimerInventory | None = None
+        self._ids: list[str] = []
+        self._before_add = before_add
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(4)
+        self._text = QLineEdit(self)
+        self._text.setReadOnly(True)
+        self._text.setPlaceholderText("Nobody chosen")
+        self._btn = QPushButton("Choose…", self)
+        self._btn.clicked.connect(self._choose)
+        lay.addWidget(self._text, 1)
+        lay.addWidget(self._btn)
+
+    def set_database(self, db: inv.PrimerInventory | None) -> None:
+        self._db = db
+        self._show()
+
+    def value(self) -> list[str]:
+        return list(self._ids)
+
+    def set_value(self, ids: list[str]) -> None:
+        self._ids = list(ids)
+        self._show()
+
+    def _show(self) -> None:
+        names = self._db.names_of(self._ids) if self._db is not None else list(self._ids)
+        self._text.setText(", ".join(names))
+        self._text.setCursorPosition(0)
+
+    def _choose(self) -> None:
+        if self._db is None:
+            return
+        dlg = PeoplePicker(self._db, self._ids, self, before_add=self._before_add)
+        if dlg.exec() != int(QDialog.DialogCode.Accepted):
+            if dlg.added:
+                self.peopleAdded.emit()
+            return
+        if dlg.added:
+            self.peopleAdded.emit()
+        ids = dlg.chosen()
+        if ids != self._ids:
+            self._ids = ids
+            self._show()
+            self.changed.emit()
+
+
+class PeoplePicker(QDialog):
+    """Tick the people who ordered the primer; add someone new."""
+
+    def __init__(self, db: inv.PrimerInventory, chosen: list[str], parent: QWidget,
+                 *, before_add=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Ordered by")
+        self.resize(320, 420)
+        self._db = db
+        self._before_add = before_add
+        self.added = False
+        self._chosen = list(chosen)
+        self._filter = QLineEdit(self)
+        self._filter.setPlaceholderText("Filter")
+        self._filter.setClearButtonEnabled(True)
+        self._filter.textChanged.connect(self._fill)
+        self._list = QListWidget(self)
+        self._list.itemChanged.connect(self._ticked)
+        add = QPushButton("Add Person…", self)
+        add.clicked.connect(self._add)
+        cancel = QPushButton("Cancel", self)
+        save = QPushButton("Save", self)
+        save.setDefault(True)
+        cancel.clicked.connect(self.reject)
+        save.clicked.connect(self.accept)
+        bar = QHBoxLayout()
+        bar.addWidget(add)
+        bar.addStretch(1)
+        bar.addWidget(cancel)
+        bar.addWidget(save)
+        lay = QVBoxLayout(self)
+        lay.addWidget(self._filter)
+        lay.addWidget(self._list, 1)
+        lay.addLayout(bar)
+        self._fill()
+
+    def _fill(self, *_a) -> None:
+        text = self._filter.text().strip().lower()
+        self._list.blockSignals(True)
+        self._list.clear()
+        for person in self._db.people():
+            if not person.active and person.pid not in self._chosen:
+                continue
+            if text and text not in person.name.lower():
+                continue
+            item = QListWidgetItem(person.label + (f"  ·  {person.role}" if person.role else ""))
+            item.setData(Qt.ItemDataRole.UserRole, person.pid)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Checked if person.pid in self._chosen
+                               else Qt.CheckState.Unchecked)
+            self._list.addItem(item)
+        self._list.blockSignals(False)
+
+    def _ticked(self, item: QListWidgetItem) -> None:
+        pid = item.data(Qt.ItemDataRole.UserRole)
+        if item.checkState() == Qt.CheckState.Checked and pid not in self._chosen:
+            self._chosen.append(pid)
+        elif item.checkState() != Qt.CheckState.Checked and pid in self._chosen:
+            self._chosen.remove(pid)
+
+    def _add(self) -> None:
+        if self._before_add is not None and not self._before_add():
+            return
+        name, ok = QInputDialog.getText(self, "Add Person", "Name of the new lab member:")
+        if not ok or not name.strip():
+            return
+        try:
+            pid = self._db.add_person(name)
+        except PrimerError as exc:
+            existing = self._db.person_by_name(name)
+            if existing is None:
+                QMessageBox.warning(self, "Add Person", str(exc))
+                return
+            pid = existing.pid
+        self.added = True
+        if pid not in self._chosen:
+            self._chosen.append(pid)
+        self._filter.clear()
+        self._fill()
+
+    def chosen(self) -> list[str]:
+        return list(self._chosen)
+
+
+class PeopleDialog(QDialog):
+    """Manage the lab's people: add, edit, mark as former member, merge, remove."""
+
+    _COLS = ("Name", "Initials", "Role", "Email", "Primers", "Member")
+
+    def __init__(self, db: inv.PrimerInventory, parent: QWidget) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("People")
+        self.resize(720, 520)
+        self._db = db
+        self._table = QTableWidget(0, len(self._COLS), self)
+        self._table.setHorizontalHeaderLabels(list(self._COLS))
+        self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._table.verticalHeader().setVisible(False)
+        self._table.setAlternatingRowColors(True)
+        self._table.horizontalHeader().setStretchLastSection(True)
+        self._table.itemSelectionChanged.connect(self._on_select)
+
+        form = QGridLayout()
+        form.setHorizontalSpacing(8)
+        self._name = QLineEdit(self)
+        self._initials = QLineEdit(self)
+        self._initials.setMaxLength(6)
+        self._role = QComboBox(self)
+        self._role.setEditable(True)
+        self._role.addItems(list(inv.PERSON_ROLES))
+        self._email = QLineEdit(self)
+        self._active = QCheckBox("Current lab member", self)
+        for r, (label, w) in enumerate((("Name:", self._name), ("Initials:", self._initials),
+                                        ("Role:", self._role), ("Email:", self._email))):
+            lab = QLabel(label, self)
+            lab.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            form.addWidget(lab, r, 0)
+            form.addWidget(w, r, 1)
+        form.addWidget(self._active, 4, 1)
+        self._primers = QLabel(self)
+        self._primers.setWordWrap(True)
+        self._primers.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        form.addWidget(self._primers, 5, 1)
+        self._save = QPushButton("Save Changes", self)
+        self._save.clicked.connect(self._save_person)
+        form.addWidget(self._save, 6, 1, alignment=Qt.AlignmentFlag.AlignRight)
+
+        add = QPushButton("Add Person…", self)
+        add.clicked.connect(self._add)
+        self._merge = QPushButton("Merge…", self)
+        self._merge.setToolTip("Two entries for one person (e.g. \u201cAnna\u201d and "
+                               "\u201cAnna K.\u201d): select both, keep one")
+        self._merge.clicked.connect(self._merge_selected)
+        self._remove = QPushButton("Remove", self)
+        self._remove.setToolTip("Someone with primers is kept as a former member, so the "
+                                "record of who ordered what stays")
+        self._remove.clicked.connect(self._remove_selected)
+        close = QPushButton("Close", self)
+        close.clicked.connect(self.accept)
+        bar = QHBoxLayout()
+        for b in (add, self._merge, self._remove):
+            bar.addWidget(b)
+        bar.addStretch(1)
+        bar.addWidget(close)
+        lay = QVBoxLayout(self)
+        lay.addWidget(self._table, 1)
+        lay.addLayout(form)
+        lay.addLayout(bar)
+        self._fill()
+
+    def _fill(self, select: list[str] | None = None) -> None:
+        people = self._db.people()
+        self._table.blockSignals(True)
+        self._table.setRowCount(len(people))
+        for i, p in enumerate(people):
+            n = len(self._db.primers_of(p.pid))
+            for j, v in enumerate((p.name, p.initials, p.role, p.email, n,
+                                   "Yes" if p.active else "Former")):
+                item = QTableWidgetItem()
+                item.setData(Qt.ItemDataRole.DisplayRole, v)
+                item.setData(Qt.ItemDataRole.UserRole, p.pid)
+                if not p.active:
+                    item.setForeground(Qt.GlobalColor.gray)
+                self._table.setItem(i, j, item)
+        self._table.resizeColumnsToContents()
+        if select:
+            for r in range(self._table.rowCount()):
+                if self._table.item(r, 0).data(Qt.ItemDataRole.UserRole) in select:
+                    self._table.selectRow(r)
+        self._table.blockSignals(False)
+        self._on_select()
+
+    def _selected(self) -> list[str]:
+        return [self._table.item(i.row(), 0).data(Qt.ItemDataRole.UserRole)
+                for i in self._table.selectionModel().selectedRows()]
+
+    def _on_select(self) -> None:
+        ids = self._selected()
+        one = len(ids) == 1
+        for w in (self._name, self._initials, self._role, self._email, self._active,
+                  self._save):
+            w.setEnabled(one)
+        self._merge.setEnabled(len(ids) == 2)
+        self._remove.setEnabled(bool(ids))
+        if not one:
+            for w in (self._name, self._initials, self._email):
+                w.clear()
+            self._role.setEditText("")
+            self._primers.clear()
+            return
+        p = self._db.persons[ids[0]]
+        self._name.setText(p.name)
+        self._initials.setText(p.initials)
+        self._role.setEditText(p.role)
+        self._email.setText(p.email)
+        self._active.setChecked(p.active)
+        recs = sorted(r.name for r in self._db.primers_of(p.pid))
+        self._primers.setText(
+            f"<span style='color:palette(mid)'>Ordered {len(recs)} primer(s)"
+            + (": " + ", ".join(recs[:12]) + (" …" if len(recs) > 12 else "") if recs else "")
+            + "</span>")
+
+    @_keeps_front_of_parent
+    def _save_person(self) -> None:
+        ids = self._selected()
+        if len(ids) != 1:
+            return
+        try:
+            self._db.update_person(ids[0], {
+                "name": self._name.text(), "initials": self._initials.text().strip(),
+                "role": self._role.currentText().strip(), "email": self._email.text().strip(),
+                "active": self._active.isChecked()})
+        except PrimerError as exc:
+            QMessageBox.warning(self, "People", str(exc))
+            return
+        self._fill(select=ids)
+
+    @_keeps_front_of_parent
+    def _add(self) -> None:
+        name, ok = QInputDialog.getText(self, "Add Person", "Name of the new lab member:")
+        if not ok or not name.strip():
+            return
+        try:
+            pid = self._db.add_person(name)
+        except PrimerError as exc:
+            QMessageBox.warning(self, "Add Person", str(exc))
+            return
+        self._fill(select=[pid])
+
+    @_keeps_front_of_parent
+    def _merge_selected(self) -> None:
+        ids = self._selected()
+        if len(ids) != 2:
+            return
+        a, b = (self._db.persons[i] for i in ids)
+        keep_name, ok = QInputDialog.getItem(
+            self, "Merge", f"{a.name} and {b.name} are one person. Keep which name?",
+            [a.name, b.name], 0, False)
+        if not ok:
+            return
+        keep, drop = (a, b) if keep_name == a.name else (b, a)
+        n = self._db.merge_people(keep.pid, drop.pid)
+        QMessageBox.information(self, "Merge", f"{drop.name} merged into {keep.name}; "
+                                f"{n} primer(s) now show {keep.name}.")
+        self._fill(select=[keep.pid])
+
+    @_keeps_front_of_parent
+    def _remove_selected(self) -> None:
+        ids = self._selected()
+        if not ids:
+            return
+        names = ", ".join(self._db.persons[i].name for i in ids)
+        ans = QMessageBox.question(
+            self, "Remove", f"Remove {names}?\n\nSomeone who ordered primers stays as a "
+            "former member (shown in grey), so the record of who ordered what is kept.")
+        if ans != QMessageBox.StandardButton.Yes:
+            return
+        for pid in ids:
+            self._db.remove_person(pid)
+        self._fill()
+
+
+__all__ = ["PeopleDialog", "PeopleField", "PrimerDatabaseDialog", "apply_lab_user_setting",
+           "lab_user_setting"]

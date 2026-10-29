@@ -207,6 +207,9 @@ def clean_record_fields(fields: dict) -> dict:
         if key == "dissolved":
             out[key] = _to_bool(value)
             continue
+        if key == "ordered_by" and isinstance(value, (list, tuple)):
+            out[key] = [str(v) for v in value if str(v).strip()]
+            continue
         text = "" if value is None else str(value).strip()
         if key == "name":
             text = re.sub(r"\s*([_\-.])\s*", r"\1", text)
@@ -241,6 +244,60 @@ def _to_bool(value) -> bool:
     if isinstance(value, bool):
         return value
     return str(value).strip().lower() in ("1", "true", "yes", "y", "x", "✓", "ja", "wahr")
+
+
+# --------------------------------------------------------------------------
+# People
+# --------------------------------------------------------------------------
+
+PERSON_PREFIX = "person:"
+PERSON_FIELDS: tuple[tuple[str, str], ...] = (
+    ("name", "Name"), ("initials", "Initials"), ("role", "Role"), ("email", "Email"),
+    ("active", "Active"),
+)
+PERSON_ROLES = ("", "Group leader", "Postdoc", "PhD student", "Master student",
+                "Bachelor student", "Technician", "Guest", "Former member")
+_NAME_SPLIT = re.compile(r"\s*(?:&|,|;|/|\+|\band\b|\bund\b)\s*", re.I)
+
+
+@dataclass
+class Person:
+    pid: str
+    name: str
+    initials: str = ""
+    role: str = ""
+    email: str = ""
+    active: bool = True
+    created_by: str = ""
+    history: list = field(default_factory=list)
+
+    @property
+    def label(self) -> str:
+        return self.name + ("" if self.active else " (former)")
+
+
+def person_id(name: str) -> str:
+    """Stable id from the name, so the same person added on two computers
+    before Sciebo has synced is still one person."""
+    slug = re.sub(r"[^a-z0-9]+", "-", (name or "").strip().lower()).strip("-")
+    return PERSON_PREFIX + (slug or "unnamed")
+
+
+def split_names(text: str) -> list[str]:
+    """``"Anna & Nusrat"`` -> ``["Anna", "Nusrat"]``."""
+    out = []
+    for part in _NAME_SPLIT.split(str(text or "")):
+        part = re.sub(r"\s+", " ", part).strip(" .")
+        if part and part.lower() not in [x.lower() for x in out]:
+            out.append(part)
+    return out
+
+
+def initials_of(name: str) -> str:
+    words = [w for w in re.split(r"[\s\-]+", name) if w]
+    if len(words) >= 2:
+        return (words[0][0] + words[-1][0]).upper()
+    return name[:2].upper()
 
 
 # --------------------------------------------------------------------------
@@ -285,6 +342,7 @@ class PrimerInventory(PrimerDatabase):
         self.set_user(user or "")
         self._signature: tuple = ()
         self.records: dict[str, Record] = {}
+        self.persons: dict[str, Person] = {}
         self.primers: list[Primer] = []
         self.skipped_lines = 0
         self.reload()
@@ -350,8 +408,18 @@ class PrimerInventory(PrimerDatabase):
                 continue
             rec.changed_by, rec.changed_ts = ch.user, ch.ts
             rec.history.append(ch)
+        self.persons = {}
+        for k, r in records.items():
+            if not k.startswith(PERSON_PREFIX) or r.data.get("_deleted"):
+                continue
+            d = r.data
+            self.persons[k] = Person(k, str(d.get("name") or k[len(PERSON_PREFIX):]),
+                                     str(d.get("initials", "")), str(d.get("role", "")),
+                                     str(d.get("email", "")),
+                                     bool(d.get("active", True)), r.created_by,
+                                     list(r.history))
         self.records = {k: r for k, r in records.items() if not r.data.get("_deleted")
-                        and r.sequence}
+                        and not k.startswith(PERSON_PREFIX) and r.sequence}
         self.skipped_lines = skipped
         self._signature = self.signature()
         self._rebuild_primers()
@@ -394,8 +462,9 @@ class PrimerInventory(PrimerDatabase):
         """Add records (cleaned dicts with at least name and sequence). Returns ids."""
         taken = {r.name for r in self.records.values()}
         changes, ids = [], []
-        for row in rows:
-            data = clean_record_fields(row)
+        rows = [clean_record_fields(row) for row in rows]
+        self._resolve_people_in(rows)
+        for data in rows:
             if not data.get("name") or not data.get("sequence"):
                 raise PrimerError("Every primer needs a name and a sequence.")
             data["name"] = unique_name(data["name"], taken)
@@ -412,6 +481,7 @@ class PrimerInventory(PrimerDatabase):
         if rec is None:
             raise PrimerError("This primer was deleted meanwhile (by someone else?).")
         data = clean_record_fields(fields)
+        self._resolve_people_in([data])
         if "name" in data:
             if not data["name"]:
                 raise PrimerError("The name cannot be empty.")
@@ -472,13 +542,162 @@ class PrimerInventory(PrimerDatabase):
 
     # ------------------------------------------------------------ helpers
 
-    def people(self) -> list[str]:
+    def writers(self) -> list[str]:
+        """Everyone who has written to this database (one log per person+computer)."""
         seen = []
         for p in self.log_files():
             who = p.name.split("@", 1)[0]
             if who not in seen:
                 seen.append(who)
         return seen
+
+    # ------------------------------------------------------------ people
+
+    def people(self, *, include_former: bool = True) -> list[Person]:
+        out = [p for p in self.persons.values() if include_former or p.active]
+        return sorted(out, key=lambda p: (not p.active, p.name.lower()))
+
+    def person_by_name(self, name: str) -> Person | None:
+        return self.persons.get(person_id(name)) or next(
+            (p for p in self.persons.values() if p.name.lower() == (name or "").strip().lower()),
+            None)
+
+    def ensure_people(self, names: list[str]) -> list[str]:
+        """Person ids for these names; people not there yet are added."""
+        ids, changes = [], []
+        for name in names:
+            name = re.sub(r"\s+", " ", str(name)).strip()
+            if not name:
+                continue
+            p = self.person_by_name(name)
+            pid = p.pid if p is not None else person_id(name)
+            if p is None and pid not in [c.rid for c in changes]:
+                changes.append(self._change("add", pid, {"name": name,
+                                                         "initials": initials_of(name),
+                                                         "active": True}))
+            if pid not in ids:
+                ids.append(pid)
+        self._write(changes)
+        return ids
+
+    def add_person(self, name: str, **fields) -> str:
+        name = re.sub(r"\s+", " ", str(name or "")).strip()
+        if not name:
+            raise PrimerError("A person needs a name.")
+        if self.person_by_name(name) is not None:
+            raise PrimerError(f"{name} is already in the list of people.")
+        data = {"name": name, "initials": fields.get("initials") or initials_of(name),
+                "role": fields.get("role", ""), "email": fields.get("email", ""),
+                "active": bool(fields.get("active", True))}
+        pid = person_id(name)
+        self._write([self._change("add", pid, data)])
+        return pid
+
+    def update_person(self, pid: str, fields: dict) -> bool:
+        p = self.persons.get(pid)
+        if p is None:
+            raise PrimerError("This person was removed meanwhile.")
+        data = {k: v for k, v in fields.items() if k in dict(PERSON_FIELDS)}
+        if "name" in data:
+            data["name"] = re.sub(r"\s+", " ", str(data["name"])).strip()
+            if not data["name"]:
+                raise PrimerError("A person needs a name.")
+            other = self.person_by_name(data["name"])
+            if other is not None and other.pid != pid:
+                raise PrimerError(f"{data['name']} is already in the list of people.")
+        if "active" in data:
+            data["active"] = bool(data["active"])
+        current = {"name": p.name, "initials": p.initials, "role": p.role, "email": p.email,
+                   "active": p.active}
+        diff = {k: v for k, v in data.items() if current.get(k) != v}
+        if not diff:
+            return False
+        self._write([self._change("update", pid, diff)])
+        return True
+
+    def primers_of(self, pid: str) -> list[Record]:
+        return [r for r in self.records.values() if pid in self.ordered_by_ids(r)]
+
+    def remove_person(self, pid: str) -> str:
+        """Delete a person nobody's primers refer to; otherwise mark them former.
+        Returns "deleted" or "former"."""
+        if pid not in self.persons:
+            return ""
+        if self.primers_of(pid):
+            self.update_person(pid, {"active": False})
+            return "former"
+        self._write([self._change("delete", pid, {})])
+        return "deleted"
+
+    def merge_people(self, keep: str, drop: str) -> int:
+        """Two entries for one person: primers of ``drop`` go to ``keep``."""
+        if keep == drop or keep not in self.persons or drop not in self.persons:
+            return 0
+        changes = []
+        for rec in self.primers_of(drop):
+            ids = [keep if x == drop else x for x in self.ordered_by_ids(rec)]
+            ids = list(dict.fromkeys(ids))
+            changes.append(self._change("update", rec.rid, {"ordered_by": ids}))
+        changes.append(self._change("delete", drop, {}))
+        self._write(changes)
+        return len(changes) - 1
+
+    def ordered_by_ids(self, rec: Record) -> list[str]:
+        value = rec.data.get("ordered_by")
+        if isinstance(value, list):
+            return [str(v) for v in value]
+        if value:   # older text value not turned into people yet
+            return [p.pid if (p := self.person_by_name(n)) else person_id(n)
+                    for n in split_names(str(value))]
+        return []
+
+    def names_of(self, ids) -> list[str]:
+        out = []
+        for pid in ids or []:
+            p = self.persons.get(pid)
+            out.append(p.name if p else pid[len(PERSON_PREFIX):] if
+                       str(pid).startswith(PERSON_PREFIX) else str(pid))
+        return out
+
+    def ordered_by_text(self, rec: Record) -> str:
+        value = rec.data.get("ordered_by")
+        if isinstance(value, str):      # not turned into people yet
+            return ", ".join(p.name if (p := self.person_by_name(n)) else n
+                             for n in split_names(value))
+        return ", ".join(self.names_of(self.ordered_by_ids(rec)))
+
+    def _resolve_people_in(self, rows: list[dict]) -> None:
+        """``ordered_by`` given as names (text) -> person ids, adding new people."""
+        names: list[str] = []
+        for row in rows:
+            v = row.get("ordered_by")
+            if isinstance(v, str):
+                names += split_names(v)
+        if names:
+            self.ensure_people(names)
+        for row in rows:
+            v = row.get("ordered_by")
+            if isinstance(v, str):
+                row["ordered_by"] = [self.person_by_name(n).pid for n in split_names(v)
+                                     if self.person_by_name(n) is not None]
+            elif isinstance(v, list):
+                row["ordered_by"] = [x for x in v if x in self.persons]
+
+    def migrate_people(self) -> int:
+        """Older databases: "Anna & Nusrat" text -> two people. Returns primers changed."""
+        todo = [r for r in self.records.values()
+                if isinstance(r.data.get("ordered_by"), str) and r.data.get("ordered_by")]
+        if not todo:
+            return 0
+        names = [n for r in todo for n in split_names(r.data["ordered_by"])]
+        self.ensure_people(names)
+        changes = []
+        for r in todo:
+            ids = [self.person_by_name(n).pid for n in split_names(r.data["ordered_by"])
+                   if self.person_by_name(n) is not None]
+            changes.append(self._change("update", r.rid, {"ordered_by": ids}))
+        self._write(changes)
+        return len(changes)
 
 
 def default_inventory_folder() -> Path:
@@ -890,7 +1109,7 @@ def plan_import(rows: list[list[str]], db: PrimerDatabase) -> ImportPlan:
                 aliases.append(data["name"])
             data["aliases"] = ", ".join(aliases)
         fill = {k: v for k, v in data.items() if k not in ("name", "sequence")
-                and (k == "aliases" or rec.get(k) in ("", None, False))}
+                and (k == "aliases" or rec.get(k) in ("", None, False, []))}
         if fill and rec.rid:
             plan.updates.append((rec.rid, fill))
         else:
@@ -941,6 +1160,8 @@ def export_rows(db: PrimerDatabase) -> list[list[str]]:
                     v = STATUS_LABELS.get(v, v)
                 elif k == "tested":
                     v = TESTED_LABELS.get(v, v)
+                elif k == "ordered_by":
+                    v = db.ordered_by_text(r)
                 vals.append(str(v))
             vals += [r.created_by, time.strftime("%Y-%m-%d %H:%M",
                                                  time.localtime(r.changed_ts)) + f" {r.changed_by}"]
@@ -952,7 +1173,7 @@ def export_rows(db: PrimerDatabase) -> list[list[str]]:
     return rows
 
 
-def describe_change(ch: Change) -> str:
+def describe_change(ch: Change, db: "PrimerInventory | None" = None) -> str:
     when = time.strftime("%Y-%m-%d %H:%M", time.localtime(ch.ts))
     if ch.op == "add":
         return f"{when}  {ch.user}: added"
@@ -963,6 +1184,10 @@ def describe_change(ch: Change) -> str:
         label = FIELD_LABELS.get(k, k)
         if k == "dissolved":
             v = "yes" if v else "no"
+        elif k == "ordered_by" and isinstance(v, list):
+            v = ", ".join(db.names_of(v)) if db is not None else ", ".join(v)
+        elif k == "active":
+            v = "yes" if v else "no (former member)"
         parts.append(f"{label} = {v}" if v != "" else f"{label} cleared")
     return f"{when}  {ch.user}: " + "; ".join(parts)
 

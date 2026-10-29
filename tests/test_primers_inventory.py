@@ -78,7 +78,7 @@ def test_two_people_never_lose_changes(shared):
     b.reload()
     assert a.records[rid].get("status") == b.records[rid].get("status") == "used up"
     assert {c.user for c in a.records[rid].history} == {"Abdullah", "Anna"}
-    assert set(a.people()) == {"Abdullah", "Anna"}
+    assert set(a.writers()) == {"Abdullah", "Anna"}
 
 
 def test_half_synced_line_and_conflicted_copy(shared):
@@ -423,4 +423,120 @@ def test_window_find_duplicates_and_shared_move(qapp, settings, shared, tmp_path
     monkeypatch.setattr(QMessageBox, "exec", lambda self: 0)
     d._find_duplicates()
     assert len(d._selected_ids()) == 2
+    d.close()
+
+
+# --------------------------------------------------------------------------
+# People
+# --------------------------------------------------------------------------
+
+
+def test_people_from_the_sheet(shared):
+    db = _imported(shared)
+    names = [p.name for p in db.people()]
+    assert names == ["Anna", "Loreen", "Nici", "Sara"]
+    fern = db.record_by_name("fern_5S_rRNA_fwd")
+    assert fern.get("ordered_by") == [inv.person_id("Loreen"), inv.person_id("Anna")]
+    assert db.ordered_by_text(fern) == "Loreen, Anna"
+    assert len(db.primers_of(inv.person_id("Anna"))) == 20   # Anna, Loreen & Anna, Sara & Anna
+    assert inv.split_names("Anna & Nusrat") == ["Anna", "Nusrat"]
+    assert inv.split_names("Anna und Daniel, Sara/Nici") == ["Anna", "Daniel", "Sara", "Nici"]
+
+
+def test_people_add_edit_merge_remove(shared):
+    db = _imported(shared)
+    pid = db.add_person("Abdullah Yusuf", role="PhD student", email="a@rwth-aachen.de")
+    assert db.persons[pid].initials == "AY"
+    with pytest.raises(PrimerError, match="already"):
+        db.add_person("abdullah  yusuf")
+    db.update_person(pid, {"role": "Postdoc"})
+    assert db.persons[pid].role == "Postdoc"
+    rid = db.record_by_name("ITS4").rid
+    db.update(rid, {"ordered_by": [inv.person_id("Anna"), pid]})
+    assert db.ordered_by_text(db.records[rid]) == "Anna, Abdullah Yusuf"
+    # Text still works (names are matched, new names become people).
+    db.update(rid, {"ordered_by": "Anna & Nusrat"})
+    assert db.ordered_by_text(db.records[rid]) == "Anna, Nusrat"
+    assert db.person_by_name("Nusrat") is not None
+    # Renaming a person shows the new name on every primer.
+    db.update_person(inv.person_id("Nici"), {"name": "Nicola"})
+    assert db.ordered_by_text(db.record_by_name("pBV1_for")) == "Nicola"
+    # Merge: two entries for one person.
+    dup = db.add_person("Anna K.")
+    db.update(db.record_by_name("ITS1-F").rid, {"ordered_by": [dup]})
+    assert db.merge_people(inv.person_id("Anna"), dup) == 1
+    assert dup not in db.persons
+    assert db.ordered_by_text(db.record_by_name("ITS1-F")) == "Anna"
+    # Remove: with primers -> former member; without -> gone.
+    assert db.remove_person(inv.person_id("Sara")) == "former"
+    assert db.persons[inv.person_id("Sara")].active is False
+    assert db.remove_person(pid) == "deleted" and pid not in db.persons
+    # History speaks names, not ids.
+    hist = [inv.describe_change(c, db) for c in db.records[rid].history]
+    assert any("Ordered by = Anna, Nusrat" in h for h in hist)
+
+
+def test_same_person_added_on_two_computers_is_one(shared):
+    a = inv.PrimerInventory(shared, user="Abdullah")
+    b = inv.PrimerInventory(shared, user="Anna")
+    a.add_person("Daniel")
+    b.add_person("Daniel")       # before Sciebo synced: b did not see a's entry
+    a.reload()
+    assert [p.name for p in a.people()] == ["Daniel"]
+
+
+def test_old_text_is_migrated(shared):
+    db = inv.PrimerInventory(shared, user="Abdullah")
+    # An older database: ordered_by written as text.
+    db._write([db._change("add", "r1", {"name": "X_F", "sequence": "ACGTACGTACGTACGTAA",
+                                        "ordered_by": "Anna & Daniel"})])
+    assert db.ordered_by_text(db.records["r1"]) == "Anna, Daniel"   # readable before
+    assert db.migrate_people() == 1 and db.migrate_people() == 0
+    assert db.records["r1"].get("ordered_by") == [inv.person_id("Anna"), inv.person_id("Daniel")]
+
+
+def test_window_people(qapp, settings, shared, monkeypatch):
+    from PySide6.QtWidgets import QInputDialog, QMessageBox
+
+    from repeatviewer.views.primer_database_dialog import (
+        PeopleDialog,
+        PeoplePicker,
+        PrimerDatabaseDialog,
+    )
+
+    _imported(shared)
+    d = PrimerDatabaseDialog(shared)
+    # Person filter.
+    d._person.setCurrentIndex(d._person.findData(inv.person_id("Nici")))
+    assert d._table.rowCount() == 8
+    assert d._person.currentText() == "Nici (8)"
+    d._person.setCurrentIndex(0)
+    # The form shows names; the picker sets people.
+    d._table.selectRow(_row_of(d, "ITS4"))
+    qapp.processEvents()
+    field = d._fields["ordered_by"]
+    assert field._text.text() == "Anna"
+    db = d.database()
+    picker = PeoplePicker(db, field.value(), d)
+    monkeypatch.setattr(QInputDialog, "getText", lambda *a, **k: ("Daniel", True))
+    picker._add()
+    assert picker.chosen() == [inv.person_id("Anna"), inv.person_id("Daniel")]
+    field.set_value(picker.chosen())
+    d._form_touched()
+    assert d._save_btn.isEnabled()
+    d._save_form()
+    assert db.ordered_by_text(db.record_by_name("ITS4")) == "Anna, Daniel"
+    assert d._table.item(_row_of(d, "ITS4"), 12).text() == "Anna, Daniel"
+    # People window: edit and mark as former.
+    pd = PeopleDialog(db, d)
+    assert pd._table.rowCount() == 5
+    r = next(i for i in range(5) if pd._table.item(i, 0).text() == "Daniel")
+    pd._table.selectRow(r)
+    pd._role.setEditText("Master student")
+    pd._save_person()
+    assert db.persons[inv.person_id("Daniel")].role == "Master student"
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
+    pd._table.selectRow(r)
+    pd._remove_selected()
+    assert db.persons[inv.person_id("Daniel")].active is False   # has a primer: kept
     d.close()

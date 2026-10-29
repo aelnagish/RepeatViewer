@@ -66,7 +66,7 @@ th{color:var(--muted);font-weight:600}
    └─ Database    the lab's primer inventory
 Help
 └─ Primers and Probes Manual   (this page)</div>
-<p>The toolbar can also show <b>Primers</b> (Design) and <b>Map Primers</b> (Map). Add them with the toolbar customisation. A <b>right-click</b> on a toolbar button runs it with the saved settings, or opens the window (choose which on the <b>Options</b> tab).</p>
+<p>The toolbar can also show a <b>Primers and Probes</b> button (Settings › Toolbar › Add buttons…). Click it for the same three items: Design, Map, Database. A <b>right-click</b> on it designs with the saved settings, or opens the Design window (choose which on its <b>Options</b> tab).</p>
 
 <h2 id="design">3. The Design window</h2>
 <p>Tabs: <b>Primers</b> | <b>Regions</b> | <b>Specificity</b> | <b>Options</b>. You can run from the first tab; the others are optional.</p>
@@ -101,7 +101,7 @@ FISH probes
 <tr><td>Max Tm difference</td><td>Largest Tm gap between the two primers of a pair.</td></tr>
 <tr><td>Pairs to return</td><td>How many pairs the report lists.</td></tr>
 </table>
-<p><b>Advanced Settings ▸</b> (bottom left) shows poly-X, GC clamp, 3′ stability, probe size and Tm, 5′ tails (M13, T7, restriction sites, or your own) and the Tm calculation (salt, Mg²⁺, dNTP, oligo concentration).</p>
+<p><b>Advanced Settings ▸</b> (bottom left) shows poly-X, GC clamp, 3′ stability, probe size and Tm, 5′ tails (M13, T7, restriction sites, or your own) and the Tm calculation (salt, Mg²⁺, dNTP, oligo concentration). When the window would be taller than your screen, the settings scroll and the buttons stay at the bottom.</p>
 <h3>Options tab</h3>
 <ul>
 <li>What a right-click on the toolbar button does.</li>
@@ -209,7 +209,8 @@ gene.fa_primers_details/
 <p>In Google Sheets: <b>File › Download › Microsoft Excel (.xlsx)</b> or <b>Comma-separated values (.csv)</b>. Then <b>Import…</b> and choose the file. RepeatViewer finds the header row and reads the columns it recognises: Primer name, Primer sequence, Organism, Amplified sequence (Target), Tm (supplier), H2O added (Dissolved), Ordered by, Ordered on, Located in Box, Freezer, Room, and also Status, Tested, Annealing, Concentration, Pair, Note when present. Before importing it shows how many primers are new, which are already in (same sequence, even under another name: that name is kept as <i>Other names</i>), and which rows are skipped and why. Importing again later only adds what is new.</p>
 <h3>The window</h3>
 <ul>
-<li><b>Filter</b> searches every field (name, sequence, target, box, who …); the two boxes next to it show one organism or one status.</li>
+<li><b>Filter</b> searches every field (name, sequence, target, box, who …); the boxes next to it show one organism, the primers of one person, or one status.</li>
+<li><b>People</b>: everyone in the lab is one entry, so <i>Ordered by</i> is chosen from a list (<b>Choose…</b>), not typed. A primer can have several people. Add someone new from <b>Choose… › Add Person…</b> or <b>People…</b>. In <b>People…</b> you can set a role and email, rename (every primer shows the new name), <b>Merge</b> two entries for one person (e.g. Anna and Anna K.), and <b>Remove</b>: someone who ordered primers stays as a former member (grey), so the record of who ordered what is kept. The sheet's “Anna &amp; Nusrat” became two people, Anna and Nusrat. The first time you change something, pick yourself from the list.</li>
 <li><b>Pair</b> is found from the names (<code>_for/_rev</code>, <code>_fwd/_rev1</code>, <code>_FW/_RV</code>, <code>_F/_R</code>); write it in <i>Pairs with</i> when the names do not show it (for example ITS1-F with ITS4).</li>
 <li>Select a primer to edit it below the table, then <b>Save Changes</b>. Select several to set a field on all of them at once (for example a new box or <i>Used up</i>).</li>
 <li>The panel on the right shows Tm, GC, hairpin, self-dimer, the Tm from the synthesis report, and the history. Select two primers to see the dimer between them.</li>
