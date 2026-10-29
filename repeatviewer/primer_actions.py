@@ -158,6 +158,12 @@ class PrimerActionsMixin:
     def _init_primer_actions(self) -> None:
         self._primer_options = load_primer_options()
         self._primer_database_dialog = None
+        try:
+            from repeatviewer.views.primer_database_dialog import apply_lab_user_setting
+
+            apply_lab_user_setting()
+        except Exception:  # noqa: BLE001 - only the name in the history
+            pass
 
     def _save_primer_options(self, opts: PrimerOptions) -> None:
         self._primer_options = opts
@@ -271,13 +277,27 @@ class PrimerActionsMixin:
 
     # ------------------------------------------------------------- map
 
-    def _open_map_primers_dialog(self) -> None:
+    def _open_map_primers_dialog(self, *, check_stock: bool = False) -> None:
+        """Map Primers; ``check_stock``: preset to test every saved primer (Database ›
+        Check a Sequence)."""
         if not self._primers_ready():
             return
         from repeatviewer.views.primer_dialogs import MapPrimersDialog
 
+        opts = self._primer_options
+        if check_stock:
+            from repeatviewer.backends.primers import jobs as pj
+
+            ms = opts.map_settings()
+            data = ms.to_dict()
+            data.update(mode=pj.MAP_DATABASE, primer_file="", search_forward=True,
+                        search_reverse=True, search_probe=False, pairs_only=False,
+                        use_max_mismatches=True, max_mismatches=max(2, ms.max_mismatches),
+                        three_prime_exact=3, use_product_range=True, product_min=40,
+                        product_max=max(3000, ms.product_max), test_on=pj.TEST_ON_SEQUENCES)
+            opts = replace(opts, map=data)
         dialog = MapPrimersDialog(
-            initial=self._primer_options,
+            initial=opts,
             files=self._primer_candidate_files(),
             project_genome=self._genome_path_resolved(),
             parent=self,
@@ -341,6 +361,15 @@ class PrimerActionsMixin:
             parent=self,
         )
         self._primer_database_dialog = dialog
+
+        def _path_changed(new_path: str) -> None:
+            self._save_primer_options(replace(self._primer_options, database_path=new_path))
+            self._set_status_message(
+                f"Primer Database: {new_path or 'the database on this computer'}", 6000)
+
+        dialog.databasePathChanged.connect(_path_changed)
+        dialog.checkSequenceRequested.connect(
+            lambda _p: self._open_map_primers_dialog(check_stock=True))
 
         def _closed(_code: int) -> None:
             if self._primer_database_dialog is dialog:

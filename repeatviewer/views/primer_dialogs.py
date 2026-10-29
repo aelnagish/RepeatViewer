@@ -21,19 +21,15 @@ from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
     QDialog,
-    QFileDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
-    QHeaderView,
     QLabel,
     QLineEdit,
     QMessageBox,
-    QPlainTextEdit,
     QPushButton,
     QRadioButton,
     QSizePolicy,
-    QSplitter,
     QStackedWidget,
     QStyledItemDelegate,
     QStyleOptionViewItem,
@@ -49,11 +45,8 @@ from repeatviewer.backends.primers import jobs as pj
 from repeatviewer.backends.primers import painting as pt
 from repeatviewer.backends.primers.oligos import (
     KIND_LABELS,
-    PRIMER_KINDS,
     Primer,
     PrimerDatabase,
-    parse_primer_text,
-    write_primers,
 )
 from repeatviewer.backends.primers.thermo import (
     SALT_METHOD_LABELS,
@@ -62,8 +55,6 @@ from repeatviewer.backends.primers.thermo import (
     TM_METHODS,
     PrimerError,
     ThermoSettings,
-    analyze_oligo,
-    heterodimer,
     primer3_available,
     PRIMER3_MISSING,
 )
@@ -1095,8 +1086,8 @@ class PrimerDesignDialog(_TabbedToolDialog):
         dbl.setContentsMargins(0, 4, 0, 0)
         dbl.setSpacing(6)
         dbl.addWidget(QLabel("Primer Database:", self))
-        self._db_path = _path_row(self, "Default (RepeatViewer settings folder)",
-                                  "Choose the Primer Database FASTA")
+        self._db_path = _path_row(self, "Default: the database on this computer",
+                                  "Choose the Primer Database folder", mode="directory")
         self._db_path.set_path(initial.database_path or None, emit=False)
         dbl.addWidget(self._db_path, 1)
         rl.addWidget(db_row)
@@ -2098,8 +2089,8 @@ class MapPrimersDialog(_TabbedToolDialog):
         dbl.setContentsMargins(0, 4, 0, 0)
         dbl.setSpacing(6)
         dbl.addWidget(QLabel("Primer Database:", self))
-        self._db_path = _path_row(self, "Default (RepeatViewer settings folder)",
-                                  "Choose the Primer Database FASTA")
+        self._db_path = _path_row(self, "Default: the database on this computer",
+                                  "Choose the Primer Database folder", mode="directory")
         self._db_path.set_path(initial.database_path or None, emit=False)
         self._db_path.line_edit().editingFinished.connect(self._reload_db)
         dbl.addWidget(self._db_path, 1)
@@ -2137,7 +2128,9 @@ class MapPrimersDialog(_TabbedToolDialog):
     def _reload_db(self) -> None:
         p = self._db_path.path()
         try:
-            self._db = PrimerDatabase(p)
+            from repeatviewer.backends.primers.inventory import open_database
+
+            self._db = open_database(p)
         except PrimerError:
             self._db = PrimerDatabase.__new__(PrimerDatabase)
             self._db.path = p
@@ -2272,313 +2265,6 @@ class MapPrimersDialog(_TabbedToolDialog):
 # --------------------------------------------------------------------------
 
 
-class PrimerDatabaseDialog(QDialog):
-    """The saved primers: add, paste, import, export, delete, with live checks.
-
-    Selecting one primer shows its Tm, GC, hairpin and self-dimer; selecting
-    two shows the cross-dimer between them.
-    """
-
-    databaseChanged = Signal()
-
-    COLS = ("Name", "Kind", "Sequence 5′→3′", "Length", "Tm °C", "GC %", "Note")
-
-    def __init__(self, path: Path | None = None, *, thermo: ThermoSettings | None = None,
-                 parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setWindowTitle("Primer Database")
-        self.setModal(False)
-        self.setWindowModality(Qt.WindowModality.NonModal)
-        self.resize(940, 560)
-        self._db = PrimerDatabase(path)
-        self._thermo = thermo or ThermoSettings()
-        self._stats_cache: dict[str, object] = {}
-
-        self._filter = QLineEdit(self)
-        self._filter.setPlaceholderText("Filter by name, sequence or note")
-        self._filter.setClearButtonEnabled(True)
-        self._filter.textChanged.connect(self._fill)
-        self._path_label = QLabel(self)
-        self._path_label.setEnabled(False)
-        self._path_label.setText(str(self._db.path))
-        self._path_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-
-        self._table = QTableWidget(0, len(self.COLS), self)
-        self._table.setHorizontalHeaderLabels(list(self.COLS))
-        self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self._table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-        self._table.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked
-                                    | QAbstractItemView.EditTrigger.EditKeyPressed)
-        self._table.verticalHeader().setVisible(False)
-        self._table.verticalHeader().setDefaultSectionSize(22)
-        self._table.setAlternatingRowColors(True)
-        self._table.setSortingEnabled(True)
-        hh = self._table.horizontalHeader()
-        hh.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        hh.setStretchLastSection(True)
-        self._table.itemSelectionChanged.connect(self._show_details)
-        self._table.itemChanged.connect(self._edited)
-        self._table.horizontalHeader().setSortIndicator(0, Qt.SortOrder.AscendingOrder)
-
-        self._details = QPlainTextEdit(self)
-        self._details.setReadOnly(True)
-        self._details.setFont(_mono_font())
-        self._details.setPlaceholderText("Select a primer to see its Tm, GC, hairpin and "
-                                         "self-dimer.\nSelect two to see the dimer between them.")
-        split = QSplitter(Qt.Orientation.Vertical, self)
-        split.addWidget(self._table)
-        split.addWidget(self._details)
-        split.setStretchFactor(0, 3)
-        split.setStretchFactor(1, 2)
-
-        add = QPushButton("Add…", self)
-        add.setToolTip("Add primers: paste FASTA, name<TAB>sequence lines, or bare sequences")
-        add.clicked.connect(self._add)
-        imp = QPushButton("Import FASTA…", self)
-        imp.clicked.connect(self._import)
-        exp = QPushButton("Export…", self)
-        exp.clicked.connect(self._export)
-        self._delete = QPushButton("Delete", self)
-        self._delete.clicked.connect(self._delete_selected)
-        close = QPushButton("Close", self)
-        close.setDefault(True)
-        close.clicked.connect(self.accept)
-        bar = QHBoxLayout()
-        bar.setSpacing(8)
-        for b in (add, imp, exp, self._delete):
-            bar.addWidget(b)
-        bar.addStretch(1)
-        bar.addWidget(close)
-        top = QHBoxLayout()
-        top.addWidget(self._filter, 1)
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(16, 14, 16, 14)
-        lay.setSpacing(8)
-        lay.addLayout(top)
-        lay.addWidget(split, 1)
-        lay.addWidget(self._path_label)
-        lay.addLayout(bar)
-        self._fill()
-
-    # --------------------------------------------------------------- table
-
-    def database(self) -> PrimerDatabase:
-        return self._db
-
-    def _stats(self, p: Primer):
-        key = (p.sequence, self._thermo.to_dict().__repr__())
-        if key not in self._stats_cache:
-            try:
-                self._stats_cache[key] = analyze_oligo(p.sequence, self._thermo)
-            except Exception:  # noqa: BLE001
-                self._stats_cache[key] = None
-        return self._stats_cache[key]
-
-    def _fill(self, *_a) -> None:
-        text = self._filter.text().strip().lower()
-        rows = [p for p in self._db.primers
-                if not text or text in p.name.lower() or text in p.sequence.lower()
-                or text in p.note.lower()]
-        self._table.blockSignals(True)
-        self._table.setSortingEnabled(False)
-        self._table.setRowCount(len(rows))
-        mono = _mono_font()
-        for i, p in enumerate(rows):
-            st = self._stats(p)
-            vals = (p.name, KIND_LABELS.get(p.kind, p.kind), p.sequence, len(p.binding),
-                    round(st.tm, 1) if st else "", round(st.gc) if st else "", p.note)
-            for j, v in enumerate(vals):
-                item = QTableWidgetItem()
-                item.setData(Qt.ItemDataRole.DisplayRole, v)
-                item.setData(Qt.ItemDataRole.UserRole, p.name)
-                if j == 2:
-                    item.setFont(mono)
-                if j not in (0, 6):
-                    item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-                if j in (3, 4, 5):
-                    item.setTextAlignment(Qt.AlignmentFlag.AlignRight
-                                          | Qt.AlignmentFlag.AlignVCenter)
-                if st and st.warnings and j == 2:
-                    item.setToolTip("; ".join(st.warnings))
-                self._table.setItem(i, j, item)
-        self._table.setSortingEnabled(True)
-        self._table.sortByColumn(self._table.horizontalHeader().sortIndicatorSection(),
-                                 self._table.horizontalHeader().sortIndicatorOrder())
-        self._table.blockSignals(False)
-        self._table.resizeColumnsToContents()
-        self._table.setColumnWidth(2, max(220, min(380, self._table.columnWidth(2))))
-        self._delete.setEnabled(bool(rows))
-        self._show_details()
-
-    def _selected(self) -> list[Primer]:
-        names = []
-        for idx in self._table.selectionModel().selectedRows():
-            item = self._table.item(idx.row(), 0)
-            if item is not None:
-                names.append(item.data(Qt.ItemDataRole.UserRole))
-        return [p for n in names if (p := self._db.get(n)) is not None]
-
-    def _show_details(self) -> None:
-        sel = self._selected()
-        if not sel:
-            self._details.clear()
-            return
-        lines: list[str] = []
-        for p in sel[:2]:
-            st = self._stats(p)
-            if st is None:
-                lines.append(f"{p.name}: cannot analyse {p.sequence}")
-                continue
-            lines.append(f"{p.name}  ({KIND_LABELS.get(p.kind, p.kind)})")
-            lines.append(f"  5′-{p.sequence}-3′")
-            lines.append(f"  {st.binding_length} nt binding"
-                         + (f" + {len(p.tail)} nt tail" if p.tail else "")
-                         + f" · Tm {st.tm:.1f} °C"
-                         + (f" ({st.tm_min:.1f}–{st.tm_max:.1f})" if st.degeneracy > 1 else "")
-                         + f" · GC {st.gc:.0f} % · 3′ ΔG {st.end_dg:.1f}")
-            if st.warnings:
-                lines.append("  ⚠ " + "; ".join(st.warnings))
-            for s in (st.hairpin, st.self_dimer):
-                if s.found:
-                    tm = f", Tm {s.tm:.1f} °C" if s.tm > 0 else ""
-                    lines.append(f"  {s.kind}: ΔG {s.dg:.1f} kcal/mol{tm}")
-                    lines.extend("    " + x for x in s.lines)
-                else:
-                    lines.append(f"  {s.kind}: none")
-            lines.append("")
-        if len(sel) >= 2:
-            d = heterodimer(sel[0].sequence, sel[1].sequence, self._thermo)
-            lines.append(f"{sel[0].name} × {sel[1].name}: "
-                         + (f"cross-dimer ΔG {d.dg:.1f} kcal/mol" if d.found else "no dimer"))
-            lines.extend("    " + x for x in d.lines)
-            ta, tb = self._stats(sel[0]), self._stats(sel[1])
-            if ta and tb:
-                lines.append(f"    Tm difference {abs(ta.tm - tb.tm):.1f} °C")
-        self._details.setPlainText("\n".join(lines))
-
-    def _edited(self, item: QTableWidgetItem) -> None:
-        old = item.data(Qt.ItemDataRole.UserRole)
-        p = self._db.get(old)
-        if p is None:
-            return
-        if item.column() == 0:
-            new = item.text().strip()
-            if not new or (new != old and self._db.get(new) is not None):
-                QTimer.singleShot(0, self._fill)
-                return
-            p.name = new
-        elif item.column() == 6:
-            p.note = item.text().strip()
-        self._db.save()
-        self.databaseChanged.emit()
-        QTimer.singleShot(0, self._fill)
-
-    # --------------------------------------------------------------- actions
-
-    def add_primers(self, primers: list[Primer]) -> int:
-        added = self._db.add(primers)
-        if added:
-            self._db.save()
-            self.databaseChanged.emit()
-            self._fill()
-        return len(added)
-
-    def _add(self) -> None:
-        dlg = QDialog(self)
-        dlg.setWindowTitle("Add Primers")
-        dlg.resize(520, 300)
-        text = QPlainTextEdit(dlg)
-        text.setFont(_mono_font())
-        text.setPlaceholderText(
-            "CroSat2_F\tGACTTGCAAGTTCGAGAAC\nCroSat2_R\tGTTGCATCCACTTAGCTTAG\n\n"
-            "or FASTA, or one sequence per line.\n"
-            "Lower-case 5′ letters are a tail (e.g. caggaaacagctatgacGTTGCATCC…).")
-        kind = QComboBox(dlg)
-        kind.addItem("Kind from the name (…_F / …_R / …_P)", "")
-        for k in PRIMER_KINDS:
-            kind.addItem(KIND_LABELS[k], k)
-        cancel = QPushButton("Cancel", dlg)
-        save = QPushButton("Save", dlg)
-        save.setDefault(True)
-        cancel.clicked.connect(dlg.reject)
-        save.clicked.connect(dlg.accept)
-        bar = QHBoxLayout()
-        bar.addWidget(kind)
-        bar.addStretch(1)
-        bar.addWidget(cancel)
-        bar.addWidget(save)
-        lay = QVBoxLayout(dlg)
-        lay.addWidget(text, 1)
-        lay.addLayout(bar)
-        if dlg.exec() != int(QDialog.DialogCode.Accepted):
-            return
-        try:
-            primers = parse_primer_text(text.toPlainText())
-        except PrimerError as exc:
-            QMessageBox.warning(self, "Add Primers", str(exc))
-            return
-        forced = kind.currentData()
-        if forced:
-            for p in primers:
-                p.kind = forced
-        n = self.add_primers(primers)
-        if n < len(primers):
-            QMessageBox.information(self, "Add Primers",
-                                    f"Added {n} of {len(primers)}; the others were already "
-                                    "in the database (same sequence).")
-
-    def _import(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "Import primers", str(Path.home()),
-                                              "Primers (*.fa *.fasta *.txt *.tsv);;All files (*)")
-        if not path:
-            return
-        from repeatviewer.backends.primers.oligos import load_primers
-
-        try:
-            primers = load_primers(Path(path))
-        except PrimerError as exc:
-            QMessageBox.warning(self, "Import primers", str(exc))
-            return
-        n = self.add_primers(primers)
-        QMessageBox.information(self, "Import primers", f"Added {n} primer(s) from "
-                                                        f"{Path(path).name}.")
-
-    def _export(self) -> None:
-        sel = self._selected() or list(self._db.primers)
-        if not sel:
-            return
-        path, _ = QFileDialog.getSaveFileName(self, "Export primers",
-                                              str(Path.home() / "primers.fa"),
-                                              "FASTA (*.fa);;Order sheet (*.tsv)")
-        if not path:
-            return
-        p = Path(path)
-        if p.suffix.lower() == ".tsv":
-            lines = ["name\tsequence\tlength\ttm\tgc\tnote"]
-            for pr in sel:
-                st = self._stats(pr)
-                lines.append(f"{pr.name}\t{pr.sequence}\t{len(pr.sequence)}\t"
-                             f"{st.tm:.1f}\t{st.gc:.0f}\t{pr.note}" if st else
-                             f"{pr.name}\t{pr.sequence}\t{len(pr.sequence)}\t\t\t{pr.note}")
-            p.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        else:
-            write_primers(p, sel)
-
-    def _delete_selected(self) -> None:
-        sel = self._selected()
-        if not sel:
-            return
-        names = ", ".join(p.name for p in sel[:5]) + (" …" if len(sel) > 5 else "")
-        ok = QMessageBox.question(self, "Delete primers",
-                                  f"Delete {len(sel)} primer(s) from the database?\n{names}")
-        if ok != QMessageBox.StandardButton.Yes:
-            return
-        self._db.remove([p.name for p in sel])
-        self._db.save()
-        self.databaseChanged.emit()
-        self._fill()
-
-
 def primer3_missing_message(parent: QWidget | None) -> bool:
     """Show the install hint when primer3-py is missing; True when it is."""
     if primer3_available():
@@ -2586,6 +2272,9 @@ def primer3_missing_message(parent: QWidget | None) -> bool:
     QMessageBox.warning(parent, "Primers", PRIMER3_MISSING)
     return True
 
+
+# The Database window lives in its own module (it imports helpers from here).
+from repeatviewer.views.primer_database_dialog import PrimerDatabaseDialog  # noqa: E402
 
 __all__ = [
     "MapPrimersDialog",

@@ -1,0 +1,31 @@
+Primers are collectively stored here:,,,,,,,,,,
+,,,,,H2O added for 100 pmol/µl,,,,,
+Primer name,Organism,Amplified sequence,Primer sequence,Tm [°C],according to synthesis report,Ordered by,Ordered on,Located in Box,Freezer,Room
+pBV1_for,sect. Beta sp.,satDNA,TTCAATGCAACGCACTCG,"53,7",TRUE,Nici,"2025, Dec",BI-8,"-20, 'general stuff' shelf",Sterilbankraum
+pBV1_rev,sect. Beta sp.,satDNA,ATCCTCTAGTTCTCGAGC,"53,7",TRUE,Nici,"2025, Dec",BI-8,"-20, 'general stuff' shelf",Sterilbankraum
+pTS5_for,Patellifolia sp.,satDNA,TTGATCCAAGGCTTAGTATGC,"55,9",TRUE,Nici,"2025, Dec",BI-8,"-20, 'general stuff' shelf",Sterilbankraum
+pTS5_rev,Patellifolia sp.,satDNA,AACTATCATAGTATCTTACGAG,"52,8",TRUE,Nici,"2025, Dec",BI-8,"-20, 'general stuff' shelf",Sterilbankraum
+SolRTE_Nt1B_for,Nicotiana sp.,LINE (5' UTR),TCAGGGAAATTCTCGAAGTTG,"55,9",TRUE,Nici,"2025, Dec",BI-8,"-20, 'general stuff' shelf",Sterilbankraum
+SolRTE_Nt1B_rev,Nicotiana sp.,LINE (5' UTR),TGTGTTGATTTGTTGTACTCG,"54,0",TRUE,Nici,"2025, Dec",BI-8,"-20, 'general stuff' shelf",Sterilbankraum
+SolRTE_Nt1A_I_for,Nicotiana sp.,LINE (5' UTR),TATTTTCTGGCGCACTGACC,"57,3",TRUE,Nici,"2025, Dec",BI-8,"-20, 'general stuff' shelf",Sterilbankraum
+SolRTE_Nt1A_I_rev,Nicotiana sp.,LINE (5' UTR),GAAAACTGGAAAACGGGAGG,"57,3",TRUE,Nici,"2025, Dec",BI-8,"-20, 'general stuff' shelf",Sterilbankraum
+fern_5S_rRNA_fwd,S. minima; H. pteridoides; H. guancha,rDNA (outward-facing),GGAAGTCCTGGTGCTGCA,"59,8",TRUE,Loreen & Anna,"2025, Dec",AI-9,"-20, 'general stuff' shelf",Sterilbankraum
+fern_5S_rRNA_rev1,S. minima; H. pteridoides; H. guancha,rDNA (outward-facing),GAGTTCTGATGGGATCCGGT,"58,9",TRUE,Loreen & Anna,"2025, Dec",AI-9,"-20, 'general stuff' shelf",Sterilbankraum
+fern_5S_rRNA_rev2,S. minima; H. pteridoides; H. guancha,rDNA (outward-facing),CGGTGTATTAGCGCTGGTATG,"58,9",TRUE,Loreen & Anna,"2025, Dec",AI-9,"-20, 'general stuff' shelf",Sterilbankraum
+fern_18S_rRNA_fwd1,S. minima; H. pteridoides; H. guancha,rDNA (outward-facing),GGAAGGAGAAGTCGTAACAAGG,"58,9",TRUE,Loreen & Anna,"2025, Dec",AI-9,"-20, 'general stuff' shelf",Sterilbankraum
+fern_18S_rRNA_fwd2,S. minima; H. pteridoides; H. guancha,rDNA (outward-facing),CGATTGAATGGTCCGGTGAA,"58,3",TRUE,Loreen & Anna,"2025, Dec",AI-9,"-20, 'general stuff' shelf",Sterilbankraum
+fern_18S_rRNA_rev1,S. minima; H. pteridoides; H. guancha,rDNA (outward-facing),CAAGCATATGACTACTGGCAGG,"58,9",TRUE,Loreen & Anna,"2025, Dec",AI-9,"-20, 'general stuff' shelf",Sterilbankraum
+fern_25S_rRNA_fwd1,S. minima; H. pteridoides; H. guancha,rDNA (outward-facing),GCTGCTACGATCCACTGAGA,"59,3",TRUE,Loreen & Anna,"2025, Dec",AI-9,"-20, 'general stuff' shelf",Sterilbankraum
+fern_25S_rRNA_rev1,S. minima; H. pteridoides; H. guancha,rDNA (outward-facing),CTCGCCGCTACTAGGGAAAT,"59,3",TRUE,Loreen & Anna,"2025, Dec",AI-9,"-20, 'general stuff' shelf",Sterilbankraum
+fern_25S_rRNA_rev2,S. minima; H. pteridoides; H. guancha,rDNA (outward-facing),GGTAGCCTTGCCTGATCTGA,"59,2",TRUE,Loreen & Anna,"2025, Dec",AI-9,"-20, 'general stuff' shelf",Sterilbankraum
+Family04_FW,Hydrangea sp.,ISAP,CTGACGGGCCTAACGGAGCGGCCTCGTGGGATTAGTCGAG,"79,7",TRUE,Sara & Anna,"2025, Oct",CI-7,"-20, 'general stuff' shelf",Sterilbankraum
+Family04_RV,Hydrangea sp.,ISAP,CTGACGGGCCTAACGGAGCGTGAATCACCTGTGGCCACC,"78,9",TRUE,Sara & Anna,"2025, Oct",CI-8,"-20, 'general stuff' shelf",Sterilbankraum
+Family05_FW,Hydrangea sp.,ISAP,CTGACGGGCCTAACGGAGCGCGGGTGCTTTGACCTCTAGC,"79,7",TRUE,Sara & Anna,"2025, Oct",CI-9,"-20, 'general stuff' shelf",Sterilbankraum
+Family05_RV,Hydrangea sp.,ISAP,CTGACGGGCCTAACGGAGCGGGCCCACTTCAAAGGGACTT,"78,7",TRUE,Sara & Anna,"2025, Oct",CI-10,"-20, 'general stuff' shelf",Sterilbankraum
+Family07_FW,Hydrangea sp.,ISAP,CTGACGGGCCTAACGGAGCGGTATCCAGCCGTGATCCAGG,"79,7",TRUE,Sara & Anna,"2025, Oct",CI-11,"-20, 'general stuff' shelf",Sterilbankraum
+Family07_RV,Hydrangea sp.,ISAP,CTGACGGGCCTAACGGAGCGGGCCCACTCATTCCGACTGAA,"78,7",TRUE,Sara & Anna,"2025, Oct",CI-12,"-20, 'general stuff' shelf",Sterilbankraum
+ITS1-F,,ITS,CTTGGTCATTTAGAGGAAGTAA,"54,7",TRUE,Anna,12.03.26,D1-2,"-20, 'general stuff' shelf",Sterilbankraum
+ITS4,,ITS,TCCTCCGCTTATTGATATGC,"55,2",TRUE,Anna,12.03.26,D1-2,"-20, 'general stuff' shelf",Sterilbankraum
+SAIL_877_F01 _F,A.thaliana,genotyping mutants,ACGGAAAAAGTTCTTTCCAGG,,TRUE,Anna,31.03.26,E1-4,"-20, 'general stuff' shelf",Sterilbankraum
+SAIL_877_F01 _R,A.thaliana,genotyping mutants,GCTTTCCATCGGCTAGGTTAG,,TRUE,Anna,31.03.26,E1-4,"-20, 'general stuff' shelf",Sterilbankraum
+SALK_093009 _F,A.thaliana,genotyping mutants,CCTAAACCGGGTTTGCTTTAC,,TRUE,Anna,31.03.26,E1-4,"-20, 'general stuff' shelf",Sterilbankraum

@@ -272,8 +272,12 @@ def _primers_from_pairs(pairs: list[dz.DesignedPair]) -> list[Primer]:
                 note += f", product {p.product_size} bp"
             if p.extra.get("order"):
                 note += f", order {p.extra['order']}"
+            partners_ = [x.name for x in oligos if x is not o and x.kind != o.kind
+                         and x.kind in ("forward", "reverse") and o.kind in ("forward", "reverse")]
             out.append(Primer(name=o.name, sequence=o.sequence, kind=o.kind, note=note,
-                              source=p.template))
+                              source=p.template,
+                              extra={"status": "designed", "target": p.template,
+                                     **({"pair": ", ".join(partners_)} if partners_ else {})}))
     return out
 
 
@@ -771,7 +775,9 @@ def run_map(inputs: list[Path], ms: MapSettings, *, database_path: Path | None =
     inputs = [Path(p).expanduser().resolve() for p in inputs]
     if not inputs:
         raise PrimerError("Select the sequences to test in the Files panel first.")
-    db = PrimerDatabase(database_path) if database_path is not None else PrimerDatabase()
+    from repeatviewer.backends.primers.inventory import open_database
+
+    db = open_database(database_path)
     primers = map_primer_list(ms, db)
     _say(progress, f"Testing {len(primers)} primer(s)")
     payload = _base_payload("map", f"Map Primers: {inputs[0].name}", inputs)
@@ -841,6 +847,8 @@ def run_map(inputs: list[Path], ms: MapSettings, *, database_path: Path | None =
     if ms.mode == MAP_DATABASE and ms.pairs_only:
         used = {p.forward for p in products} | {p.reverse for p in products}
         sites = [s for s in sites if s.primer in used]
+    if ms.mode == MAP_DATABASE:
+        payload["stock"] = stock_summary(primers, sites, products, len(templates))
     payload["templates"] = [_template_entry(rid, seq, file=str(path)) for rid, seq, path
                             in templates[:200]]
     payload["sites"] = [s.to_dict() for s in sites[:MAX_SITES_IN_FILE]]
@@ -899,6 +907,86 @@ def run_map(inputs: list[Path], ms: MapSettings, *, database_path: Path | None =
     return layout.main, files, payload
 
 
+STOCK_FIELDS = ("box", "freezer", "room", "status", "tested", "organism", "target",
+                "ordered_by", "ordered_on", "anneal_temp")
+
+
+def primer_location(p: Primer) -> str:
+    """``box BI-8 · -20, 'general stuff' shelf · Sterilbankraum`` (what is known)."""
+    e_ = p.extra or {}
+    parts = []
+    if e_.get("box"):
+        parts.append(f"box {e_['box']}")
+    for k in ("freezer", "room"):
+        if e_.get(k):
+            parts.append(str(e_[k]))
+    return " · ".join(parts)
+
+
+def stock_summary(primers: list[Primer], sites: list[bd.BindingSite],
+                  products: list[bd.Product], n_sequences: int) -> dict:
+    """What the saved primers offer for these sequences.
+
+    * ready pairs: two saved primers that give a product (a saved pair first)
+    * single primers: bind, but no saved partner gives a product
+    """
+    from repeatviewer.backends.primers.inventory import is_saved_pair, partners
+
+    by_name = {p.name: p for p in primers}
+    pairs_of = partners(primers)
+    site_mm: dict[tuple, int] = {}
+    for s_ in sites:
+        key = (s_.primer, s_.record, s_.strand, s_.start if s_.strand == "+" else s_.end)
+        site_mm[key] = min(s_.mismatches, site_mm.get(key, 99))
+    ready: dict[tuple[str, str], dict] = {}
+    for pr in products:
+        mm_f = site_mm.get((pr.forward, pr.record, "+", pr.start), 0)
+        mm_r = site_mm.get((pr.reverse, pr.record, "-", pr.end), 0)
+        key = tuple(sorted((pr.forward, pr.reverse)))
+        entry = ready.setdefault(key, {
+            "forward": pr.forward, "reverse": pr.reverse,
+            "saved_pair": is_saved_pair(pr.forward, pr.reverse, pairs_of),
+            "mm_forward": mm_f, "mm_reverse": mm_r, "sizes": [], "records": set(),
+            "products": 0})
+        if mm_f + mm_r < entry["mm_forward"] + entry["mm_reverse"]:
+            entry.update(forward=pr.forward, reverse=pr.reverse, mm_forward=mm_f, mm_reverse=mm_r)
+        entry["products"] += 1
+        entry["records"].add(pr.record)
+        if pr.size not in entry["sizes"] and len(entry["sizes"]) < 6:
+            entry["sizes"].append(pr.size)
+    ready_list = []
+    for entry in ready.values():
+        entry["records"] = len(entry["records"])
+        entry["sizes"].sort()
+        for side in ("forward", "reverse"):
+            p = by_name.get(entry[side])
+            entry[f"{side}_where"] = primer_location(p) if p else ""
+            entry[f"{side}_tested"] = (p.extra or {}).get("tested", "") if p else ""
+        ready_list.append(entry)
+    ready_list.sort(key=lambda d: (not d["saved_pair"], d["mm_forward"] + d["mm_reverse"],
+                                   -d["records"], d["products"], d["sizes"][0] if d["sizes"] else 0))
+    in_product = {d["forward"] for d in ready_list} | {d["reverse"] for d in ready_list}
+    single: dict[str, dict] = {}
+    for s_ in sites:
+        if s_.primer in in_product:
+            continue
+        d = single.setdefault(s_.primer, {"name": s_.primer, "mismatches": s_.mismatches,
+                                          "sites": 0, "record": s_.record,
+                                          "strand": s_.strand, "start": s_.start})
+        d["sites"] += 1
+        if s_.mismatches < d["mismatches"]:
+            d.update(mismatches=s_.mismatches, record=s_.record, strand=s_.strand,
+                     start=s_.start)
+    single_list = sorted(single.values(), key=lambda d: (d["mismatches"], -d["sites"]))
+    for d in single_list:
+        p = by_name.get(d["name"])
+        d["where"] = primer_location(p) if p else ""
+        d["partners"] = pairs_of.get(d["name"], [])
+    return {"ready": ready_list[:200], "ready_total": len(ready_list),
+            "single": single_list[:200], "single_total": len(single_list),
+            "primers": len(primers), "sequences": n_sequences}
+
+
 def _kind_of(primers: list[Primer], name: str) -> str:
     return next((p.kind for p in primers if p.name == name), KIND_OLIGO)
 
@@ -935,7 +1023,9 @@ def _map_genome(primers: list[Primer], ms: MapSettings, progress: ProgressFn,
 def save_pairs_to_database(payload: dict, db_path: Path | None = None,
                            pair_names: list[str] | None = None) -> list[Primer]:
     """Primers of a design result → Primer Database (identical sequences skipped)."""
-    db = PrimerDatabase(db_path)
+    from repeatviewer.backends.primers.inventory import open_database
+
+    db = open_database(db_path)
     pairs = []
     for d in payload.get("pairs", []):
         if pair_names and d.get("name") not in pair_names:
