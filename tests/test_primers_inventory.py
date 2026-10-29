@@ -340,7 +340,7 @@ def test_window_import_edit_filter_history(qapp, settings, shared):
     assert d._table.rowCount() == 0
     assert d.import_file(SHEET, confirm=False) == 28
     assert d._table.rowCount() == 28
-    assert "you are <b>Abdullah</b>" in d._where.text()
+    assert "User: <b>Abdullah</b>" in d._where.text()
     # Filters: organism and free text over every field.
     d._organism.setCurrentIndex(d._organism.findData("Nicotiana sp."))
     assert d._table.rowCount() == 4
@@ -408,7 +408,7 @@ def test_window_find_duplicates_and_shared_move(qapp, settings, shared, tmp_path
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
     d = PrimerDatabaseDialog(None)
     assert isinstance(d.database(), inv.PrimerInventory)
-    assert "This computer" in d._where.text() and "On this computer only" in d._where.toolTip()
+    assert "Database is on <b>this computer</b>" in d._where.text() and "On this computer only" in d._where.toolTip()
     d.add_primers([Primer("Loc_F", "ACGTGGTCAAGCTTGACCAA"), Primer("Loc_R", "TTGGTCAAGCTTGACCACGT")])
     moved = []
     d.databasePathChanged.connect(moved.append)
@@ -419,7 +419,7 @@ def test_window_find_duplicates_and_shared_move(qapp, settings, shared, tmp_path
     d._use_shared_folder()
     target = tmp_path / "Sciebo2" / inv.FOLDER_NAME
     assert moved == [str(target)] and sorted(d.database().names()) == ["Loc_F", "Loc_R"]
-    assert "Shared" in d._where.text() and "Sciebo" in d._where.toolTip()
+    assert "<b>a shared folder</b>" in d._where.text() and "Sciebo" in d._where.toolTip()
     # Loc_R is the reverse complement of Loc_F.
     monkeypatch.setattr(QMessageBox, "exec", lambda self: 0)
     d._find_duplicates()

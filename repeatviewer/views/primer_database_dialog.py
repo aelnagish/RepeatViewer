@@ -374,7 +374,8 @@ class PrimerDatabaseDialog(QDialog):
         """Short line next to Change…; the full path is in the tooltip."""
         db = self._inventory()
         if db is None:
-            self._where.setText("<span style='color:palette(mid)'>Older FASTA database</span>")
+            self._where.setText("<span style='color:palette(mid)'>Database is an <b>older FASTA "
+                                "file</b></span>")
             self._where.setToolTip(
                 f"Database: {self._db.path}\nAn older single FASTA file: only names and "
                 "sequences. Change… › Use the Database on This Computer, then Import this "
@@ -382,9 +383,9 @@ class PrimerDatabaseDialog(QDialog):
             return
         shared = db.path.resolve() != inv.default_inventory_folder().resolve()
         writers = db.writers()
-        kind = "Shared" if shared else "This computer"
-        self._where.setText(f"<span style='color:palette(mid)'>{kind} · you are "
-                            f"<b>{db.user}</b></span>")
+        place = "a shared folder" if shared else "this computer"
+        self._where.setText(f"<span style='color:palette(mid)'>Database is on <b>{place}</b>. "
+                            f"User: <b>{db.user}</b></span>")
         self._where.setToolTip(
             f"Database: {db.path}\n"
             + ("A shared folder (Sciebo): changes from others appear after syncing."
