@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QFileDialog,
     QGridLayout,
+    QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QInputDialog,
@@ -47,7 +48,6 @@ from repeatviewer.backends.primers.oligos import (
     Primer,
     PrimerDatabase,
     load_primers,
-    parse_primer_text,
     write_primers,
 )
 from repeatviewer.backends.primers.thermo import (
@@ -68,7 +68,7 @@ LAB_USER_KEY = "primers/lab_user"
 _ALL = "__all__"
 _COLUMNS: tuple[tuple[str, str], ...] = (
     ("name", "Name"), ("pair", "Pair"), ("sequence", "Sequence 5′→3′"), ("length", "Length"),
-    ("tm", "Tm °C"), ("organism", "Organism"), ("target", "Target"), ("box", "Box"),
+    ("tm", "Tm °C"), ("tm_supplier", "Tm supplier °C"), ("organism", "Organism"), ("target", "Target"), ("box", "Box"),
     ("freezer", "Freezer"), ("room", "Room"), ("status", "Status"), ("tested", "Tested"),
     ("ordered_by", "Ordered by"), ("ordered_on", "Ordered on"),
 )
@@ -88,6 +88,13 @@ _FORM: tuple[tuple[str, str, str], ...] = (
     ("note", "Note:", "line"),
 )
 _MULTI_SKIP = ("name", "sequence", "aliases")
+
+
+def _one_decimal(value) -> str:
+    try:
+        return f"{float(str(value).replace(',', '.')):.1f}"
+    except (TypeError, ValueError):
+        return str(value or "")
 
 
 def lab_user_setting() -> str:
@@ -177,7 +184,9 @@ class PrimerDatabaseDialog(QDialog):
 
         self._where = QLabel(self)
         self._where.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        self._where.setWordWrap(True)
+        self._where.setWordWrap(False)
+        self._where.setMinimumWidth(80)
+        self._where.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self._change_btn = QPushButton("Change…", self)
         menu = QMenu(self._change_btn)
         # Run after the menu has closed: a file chooser opened while the menu is
@@ -191,13 +200,7 @@ class PrimerDatabaseDialog(QDialog):
         menu.addAction("Your Name in the History…",
                        later(lambda: self._ask_user(force=True)))
         self._change_btn.setMenu(menu)
-        # Same width as the status box above it, so the two line up.
-        width = max(self._status.sizeHint().width(), self._change_btn.sizeHint().width())
-        self._status.setFixedWidth(width)
-        self._change_btn.setFixedWidth(width)
-        where_row = QHBoxLayout()
-        where_row.addWidget(self._where, 1)
-        where_row.addWidget(self._change_btn)
+
 
         # ---- table
         self._table = QTableWidget(0, len(_COLUMNS), self)
@@ -314,14 +317,16 @@ class PrimerDatabaseDialog(QDialog):
         bar.setSpacing(8)
         for b in (add, imp, exp, self._delete, dups, people, check):
             bar.addWidget(b)
-        bar.addStretch(1)
+        bar.addSpacing(12)
+        bar.addWidget(self._where, 1)
+        bar.addWidget(self._change_btn)
+        bar.addSpacing(12)
         bar.addWidget(close)
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(16, 14, 16, 14)
         lay.setSpacing(8)
         lay.addLayout(top)
-        lay.addLayout(where_row)
         lay.addWidget(split, 1)
         lay.addLayout(bar)
 
@@ -365,21 +370,26 @@ class PrimerDatabaseDialog(QDialog):
         self.databasePathChanged.emit(path)
 
     def _refresh_where(self) -> None:
+        """Short line next to Change…; the full path is in the tooltip."""
         db = self._inventory()
         if db is None:
-            self._where.setText(
-                f"<span style='color:palette(mid)'>Database: {self._db.path} (an older "
-                "single FASTA file: only names and sequences). Change… › Use the Database "
-                "on This Computer, then Import this FASTA, to keep locations and stock."
-                "</span>")
+            self._where.setText("<span style='color:palette(mid)'>Older FASTA database</span>")
+            self._where.setToolTip(
+                f"Database: {self._db.path}\nAn older single FASTA file: only names and "
+                "sequences. Change… › Use the Database on This Computer, then Import this "
+                "FASTA, to keep locations and stock.")
             return
         shared = db.path.resolve() != inv.default_inventory_folder().resolve()
-        people = db.writers()
-        who = (f" · {len(people)} people have made changes" if len(people) > 1 else "")
-        kind = "shared folder" if shared else "on this computer only"
-        self._where.setText(
-            f"<span style='color:palette(mid)'>Database: {db.path} ({kind}{who}) · "
-            f"you are <b>{db.user}</b></span>")
+        writers = db.writers()
+        kind = "Shared" if shared else "This computer"
+        self._where.setText(f"<span style='color:palette(mid)'>{kind} · you are "
+                            f"<b>{db.user}</b></span>")
+        self._where.setToolTip(
+            f"Database: {db.path}\n"
+            + ("A shared folder (Sciebo): changes from others appear after syncing."
+               if shared else "On this computer only. Change… › Use a Shared Folder to "
+               "share it with the lab.")
+            + (f"\n{len(writers)} people have made changes." if len(writers) > 1 else ""))
 
     def _poll_disk(self) -> None:
         db = self._inventory()
@@ -540,7 +550,9 @@ class PrimerDatabaseDialog(QDialog):
             vals = {
                 "name": p.name, "pair": ", ".join(pairs.get(p.name, [])),
                 "sequence": p.sequence, "length": len(p.binding),
-                "tm": round(st.tm, 1) if st else "",
+                # Text with one decimal (65.0, not 65); same width, so it sorts right.
+                "tm": f"{st.tm:.1f}" if st else "",
+                "tm_supplier": _one_decimal(d.get("tm_supplier", "")),
                 "status": inv.STATUS_LABELS.get(d.get("status", ""), d.get("status", "")),
                 "tested": inv.TESTED_LABELS.get(d.get("tested", ""), d.get("tested", "")),
                 "ordered_by": d.get("_ordered_names", ""),
@@ -554,9 +566,12 @@ class PrimerDatabaseDialog(QDialog):
                     item.setFont(mono)
                     if st and st.warnings:
                         item.setToolTip("; ".join(st.warnings))
-                if key in ("length", "tm"):
+                if key in ("length", "tm", "tm_supplier"):
                     item.setTextAlignment(Qt.AlignmentFlag.AlignRight
                                           | Qt.AlignmentFlag.AlignVCenter)
+                if key == "tm":
+                    item.setToolTip(f"Calculated here (Primer3, {self._thermo.describe()}).\n"
+                                    "The supplier uses other conditions, so its Tm differs.")
                 if key == "status" and d.get("status") in ("used up", "running low"):
                     item.setForeground(Qt.GlobalColor.darkRed)
                 if key == "tested" and d.get("tested") == "failed":
@@ -585,8 +600,9 @@ class PrimerDatabaseDialog(QDialog):
         self._filling = False
         total = len(rows)
         self._delete.setEnabled(bool(shown))
-        self.setWindowTitle(f"Primer Database ({len(shown)} of {total})" if len(shown) != total
-                            else f"Primer Database ({total})")
+        unit = "primer" if total == 1 else "primers"
+        self.setWindowTitle(f"Primer Database: {len(shown)} of {total} {unit} shown"
+                            if len(shown) != total else f"Primer Database: {total} {unit}")
         if wanted:
             self._on_selection()
 
@@ -788,7 +804,9 @@ class PrimerDatabaseDialog(QDialog):
                          + f" · GC {st.gc:.0f} % · 3′ ΔG {st.end_dg:.1f}")
             sup = p.extra.get("tm_supplier")
             if sup:
-                lines.append(f"  Tm on the synthesis report: {sup} °C (other method)")
+                lines.append(f"  Tm on the synthesis report: {sup} °C (the supplier's "
+                             "method and conditions)")
+            lines.append(f"  Tm here: Primer3, {self._thermo.describe()}")
             if pairs.get(p.name):
                 lines.append(f"  Pairs with: {', '.join(pairs[p.name])}")
             if st.warnings:
@@ -834,44 +852,12 @@ class PrimerDatabaseDialog(QDialog):
 
     @_keeps_front
     def _add(self) -> None:
-        dlg = QDialog(self)
-        dlg.setWindowTitle("Add Primers")
-        dlg.resize(560, 320)
-        text = QPlainTextEdit(dlg)
-        text.setFont(_mono_font())
-        text.setPlaceholderText(
-            "CroSat2_F\tGACTTGCAAGTTCGAGAAC\nCroSat2_R\tGTTGCATCCACTTAGCTTAG\n\n"
-            "or FASTA, or one sequence per line.\n"
-            "Lower-case 5′ letters are a tail (e.g. caggaaacagctatgacGTTGCATCC…).\n"
-            "After adding, fill in box, organism … below the table.")
-        kind = QComboBox(dlg)
-        kind.addItem("Direction from the name (…_F / …_rev)", "")
-        for k in PRIMER_KINDS:
-            kind.addItem(KIND_LABELS[k], k)
-        cancel = QPushButton("Cancel", dlg)
-        save = QPushButton("Save", dlg)
-        save.setDefault(True)
-        cancel.clicked.connect(dlg.reject)
-        save.clicked.connect(dlg.accept)
-        bar = QHBoxLayout()
-        bar.addWidget(kind)
-        bar.addStretch(1)
-        bar.addWidget(cancel)
-        bar.addWidget(save)
-        lay = QVBoxLayout(dlg)
-        lay.addWidget(text, 1)
-        lay.addLayout(bar)
+        if not self._before_write():
+            return
+        dlg = AddPrimersDialog(self._db, self._thermo, self)
         if dlg.exec() != int(QDialog.DialogCode.Accepted):
             return
-        try:
-            primers = parse_primer_text(text.toPlainText())
-        except PrimerError as exc:
-            QMessageBox.warning(self, "Add Primers", str(exc))
-            return
-        forced = kind.currentData()
-        if forced:
-            for p in primers:
-                p.kind = forced
+        primers = dlg.primers()
         n = self.add_primers(primers)
         if n < len(primers):
             QMessageBox.information(self, "Add Primers",
@@ -1089,6 +1075,330 @@ class PrimerDatabaseDialog(QDialog):
                 self._save_form()
         self._poll.stop()
         super().closeEvent(event)
+
+
+# --------------------------------------------------------------------------
+# Add primers
+# --------------------------------------------------------------------------
+
+
+def _rows_from_text(text: str) -> list[tuple[str, str]]:
+    """(name, sequence) pairs from FASTA, ``name<TAB>sequence`` lines or bare sequences.
+    Sequences are not checked here."""
+    body = str(text or "").strip()
+    if not body:
+        return []
+    out: list[tuple[str, str]] = []
+    if body.startswith(">"):
+        name, seq = None, []
+        for line in body.splitlines():
+            line = line.strip()
+            if line.startswith(">"):
+                if name is not None:
+                    out.append((name, "".join(seq)))
+                name, seq = line[1:].split()[0] if line[1:].split() else "", []
+            elif line:
+                seq.append(line)
+        if name is not None:
+            out.append((name, "".join(seq)))
+        return out
+    import re as _re
+
+    for raw in body.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = [p for p in _re.split(r"\t+|;|\s{2,}", line) if p.strip()]
+        if len(parts) == 1 and " " in line:
+            head, _sp, tail = line.rpartition(" ")
+            parts = [head, tail]
+        if len(parts) >= 2:
+            out.append((parts[0].strip(), parts[1].strip()))
+        else:
+            out.append(("", parts[0].strip()))
+    return out
+
+
+class AddPrimersDialog(QDialog):
+    """Add one or more primers: a row per primer with live checks, and the
+    details they share (organism, target, who ordered them, where they go)."""
+
+    _COLS = ("Name", "Sequence 5′→3′", "Length", "Tm °C", "GC %", "Check")
+
+    def __init__(self, db: PrimerDatabase, thermo: ThermoSettings, parent: QWidget) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Add Primers")
+        self.resize(860, 600)
+        self._db = db
+        self._thermo = thermo
+        self._inv = db if isinstance(db, inv.PrimerInventory) else None
+        self._checking = False
+
+        intro = QLabel("One row per primer. Paste several at once (from a sheet, an order "
+                       "confirmation or FASTA) with <b>Paste</b>. Lower-case 5′ letters are "
+                       "a tail that does not bind (e.g. an M13 or T7 adapter).", self)
+        intro.setWordWrap(True)
+        self._table = QTableWidget(0, len(self._COLS), self)
+        self._table.setHorizontalHeaderLabels(list(self._COLS))
+        self._table.verticalHeader().setVisible(False)
+        self._table.verticalHeader().setDefaultSectionSize(24)
+        hh = self._table.horizontalHeader()
+        hh.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
+        hh.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        for c in (2, 3, 4):
+            hh.setSectionResizeMode(c, QHeaderView.ResizeMode.ResizeToContents)
+        hh.setSectionResizeMode(5, QHeaderView.ResizeMode.Interactive)
+        self._table.setColumnWidth(0, 170)
+        self._table.setColumnWidth(5, 220)
+        self._table.itemChanged.connect(self._check_row)
+        add_row = QPushButton("Add Row", self)
+        add_row.clicked.connect(lambda: self._add_row())
+        add_pair = QPushButton("Add Pair", self)
+        add_pair.setToolTip("Two rows: …_F and …_R")
+        add_pair.clicked.connect(self._add_pair)
+        paste = QPushButton("Paste", self)
+        paste.setToolTip("Rows from the clipboard: name<TAB>sequence lines (copied from a "
+                         "sheet), FASTA, or one sequence per line")
+        paste.clicked.connect(self._paste)
+        remove = QPushButton("Remove Row", self)
+        remove.clicked.connect(self._remove_rows)
+        rows_bar = QHBoxLayout()
+        for b in (add_row, add_pair, paste, remove):
+            rows_bar.addWidget(b)
+        rows_bar.addStretch(1)
+
+        # Shared details
+        box = QGroupBox("Details for these primers", self)
+        grid = QGridLayout(box)
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(4)
+
+        def combo(key: str) -> QComboBox:
+            w = QComboBox(self)
+            w.setEditable(True)
+            w.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+            values = sorted({str((p.extra or {}).get(key, "")).strip() for p in db.primers}
+                            - {""}, key=str.lower)
+            w.addItems(values)
+            w.setEditText("")
+            return w
+
+        self._organism = combo("organism")
+        self._target = combo("target")
+        self._box = combo("box")
+        self._freezer = combo("freezer")
+        self._room = combo("room")
+        self._ordered_by = PeopleField(self)
+        self._ordered_by.set_database(self._inv)
+        if self._inv is not None:
+            me = self._inv.person_by_name(inv.lab_user())
+            if me is not None and me.active:
+                self._ordered_by.set_value([me.pid])
+        self._ordered_on = QLineEdit(time.strftime("%Y-%m-%d"), self)
+        self._status = QComboBox(self)
+        for v in inv.STATUS_VALUES:
+            self._status.addItem(inv.STATUS_LABELS[v] or "–", v)
+        self._status.setCurrentIndex(self._status.findData("ordered"))
+        self._dissolved = QCheckBox("Dissolved (water added to the tube)", self)
+        self._note = QLineEdit(self)
+        self._note.setPlaceholderText("e.g. project, supplier, order number")
+        fields = (("Organism:", self._organism), ("Target:", self._target),
+                  ("Ordered by:", self._ordered_by), ("Ordered on:", self._ordered_on),
+                  ("Status:", self._status), ("Box:", self._box),
+                  ("Freezer:", self._freezer), ("Room:", self._room))
+        for i, (label, w) in enumerate(fields):
+            r, c = divmod(i, 2)
+            lab = QLabel(label, self)
+            lab.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            grid.addWidget(lab, r, c * 2)
+            grid.addWidget(w, r, c * 2 + 1)
+        r = len(fields) // 2
+        lab = QLabel("Note:", self)
+        lab.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        grid.addWidget(lab, r, 0)
+        grid.addWidget(self._note, r, 1, 1, 3)
+        grid.addWidget(self._dissolved, r + 1, 1, 1, 3)
+        grid.setColumnStretch(1, 1)
+        grid.setColumnStretch(3, 1)
+        if self._inv is None:
+            box.setEnabled(False)
+            box.setTitle("Details (only in a database folder, not in an older FASTA)")
+
+        self._summary = QLabel(self)
+        cancel = QPushButton("Cancel", self)
+        cancel.clicked.connect(self.reject)
+        self._save = QPushButton("Save", self)
+        self._save.setDefault(True)
+        self._save.clicked.connect(self.accept)
+        bar = QHBoxLayout()
+        bar.addWidget(self._summary, 1)
+        bar.addWidget(cancel)
+        bar.addWidget(self._save)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 14, 16, 14)
+        lay.setSpacing(8)
+        lay.addWidget(intro)
+        lay.addWidget(self._table, 1)
+        lay.addLayout(rows_bar)
+        lay.addWidget(box)
+        lay.addLayout(bar)
+        self._add_pair()
+
+    # ---------------------------------------------------------------- rows
+
+    def _add_row(self, name: str = "", seq: str = "") -> int:
+        r = self._table.rowCount()
+        self._checking = True
+        self._table.insertRow(r)
+        for c in range(len(self._COLS)):
+            item = QTableWidgetItem("")
+            if c >= 2:
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            if c == 1:
+                item.setFont(_mono_font())
+            if c in (2, 3, 4):
+                item.setTextAlignment(Qt.AlignmentFlag.AlignRight
+                                      | Qt.AlignmentFlag.AlignVCenter)
+            self._table.setItem(r, c, item)
+        self._table.item(r, 0).setText(name)
+        self._table.item(r, 1).setText(seq)
+        self._checking = False
+        self._check_row(self._table.item(r, 1))
+        return r
+
+    def _add_pair(self) -> None:
+        base = ""
+        names = [self._table.item(r, 0).text().strip() for r in range(self._table.rowCount())]
+        if names and names[-1]:
+            base = inv.pair_stem(names[-1])[0]
+        r = self._add_row(f"{base}_F" if base else "", "")
+        self._add_row(f"{base}_R" if base else "", "")
+        self._table.setCurrentCell(r, 0 if not base else 1)
+        self._table.editItem(self._table.item(r, 0 if not base else 1))
+
+    def _remove_rows(self) -> None:
+        rows = sorted({i.row() for i in self._table.selectedIndexes()}, reverse=True)
+        if not rows and self._table.rowCount():
+            rows = [self._table.rowCount() - 1]
+        for r in rows:
+            self._table.removeRow(r)
+        self._update_summary()
+
+    def _paste(self) -> None:
+        from PySide6.QtWidgets import QApplication
+
+        self.paste_text(QApplication.clipboard().text())
+
+    def paste_text(self, text: str) -> int:
+        """Rows from pasted text; a line with a bad sequence still becomes a row,
+        marked in Check, so nothing pasted is silently lost."""
+        rows = _rows_from_text(text)
+        if not rows:
+            QMessageBox.information(self, "Paste", "The clipboard holds no primers.")
+            return 0
+        empty = [r for r in range(self._table.rowCount())
+                 if not self._table.item(r, 0).text().strip()
+                 and not self._table.item(r, 1).text().strip()]
+        for name, seq in rows:
+            if empty:
+                r = empty.pop(0)
+                self._table.item(r, 0).setText(name)
+                self._table.item(r, 1).setText(seq)
+            else:
+                self._add_row(name, seq)
+        for r in reversed(empty):
+            self._table.removeRow(r)
+        return len(rows)
+
+    def _check_row(self, item: QTableWidgetItem | None) -> None:
+        if self._checking or item is None or item.column() > 1:
+            return
+        r = item.row()
+        self._checking = True
+        try:
+            name = self._table.item(r, 0).text().strip()
+            raw = self._table.item(r, 1).text().strip()
+            problems, stats = [], None
+            if raw:
+                try:
+                    p = Primer(name or "x", raw)
+                    stats = analyze_oligo(p.sequence, self._thermo)
+                    same = self._db.find_sequence(p.sequence)
+                    if same is not None:
+                        problems.append(f"already saved as {same.name}")
+                    if stats.warnings:
+                        problems.append(stats.warnings[0])
+                except PrimerError as exc:
+                    problems.append(str(exc).split(": ", 1)[-1])
+            if raw and not name:
+                problems.insert(0, "needs a name")
+            if name and self._db.get(name) is not None:
+                problems.insert(0, f"name taken: saved as {name}_2")
+            self._table.item(r, 2).setText(str(stats.binding_length) if stats else "")
+            self._table.item(r, 3).setText(f"{stats.tm:.1f}" if stats else "")
+            self._table.item(r, 4).setText(f"{stats.gc:.0f}" if stats else "")
+            check = self._table.item(r, 5)
+            bad = any(x.startswith(("needs", "already")) for x in problems) or bool(
+                raw and stats is None)
+            check.setText("; ".join(problems) if problems else ("OK" if raw else ""))
+            check.setToolTip("; ".join(problems))
+            check.setForeground(Qt.GlobalColor.darkRed if bad else
+                                (Qt.GlobalColor.darkYellow if problems else
+                                 Qt.GlobalColor.darkGreen))
+        finally:
+            self._checking = False
+        self._update_summary()
+
+    def _valid_rows(self) -> list[tuple[str, str]]:
+        out = []
+        for r in range(self._table.rowCount()):
+            name = self._table.item(r, 0).text().strip()
+            seq = self._table.item(r, 1).text().strip()
+            if not name or not seq:
+                continue
+            try:
+                p = Primer(name, seq)
+            except PrimerError:
+                continue
+            if self._db.find_sequence(p.sequence) is not None:
+                continue
+            out.append((name, seq))
+        return out
+
+    def _update_summary(self) -> None:
+        n = len(self._valid_rows())
+        filled = sum(1 for r in range(self._table.rowCount())
+                     if self._table.item(r, 1).text().strip())
+        skip = filled - n
+        self._summary.setText(f"<b>{n}</b> primer{'s' if n != 1 else ''} to add"
+                              + (f" <span style='color:#b45309'>· {skip} row(s) not added: "
+                                 "see Check</span>" if skip > 0 else ""))
+        self._save.setEnabled(n > 0)
+        self._save.setText(f"Add {n}" if n else "Save")
+
+    # ---------------------------------------------------------------- result
+
+    def details(self) -> dict:
+        d = {"organism": self._organism.currentText().strip(),
+             "target": self._target.currentText().strip(),
+             "box": self._box.currentText().strip(),
+             "freezer": self._freezer.currentText().strip(),
+             "room": self._room.currentText().strip(),
+             "ordered_by": self._ordered_by.value(),
+             "ordered_on": self._ordered_on.text().strip(),
+             "status": str(self._status.currentData() or ""),
+             "dissolved": self._dissolved.isChecked(),
+             "note": self._note.text().strip()}
+        return {k: v for k, v in d.items() if v not in ("", [], None, False)}
+
+    def primers(self) -> list[Primer]:
+        shared = self.details() if self._inv is not None else {}
+        note = shared.pop("note", "") if self._inv is not None else self._note.text().strip()
+        out = []
+        for name, seq in self._valid_rows():
+            out.append(Primer(name, seq, note=note, source="added", extra=dict(shared)))
+        return out
 
 
 # --------------------------------------------------------------------------
@@ -1415,5 +1725,5 @@ class PeopleDialog(QDialog):
         self._fill()
 
 
-__all__ = ["PeopleDialog", "PeopleField", "PrimerDatabaseDialog", "apply_lab_user_setting",
+__all__ = ["AddPrimersDialog", "PeopleDialog", "PeopleField", "PrimerDatabaseDialog", "apply_lab_user_setting",
            "lab_user_setting"]

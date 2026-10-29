@@ -5,6 +5,7 @@ Database window."""
 from __future__ import annotations
 
 import json
+import time
 import random
 import shutil
 from pathlib import Path
@@ -395,7 +396,7 @@ def test_window_sees_changes_from_others(qapp, settings, shared):
     other.add_records([{"name": "NewSat_F", "sequence": "ACGTGGTCAAGCTTGACCAA", "box": "Z1"}])
     d._poll_disk()
     assert d._table.rowCount() == 29
-    assert "2 people have made changes" in d._where.text()   # Anna and Nici
+    assert "2 people have made changes" in d._where.toolTip()   # Anna and Nici
     d.close()
 
 
@@ -407,7 +408,7 @@ def test_window_find_duplicates_and_shared_move(qapp, settings, shared, tmp_path
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
     d = PrimerDatabaseDialog(None)
     assert isinstance(d.database(), inv.PrimerInventory)
-    assert "on this computer only" in d._where.text()
+    assert "This computer" in d._where.text() and "On this computer only" in d._where.toolTip()
     d.add_primers([Primer("Loc_F", "ACGTGGTCAAGCTTGACCAA"), Primer("Loc_R", "TTGGTCAAGCTTGACCACGT")])
     moved = []
     d.databasePathChanged.connect(moved.append)
@@ -418,7 +419,7 @@ def test_window_find_duplicates_and_shared_move(qapp, settings, shared, tmp_path
     d._use_shared_folder()
     target = tmp_path / "Sciebo2" / inv.FOLDER_NAME
     assert moved == [str(target)] and sorted(d.database().names()) == ["Loc_F", "Loc_R"]
-    assert "shared folder" in d._where.text()
+    assert "Shared" in d._where.text() and "Sciebo" in d._where.toolTip()
     # Loc_R is the reverse complement of Loc_F.
     monkeypatch.setattr(QMessageBox, "exec", lambda self: 0)
     d._find_duplicates()
@@ -526,7 +527,14 @@ def test_window_people(qapp, settings, shared, monkeypatch):
     assert d._save_btn.isEnabled()
     d._save_form()
     assert db.ordered_by_text(db.record_by_name("ITS4")) == "Anna, Daniel"
-    assert d._table.item(_row_of(d, "ITS4"), 12).text() == "Anna, Daniel"
+    from repeatviewer.views.primer_database_dialog import _COL
+
+    assert d._table.item(_row_of(d, "ITS4"), _COL["ordered_by"]).text() == "Anna, Daniel"
+    # Calculated Tm always with one decimal, next to the supplier's Tm.
+    r = _row_of(d, "pBV1_for")
+    assert d._table.item(r, _COL["tm"]).text().count(".") == 1
+    assert d._table.item(r, _COL["tm_supplier"]).text() == "53.7"
+    assert d.windowTitle() == "Primer Database: 28 primers"
     # People window: edit and mark as former.
     pd = PeopleDialog(db, d)
     assert pd._table.rowCount() == 5
@@ -539,4 +547,40 @@ def test_window_people(qapp, settings, shared, monkeypatch):
     pd._table.selectRow(r)
     pd._remove_selected()
     assert db.persons[inv.person_id("Daniel")].active is False   # has a primer: kept
+    d.close()
+
+
+def test_add_primers_window(qapp, settings, shared):
+    from repeatviewer.backends.primers.thermo import ThermoSettings
+    from repeatviewer.views.primer_database_dialog import AddPrimersDialog, PrimerDatabaseDialog
+
+    db = _imported(shared)
+    db.ensure_people(["Abdullah"])
+    inv.set_lab_user("Abdullah")
+    dlg = AddPrimersDialog(db, ThermoSettings(), None)
+    assert dlg._table.rowCount() == 2 and not dlg._save.isEnabled()
+    # The person adding is "Ordered by" by default; status Ordered; today.
+    assert dlg._ordered_by.value() == [inv.person_id("Abdullah")]
+    assert dlg._status.currentData() == "ordered"
+    n = dlg.paste_text("CroSat2_F\tGACTTGCAAGTTCGAGAAC\nCroSat2_R\tGTTGCATCCACTTAGCTTAG\n"
+                       f"Copy\t{db.record_by_name('ITS4').sequence}\nBad\tACGTXXZ\n")
+    assert n == 4
+    rows = dlg._table.rowCount()
+    texts = {dlg._table.item(r, 0).text(): dlg._table.item(r, 5).text() for r in range(rows)}
+    assert texts["CroSat2_F"] and "already" not in texts["CroSat2_F"]
+    assert texts["Bad"] and texts["Bad"] != "OK"
+    assert "already saved as ITS4" in texts["Copy"]
+    assert dlg._table.item(0, 3).text().count(".") == 1
+    dlg._organism.setEditText("Crocus sativus")
+    dlg._target.setEditText("satDNA")
+    dlg._box.setEditText("S1-1")
+    assert dlg._save.text() == "Add 2"
+    primers = dlg.primers()
+    assert [p.name for p in primers] == ["CroSat2_F", "CroSat2_R"]
+    d = PrimerDatabaseDialog(shared)
+    assert d.add_primers(primers) == 2
+    rec = d.database().record_by_name("CroSat2_F")
+    assert rec.get("organism") == "Crocus sativus" and rec.get("box") == "S1-1"
+    assert rec.get("status") == "ordered" and d.database().ordered_by_text(rec) == "Abdullah"
+    assert rec.get("ordered_on") == time.strftime("%Y-%m-%d")
     d.close()
