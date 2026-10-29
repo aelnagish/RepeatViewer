@@ -415,7 +415,7 @@ class PrimerDatabaseDialog(QDialog):
         dups.setToolTip("Same sequence under two names, reverse complements, one primer "
                         "inside another")
         dups.clicked.connect(self._find_duplicates)
-        people = QPushButton("Lab…", self)
+        people = QPushButton("Lab", self)
         people.setToolTip("The lab: people, places (rooms, freezers, boxes), organisms and "
                           "targets. Add, rename (on every primer), merge, remove.")
         people.clicked.connect(self._open_people)
@@ -1724,6 +1724,16 @@ class PeoplePicker(QDialog):
         return list(self._chosen)
 
 
+def _lab_card(parent: QWidget, name: str = "LabCard") -> QFrame:
+    """The rounded panel used for every list and card in the Lab window."""
+    card = QFrame(parent)
+    card.setObjectName(name)
+    card.setFrameShape(QFrame.Shape.StyledPanel)
+    card.setStyleSheet(f"QFrame#{name} {{ border: 1px solid palette(mid); "
+                       "border-radius: 8px; }")
+    return card
+
+
 def _adjustable_columns(table: QTableWidget, widths: dict[int, int]) -> None:
     """Every column can be dragged wider or narrower; the last one fills the rest.
 
@@ -1801,20 +1811,21 @@ class PeopleDialog(QDialog):
         for b in (add, self._merge, self._remove):
             left_bar.addWidget(b)
         left_bar.addStretch(1)
+        left_card = _lab_card(self, "PeopleListCard")
+        lc = QVBoxLayout(left_card)
+        lc.setContentsMargins(16, 14, 16, 14)
+        lc.setSpacing(10)
+        lc.addWidget(self._filter)
+        lc.addWidget(self._table, 1)
         left = QWidget(self)
         ll = QVBoxLayout(left)
         ll.setContentsMargins(0, 0, 0, 0)
         ll.setSpacing(6)
-        ll.addWidget(self._filter)
-        ll.addWidget(self._table, 1)
+        ll.addWidget(left_card, 1)
         ll.addLayout(left_bar)
 
         # ---- right: the selected person
-        card = QFrame(self)
-        card.setObjectName("PersonCard")
-        card.setFrameShape(QFrame.Shape.StyledPanel)
-        card.setStyleSheet("QFrame#PersonCard { border: 1px solid palette(mid); "
-                           "border-radius: 8px; }")
+        card = _lab_card(self, "PersonCard")
         self._avatar = QLabel(card)
         self._avatar.setFixedSize(44, 44)
         self._avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -2053,7 +2064,8 @@ class ValueListPage(QWidget):
     """One list (organisms, targets, boxes …): add, rename on every primer, merge,
     remove."""
 
-    def __init__(self, db: inv.PrimerInventory, field_key: str, parent: QWidget) -> None:
+    def __init__(self, db: inv.PrimerInventory, field_key: str, parent: QWidget,
+                 title: str = "") -> None:
         super().__init__(parent)
         self._db = db
         self._key = field_key
@@ -2089,10 +2101,17 @@ class ValueListPage(QWidget):
         for b in (add, self._rename_btn, self._merge_btn, self._remove_btn):
             bar.addWidget(b)
         bar.addStretch(1)
+        card = _lab_card(self)
+        cl = QVBoxLayout(card)
+        cl.setContentsMargins(16, 14, 16, 14)
+        cl.setSpacing(10)
+        if title:
+            cl.addWidget(QLabel(f"<b>{title}</b>", card))
+        cl.addWidget(self._table, 1)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(6)
-        lay.addWidget(self._table, 1)
+        lay.addWidget(card, 1)
         lay.addLayout(bar)
         self.refresh()
 
@@ -2108,7 +2127,7 @@ class ValueListPage(QWidget):
             a = QTableWidgetItem(v)
             b = QTableWidgetItem()
             b.setData(Qt.ItemDataRole.DisplayRole, n)
-            b.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            b.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
             if not n:
                 a.setForeground(Qt.GlobalColor.gray)
                 b.setForeground(Qt.GlobalColor.gray)
@@ -2209,16 +2228,9 @@ class ListsDialog(QDialog):
         pl.setContentsMargins(12, 12, 12, 12)
         pl.setSpacing(14)
         for key in ("room", "freezer", "box"):
-            col = QWidget(places)
-            cl = QVBoxLayout(col)
-            cl.setContentsMargins(0, 0, 0, 0)
-            cl.setSpacing(6)
-            title = QLabel(f"<b>{inv.LIST_LABELS[key][0]}</b>", col)
-            page = ValueListPage(db, key, col)
+            page = ValueListPage(db, key, places, title=inv.LIST_LABELS[key][0])
             self.pages[key] = page
-            cl.addWidget(title)
-            cl.addWidget(page, 1)
-            pl.addWidget(col, 1)
+            pl.addWidget(page, 1)
         tabs.addTab(places, "Places")
         for key in ("organism", "target"):
             holder = QWidget(tabs)
