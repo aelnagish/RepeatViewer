@@ -191,6 +191,10 @@ class PrimerDatabaseDialog(QDialog):
         menu.addAction("Your Name in the History…",
                        later(lambda: self._ask_user(force=True)))
         self._change_btn.setMenu(menu)
+        # Same width as the status box above it, so the two line up.
+        width = max(self._status.sizeHint().width(), self._change_btn.sizeHint().width())
+        self._status.setFixedWidth(width)
+        self._change_btn.setFixedWidth(width)
         where_row = QHBoxLayout()
         where_row.addWidget(self._where, 1)
         where_row.addWidget(self._change_btn)
