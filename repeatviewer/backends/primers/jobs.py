@@ -733,6 +733,34 @@ def resolve_primer(text: str, kind: str, db: PrimerDatabase | None, label: str) 
     return Primer(name=name, sequence=seq, kind=kind, source="typed")
 
 
+def selection_slots(primers: list[Primer]) -> dict[str, str] | None:
+    """Selected Database primers as Forward / Reverse / Probe boxes of Map Primers.
+
+    A pair (or one primer, or a pair plus a probe) fills the boxes; anything that
+    does not fit three boxes (two forwards, four primers …) returns None and is
+    tested as "the selected primers" instead."""
+    from repeatviewer.backends.primers.inventory import kind_of
+
+    if not 1 <= len(primers) <= 3:
+        return None
+    slots: dict[str, str] = {}
+    unknown: list[str] = []
+    for p in primers:
+        k = kind_of(p.name, p.kind)
+        if k in (KIND_FORWARD, KIND_REVERSE, KIND_PROBE):
+            if k in slots:
+                return None
+            slots[k] = p.name
+        else:
+            unknown.append(p.name)
+    for name in unknown:
+        free = next((k for k in (KIND_FORWARD, KIND_REVERSE) if k not in slots), None)
+        if free is None:
+            return None
+        slots[free] = name
+    return slots
+
+
 def map_primer_list(ms: MapSettings, db: PrimerDatabase | None) -> list[Primer]:
     if ms.mode == MAP_SPECIFIC:
         out = []

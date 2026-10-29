@@ -277,8 +277,28 @@ class PrimerActionsMixin:
 
     # ------------------------------------------------------------- map
 
+    @staticmethod
+    def _selected_primer_slots(database_path: str, names: list[str]) -> dict | None:
+        """Forward / Reverse / Probe for the primers selected in the Database, or None."""
+        if not names:
+            return None
+        from repeatviewer.backends.primers import inventory as inv
+        from repeatviewer.backends.primers import jobs as pj
+        from repeatviewer.backends.primers.thermo import PrimerError
+
+        try:
+            db = inv.open_database(database_path or None)
+        except (OSError, PrimerError):
+            return None
+        wanted = set(names)
+        chosen = [p for p in db.primers if p.name in wanted]
+        if len(chosen) != len(wanted):
+            return None
+        return pj.selection_slots(chosen)
+
     def _open_map_primers_dialog(self, *, check_stock: bool = False,
-                                 primer_names: list[str] | None = None) -> None:
+                                 primer_names: list[str] | None = None,
+                                 database_path: str = "") -> None:
         """Map Primers; ``check_stock``: preset to test every saved primer (Database ›
         Check a Sequence)."""
         if not self._primers_ready():
@@ -297,6 +317,17 @@ class PrimerActionsMixin:
                         three_prime_exact=3, use_product_range=True, product_min=40,
                         product_max=max(3000, ms.product_max), test_on=pj.TEST_ON_SEQUENCES,
                         primer_names=list(primer_names or []))
+            slots = self._selected_primer_slots(database_path, primer_names or [])
+            if slots:
+                # A pair (or one primer, or a pair and a probe) goes straight into the
+                # Forward / Reverse / Probe boxes, so the window shows what is tested.
+                data.update(mode=pj.MAP_SPECIFIC, primer_names=[],
+                            use_forward=pj.KIND_FORWARD in slots,
+                            forward=slots.get(pj.KIND_FORWARD, ""),
+                            use_reverse=pj.KIND_REVERSE in slots,
+                            reverse=slots.get(pj.KIND_REVERSE, ""),
+                            use_probe=pj.KIND_PROBE in slots,
+                            probe=slots.get(pj.KIND_PROBE, ""))
             opts = replace(opts, map=data)
         elif opts.map.get("primer_names"):
             # A selection from the Database window is for that one check only.
@@ -381,8 +412,8 @@ class PrimerActionsMixin:
 
         dialog.databasePathChanged.connect(_path_changed)
         dialog.checkSequenceRequested.connect(
-            lambda _p, names: self._open_map_primers_dialog(check_stock=True,
-                                                            primer_names=list(names)))
+            lambda p, names: self._open_map_primers_dialog(
+                check_stock=True, primer_names=list(names), database_path=str(p or "")))
 
         def _closed(_code: int) -> None:
             if self._primer_database_dialog is dialog:

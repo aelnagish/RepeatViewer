@@ -711,3 +711,14 @@ def test_former_member_is_a_status_not_a_role(tmp_path):
     db.migrate_people()
     p = db.persons[pid]
     assert p.role == "" and p.active is False
+
+
+def test_selected_pair_fills_the_forward_and_reverse_boxes():
+    P = lambda n, k="oligo": Primer(name=n, sequence="ACGTACGTACGTACGTAC", kind=k)  # noqa: E731
+    assert pj.selection_slots([P("Family04_RV"), P("Family04_FW")]) == {
+        "forward": "Family04_FW", "reverse": "Family04_RV"}
+    assert pj.selection_slots([P("Actin3-F")]) == {"forward": "Actin3-F"}
+    assert pj.selection_slots([P("a_F"), P("b_F")]) is None        # two forwards
+    assert pj.selection_slots([P(f"x{i}_F") for i in range(4)]) is None
+    slots = pj.selection_slots([P("x_F"), P("x_R"), P("x_probe", "probe")])
+    assert slots == {"forward": "x_F", "reverse": "x_R", "probe": "x_probe"}
