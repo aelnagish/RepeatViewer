@@ -702,3 +702,12 @@ def test_check_only_the_selected_primers(shared, tmp_path, qapp, settings):
     assert m.map_settings().primer_names == []
     assert not m._form_main.form.isRowVisible(m._only_field)
     m.close()
+
+
+def test_former_member_is_a_status_not_a_role(tmp_path):
+    db = inv.open_database(inv.create_inventory(tmp_path / "db"))
+    pid = db.add_person("Sara", role="Former member")
+    assert "Former member" not in inv.PERSON_ROLES
+    db.migrate_people()
+    p = db.persons[pid]
+    assert p.role == "" and p.active is False

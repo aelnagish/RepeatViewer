@@ -277,7 +277,7 @@ PERSON_FIELDS: tuple[tuple[str, str], ...] = (
     ("active", "Active"),
 )
 PERSON_ROLES = ("", "Group leader", "Postdoc", "PhD student", "Master student",
-                "Bachelor student", "Technician", "Guest", "Former member")
+                "Bachelor student", "Technician", "Guest")
 _NAME_SPLIT = re.compile(r"\s*(?:&|,|;|/|\+|\band\b|\bund\b)\s*", re.I)
 
 
@@ -774,7 +774,13 @@ class PrimerInventory(PrimerDatabase):
                 row["ordered_by"] = [x for x in v if x in self.persons]
 
     def migrate_people(self) -> int:
-        """Older databases: "Anna & Nusrat" text -> two people. Returns primers changed."""
+        """Older databases: "Anna & Nusrat" text -> two people. Returns primers changed.
+
+        Also: "Former member" used to be a role; it is now only the status, so
+        such people get an empty role and are marked as former members."""
+        for p in list(self.persons.values()):
+            if p.role.strip().lower() == "former member":
+                self.update_person(p.pid, {"role": "", "active": False})
         todo = [r for r in self.records.values()
                 if isinstance(r.data.get("ordered_by"), str) and r.data.get("ordered_by")]
         if not todo:
