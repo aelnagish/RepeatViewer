@@ -68,7 +68,8 @@ LAB_USER_KEY = "primers/lab_user"
 _ALL = "__all__"
 _COLUMNS: tuple[tuple[str, str], ...] = (
     ("name", "Name"), ("pair", "Pair"), ("sequence", "Sequence 5′→3′"), ("length", "Length"),
-    ("tm", "Tm °C"), ("tm_supplier", "Tm supplier °C"), ("organism", "Organism"), ("target", "Target"), ("box", "Box"),
+    ("tm", "Tm Primer3 °C"), ("tm_supplier", "Tm supplier °C"), ("organism", "Organism"),
+    ("target", "Target"), ("box", "Box"),
     ("freezer", "Freezer"), ("room", "Room"), ("status", "Status"), ("tested", "Tested"),
     ("ordered_by", "Ordered by"), ("ordered_on", "Ordered on"),
 )
@@ -799,7 +800,7 @@ class PrimerDatabaseDialog(QDialog):
             lines.append(f"  5′-{p.sequence}-3′")
             lines.append(f"  {st.binding_length} nt binding"
                          + (f" + {len(p.tail)} nt tail" if p.tail else "")
-                         + f" · Tm {st.tm:.1f} °C"
+                         + f" · Tm {st.tm:.1f} °C (Primer3)"
                          + (f" ({st.tm_min:.1f}–{st.tm_max:.1f})" if st.degeneracy > 1 else "")
                          + f" · GC {st.gc:.0f} % · 3′ ΔG {st.end_dg:.1f}")
             sup = p.extra.get("tm_supplier")
@@ -1123,7 +1124,7 @@ class AddPrimersDialog(QDialog):
     """Add one or more primers: a row per primer with live checks, and the
     details they share (organism, target, who ordered them, where they go)."""
 
-    _COLS = ("Name", "Sequence 5′→3′", "Length", "Tm °C", "GC %", "Check")
+    _COLS = ("Name", "Sequence 5′→3′", "Length", "Tm Primer3 °C", "GC %", "Check")
 
     def __init__(self, db: PrimerDatabase, thermo: ThermoSettings, parent: QWidget) -> None:
         super().__init__(parent)
