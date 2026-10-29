@@ -247,6 +247,27 @@ def _to_bool(value) -> bool:
 
 
 # --------------------------------------------------------------------------
+# Lists (organisms, targets, places)
+# --------------------------------------------------------------------------
+
+LIST_PREFIX = "list:"
+LIST_FIELDS: tuple[tuple[str, str, str], ...] = (
+    # field, plural label, singular label
+    ("organism", "Organisms", "organism"),
+    ("target", "Targets", "target"),
+    ("box", "Boxes", "box"),
+    ("freezer", "Freezers", "freezer"),
+    ("room", "Rooms", "room"),
+)
+LIST_LABELS = {k: (pl, sg) for k, pl, sg in LIST_FIELDS}
+
+
+def list_entry_id(field_key: str, value: str) -> str:
+    slug = re.sub(r"\s+", " ", (value or "").strip().lower())
+    return f"{LIST_PREFIX}{field_key}:{slug}"
+
+
+# --------------------------------------------------------------------------
 # People
 # --------------------------------------------------------------------------
 
@@ -343,6 +364,7 @@ class PrimerInventory(PrimerDatabase):
         self._signature: tuple = ()
         self.records: dict[str, Record] = {}
         self.persons: dict[str, Person] = {}
+        self.lists: dict[str, dict[str, str]] = {}
         self.primers: list[Primer] = []
         self.skipped_lines = 0
         self.reload()
@@ -418,8 +440,14 @@ class PrimerInventory(PrimerDatabase):
                                      str(d.get("email", "")),
                                      bool(d.get("active", True)), r.created_by,
                                      list(r.history))
+        self.lists = {k: {} for k, _p, _s in LIST_FIELDS}
+        for k, r in records.items():
+            if k.startswith(LIST_PREFIX) and not r.data.get("_deleted"):
+                fk, value = str(r.data.get("field", "")), str(r.data.get("value", "")).strip()
+                if fk in self.lists and value:
+                    self.lists[fk][k] = value
         self.records = {k: r for k, r in records.items() if not r.data.get("_deleted")
-                        and not k.startswith(PERSON_PREFIX) and r.sequence}
+                        and not k.startswith((PERSON_PREFIX, LIST_PREFIX)) and r.sequence}
         self.skipped_lines = skipped
         self._signature = self.signature()
         self._rebuild_primers()
@@ -550,6 +578,68 @@ class PrimerInventory(PrimerDatabase):
             if who not in seen:
                 seen.append(who)
         return seen
+
+    # ------------------------------------------------------------ lists
+
+    def values(self, field_key: str) -> list[tuple[str, int]]:
+        """Every value of a list field with how many primers use it: the saved
+        list plus whatever primers already use. Sorted by name."""
+        counts: dict[str, int] = {}
+        canon: dict[str, str] = {}
+        for value in self.lists.get(field_key, {}).values():
+            canon.setdefault(value.lower(), value)
+            counts.setdefault(value.lower(), 0)
+        for r in self.records.values():
+            v = str(r.data.get(field_key, "") or "").strip()
+            if v:
+                canon.setdefault(v.lower(), v)
+                counts[v.lower()] = counts.get(v.lower(), 0) + 1
+        return sorted(((canon[k], n) for k, n in counts.items()), key=lambda x: x[0].lower())
+
+    def records_with(self, field_key: str, value: str) -> list[Record]:
+        low = (value or "").strip().lower()
+        return [r for r in self.records.values()
+                if str(r.data.get(field_key, "") or "").strip().lower() == low]
+
+    def add_value(self, field_key: str, value: str) -> bool:
+        value = re.sub(r"\s+", " ", str(value or "")).strip()
+        if field_key not in self.lists or not value:
+            raise PrimerError("Give a name.")
+        if any(v.lower() == value.lower() for v, _n in self.values(field_key)):
+            return False
+        self._write([self._change("add", list_entry_id(field_key, value),
+                                  {"field": field_key, "value": value})])
+        return True
+
+    def rename_value(self, field_key: str, old: str, new: str) -> int:
+        """Rename (or merge into an existing value) on every primer. Returns primers changed."""
+        new = re.sub(r"\s+", " ", str(new or "")).strip()
+        if not new:
+            raise PrimerError("Give the new name.")
+        changes = [self._change("update", r.rid, {field_key: new})
+                   for r in self.records_with(field_key, old)]
+        old_id, new_id = list_entry_id(field_key, old), list_entry_id(field_key, new)
+        if old_id in self.lists.get(field_key, {}) and old_id != new_id:
+            changes.append(self._change("delete", old_id, {}))
+        if new_id not in self.lists.get(field_key, {}):
+            changes.append(self._change("add", new_id, {"field": field_key, "value": new}))
+        elif self.lists[field_key][new_id] != new:
+            changes.append(self._change("update", new_id, {"value": new}))
+        self._write(changes)
+        return len([c for c in changes if c.rid in self.records])
+
+    def remove_value(self, field_key: str, value: str, *, clear: bool = False) -> int:
+        """Remove from the list. Used by primers: only with ``clear`` (the field is
+        emptied on them). Returns primers changed, or -1 when refused."""
+        used = self.records_with(field_key, value)
+        if used and not clear:
+            return -1
+        changes = [self._change("update", r.rid, {field_key: ""}) for r in used]
+        entry = list_entry_id(field_key, value)
+        if entry in self.lists.get(field_key, {}):
+            changes.append(self._change("delete", entry, {}))
+        self._write(changes)
+        return len(used)
 
     # ------------------------------------------------------------ people
 

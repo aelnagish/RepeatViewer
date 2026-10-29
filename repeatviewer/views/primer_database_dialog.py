@@ -31,12 +31,13 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMenu,
     QMessageBox,
-    QPlainTextEdit,
+    QTextBrowser,
     QPushButton,
     QScrollArea,
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -96,6 +97,104 @@ def _one_decimal(value) -> str:
         return f"{float(str(value).replace(',', '.')):.1f}"
     except (TypeError, ValueError):
         return str(value or "")
+
+
+# --------------------------------------------------------------------------
+# Plain-language checks
+# --------------------------------------------------------------------------
+
+OK, CAUTION, BAD = "ok", "caution", "bad"
+_MARK = {OK: ("✓", "#2e7d32"), CAUTION: ("⚠", "#b45309"), BAD: ("✗", "#b3261e")}
+
+
+def _e(text: str) -> str:
+    import html
+
+    return html.escape(str(text))
+
+
+def _dimer_verdict(dg: float, found: bool) -> tuple[str, str]:
+    if not found or dg > -6.0:
+        return OK, "weak, fine" if found else "none"
+    if dg > -9.0:
+        return CAUTION, "moderate: may give primer-dimer bands at low annealing temperature"
+    return BAD, "strong: likely primer-dimer bands"
+
+
+def primer_verdicts(st) -> list[tuple[str, str, str]]:
+    """(status, check, text) rows for one primer.
+
+    Rules of thumb (as in common primer guides): dimers weaker than −6 kcal/mol
+    are harmless, −6 to −9 need care, stronger than −9 cause dimer bands;
+    a hairpin matters when it is stable at the annealing temperature; the last
+    five 3′ bases should not bind too strongly (ΔG above −9); GC 40–60 %.
+    """
+    rows = []
+    hp = st.hairpin
+    if not hp.found:
+        rows.append((OK, "Hairpin", "none"))
+    elif hp.tm and hp.tm < st.tm - 10 and hp.dg > -3.0:
+        rows.append((OK, "Hairpin", f"none that matters (melts at {hp.tm:.0f} °C)"))
+    elif hp.tm and hp.tm < st.tm - 5:
+        rows.append((CAUTION, "Hairpin", f"melts at {hp.tm:.0f} °C, close to annealing: "
+                     "use an annealing temperature well above it"))
+    else:
+        rows.append((BAD, "Hairpin", f"stable (ΔG {hp.dg:.1f}"
+                     + (f", melts at {hp.tm:.0f} °C" if hp.tm else "") + "): the primer folds"))
+    status, text = _dimer_verdict(st.self_dimer.dg, st.self_dimer.found)
+    rows.append((status, "Self-dimer", text + (f" ({st.self_dimer.dg:.1f})"
+                                               if st.self_dimer.found else "")))
+    if st.end_dg < -9.0:
+        rows.append((CAUTION, "3′ end", f"binds very strongly (ΔG {st.end_dg:.1f}): may prime "
+                     "at wrong sites"))
+    else:
+        rows.append((OK, "3′ end", f"normal (ΔG {st.end_dg:.1f})"))
+    lo, hi = 40, 60
+    if lo <= st.gc <= hi:
+        rows.append((OK, "GC", f"{st.gc:.0f} %"))
+    else:
+        rows.append((CAUTION, "GC", f"{st.gc:.0f} % (aim for {lo}–{hi} %)"))
+    other = [w for w in st.warnings if not w.startswith(("GC ", "very stable 3"))
+             and "dimer" not in w and "hairpin" not in w]
+    for w in other:
+        rows.append((CAUTION, "Note", w))
+    return rows
+
+
+def pair_verdicts(sa, sb, cross) -> list[tuple[str, str, str]]:
+    """Two primers in one reaction: their dimer and Tm difference."""
+    rows = []
+    status, text = _dimer_verdict(cross.dg, cross.found)
+    rows.append((status, "Together", text + (f" (cross-dimer {cross.dg:.1f})"
+                                             if cross.found else ", no cross-dimer")))
+    if sa is not None and sb is not None:
+        diff = abs(sa.tm - sb.tm)
+        if diff <= 2:
+            rows.append((OK, "Tm difference", f"{diff:.1f} °C"))
+        elif diff <= 5:
+            rows.append((CAUTION, "Tm difference", f"{diff:.1f} °C: anneal for the lower "
+                         f"one ({min(sa.tm, sb.tm):.1f} °C)"))
+        else:
+            rows.append((BAD, "Tm difference", f"{diff:.1f} °C: too far apart for one "
+                         "annealing temperature"))
+    return rows
+
+
+def _verdict_table(rows) -> str:
+    out = ["<table cellspacing='0' cellpadding='2'>"]
+    for status, label, text in rows:
+        mark, color = _MARK[status]
+        out.append(f"<tr><td style='color:{color}'><b>{mark}</b></td>"
+                   f"<td style='padding-right:8px'>{_e(label)}</td><td>{_e(text)}</td></tr>")
+    out.append("</table>")
+    return "".join(out)
+
+
+def _drawing(title: str, struct) -> str:
+    tm = f", melts at {struct.tm:.0f} °C" if getattr(struct, "tm", 0) > 0 else ""
+    body = _e("\n".join(struct.lines)) if struct.lines else "(no drawing)"
+    return (f"<p style='color:palette(mid);margin-bottom:0'>{_e(title)}: ΔG {struct.dg:.1f} "
+            f"kcal/mol{tm}</p><pre style='font-size:11px;margin-top:2px'>{body}</pre>")
 
 
 def lab_user_setting() -> str:
@@ -266,17 +365,27 @@ class PrimerDatabaseDialog(QDialog):
         ll.addLayout(fb)
         ll.addWidget(scroll, 1)
 
-        self._details = QPlainTextEdit(self)
-        self._details.setReadOnly(True)
-        self._details.setFont(_mono_font())
-        self._details.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self._details = QTextBrowser(self)
+        self._details.setOpenLinks(False)
         self._details.setPlaceholderText(
-            "Select a primer to see its Tm, GC, hairpin, self-dimer and history.\n"
-            "Select two to see the dimer between them.\n"
+            "Select a primer to check it: hairpin, self-dimer, 3′ end, GC, and whether it "
+            "works with its partner.\n"
+            "Select two primers to check them together.\n"
             "Select several to change their box, status … at once.")
+        self._show_drawings = QCheckBox("Show the structure drawings", self)
+        self._show_drawings.setChecked(
+            str(QSettings().value("primers/database_window/drawings", "false")).lower()
+            in ("1", "true"))
+        self._show_drawings.toggled.connect(self._drawings_toggled)
+        right = QWidget(self)
+        rl = QVBoxLayout(right)
+        rl.setContentsMargins(0, 0, 0, 0)
+        rl.setSpacing(4)
+        rl.addWidget(self._details, 1)
+        rl.addWidget(self._show_drawings)
         bottom = QSplitter(Qt.Orientation.Horizontal, self)
         bottom.addWidget(left)
-        bottom.addWidget(self._details)
+        bottom.addWidget(right)
         bottom.setStretchFactor(0, 3)
         bottom.setStretchFactor(1, 2)
         bottom.setSizes([660, 480])
@@ -304,9 +413,9 @@ class PrimerDatabaseDialog(QDialog):
         dups.setToolTip("Same sequence under two names, reverse complements, one primer "
                         "inside another")
         dups.clicked.connect(self._find_duplicates)
-        people = QPushButton("People…", self)
-        people.setToolTip("The lab members: add people, set their role, mark who has left, "
-                          "merge two entries for one person")
+        people = QPushButton("Lab…", self)
+        people.setToolTip("The lab: people, places (rooms, freezers, boxes), organisms and "
+                          "targets. Add, rename (on every primer), merge, remove.")
         people.clicked.connect(self._open_people)
         self._people_btn = people
         check = QPushButton("Check a Sequence…", self)
@@ -527,8 +636,11 @@ class PrimerDatabaseDialog(QDialog):
         self._organism.blockSignals(True)
         self._organism.clear()
         self._organism.addItem("All organisms", _ALL)
-        for org in sorted({str(d.get("organism", "")).strip() for _i, _p, d in rows} - {""},
-                          key=str.lower):
+        db = self._inventory()
+        orgs = ([v for v, n in db.values("organism") if n] if db is not None else
+                sorted({str(d.get("organism", "")).strip() for _i, _p, d in rows} - {""},
+                       key=str.lower))
+        for org in orgs:
             self._organism.addItem(org, org)
         idx = self._organism.findData(current)
         self._organism.setCurrentIndex(max(0, idx))
@@ -552,8 +664,11 @@ class PrimerDatabaseDialog(QDialog):
             if kind != "combo":
                 continue
             box = self._fields[key]
-            values = sorted({str(d.get(key, "")).strip() for _i, _p, d in rows} - {""},
-                            key=str.lower)
+            if db is not None and key in db.lists:
+                values = [v for v, _n in db.values(key)]   # the saved list + values in use
+            else:
+                values = sorted({str(d.get(key, "")).strip() for _i, _p, d in rows} - {""},
+                                key=str.lower)
             text = box.currentText()
             box.blockSignals(True)
             box.clear()
@@ -827,58 +942,70 @@ class PrimerDatabaseDialog(QDialog):
 
     # ------------------------------------------------------------ details
 
+    def _drawings_toggled(self, on: bool) -> None:
+        QSettings().setValue("primers/database_window/drawings", bool(on))
+        self._show_details()
+
+    def _partner_of(self, p: Primer, pairs: dict) -> Primer | None:
+        for name in pairs.get(p.name, []):
+            other = self._db.get(name)
+            if other is not None:
+                return other
+        return None
+
     def _show_details(self) -> None:
         sel = self._selected()
         if not sel:
             self._details.clear()
             return
-        lines: list[str] = []
         db = self._inventory()
         pairs = inv.partners(self._db.primers)
-        for p in sel[:2]:
-            st = self._stats(p)
-            if st is None:
-                lines.append(f"{p.name}: cannot analyse {p.sequence}")
-                continue
-            lines.append(f"{p.name}  ({KIND_LABELS.get(p.kind, p.kind)})")
-            lines.append(f"  5′-{p.sequence}-3′")
-            lines.append(f"  {st.binding_length} nt binding"
-                         + (f" + {len(p.tail)} nt tail" if p.tail else "")
-                         + f" · Tm {st.tm:.1f} °C (Primer3)"
-                         + (f" ({st.tm_min:.1f}–{st.tm_max:.1f})" if st.degeneracy > 1 else "")
-                         + f" · GC {st.gc:.0f} % · 3′ ΔG {st.end_dg:.1f}")
-            sup = p.extra.get("tm_supplier")
-            if sup:
-                lines.append(f"  Tm on the synthesis report: {sup} °C (the supplier's "
-                             "method and conditions)")
-            lines.append(f"  Tm here: Primer3, {self._thermo.describe()}")
-            if pairs.get(p.name):
-                lines.append(f"  Pairs with: {', '.join(pairs[p.name])}")
-            if st.warnings:
-                lines.append("  ⚠ " + "; ".join(st.warnings))
-            for s in (st.hairpin, st.self_dimer):
-                if s.found:
-                    tm = f", Tm {s.tm:.1f} °C" if s.tm > 0 else ""
-                    lines.append(f"  {s.kind}: ΔG {s.dg:.1f} kcal/mol{tm}")
-                    lines.extend("    " + x for x in s.lines)
-                else:
-                    lines.append(f"  {s.kind}: none")
-            lines.append("")
+        drawings = self._show_drawings.isChecked()
+        parts: list[str] = []
         if len(sel) >= 2:
-            d = heterodimer(sel[0].sequence, sel[1].sequence, self._thermo)
-            lines.append(f"{sel[0].name} × {sel[1].name}: "
-                         + (f"cross-dimer ΔG {d.dg:.1f} kcal/mol" if d.found else "no dimer"))
-            lines.extend("    " + x for x in d.lines)
-            ta, tb = self._stats(sel[0]), self._stats(sel[1])
-            if ta and tb:
-                lines.append(f"    Tm difference {abs(ta.tm - tb.tm):.1f} °C")
-            lines.append("")
+            a, b = sel[0], sel[1]
+            sa, sb = self._stats(a), self._stats(b)
+            cross = heterodimer(a.sequence, b.sequence, self._thermo)
+            parts.append(f"<h3>{_e(a.name)} + {_e(b.name)}</h3>")
+            parts.append(_verdict_table(pair_verdicts(sa, sb, cross)))
+            if drawings and cross.found:
+                parts.append(_drawing("Dimer between them", cross))
+        for p in sel[:2] if len(sel) >= 2 else sel[:1]:
+            st = self._stats(p)
+            parts.append(f"<h3>{_e(p.name)} <span style='color:palette(mid);font-weight:"
+                         f"normal'>{_e(KIND_LABELS.get(p.kind, p.kind))}</span></h3>")
+            if st is None:
+                parts.append(f"<p>Cannot analyse {_e(p.sequence)}.</p>")
+                continue
+            partner = self._partner_of(p, pairs) if len(sel) == 1 else None
+            rows = primer_verdicts(st)
+            if partner is not None:
+                sp = self._stats(partner)
+                if sp is not None:
+                    cross = heterodimer(p.sequence, partner.sequence, self._thermo)
+                    rows = [(s_, f"With {partner.name}" if lab == "Together" else lab, t)
+                            for s_, lab, t in pair_verdicts(st, sp, cross)] + rows
+            parts.append(_verdict_table(rows))
+            sup = p.extra.get("tm_supplier")
+            facts = [f"{st.binding_length} nt" + (f" + {len(p.tail)} nt tail" if p.tail else ""),
+                     f"Tm {st.tm:.1f} °C (Primer3)"
+                     + (f", {st.tm_min:.1f}–{st.tm_max:.1f} for the degenerate mix"
+                        if st.degeneracy > 1 else ""),
+                     f"supplier {_e(str(sup))} °C" if sup else "",
+                     f"GC {st.gc:.0f} %"]
+            parts.append("<p style='color:palette(mid)'>" + " · ".join(x for x in facts if x)
+                         + f"<br>Tm conditions: {_e(self._thermo.describe())}</p>")
+            if drawings:
+                for struct, title in ((st.hairpin, "Hairpin"), (st.self_dimer, "Self-dimer")):
+                    if struct.found:
+                        parts.append(_drawing(title, struct))
         if db is not None and len(sel) == 1:
             rec = db.records.get(sel[0].extra.get("id", ""))
             if rec is not None and rec.history:
-                lines.append("History")
-                lines.extend("  " + inv.describe_change(ch, db) for ch in reversed(rec.history[-30:]))
-        self._details.setPlainText("\n".join(lines))
+                items = "".join(f"<li>{_e(inv.describe_change(ch, db))}</li>"
+                                for ch in reversed(rec.history[-30:]))
+                parts.append(f"<h3>History</h3><ul style='margin-left:-20px'>{items}</ul>")
+        self._details.setHtml("".join(parts))
 
     # ------------------------------------------------------------ actions
 
@@ -1086,7 +1213,7 @@ class PrimerDatabaseDialog(QDialog):
             return
         if not self._before_write():
             return
-        dlg = PeopleDialog(db, self)
+        dlg = ListsDialog(db, self)
         dlg.exec()
         self._refill_choices()
         self._fill()
@@ -1596,8 +1723,11 @@ class PeopleDialog(QDialog):
 
     _COLS = ("Name", "Initials", "Role", "Email", "Primers", "Member")
 
-    def __init__(self, db: inv.PrimerInventory, parent: QWidget) -> None:
+    def __init__(self, db: inv.PrimerInventory, parent: QWidget, *,
+                 embedded: bool = False) -> None:
         super().__init__(parent)
+        if embedded:
+            self.setWindowFlags(Qt.WindowType.Widget)
         self.setWindowTitle("People")
         self.resize(720, 520)
         self._db = db
@@ -1648,6 +1778,7 @@ class PeopleDialog(QDialog):
         self._remove.clicked.connect(self._remove_selected)
         close = QPushButton("Close", self)
         close.clicked.connect(self.accept)
+        close.setVisible(not embedded)
         bar = QHBoxLayout()
         for b in (add, self._merge, self._remove):
             bar.addWidget(b)
@@ -1771,5 +1902,199 @@ class PeopleDialog(QDialog):
         self._fill()
 
 
-__all__ = ["AddPrimersDialog", "PeopleDialog", "PeopleField", "PrimerDatabaseDialog", "apply_lab_user_setting",
+class ValueListPage(QWidget):
+    """One list (organisms, targets, boxes …): add, rename on every primer, merge,
+    remove."""
+
+    def __init__(self, db: inv.PrimerInventory, field_key: str, parent: QWidget) -> None:
+        super().__init__(parent)
+        self._db = db
+        self._key = field_key
+        self._plural, self._one = inv.LIST_LABELS[field_key]
+        self._table = QTableWidget(0, 2, self)
+        self._table.setHorizontalHeaderLabels([self._one.capitalize(), "Primers"])
+        self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._table.verticalHeader().setVisible(False)
+        self._table.setAlternatingRowColors(True)
+        hh = self._table.horizontalHeader()
+        hh.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        hh.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self._table.itemSelectionChanged.connect(self._on_select)
+        self._table.itemDoubleClicked.connect(lambda _i: self._rename())
+        self._used = QLabel(self)
+        self._used.setWordWrap(True)
+        self._used.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        add = QPushButton("Add…", self)
+        add.setToolTip(f"Add a new {self._one} to the list")
+        add.clicked.connect(self._add)
+        self._rename_btn = QPushButton("Rename…", self)
+        self._rename_btn.setToolTip("Changes the name on every primer that uses it")
+        self._rename_btn.clicked.connect(self._rename)
+        self._merge_btn = QPushButton("Merge…", self)
+        self._merge_btn.setToolTip("Two names for the same thing (e.g. a typo): select both, "
+                                   "keep one")
+        self._merge_btn.clicked.connect(self._merge)
+        self._remove_btn = QPushButton("Remove", self)
+        self._remove_btn.clicked.connect(self._remove)
+        bar = QHBoxLayout()
+        for b in (add, self._rename_btn, self._merge_btn, self._remove_btn):
+            bar.addWidget(b)
+        bar.addStretch(1)
+        lay = QVBoxLayout(self)
+        lay.addWidget(self._table, 1)
+        lay.addWidget(self._used)
+        lay.addLayout(bar)
+        self.refresh()
+
+    def refresh(self, select: list[str] | None = None) -> None:
+        values = self._db.values(self._key)
+        self._table.blockSignals(True)
+        self._table.setRowCount(len(values))
+        for i, (v, n) in enumerate(values):
+            a = QTableWidgetItem(v)
+            b = QTableWidgetItem()
+            b.setData(Qt.ItemDataRole.DisplayRole, n)
+            if not n:
+                a.setForeground(Qt.GlobalColor.gray)
+                b.setForeground(Qt.GlobalColor.gray)
+            self._table.setItem(i, 0, a)
+            self._table.setItem(i, 1, b)
+            if select and v in select:
+                self._table.selectRow(i)
+        self._table.blockSignals(False)
+        self._on_select()
+
+    def _selected(self) -> list[str]:
+        return [self._table.item(i.row(), 0).text()
+                for i in self._table.selectionModel().selectedRows()]
+
+    def _on_select(self) -> None:
+        sel = self._selected()
+        self._rename_btn.setEnabled(len(sel) == 1)
+        self._merge_btn.setEnabled(len(sel) == 2)
+        self._remove_btn.setEnabled(bool(sel))
+        if len(sel) == 1:
+            names = sorted(r.name for r in self._db.records_with(self._key, sel[0]))
+            self._used.setText(
+                "<span style='color:palette(mid)'>"
+                + (f"Used by {len(names)} primer(s): " + ", ".join(names[:15])
+                   + (" …" if len(names) > 15 else "") if names else
+                   "Not used by any primer yet (in the list for choosing)") + "</span>")
+        else:
+            self._used.setText("<span style='color:palette(mid)'>Double-click to rename. "
+                               "Select two to merge.</span>")
+
+    def _ask(self, title: str, label: str, text: str = "") -> str:
+        value, ok = QInputDialog.getText(self, title, label, text=text)
+        return value.strip() if ok else ""
+
+    def _add(self) -> None:
+        value = self._ask(f"Add {self._one.capitalize()}", f"New {self._one}:")
+        if not value:
+            return
+        try:
+            if not self._db.add_value(self._key, value):
+                QMessageBox.information(self, self._plural, f"{value} is already in the list.")
+        except PrimerError as exc:
+            QMessageBox.warning(self, self._plural, str(exc))
+            return
+        self.refresh(select=[value])
+
+    def _rename(self) -> None:
+        sel = self._selected()
+        if len(sel) != 1:
+            return
+        old = sel[0]
+        new = self._ask("Rename", f"New name for \u201c{old}\u201d (changed on every primer):",
+                        old)
+        if not new or new == old:
+            return
+        existing = next((v for v, _n in self._db.values(self._key)
+                         if v.lower() == new.lower() and v != old), None)
+        if existing is not None:
+            ans = QMessageBox.question(self, "Rename", f"{existing} is already in the list. "
+                                       f"Merge {old} into {existing}?")
+            if ans != QMessageBox.StandardButton.Yes:
+                return
+            new = existing
+        n = self._db.rename_value(self._key, old, new)
+        self.refresh(select=[new])
+        self._used.setText(self._used.text() + f"<br>Renamed on {n} primer(s).")
+
+    def _merge(self) -> None:
+        sel = self._selected()
+        if len(sel) != 2:
+            return
+        keep, ok = QInputDialog.getItem(self, "Merge", "These are the same. Keep which name?",
+                                        sel, 0, False)
+        if not ok:
+            return
+        drop = sel[1] if keep == sel[0] else sel[0]
+        n = self._db.rename_value(self._key, drop, keep)
+        self.refresh(select=[keep])
+        self._used.setText(self._used.text() + f"<br>{n} primer(s) changed to {keep}.")
+
+    def _remove(self) -> None:
+        for value in self._selected():
+            n = self._db.remove_value(self._key, value)
+            if n == -1:
+                count = len(self._db.records_with(self._key, value))
+                ans = QMessageBox.question(
+                    self, "Remove", f"{count} primer(s) use \u201c{value}\u201d. Remove it "
+                    f"from them too (their {self._one} becomes empty)?")
+                if ans == QMessageBox.StandardButton.Yes:
+                    self._db.remove_value(self._key, value, clear=True)
+        self.refresh()
+
+
+class ListsDialog(QDialog):
+    """Lab: the people, places, organisms and targets the fields choose from."""
+
+    TABS = ("people", "places", "organism", "target")
+
+    def __init__(self, db: inv.PrimerInventory, parent: QWidget, *, start: str = "") -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Lab")
+        self.resize(900, 600)
+        tabs = QTabWidget(self)
+        tabs.setDocumentMode(True)
+        self.people = PeopleDialog(db, tabs, embedded=True)
+        tabs.addTab(self.people, "People")
+        self.pages: dict[str, ValueListPage] = {}
+        places = QWidget(tabs)
+        pl = QHBoxLayout(places)
+        pl.setContentsMargins(0, 0, 0, 0)
+        for key in ("room", "freezer", "box"):
+            col = QWidget(places)
+            cl = QVBoxLayout(col)
+            cl.setContentsMargins(0, 0, 0, 0)
+            title = QLabel(f"<b>{inv.LIST_LABELS[key][0]}</b>", col)
+            page = ValueListPage(db, key, col)
+            self.pages[key] = page
+            cl.addWidget(title)
+            cl.addWidget(page, 1)
+            pl.addWidget(col, 1)
+        tabs.addTab(places, "Places")
+        for key in ("organism", "target"):
+            page = ValueListPage(db, key, tabs)
+            self.pages[key] = page
+            tabs.addTab(page, inv.LIST_LABELS[key][0])
+        tabs.currentChanged.connect(lambda _i: [p.refresh() for p in self.pages.values()])
+        if start in self.TABS:
+            tabs.setCurrentIndex(self.TABS.index(start))
+        self.tabs = tabs
+        close = QPushButton("Close", self)
+        close.setDefault(True)
+        close.clicked.connect(self.accept)
+        bar = QHBoxLayout()
+        bar.addStretch(1)
+        bar.addWidget(close)
+        lay = QVBoxLayout(self)
+        lay.addWidget(tabs, 1)
+        lay.addLayout(bar)
+
+
+__all__ = ["AddPrimersDialog", "ListsDialog", "PeopleDialog", "ValueListPage", "PeopleField", "PrimerDatabaseDialog", "apply_lab_user_setting",
            "lab_user_setting"]

@@ -156,7 +156,7 @@ def test_database_dialog_lists_and_analyses(qapp, isolated_settings, data):
     d._table.selectRow(0)
     qapp.processEvents()
     text = d._details.toPlainText()
-    assert "Tm" in text and "hairpin" in text
+    assert "Tm" in text and "Hairpin" in text and "Self-dimer" in text
     d._filter.setText("Sat")
     assert d._table.rowCount() == 2
 
@@ -344,3 +344,33 @@ def test_painting_mode_swaps_tabs_and_round_trips(qapp, isolated_settings, data,
     assert e._mode.currentData() == dz.MODE_PCR
     for label in e.findChildren(QLabel):
         assert "—" not in label.text()
+
+
+def test_toolbar_ids_renamed_and_pages_scroll(qapp, isolated_settings, data):
+    from repeatviewer.views.toolbar_dialog import (
+        TOOLBAR_LABELS,
+        TOOLS_TOOLBAR_IDS,
+        _rename_old_toolbar_ids,
+    )
+
+    assert "primers" in TOOLS_TOOLBAR_IDS and TOOLBAR_LABELS["primers"] == "Primers and Probes"
+    assert "primer_design" not in TOOLBAR_LABELS and "primer_map" not in TOOLBAR_LABELS
+    assert _rename_old_toolbar_ids(["blast", "primer_design", "tree", "primer_map"]) == [
+        "blast", "primers", "tree"]
+    assert _rename_old_toolbar_ids(["primer_map"]) == ["primers"]
+
+    from PySide6.QtWidgets import QScrollArea
+
+    from repeatviewer.views.primer_dialogs import MapPrimersDialog
+
+    m = MapPrimersDialog(initial=PrimerOptions(), files=[data.gene])
+    m.show()
+    m._adv_btn.setChecked(True)
+    for _ in range(5):
+        qapp.processEvents()
+    m._fit()
+    avail = m.screen().availableGeometry()
+    assert m.frameGeometry().height() <= avail.height()
+    assert isinstance(m._stack.currentWidget(), QScrollArea)
+    assert m._save_button.isVisible()
+    m.close()

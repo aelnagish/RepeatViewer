@@ -361,9 +361,10 @@ def test_window_import_edit_filter_history(qapp, settings, shared):
     rec = d.database().record_by_name("pBV1_for")
     assert rec.get("tested") == "worked" and rec.get("anneal_temp") == "55"
     assert rec.get("box") == "BI-8"           # untouched fields stay
-    assert "History" in d._details.toPlainText() and "Abdullah: Tested = worked" in \
-        d._details.toPlainText().replace("Annealing °C = 55; ", "")
-    assert "Tm on the synthesis report: 53.7" in d._details.toPlainText()
+    text = d._details.toPlainText()
+    assert "History" in text and "Abdullah: Tested = worked" in text
+    assert "supplier 53.7 °C" in text and "With pBV1_rev" in text
+    assert "Hairpin" in text and "Self-dimer" in text and "3′ end" in text
     # Several at once: only the changed field is written to each.
     d._table.clearSelection()
     for name in ("ITS1-F", "ITS4"):
@@ -608,3 +609,71 @@ def test_window_remembers_its_layout(qapp, settings, shared):
     got = e._split_bottom.sizes()
     assert abs(got[0] / sum(got) - bottom[0] / sum(bottom)) < 0.05
     e.close()
+
+
+# --------------------------------------------------------------------------
+# Lab lists and plain-language checks
+# --------------------------------------------------------------------------
+
+
+def test_lists_add_rename_merge_remove(shared):
+    db = _imported(shared)
+    assert ("Nicotiana sp.", 4) in db.values("organism")
+    assert db.add_value("organism", "Crocus sativus") is True
+    assert db.add_value("organism", "crocus  SATIVUS") is False     # already there
+    assert ("Crocus sativus", 0) in db.values("organism")
+    # Rename changes every primer; the list follows.
+    assert db.rename_value("organism", "sect. Beta sp.", "Beta vulgaris") == 2
+    assert db.record_by_name("pBV1_for").get("organism") == "Beta vulgaris"
+    assert "sect. Beta sp." not in [v for v, _n in db.values("organism")]
+    # Merge = rename into an existing value.
+    db.rename_value("box", "AI-9", "BI-8")
+    assert ("BI-8", 17) in db.values("box")
+    # Remove: refused while used, unless cleared on the primers.
+    assert db.remove_value("organism", "Crocus sativus") == 0
+    assert db.remove_value("room", "Sterilbankraum") == -1
+    assert db.remove_value("room", "Sterilbankraum", clear=True) == 28
+    assert db.values("room") == []
+    # Other computers see the list after syncing.
+    other = inv.PrimerInventory(shared, user="Anna")
+    assert ("Beta vulgaris", 2) in other.values("organism")
+
+
+def test_plain_language_checks():
+    from repeatviewer.backends.primers.thermo import ThermoSettings, analyze_oligo, heterodimer
+    from repeatviewer.views.primer_database_dialog import BAD, OK, pair_verdicts, primer_verdicts
+
+    t = ThermoSettings()
+    good = analyze_oligo("AGCACCACCAGAGAGGAAGTACAGT", t)
+    rows = {label: (status, text) for status, label, text in primer_verdicts(good)}
+    assert rows["Hairpin"][0] == OK and rows["Self-dimer"][0] == OK and rows["3′ end"][0] == OK
+    # A palindromic primer dimerizes strongly.
+    pal = analyze_oligo("GCGCGAATTCGCGCGAATTCGCGC", t)
+    rows = {label: status for status, label, _t in primer_verdicts(pal)}
+    assert rows["Self-dimer"] == BAD
+    a = analyze_oligo("AGCACCACCAGAGAGGAAGTACAGT", t)
+    b = analyze_oligo("ATAATTATAAATATTAAATTTATAT", t)
+    rows = {label: status for status, label, _t in pair_verdicts(
+        a, b, heterodimer(a.sequence, b.sequence, t))}
+    assert rows["Tm difference"] == BAD
+
+
+def test_lab_window(qapp, settings, shared, monkeypatch):
+    from PySide6.QtWidgets import QInputDialog
+
+    from repeatviewer.views.primer_database_dialog import ListsDialog, PrimerDatabaseDialog
+
+    _imported(shared)
+    d = PrimerDatabaseDialog(shared)
+    lab = ListsDialog(d.database(), d, start="places")
+    assert [lab.tabs.tabText(i) for i in range(lab.tabs.count())] == [
+        "People", "Places", "Organisms", "Targets"]
+    assert lab.tabs.currentIndex() == 1
+    boxes = lab.pages["box"]
+    monkeypatch.setattr(QInputDialog, "getText", lambda *a, **k: ("Z-1", True))
+    boxes._add()
+    assert ("Z-1", 0) in d.database().values("box")
+    lab.accept()
+    d._refill_choices()
+    assert d._fields["box"].findText("Z-1") >= 0     # offered in the form now
+    d.close()
