@@ -584,3 +584,27 @@ def test_add_primers_window(qapp, settings, shared):
     assert rec.get("status") == "ordered" and d.database().ordered_by_text(rec) == "Abdullah"
     assert rec.get("ordered_on") == time.strftime("%Y-%m-%d")
     d.close()
+
+
+def test_window_remembers_its_layout(qapp, settings, shared):
+    from repeatviewer.views.primer_database_dialog import _COL, PrimerDatabaseDialog
+
+    _imported(shared)
+    d = PrimerDatabaseDialog(shared)
+    d.show()
+    d.resize(1100, 650)
+    d._table.setColumnWidth(_COL["name"], 222)
+    d._split_bottom.setSizes([300, 500])
+    qapp.processEvents()
+    bottom = d._split_bottom.sizes()
+    d.close()
+    e = PrimerDatabaseDialog(shared)
+    e.show()
+    qapp.processEvents()
+    assert e.height() == 650   # (the test screen is only 800 px wide)
+    assert e._table.columnWidth(_COL["name"]) == 222
+    e._fill()   # a refill keeps the user's column widths
+    assert e._table.columnWidth(_COL["name"]) == 222
+    got = e._split_bottom.sizes()
+    assert abs(got[0] / sum(got) - bottom[0] / sum(bottom)) < 0.05
+    e.close()

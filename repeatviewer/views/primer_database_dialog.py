@@ -285,6 +285,7 @@ class PrimerDatabaseDialog(QDialog):
         split.addWidget(bottom)
         split.setStretchFactor(0, 3)
         split.setStretchFactor(1, 2)
+        self._split_main, self._split_bottom = split, bottom
 
         # ---- buttons
         add = QPushButton("Add…", self)
@@ -339,6 +340,46 @@ class PrimerDatabaseDialog(QDialog):
         self._refill_choices()
         self._fill()
         self._on_selection()
+        self._restore_layout()
+
+    # ------------------------------------------------------------ window layout
+
+    _LAYOUT_GROUP = "primers/database_window"
+
+    def _restore_layout(self) -> None:
+        """Size, position, splitters and column widths as the user left them."""
+        st = QSettings()
+        st.beginGroup(self._LAYOUT_GROUP)
+        try:
+            geo = st.value("geometry")
+            if geo:
+                self.restoreGeometry(geo)
+            for key, w in (("split_main", self._split_main),
+                           ("split_bottom", self._split_bottom)):
+                v = st.value(key)
+                if v:
+                    w.restoreState(v)
+            header = st.value("columns")
+            if header and self._table.horizontalHeader().restoreState(header):
+                self._columns_restored = self._table.columnCount() == len(_COLUMNS)
+        except (TypeError, RuntimeError):
+            pass
+        finally:
+            st.endGroup()
+
+    def _save_layout(self) -> None:
+        st = QSettings()
+        st.beginGroup(self._LAYOUT_GROUP)
+        st.setValue("geometry", self.saveGeometry())
+        st.setValue("split_main", self._split_main.saveState())
+        st.setValue("split_bottom", self._split_bottom.saveState())
+        st.setValue("columns", self._table.horizontalHeader().saveState())
+        st.endGroup()
+        st.sync()
+
+    def hideEvent(self, event) -> None:  # noqa: N802
+        self._save_layout()
+        super().hideEvent(event)
 
     # ------------------------------------------------------------ database
 
@@ -582,12 +623,14 @@ class PrimerDatabaseDialog(QDialog):
         self._table.setSortingEnabled(True)
         hh = self._table.horizontalHeader()
         self._table.sortByColumn(hh.sortIndicatorSection(), hh.sortIndicatorOrder())
-        self._table.resizeColumnsToContents()
-        self._table.setColumnWidth(_COL["sequence"],
-                                   max(200, min(330, self._table.columnWidth(_COL["sequence"]))))
-        for key in ("organism", "target", "freezer"):
-            c = _COL[key]
-            self._table.setColumnWidth(c, min(200, self._table.columnWidth(c)))
+        if not getattr(self, "_columns_restored", False):
+            # Fit the columns once; after that the widths the user set are kept.
+            self._table.resizeColumnsToContents()
+            self._table.setColumnWidth(
+                _COL["sequence"], max(200, min(330, self._table.columnWidth(_COL["sequence"]))))
+            for key in ("organism", "target", "freezer"):
+                c = _COL[key]
+                self._table.setColumnWidth(c, min(200, self._table.columnWidth(c)))
         wanted = set(select_ids or [])
         if wanted:
             self._table.clearSelection()
@@ -1076,6 +1119,7 @@ class PrimerDatabaseDialog(QDialog):
             if ans == QMessageBox.StandardButton.Save:
                 self._save_form()
         self._poll.stop()
+        self._save_layout()
         super().closeEvent(event)
 
 
