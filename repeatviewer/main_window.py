@@ -591,8 +591,7 @@ _TOOLBAR_TOOLTIPS = {
     "fastga": "FastGA whole-genome alignment (each file against itself, against each other, or against a reference)",
     "tree": "Phylogenetic tree from the selected FASTA (MAFFT + IQ-TREE / FastME / FastTree)",
     "map_reference": "Map the selected sequences or reads to a reference (minimap2 / HISAT2)",
-    "primer_design": "Design primers or probes on the selected FASTA (Primer3, repeat-aware)",
-    "primer_map": "Test primers on the selected sequences (binding sites, products, virtual gel)",
+    "primers": "Primers and Probes: Design, Map, Database",
     "blast": "BLAST selected FASTA against the project genome using default parameters",
     "hmmer": "HMMER (pyhmmer) search of selected FASTA against a project HMM database",
     "te_genome_map": "Genome density plot using default parameters",
@@ -2974,6 +2973,36 @@ class MainWindow(NcbiDownloadActionsMixin, PrimerActionsMixin, QMainWindow):
             status.show()
         self._rebuild_top_toolbar()
         self._repair_browser_chrome()
+        self._start_layout_autosave()
+
+    def _save_window_layout(self, *, force: bool = False) -> None:
+        """Remember window size and panel layout (also while the app runs, so a
+        crash, a forced quit or Stop in the IDE does not lose them)."""
+        if not force and (self.isMinimized() or self.isFullScreen()):
+            return
+        try:
+            state = bytes(self.saveState())
+            geometry = bytes(self.saveGeometry())
+        except RuntimeError:
+            return
+        if not force and (state, geometry) == getattr(self, "_saved_layout", None):
+            return
+        self._saved_layout = (state, geometry)
+        settings = QSettings()
+        settings.beginGroup("mainwindow")
+        settings.setValue("toolbar_state_v5", self.saveState())
+        settings.setValue("geometry", self.saveGeometry())
+        settings.endGroup()
+        settings.sync()
+
+    def _start_layout_autosave(self) -> None:
+        if getattr(self, "_layout_autosave", None) is not None:
+            return
+        # Restoring and the first repairs run on the event loop; start a moment later.
+        self._layout_autosave = QTimer(self)
+        self._layout_autosave.setInterval(3000)
+        self._layout_autosave.timeout.connect(self._save_window_layout)
+        QTimer.singleShot(4000, self._layout_autosave.start)
 
     def _browser_layout_needs_repair(self) -> bool:
         """True when dock geometry leaves a visible central gutter or wrong areas."""
@@ -3036,6 +3065,9 @@ class MainWindow(NcbiDownloadActionsMixin, PrimerActionsMixin, QMainWindow):
             return
         if self._find_dialog is not None:
             self._find_dialog.save_settings()
+        # Save the layout first: tearing down web previews below can crash on some
+        # systems, and then nothing after it would run.
+        self._save_window_layout(force=True)
         self._stop_metadata_enrichment()
         if self._any_background_job_running():
             self._shutdown_background_threads()
@@ -7488,16 +7520,18 @@ class MainWindow(NcbiDownloadActionsMixin, PrimerActionsMixin, QMainWindow):
                 ),
                 right_click_slot=self._quick_map_right_click,
             )
-        elif tool_id == "primer_design":
-            self._add_toolbar_action_button(
+        elif tool_id == "primers":
+            self._add_toolbar_text_menu_button(
                 bar,
-                "Primers",
+                "Primers and Probes",
                 lambda: self._open_primer_design_dialog(),
+                lambda menu, skip_default=True: self._populate_primers_menu(menu),
                 tooltip=(
-                    "Click: set parameters and run.\n"
-                    "Right-click: action chosen in the Options tab "
-                    "(default: design with saved parameters)."
+                    "Click: Design, Map or Database (as in Tools › Primers and Probes).\n"
+                    "Right-click: Design with saved parameters (or the window, as chosen "
+                    "in its Options tab)."
                 ),
+                show_default_action=False,
                 right_click_slot=self._quick_primer_design_right_click,
             )
         elif tool_id == "ncbi_download":
@@ -7511,18 +7545,6 @@ class MainWindow(NcbiDownloadActionsMixin, PrimerActionsMixin, QMainWindow):
                     "(default: open this window)."
                 ),
                 right_click_slot=self._quick_ncbi_download_right_click,
-            )
-        elif tool_id == "primer_map":
-            self._add_toolbar_action_button(
-                bar,
-                "Map Primers",
-                lambda: self._open_map_primers_dialog(),
-                tooltip=(
-                    "Click: choose primers and run.\n"
-                    "Right-click: action chosen in the Options tab "
-                    "(default: open this window)."
-                ),
-                right_click_slot=self._quick_map_primers_right_click,
             )
         elif tool_id == "repeat_quantify":
             self._add_toolbar_action_button(
@@ -10401,6 +10423,7 @@ class MainWindow(NcbiDownloadActionsMixin, PrimerActionsMixin, QMainWindow):
             "_manage_references_dialog",
             "_define_database_dialog",
             "_plugin_run_dialog",
+            "_primer_database_dialog",
         ):
             dialog = getattr(self, attr, None)
             if dialog is None:

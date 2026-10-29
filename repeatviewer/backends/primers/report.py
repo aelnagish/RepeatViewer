@@ -148,8 +148,77 @@ def _design_sections(d: dict) -> tuple[list[str], str]:
     return tiles, "".join(body)
 
 
+def _mm_tag(n: int) -> str:
+    return '<span class="tag">exact</span>' if n == 0 else \
+        f'<span class="tag bad">{n} mm</span>'
+
+
+def _tested_tag(*values) -> str:
+    vals = [v for v in values if v]
+    if "failed" in vals:
+        return ' <span class="tag bad">failed before</span>'
+    if "worked" in vals:
+        return ' <span class="tag">worked before</span>'
+    return ""
+
+
+def _stock_section(st: dict) -> str:
+    """Map on saved primers: what the lab already has for these sequences."""
+    ready, single = st.get("ready", []), st.get("single", [])
+    html = "<h2>From your Primer Database</h2>"
+    if not ready and not single:
+        return html + ("<p>None of the {n} saved primers binds these sequences with the "
+                       "mismatches allowed. Design new primers (Tools › Primers and Probes › "
+                       "Design), or allow more mismatches.</p>").format(n=st.get("primers", 0))
+    if ready:
+        rows = "".join(
+            f"<tr><td><b>{e(r['forward'])}</b> + <b>{e(r['reverse'])}</b>"
+            + (' <span class="tag">saved pair</span>' if r.get("saved_pair") else "")
+            + _tested_tag(r.get("forward_tested"), r.get("reverse_tested"))
+            + f"</td><td class=n>{', '.join(f'{x:,}' for x in r['sizes'])}"
+            + (" …" if r["products"] > len(r["sizes"]) else "")
+            + f"</td><td>{_mm_tag(r['mm_forward'])} {_mm_tag(r['mm_reverse'])}</td>"
+            f"<td class=n>{r['records']} / {st.get('sequences', 0)}</td>"
+            f"<td class=m>{e(r.get('forward_where') or '?')}"
+            + (f"<br>{e(r['reverse_where'])}" if r.get("reverse_where")
+               and r.get("reverse_where") != r.get("forward_where") else "")
+            + "</td></tr>" for r in ready[:60])
+        html += ("<p>Pairs of saved primers that give a product. Saved pairs and exact "
+                 "matches first; mismatches (mm) in a primer lower the chance that it works, "
+                 "most of all near its 3′ end.</p>"
+                 "<div class=scroll><table class=grid><tr><th>Primers</th><th class=n>"
+                 "Product bp</th><th>Forward / reverse</th><th class=n>Sequences</th>"
+                 f"<th>Where</th></tr>{rows}</table></div>")
+        if st.get("ready_total", 0) > 60:
+            html += f"<p class=note>First 60 of {st['ready_total']} shown.</p>"
+    if single:
+        rows = "".join(
+            f"<tr><td><b>{e(x['name'])}</b></td><td>{_mm_tag(x['mismatches'])}</td>"
+            f"<td>{e(x['record'])} {e(x['strand'])} {x['start']:,}</td>"
+            f"<td class=n>{x['sites']}</td><td class=m>{e(x.get('where') or '?')}</td></tr>"
+            for x in single[:40])
+        html += ("<h2>Single primers that bind</h2><p>These bind, but no saved partner gives a "
+                 "product here. One new partner primer next to the site is enough to use "
+                 "them.</p><div class=scroll><table "
+                 "class=grid><tr><th>Primer</th><th>Match</th><th>Best site</th><th class=n>"
+                 f"Sites</th><th>Where</th></tr>{rows}</table></div>")
+    return html
+
+
 def _map_sections(d: dict) -> tuple[list[str], str]:
     c = d.get("counts", {})
+    stock = d.get("stock")
+    if stock is not None:
+        tiles = [
+            _tile("Saved primers tested", f"{stock.get('primers', 0)}", ""),
+            _tile("Ready pairs", f"{stock.get('ready_total', 0)}",
+                  f"{sum(1 for r in stock.get('ready', []) if r.get('saved_pair'))} saved pairs"),
+            _tile("Single primers", f"{stock.get('single_total', 0)}", "bind, no partner"),
+            _tile("Sequences", f"{c.get('sequences', 0)}",
+                  f"{c.get('sequences_with_product', 0)} with a product"),
+        ]
+        body = _stock_section(stock) + _map_sections_body(d)
+        return tiles, body
     tiles = [
         _tile("Primers tested", f"{c.get('primers', 0)}", ""),
         _tile("Binding sites", f"{c.get('sites', 0):,}", f"in {c.get('sequences', 0)} sequences"),
@@ -162,6 +231,15 @@ def _map_sections(d: dict) -> tuple[list[str], str]:
                            Path(genome.get("genome", "")).name))
     else:
         tiles.append(_tile("Sequences", f"{c.get('sequences', 0)}", ""))
+    return tiles, _map_sections_body(d)
+
+
+def _map_sections_body(d: dict) -> str:
+    stock = d.get("stock")
+    if stock is not None:
+        # Only the primers that bind are worth listing.
+        bound = {s["primer"] for s in d.get("sites", [])}
+        d = dict(d, primers=[p for p in d.get("primers", []) if p["name"] in bound])
     prows = "".join(
         f"<tr><td><b>{e(p['name'])}</b></td><td>{e(p.get('kind', ''))}</td>"
         f"<td class=c>{_seq_html(p['sequence'])}</td><td class=n>{p.get('length', 0)}</td>"
@@ -180,7 +258,7 @@ def _map_sections(d: dict) -> tuple[list[str], str]:
         for p in d.get("products", [])[:60])
     body = f"<h2>Primers</h2><div class=scroll><table class=grid><tr><th>Name</th><th>Kind</th><th>Sequence 5′→3′</th>" \
            f"<th class=n>Length</th><th class=n>Tm °C</th><th class=n>GC %</th><th>Check</th>" \
-           f"</tr>{prows}</table></div>"
+           f"</tr>{prows}</table></div>" if prows else ""
     if rrows:
         body += "<h2>Products</h2><table class=grid><tr><th>Sequence</th><th>Primers</th>" \
                 "<th class=n>Position</th><th class=n>Size bp</th><th class=n>Mismatches</th>" \
@@ -193,7 +271,7 @@ def _map_sections(d: dict) -> tuple[list[str], str]:
                 f"<th class=n>Binding Tm</th></tr>{srows}</table>"
         if len(d.get("sites", [])) > 60:
             body += "<p class=note>First 60 shown; all are in the binding-sites table.</p>"
-    return tiles, body
+    return body
 
 
 def methods_text(d: dict) -> str:

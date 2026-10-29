@@ -43,7 +43,7 @@ th{color:var(--muted);font-weight:600}
 <li><a href="#painting">Chromosome painting (Chorus2)</a></li>
 <li><a href="#results">Results</a></li>
 <li><a href="#map">Map: test primers on sequences</a></li>
-<li><a href="#database">Database: your saved primers</a></li>
+<li><a href="#database">Database: the lab's primer inventory</a></li>
 <li><a href="#methylation">Methylation (BSP and MSP) in plants</a></li>
 <li><a href="#trouble">When nothing is found</a></li>
 <li><a href="#engine">How it works</a></li>
@@ -63,10 +63,10 @@ th{color:var(--muted);font-weight:600}
 └─ Primers and Probes
    ├─ Design      design PCR primers or FISH probes
    ├─ Map         test primers against sequences
-   └─ Database    your saved primers
+   └─ Database    the lab's primer inventory
 Help
 └─ Primers and Probes Manual   (this page)</div>
-<p>The toolbar can also show <b>Primers</b> (Design) and <b>Map Primers</b> (Map). Add them with the toolbar customisation. A <b>right-click</b> on a toolbar button runs it with the saved settings, or opens the window (choose which on the <b>Options</b> tab).</p>
+<p>The toolbar can also show a <b>Primers and Probes</b> button (Settings › Toolbar › Add buttons…). Click it for the same three items: Design, Map, Database. A <b>right-click</b> on it designs with the saved settings, or opens the Design window (choose which on its <b>Options</b> tab).</p>
 
 <h2 id="design">3. The Design window</h2>
 <p>Tabs: <b>Primers</b> | <b>Regions</b> | <b>Specificity</b> | <b>Options</b>. You can run from the first tab; the others are optional.</p>
@@ -101,12 +101,12 @@ FISH probes
 <tr><td>Max Tm difference</td><td>Largest Tm gap between the two primers of a pair.</td></tr>
 <tr><td>Pairs to return</td><td>How many pairs the report lists.</td></tr>
 </table>
-<p><b>Advanced Settings ▸</b> (bottom left) shows poly-X, GC clamp, 3′ stability, probe size and Tm, 5′ tails (M13, T7, restriction sites, or your own) and the Tm calculation (salt, Mg²⁺, dNTP, oligo concentration).</p>
+<p><b>Advanced Settings ▸</b> (bottom left) shows poly-X, GC clamp, 3′ stability, probe size and Tm, 5′ tails (M13, T7, restriction sites, or your own) and the Tm calculation (salt, Mg²⁺, dNTP, oligo concentration). When the window would be taller than your screen, the settings scroll and the buttons stay at the bottom.</p>
 <h3>Options tab</h3>
 <ul>
 <li>What a right-click on the toolbar button does.</li>
 <li><b>Add the best pair to the sequence annotations</b> (on by default): the primers and the product appear on the sequence view. A new run replaces the old primer annotations.</li>
-<li><b>Add the designed primers to the Primer Database</b> and which database file to use.</li>
+<li><b>Add the designed primers to the Primer Database</b> and which database to use.</li>
 <li>Process window behaviour.</li>
 </ul>
 
@@ -196,10 +196,38 @@ gene.fa_primers_details/
 </ul>
 <p>Output: <code>&lt;file&gt;_primer_map.html</code> with binding sites, predicted products and a gel; sites and products are added to the sequence annotations.</p>
 
-<h2 id="database">9. Database: your saved primers</h2>
-<p>A plain FASTA file (by default in the RepeatViewer settings folder; choose another on the Options tab). The window lists every primer with Tm, GC, hairpin and self-dimer. Select two to see their heterodimer. Use <b>Add…</b> (paste FASTA or <code>name sequence</code> lines), <b>Import FASTA…</b>, <b>Export…</b> and <b>Delete</b>; double-click a cell to edit it; the filter box searches names, sequences and notes.</p>
-<p>Designed primers are added when <i>Add the designed primers to the Primer Database</i> is on. The same sequence is never added twice.</p>
-
+<h2 id="database">9. Database: the lab's primer inventory</h2>
+<p>The Database is the record of every primer the lab has: its sequence and checks, what it amplifies and in which organism, where the tube is, whether it is in stock and whether it worked, who ordered it and when, and every change since.</p>
+<h3>Share it with the lab (Sciebo)</h3>
+<ol>
+<li>One person: <b>Change… › Use a Shared Folder (Sciebo)…</b> and choose a folder inside the lab's shared Sciebo folder. RepeatViewer makes a folder <code>RepeatViewer Primer Database</code> there and offers to copy the primers you already have.</li>
+<li>Everyone else: <b>Change… › Open Another Database…</b> and choose that folder in their own Sciebo folder.</li>
+<li>The first time you change something, RepeatViewer asks your name; it appears in the history. Change it with <b>Change… › Your Name in the History…</b>.</li>
+</ol>
+<p>Each person and computer writes only its own change log (<code>log/&lt;name&gt;@&lt;computer&gt;.jsonl</code>), so Sciebo never has to choose between two versions of one file and no change is lost. Changes from others appear after Sciebo has synced (the window checks every few seconds). If two people change the same field of one primer, the later change wins; changes to different fields are both kept. Without a shared folder the database lives on your computer only.</p>
+<h3>Move the lab sheet in (once)</h3>
+<p>In Google Sheets: <b>File › Download › Microsoft Excel (.xlsx)</b> or <b>Comma-separated values (.csv)</b>. Then <b>Import…</b> and choose the file. RepeatViewer finds the header row and reads the columns it recognises: Primer name, Primer sequence, Organism, Amplified sequence (Target), Tm (supplier), H2O added (Dissolved), Ordered by, Ordered on, Located in Box, Freezer, Room, and also Status, Tested, Annealing, Concentration, Pair, Note when present. Before importing it shows how many primers are new, which are already in (same sequence, even under another name: that name is kept as <i>Other names</i>), and which rows are skipped and why. Importing again later only adds what is new.</p>
+<h3>The window</h3>
+<ul>
+<li><b>Filter</b> searches every field (name, sequence, target, box, who …); the boxes next to it show one organism, the primers of one person, or one status.</li>
+<li><b>People</b>: everyone in the lab is one entry, so <i>Ordered by</i> is chosen from a list (<b>Choose…</b>), not typed. A primer can have several people. Add someone new from <b>Choose… › Add Person…</b> or <b>Lab… › People</b>. In <b>Lab… › People</b> you can set a role and email, rename (every primer shows the new name), <b>Merge</b> two entries for one person (e.g. Anna and Anna K.), and <b>Remove</b>: someone who ordered primers stays as a former member (grey), so the record of who ordered what is kept. The sheet's “Anna &amp; Nusrat” became two people, Anna and Nusrat. The first time you change something, pick yourself from the list.</li>
+<li><b>Pair</b> is found from the names (<code>_for/_rev</code>, <code>_fwd/_rev1</code>, <code>_FW/_RV</code>, <code>_F/_R</code>); write it in <i>Pairs with</i> when the names do not show it (for example ITS1-F with ITS4).</li>
+<li>Select a primer to edit it below the table, then <b>Save Changes</b>. Select several to set a field on all of them at once (for example a new box or <i>Used up</i>).</li>
+<li>The panel on the right shows Tm, GC, hairpin, self-dimer, the Tm from the synthesis report, and the history. Select two primers to see the dimer between them.</li>
+<li><b>Lab…</b>: the lists the fields choose from. <b>People</b> (above), <b>Places</b> (rooms, freezers, boxes), <b>Organisms</b> and <b>Targets</b>. In each: <b>Add…</b> a new entry (it is then offered in the form), <b>Rename…</b> (or double-click; the name changes on every primer that uses it), <b>Merge…</b> two spellings of the same thing, and <b>Remove</b> (if primers use it, you are asked whether to clear it on them).</li>
+<li><b>Checks</b> (right panel): each primer gets plain verdicts with ✓, ⚠ or ✗: with its partner (cross-dimer, Tm difference), hairpin, self-dimer, 3′ end and GC. Rules of thumb: dimers weaker than −6 kcal/mol are harmless, −6 to −9 need care, stronger than −9 give primer-dimer bands; a hairpin matters only if it is stable near the annealing temperature. Tick <i>Show the structure drawings</i> to see how a hairpin or dimer forms. Select two primers to check them together.</li>
+<li><b>Two Tm columns</b>: <i>Tm Primer3</i> is calculated by RepeatViewer with Primer3 (the conditions are in the Tm Calculation settings; hover over a value to see them); <i>Tm supplier</i> is the value from the synthesis report. They differ because each uses its own method and salt, Mg²⁺ and primer concentrations.</li>
+<li><b>Find Duplicates</b>: the same sequence under two names, reverse complements, and one primer inside another.</li>
+<li><b>Export…</b>: the whole table (every field, .tsv opens in Excel), a FASTA, or an order sheet.</li>
+<li>Designed primers are added (with status <i>Designed</i>) when <i>Add the designed primers to the Primer Database</i> is on in Design › Options.</li>
+</ul>
+<h3>Check a new sequence against the stock</h3>
+<p>Someone new brings their plant: before designing and ordering, see what the lab already has. Click the sequence (a gene, contigs or a genome) in the Files panel, then <b>Check a Sequence…</b> in the Database window (or Map with <i>Search for saved primers</i>). Every saved primer is tested on both strands, with up to 2 mismatches but the last 3 bases at the 3′ end exact. The report starts with <b>From your Primer Database</b>:</p>
+<ul>
+<li><b>Ready pairs</b>: two saved primers that give a product, with the product size, mismatches in each primer, and where the tubes are. Saved pairs, exact matches and pairs that <i>worked before</i> come first. A primer with mismatches can still work, but test it; mismatches near its 3′ end matter most.</li>
+<li><b>Single primers that bind</b>: no saved partner gives a product. One new partner primer is enough to use them.</li>
+<li>Nothing usable: design new primers.</li>
+</ul>
 <h2 id="methylation">10. Methylation (BSP and MSP) in plants</h2>
 <p>Bisulfite turns unmethylated C into T; methylated C stays C. The <b>Methylation</b> field says which C may be methylated:</p>
 <table>
