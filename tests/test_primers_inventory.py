@@ -722,3 +722,33 @@ def test_selected_pair_fills_the_forward_and_reverse_boxes():
     assert pj.selection_slots([P(f"x{i}_F") for i in range(4)]) is None
     slots = pj.selection_slots([P("x_F"), P("x_R"), P("x_probe", "probe")])
     assert slots == {"forward": "x_F", "reverse": "x_R", "probe": "x_probe"}
+
+
+def test_check_window_runs_only_with_a_sequence(qapp, settings, shared, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+
+    from repeatviewer.views.primer_check_dialog import NO_SEQUENCE, CheckPrimersDialog
+
+    db = _imported(shared)
+    names = ["pBV1_for", "pBV1_rev"]
+    told = []
+    monkeypatch.setattr(QMessageBox, "information",
+                        staticmethod(lambda *a, **k: told.append(a[2])))
+    d = CheckPrimersDialog(db, names)
+    ran = []
+    d.runRequested.connect(ran.append)
+    d.show()
+    assert d._table.rowCount() == 2
+    d._run_btn.click()
+    assert told == [NO_SEQUENCE] and d.isVisible() and not ran
+    fa = _new_plant(db, tmp_path / "plant.fa")
+    d.apply_path_from_panel(tmp_path / "not_fasta.txt")      # ignored
+    assert d.sequence() is None
+    d.apply_path_from_panel(fa)
+    d._pmin.setValue(900)
+    d._pmax.setValue(100)                                    # swapped back
+    d._run_btn.click()
+    assert ran and ran[0]["sequence"] == str(fa) and ran[0]["primer_names"] == names
+    assert (ran[0]["product_min"], ran[0]["product_max"]) == (100, 900)
+    every = CheckPrimersDialog(db, [])
+    assert every._table is None and len(every._primers) == len(db.primers)

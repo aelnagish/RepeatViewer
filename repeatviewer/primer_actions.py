@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import replace
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Signal, Slot
+from PySide6.QtCore import QObject, QTimer, Signal, Slot
 from PySide6.QtWidgets import QMenu, QMessageBox
 
 from repeatviewer.backends.job_cancel import CANCELLED_MESSAGE
@@ -152,12 +152,14 @@ class PrimerActionsMixin:
 
     _primer_options: PrimerOptions
     _primer_database_dialog = None
+    _primer_check_dialog = None
 
     # ------------------------------------------------------------- state
 
     def _init_primer_actions(self) -> None:
         self._primer_options = load_primer_options()
         self._primer_database_dialog = None
+        self._primer_check_dialog = None
         try:
             from repeatviewer.views.primer_database_dialog import apply_lab_user_setting
 
@@ -296,38 +298,97 @@ class PrimerActionsMixin:
             return None
         return pj.selection_slots(chosen)
 
+    def _check_stock_map_data(self, primer_names: list[str], database_path: str,
+                              strict: dict | None = None) -> dict:
+        """Map Primers settings for "test these Database primers on a sequence"."""
+        from repeatviewer.backends.primers import jobs as pj
+
+        ms = self._primer_options.map_settings()
+        data = ms.to_dict()
+        data.update(mode=pj.MAP_DATABASE, primer_file="", search_forward=True,
+                    search_reverse=True, search_probe=False, pairs_only=False,
+                    use_max_mismatches=True, max_mismatches=max(2, ms.max_mismatches),
+                    three_prime_exact=3, use_product_range=True, product_min=40,
+                    product_max=max(3000, ms.product_max), test_on=pj.TEST_ON_SEQUENCES,
+                    primer_names=list(primer_names or []))
+        for key in ("product_min", "product_max", "max_mismatches", "three_prime_exact"):
+            if strict and key in strict:
+                data[key] = int(strict[key])
+        slots = self._selected_primer_slots(database_path, primer_names or [])
+        if slots:
+            # A pair (or one primer, or a pair and a probe) goes straight into the
+            # Forward / Reverse / Probe boxes, so the window shows what is tested.
+            data.update(mode=pj.MAP_SPECIFIC, primer_names=[],
+                        use_forward=pj.KIND_FORWARD in slots,
+                        forward=slots.get(pj.KIND_FORWARD, ""),
+                        use_reverse=pj.KIND_REVERSE in slots,
+                        reverse=slots.get(pj.KIND_REVERSE, ""),
+                        use_probe=pj.KIND_PROBE in slots,
+                        probe=slots.get(pj.KIND_PROBE, ""))
+        return data
+
+    def _open_primer_check(self, database_path: str, primer_names: list[str]) -> None:
+        """Database › Check a Sequence: the small window for the selected primers."""
+        if not self._primers_ready():
+            return
+        from repeatviewer.backends.primers import inventory as inv
+        from repeatviewer.backends.primers.thermo import PrimerError
+        from repeatviewer.views.primer_check_dialog import CheckPrimersDialog
+
+        old = self._primer_check_dialog
+        if old is not None:
+            try:
+                old.close()
+            except RuntimeError:
+                pass
+        try:
+            db = inv.open_database(database_path or None)
+        except (OSError, PrimerError) as exc:
+            QMessageBox.warning(self, "Check Primers", str(exc))
+            return
+        owner = self._primer_database_dialog or self
+        files = self._primer_candidate_files()
+        dialog = CheckPrimersDialog(
+            db, list(primer_names), thermo=self._primer_options.map_settings().thermo,
+            sequence=files[0] if files else None, parent=owner)
+        self._primer_check_dialog = dialog
+
+        def _run(values: dict) -> None:
+            data = self._check_stock_map_data(values["primer_names"], database_path, values)
+            opts = replace(self._primer_options, map=data)
+            self._start_primer_job(PRIMER_JOB_MAP, [Path(values["sequence"])], opts)
+
+        def _all(values: dict) -> None:
+            QTimer.singleShot(0, lambda: self._open_map_primers_dialog(
+                check_stock=True, primer_names=values["primer_names"],
+                database_path=database_path, strict=values,
+                sequence=values.get("sequence") or ""))
+
+        def _closed(_code: int) -> None:
+            if self._primer_check_dialog is dialog:
+                self._primer_check_dialog = None
+            dialog.deleteLater()
+
+        dialog.runRequested.connect(_run)
+        dialog.allSettingsRequested.connect(_all)
+        dialog.finished.connect(_closed)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
     def _open_map_primers_dialog(self, *, check_stock: bool = False,
                                  primer_names: list[str] | None = None,
-                                 database_path: str = "") -> None:
-        """Map Primers; ``check_stock``: preset to test every saved primer (Database ›
-        Check a Sequence)."""
+                                 database_path: str = "", strict: dict | None = None,
+                                 sequence: str = "") -> None:
+        """Map Primers; ``check_stock``: preset to test the Database primers (the
+        selected ones, or all) on a sequence."""
         if not self._primers_ready():
             return
         from repeatviewer.views.primer_dialogs import MapPrimersDialog
 
         opts = self._primer_options
         if check_stock:
-            from repeatviewer.backends.primers import jobs as pj
-
-            ms = opts.map_settings()
-            data = ms.to_dict()
-            data.update(mode=pj.MAP_DATABASE, primer_file="", search_forward=True,
-                        search_reverse=True, search_probe=False, pairs_only=False,
-                        use_max_mismatches=True, max_mismatches=max(2, ms.max_mismatches),
-                        three_prime_exact=3, use_product_range=True, product_min=40,
-                        product_max=max(3000, ms.product_max), test_on=pj.TEST_ON_SEQUENCES,
-                        primer_names=list(primer_names or []))
-            slots = self._selected_primer_slots(database_path, primer_names or [])
-            if slots:
-                # A pair (or one primer, or a pair and a probe) goes straight into the
-                # Forward / Reverse / Probe boxes, so the window shows what is tested.
-                data.update(mode=pj.MAP_SPECIFIC, primer_names=[],
-                            use_forward=pj.KIND_FORWARD in slots,
-                            forward=slots.get(pj.KIND_FORWARD, ""),
-                            use_reverse=pj.KIND_REVERSE in slots,
-                            reverse=slots.get(pj.KIND_REVERSE, ""),
-                            use_probe=pj.KIND_PROBE in slots,
-                            probe=slots.get(pj.KIND_PROBE, ""))
+            data = self._check_stock_map_data(list(primer_names or []), database_path, strict)
             opts = replace(opts, map=data)
         elif opts.map.get("primer_names"):
             # A selection from the Database window is for that one check only.
@@ -338,6 +399,19 @@ class PrimerActionsMixin:
             project_genome=self._genome_path_resolved(),
             parent=self,
         )
+        if sequence:
+            dialog._input_define.setChecked(True)
+            dialog._seq_row.set_path(Path(sequence))
+
+        def _no_sequence(d) -> str:
+            files = d.run_files() or (
+                self._primer_candidate_files() if d.uses_selected() else [])
+            return "" if files else (
+                "Choose the sequences: click a FASTA in the Files panel (or fill "
+                "Sequences with Define inputs), then Run.")
+
+        # Checked before the window closes, so OK brings you back to it.
+        dialog._run_check = _no_sequence
 
         def _forget_selection() -> None:
             if self._primer_options.map.get("primer_names"):
@@ -412,8 +486,7 @@ class PrimerActionsMixin:
 
         dialog.databasePathChanged.connect(_path_changed)
         dialog.checkSequenceRequested.connect(
-            lambda p, names: self._open_map_primers_dialog(
-                check_stock=True, primer_names=list(names), database_path=str(p or "")))
+            lambda p, names: self._open_primer_check(str(p or ""), list(names)))
 
         def _closed(_code: int) -> None:
             if self._primer_database_dialog is dialog:
