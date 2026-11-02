@@ -283,6 +283,13 @@ def make_cancel_save_run_bar(
     dialog._ok_button = save_btn
 
     def _finish(action: str) -> None:
+        check = getattr(dialog, "_run_check", None)
+        if action == "run" and callable(check):
+            problem = check(dialog)
+            if problem:
+                # Say what is missing and stay open, with everything still filled in.
+                QMessageBox.information(dialog, dialog.windowTitle() or "Run", problem)
+                return
         dialog._close_action = action
         if on_accept is not None:
             on_accept()

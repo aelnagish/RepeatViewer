@@ -20,6 +20,8 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
     QFileDialog,
+    QFormLayout,
+    QFrame,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -241,7 +243,7 @@ class PrimerDatabaseDialog(QDialog):
 
     databaseChanged = Signal()
     databasePathChanged = Signal(str)      # "" = the database on this computer
-    checkSequenceRequested = Signal(str)   # database path
+    checkSequenceRequested = Signal(str, list)   # database path, selected primer names
 
     def __init__(self, path: Path | None = None, *, thermo: ThermoSettings | None = None,
                  parent: QWidget | None = None) -> None:
@@ -413,7 +415,7 @@ class PrimerDatabaseDialog(QDialog):
         dups.setToolTip("Same sequence under two names, reverse complements, one primer "
                         "inside another")
         dups.clicked.connect(self._find_duplicates)
-        people = QPushButton("Lab…", self)
+        people = QPushButton("Lab", self)
         people.setToolTip("The lab: people, places (rooms, freezers, boxes), organisms and "
                           "targets. Add, rename (on every primer), merge, remove.")
         people.clicked.connect(self._open_people)
@@ -421,7 +423,11 @@ class PrimerDatabaseDialog(QDialog):
         check = QPushButton("Check a Sequence…", self)
         check.setToolTip("Test every saved primer against a new sequence: which pairs "
                          "already give a product, where the tubes are")
-        check.clicked.connect(lambda: self.checkSequenceRequested.emit(str(self._db.path)))
+        check.setToolTip("Test primers against a sequence (a FASTA you choose next): the "
+                         "selected primers, or all saved primers when none is selected. "
+                         "Shows which pairs give a product and where the tubes are.")
+        check.clicked.connect(lambda: self.checkSequenceRequested.emit(
+            str(self._db.path), [p.name for p in self._selected()]))
         close = QPushButton("Close", self)
         close.clicked.connect(self.close)
         bar = QHBoxLayout()
@@ -1718,10 +1724,49 @@ class PeoplePicker(QDialog):
         return list(self._chosen)
 
 
-class PeopleDialog(QDialog):
-    """Manage the lab's people: add, edit, mark as former member, merge, remove."""
+def _lab_card(parent: QWidget, name: str = "LabCard") -> QFrame:
+    """The rounded panel used for every list and card in the Lab window."""
+    card = QFrame(parent)
+    card.setObjectName(name)
+    card.setFrameShape(QFrame.Shape.StyledPanel)
+    card.setStyleSheet(f"QFrame#{name} {{ border: 1px solid palette(mid); "
+                       "border-radius: 8px; }")
+    return card
 
-    _COLS = ("Name", "Initials", "Role", "Email", "Primers", "Member")
+
+def _adjustable_columns(table: QTableWidget, widths: dict[int, int]) -> None:
+    """Every column can be dragged wider or narrower; the last one fills the rest.
+
+    widths: starting width of the fixed columns. The first column gets whatever
+    space is left the first time the table is shown."""
+    hh = table.horizontalHeader()
+    hh.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+    hh.setStretchLastSection(True)
+    hh.setMinimumSectionSize(40)
+    for c, w in widths.items():
+        table.setColumnWidth(c, w)
+    table.setProperty("_rv_widths", widths)
+    table.setProperty("_rv_spread", False)
+
+
+def _spread_first_column(table: QTableWidget) -> None:
+    """Once, when the table first has its real size: give column 0 the free space."""
+    if table.property("_rv_spread") or table.viewport().width() < 50:
+        return
+    widths = table.property("_rv_widths") or {}
+    last = table.columnCount() - 1
+    used = sum(w for c, w in widths.items() if c != last)
+    room = table.viewport().width() - used - widths.get(last, 70)
+    table.setColumnWidth(0, max(120, room))
+    table.setProperty("_rv_spread", True)
+
+
+class PeopleDialog(QDialog):
+    """Manage the lab's people: add, edit, mark as former member, merge, remove.
+
+    List on the left, the selected person on the right."""
+
+    _COLS = ("Name", "Role", "Primers", "Status")
 
     def __init__(self, db: inv.PrimerInventory, parent: QWidget, *,
                  embedded: bool = False) -> None:
@@ -1729,43 +1774,28 @@ class PeopleDialog(QDialog):
         if embedded:
             self.setWindowFlags(Qt.WindowType.Widget)
         self.setWindowTitle("People")
-        self.resize(720, 520)
+        self.resize(820, 520)
         self._db = db
+
+        # ---- left: the list
+        self._filter = QLineEdit(self)
+        self._filter.setPlaceholderText("Find a person")
+        self._filter.setClearButtonEnabled(True)
+        self._filter.textChanged.connect(lambda _t: self._fill(select=self._selected()))
         self._table = QTableWidget(0, len(self._COLS), self)
         self._table.setHorizontalHeaderLabels(list(self._COLS))
         self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._table.verticalHeader().setVisible(False)
+        self._table.verticalHeader().setDefaultSectionSize(28)
+        self._table.setShowGrid(False)
         self._table.setAlternatingRowColors(True)
-        self._table.horizontalHeader().setStretchLastSection(True)
+        self._table.setWordWrap(False)
+        hh = self._table.horizontalHeader()
+        hh.setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        _adjustable_columns(self._table, {1: 140, 2: 70, 3: 80})
         self._table.itemSelectionChanged.connect(self._on_select)
-
-        form = QGridLayout()
-        form.setHorizontalSpacing(8)
-        self._name = QLineEdit(self)
-        self._initials = QLineEdit(self)
-        self._initials.setMaxLength(6)
-        self._role = QComboBox(self)
-        self._role.setEditable(True)
-        self._role.addItems(list(inv.PERSON_ROLES))
-        self._email = QLineEdit(self)
-        self._active = QCheckBox("Current lab member", self)
-        for r, (label, w) in enumerate((("Name:", self._name), ("Initials:", self._initials),
-                                        ("Role:", self._role), ("Email:", self._email))):
-            lab = QLabel(label, self)
-            lab.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            form.addWidget(lab, r, 0)
-            form.addWidget(w, r, 1)
-        form.addWidget(self._active, 4, 1)
-        self._primers = QLabel(self)
-        self._primers.setWordWrap(True)
-        self._primers.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        form.addWidget(self._primers, 5, 1)
-        self._save = QPushButton("Save Changes", self)
-        self._save.clicked.connect(self._save_person)
-        form.addWidget(self._save, 6, 1, alignment=Qt.AlignmentFlag.AlignRight)
-
         add = QPushButton("Add Person…", self)
         add.clicked.connect(self._add)
         self._merge = QPushButton("Merge…", self)
@@ -1776,39 +1806,142 @@ class PeopleDialog(QDialog):
         self._remove.setToolTip("Someone with primers is kept as a former member, so the "
                                 "record of who ordered what stays")
         self._remove.clicked.connect(self._remove_selected)
+        left_bar = QHBoxLayout()
+        left_bar.setSpacing(6)
+        for b in (add, self._merge, self._remove):
+            left_bar.addWidget(b)
+        left_bar.addStretch(1)
+        left_card = _lab_card(self, "PeopleListCard")
+        lc = QVBoxLayout(left_card)
+        lc.setContentsMargins(16, 14, 16, 14)
+        lc.setSpacing(10)
+        lc.addWidget(self._filter)
+        lc.addWidget(self._table, 1)
+        left = QWidget(self)
+        ll = QVBoxLayout(left)
+        ll.setContentsMargins(0, 0, 0, 0)
+        ll.setSpacing(6)
+        ll.addWidget(left_card, 1)
+        ll.addLayout(left_bar)
+
+        # ---- right: the selected person
+        card = _lab_card(self, "PersonCard")
+        self._avatar = QLabel(card)
+        self._avatar.setFixedSize(44, 44)
+        self._avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._title = QLabel(card)
+        self._subtitle = QLabel(card)
+        self._subtitle.setStyleSheet("color: palette(mid);")
+        head = QHBoxLayout()
+        head.setSpacing(10)
+        head.addWidget(self._avatar)
+        names = QVBoxLayout()
+        names.setSpacing(0)
+        names.addWidget(self._title)
+        names.addWidget(self._subtitle)
+        head.addLayout(names, 1)
+
+        self._name = QLineEdit(card)
+        self._initials = QLineEdit(card)
+        self._initials.setMaxLength(6)
+        self._role = QComboBox(card)
+        self._role.setEditable(True)
+        self._role.addItems(list(inv.PERSON_ROLES))
+        self._email = QLineEdit(card)
+        self._email.setPlaceholderText("name@rwth-aachen.de")
+        self._active = QCheckBox("Current lab member", card)
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        form.setHorizontalSpacing(10)
+        form.setVerticalSpacing(6)
+        form.addRow("Name:", self._name)
+        form.addRow("Initials:", self._initials)
+        form.addRow("Role:", self._role)
+        form.addRow("Email:", self._email)
+        form.addRow("", self._active)
+        self._save = QPushButton("Save Changes", card)
+        self._save.clicked.connect(self._save_person)
+        self._primers_title = QLabel(card)
+        self._primers_list = QListWidget(card)
+        self._primers_list.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self._primers_list.setAlternatingRowColors(True)
+        self._primers = self._primers_title   # (kept for older callers)
+        self._empty = QLabel("Select a person on the left, or add someone new.", card)
+        self._empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._empty.setStyleSheet("color: palette(mid);")
+        cl = QVBoxLayout(card)
+        cl.setContentsMargins(16, 14, 16, 14)
+        cl.setSpacing(10)
+        cl.addLayout(head)
+        cl.addLayout(form)
+        cl.addWidget(self._primers_title)
+        cl.addWidget(self._primers_list, 1)
+        cl.addWidget(self._empty, 1)
+        self._detail_widgets = [self._avatar, self._title, self._subtitle, self._name,
+                                self._initials, self._role, self._email, self._active,
+                                self._primers_title, self._primers_list]
+        self._form = form
+
+        # Both halves line up: the card starts where the filter starts and ends
+        # where the list ends, and the buttons of both sides share one row.
+        right_bar = QHBoxLayout()
+        right_bar.addStretch(1)
+        right_bar.addWidget(self._save)
+        right = QWidget(self)
+        rl = QVBoxLayout(right)
+        rl.setContentsMargins(0, 0, 0, 0)
+        rl.setSpacing(6)
+        rl.addWidget(card, 1)
+        rl.addLayout(right_bar)
+        body = QHBoxLayout()
+        body.setSpacing(14)
+        body.addWidget(left, 1)
+        body.addWidget(right, 1)
         close = QPushButton("Close", self)
         close.clicked.connect(self.accept)
         close.setVisible(not embedded)
-        bar = QHBoxLayout()
-        for b in (add, self._merge, self._remove):
-            bar.addWidget(b)
-        bar.addStretch(1)
-        bar.addWidget(close)
         lay = QVBoxLayout(self)
-        lay.addWidget(self._table, 1)
-        lay.addLayout(form)
-        lay.addLayout(bar)
+        lay.setContentsMargins(12 if embedded else 16, 12, 12 if embedded else 16, 12)
+        lay.addLayout(body, 1)
+        if not embedded:
+            bar = QHBoxLayout()
+            bar.addStretch(1)
+            bar.addWidget(close)
+            lay.addLayout(bar)
         self._fill()
+        if self._table.rowCount():
+            self._table.selectRow(0)
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        QTimer.singleShot(0, lambda: _spread_first_column(self._table))
 
     def _fill(self, select: list[str] | None = None) -> None:
-        people = self._db.people()
+        text = self._filter.text().strip().lower() if hasattr(self, "_filter") else ""
+        people = [p for p in self._db.people()
+                  if not text or text in p.name.lower() or text in p.role.lower()]
         self._table.blockSignals(True)
+        self._table.clearSelection()
         self._table.setRowCount(len(people))
         for i, p in enumerate(people):
             n = len(self._db.primers_of(p.pid))
-            for j, v in enumerate((p.name, p.initials, p.role, p.email, n,
-                                   "Yes" if p.active else "Former")):
+            for j, v in enumerate((p.name, p.role, n, "Current" if p.active else "Former")):
                 item = QTableWidgetItem()
                 item.setData(Qt.ItemDataRole.DisplayRole, v)
                 item.setData(Qt.ItemDataRole.UserRole, p.pid)
+                if j == 2:
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignRight
+                                          | Qt.AlignmentFlag.AlignVCenter)
                 if not p.active:
                     item.setForeground(Qt.GlobalColor.gray)
                 self._table.setItem(i, j, item)
-        self._table.resizeColumnsToContents()
         if select:
+            mode = self._table.selectionMode()
+            self._table.setSelectionMode(QAbstractItemView.SelectionMode.MultiSelection)
             for r in range(self._table.rowCount()):
                 if self._table.item(r, 0).data(Qt.ItemDataRole.UserRole) in select:
                     self._table.selectRow(r)
+            self._table.setSelectionMode(mode)
         self._table.blockSignals(False)
         self._on_select()
 
@@ -1816,31 +1949,56 @@ class PeopleDialog(QDialog):
         return [self._table.item(i.row(), 0).data(Qt.ItemDataRole.UserRole)
                 for i in self._table.selectionModel().selectedRows()]
 
+    def _show_detail(self, on: bool) -> None:
+        for w in self._detail_widgets:
+            w.setVisible(on)
+        for i in range(self._form.rowCount()):
+            for role in (QFormLayout.ItemRole.LabelRole, QFormLayout.ItemRole.FieldRole):
+                item = self._form.itemAt(i, role)
+                if item is not None and item.widget() is not None:
+                    item.widget().setVisible(on)
+        self._empty.setVisible(not on)
+        self._save.setEnabled(on)
+
     def _on_select(self) -> None:
         ids = self._selected()
         one = len(ids) == 1
+        self._merge.setEnabled(len(ids) == 2)
+        self._remove.setEnabled(bool(ids))
         for w in (self._name, self._initials, self._role, self._email, self._active,
                   self._save):
             w.setEnabled(one)
-        self._merge.setEnabled(len(ids) == 2)
-        self._remove.setEnabled(bool(ids))
         if not one:
             for w in (self._name, self._initials, self._email):
                 w.clear()
             self._role.setEditText("")
-            self._primers.clear()
+            self._primers_list.clear()
+            self._empty.setText(
+                f"{len(ids)} people selected: Merge… joins two entries for one person, "
+                "Remove removes them." if len(ids) > 1 else
+                "Select a person on the left, or add someone new.")
+            self._show_detail(False)
             return
+        self._show_detail(True)
         p = self._db.persons[ids[0]]
         self._name.setText(p.name)
         self._initials.setText(p.initials)
         self._role.setEditText(p.role)
         self._email.setText(p.email)
         self._active.setChecked(p.active)
+        color = "#2f6fb2" if p.active else "#9aa0a6"
+        self._avatar.setText(p.initials or inv.initials_of(p.name))
+        self._avatar.setStyleSheet(f"background:{color}; color:white; border-radius:22px; "
+                                   "font-weight:600; font-size:15px;")
+        self._title.setText(f"<span style='font-size:16px;font-weight:600'>{_e(p.name)}"
+                            "</span>")
+        bits = [p.role or "No role set", "current member" if p.active else "former member"]
+        self._subtitle.setText(" · ".join(bits))
         recs = sorted(r.name for r in self._db.primers_of(p.pid))
-        self._primers.setText(
-            f"<span style='color:palette(mid)'>Ordered {len(recs)} primer(s)"
-            + (": " + ", ".join(recs[:12]) + (" …" if len(recs) > 12 else "") if recs else "")
-            + "</span>")
+        self._primers_title.setText(f"<b>Primers ordered</b> <span style='color:palette(mid)'>"
+                                    f"({len(recs)})</span>")
+        self._primers_list.clear()
+        self._primers_list.addItems(recs)
 
     @_keeps_front_of_parent
     def _save_person(self) -> None:
@@ -1906,7 +2064,8 @@ class ValueListPage(QWidget):
     """One list (organisms, targets, boxes …): add, rename on every primer, merge,
     remove."""
 
-    def __init__(self, db: inv.PrimerInventory, field_key: str, parent: QWidget) -> None:
+    def __init__(self, db: inv.PrimerInventory, field_key: str, parent: QWidget,
+                 title: str = "") -> None:
         super().__init__(parent)
         self._db = db
         self._key = field_key
@@ -1917,15 +2076,15 @@ class ValueListPage(QWidget):
         self._table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._table.verticalHeader().setVisible(False)
+        self._table.verticalHeader().setDefaultSectionSize(28)
+        self._table.setShowGrid(False)
         self._table.setAlternatingRowColors(True)
         hh = self._table.horizontalHeader()
-        hh.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        hh.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        hh.setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        _adjustable_columns(self._table, {1: 70})
+        self._table.setToolTip("Double-click to rename. Select two to merge.")
         self._table.itemSelectionChanged.connect(self._on_select)
         self._table.itemDoubleClicked.connect(lambda _i: self._rename())
-        self._used = QLabel(self)
-        self._used.setWordWrap(True)
-        self._used.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         add = QPushButton("Add…", self)
         add.setToolTip(f"Add a new {self._one} to the list")
         add.clicked.connect(self._add)
@@ -1942,11 +2101,23 @@ class ValueListPage(QWidget):
         for b in (add, self._rename_btn, self._merge_btn, self._remove_btn):
             bar.addWidget(b)
         bar.addStretch(1)
+        card = _lab_card(self)
+        cl = QVBoxLayout(card)
+        cl.setContentsMargins(16, 14, 16, 14)
+        cl.setSpacing(10)
+        if title:
+            cl.addWidget(QLabel(f"<b>{title}</b>", card))
+        cl.addWidget(self._table, 1)
         lay = QVBoxLayout(self)
-        lay.addWidget(self._table, 1)
-        lay.addWidget(self._used)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(6)
+        lay.addWidget(card, 1)
         lay.addLayout(bar)
         self.refresh()
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        QTimer.singleShot(0, lambda: _spread_first_column(self._table))
 
     def refresh(self, select: list[str] | None = None) -> None:
         values = self._db.values(self._key)
@@ -1956,6 +2127,7 @@ class ValueListPage(QWidget):
             a = QTableWidgetItem(v)
             b = QTableWidgetItem()
             b.setData(Qt.ItemDataRole.DisplayRole, n)
+            b.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
             if not n:
                 a.setForeground(Qt.GlobalColor.gray)
                 b.setForeground(Qt.GlobalColor.gray)
@@ -1975,16 +2147,6 @@ class ValueListPage(QWidget):
         self._rename_btn.setEnabled(len(sel) == 1)
         self._merge_btn.setEnabled(len(sel) == 2)
         self._remove_btn.setEnabled(bool(sel))
-        if len(sel) == 1:
-            names = sorted(r.name for r in self._db.records_with(self._key, sel[0]))
-            self._used.setText(
-                "<span style='color:palette(mid)'>"
-                + (f"Used by {len(names)} primer(s): " + ", ".join(names[:15])
-                   + (" …" if len(names) > 15 else "") if names else
-                   "Not used by any primer yet (in the list for choosing)") + "</span>")
-        else:
-            self._used.setText("<span style='color:palette(mid)'>Double-click to rename. "
-                               "Select two to merge.</span>")
 
     def _ask(self, title: str, label: str, text: str = "") -> str:
         value, ok = QInputDialog.getText(self, title, label, text=text)
@@ -2019,9 +2181,8 @@ class ValueListPage(QWidget):
             if ans != QMessageBox.StandardButton.Yes:
                 return
             new = existing
-        n = self._db.rename_value(self._key, old, new)
+        self._db.rename_value(self._key, old, new)
         self.refresh(select=[new])
-        self._used.setText(self._used.text() + f"<br>Renamed on {n} primer(s).")
 
     def _merge(self) -> None:
         sel = self._selected()
@@ -2032,9 +2193,8 @@ class ValueListPage(QWidget):
         if not ok:
             return
         drop = sel[1] if keep == sel[0] else sel[0]
-        n = self._db.rename_value(self._key, drop, keep)
+        self._db.rename_value(self._key, drop, keep)
         self.refresh(select=[keep])
-        self._used.setText(self._used.text() + f"<br>{n} primer(s) changed to {keep}.")
 
     def _remove(self) -> None:
         for value in self._selected():
@@ -2065,22 +2225,21 @@ class ListsDialog(QDialog):
         self.pages: dict[str, ValueListPage] = {}
         places = QWidget(tabs)
         pl = QHBoxLayout(places)
-        pl.setContentsMargins(0, 0, 0, 0)
+        pl.setContentsMargins(12, 12, 12, 12)
+        pl.setSpacing(14)
         for key in ("room", "freezer", "box"):
-            col = QWidget(places)
-            cl = QVBoxLayout(col)
-            cl.setContentsMargins(0, 0, 0, 0)
-            title = QLabel(f"<b>{inv.LIST_LABELS[key][0]}</b>", col)
-            page = ValueListPage(db, key, col)
+            page = ValueListPage(db, key, places, title=inv.LIST_LABELS[key][0])
             self.pages[key] = page
-            cl.addWidget(title)
-            cl.addWidget(page, 1)
-            pl.addWidget(col, 1)
+            pl.addWidget(page, 1)
         tabs.addTab(places, "Places")
         for key in ("organism", "target"):
-            page = ValueListPage(db, key, tabs)
+            holder = QWidget(tabs)
+            hl = QVBoxLayout(holder)
+            hl.setContentsMargins(12, 12, 12, 12)
+            page = ValueListPage(db, key, holder)
             self.pages[key] = page
-            tabs.addTab(page, inv.LIST_LABELS[key][0])
+            hl.addWidget(page)
+            tabs.addTab(holder, inv.LIST_LABELS[key][0])
         tabs.currentChanged.connect(lambda _i: [p.refresh() for p in self.pages.values()])
         if start in self.TABS:
             tabs.setCurrentIndex(self.TABS.index(start))

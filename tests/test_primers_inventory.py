@@ -677,3 +677,78 @@ def test_lab_window(qapp, settings, shared, monkeypatch):
     d._refill_choices()
     assert d._fields["box"].findText("Z-1") >= 0     # offered in the form now
     d.close()
+
+
+def test_check_only_the_selected_primers(shared, tmp_path, qapp, settings):
+    db = _imported(shared)
+    fasta = _new_plant(db, tmp_path / "new_plant.fa")
+    ms = pj.MapSettings(mode=pj.MAP_DATABASE, max_mismatches=2, product_max=3000,
+                        primer_names=["pBV1_for", "pBV1_rev"])
+    _main, _f, payload = pj.run_map([fasta], ms, database_path=shared)
+    st = payload["stock"]
+    assert st["primers"] == 2
+    assert [(r["forward"], r["reverse"]) for r in st["ready"]] == [("pBV1_for", "pBV1_rev")]
+    # The Map window shows what it will test, and can go back to all primers.
+    from repeatviewer.job_options import PrimerOptions
+    from repeatviewer.views.primer_dialogs import MapPrimersDialog
+
+    m = MapPrimersDialog(initial=PrimerOptions(map=ms.to_dict()), files=[])
+    m.show()
+    qapp.processEvents()
+    assert m._form_main.form.isRowVisible(m._only_field)
+    assert "2 selected" in m._only_label.text()
+    assert m.map_settings().primer_names == ["pBV1_for", "pBV1_rev"]
+    m._clear_only()
+    assert m.map_settings().primer_names == []
+    assert not m._form_main.form.isRowVisible(m._only_field)
+    m.close()
+
+
+def test_former_member_is_a_status_not_a_role(tmp_path):
+    db = inv.open_database(inv.create_inventory(tmp_path / "db"))
+    pid = db.add_person("Sara", role="Former member")
+    assert "Former member" not in inv.PERSON_ROLES
+    db.migrate_people()
+    p = db.persons[pid]
+    assert p.role == "" and p.active is False
+
+
+def test_selected_pair_fills_the_forward_and_reverse_boxes():
+    P = lambda n, k="oligo": Primer(name=n, sequence="ACGTACGTACGTACGTAC", kind=k)  # noqa: E731
+    assert pj.selection_slots([P("Family04_RV"), P("Family04_FW")]) == {
+        "forward": "Family04_FW", "reverse": "Family04_RV"}
+    assert pj.selection_slots([P("Actin3-F")]) == {"forward": "Actin3-F"}
+    assert pj.selection_slots([P("a_F"), P("b_F")]) is None        # two forwards
+    assert pj.selection_slots([P(f"x{i}_F") for i in range(4)]) is None
+    slots = pj.selection_slots([P("x_F"), P("x_R"), P("x_probe", "probe")])
+    assert slots == {"forward": "x_F", "reverse": "x_R", "probe": "x_probe"}
+
+
+def test_check_window_runs_only_with_a_sequence(qapp, settings, shared, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+
+    from repeatviewer.views.primer_check_dialog import NO_SEQUENCE, CheckPrimersDialog
+
+    db = _imported(shared)
+    names = ["pBV1_for", "pBV1_rev"]
+    told = []
+    monkeypatch.setattr(QMessageBox, "information",
+                        staticmethod(lambda *a, **k: told.append(a[2])))
+    d = CheckPrimersDialog(db, names)
+    ran = []
+    d.runRequested.connect(ran.append)
+    d.show()
+    assert d._table.rowCount() == 2
+    d._run_btn.click()
+    assert told == [NO_SEQUENCE] and d.isVisible() and not ran
+    fa = _new_plant(db, tmp_path / "plant.fa")
+    d.apply_path_from_panel(tmp_path / "not_fasta.txt")      # ignored
+    assert d.sequence() is None
+    d.apply_path_from_panel(fa)
+    d._pmin.setValue(900)
+    d._pmax.setValue(100)                                    # swapped back
+    d._run_btn.click()
+    assert ran and ran[0]["sequence"] == str(fa) and ran[0]["primer_names"] == names
+    assert (ran[0]["product_min"], ran[0]["product_max"]) == (100, 900)
+    every = CheckPrimersDialog(db, [])
+    assert every._table is None and len(every._primers) == len(db.primers)
