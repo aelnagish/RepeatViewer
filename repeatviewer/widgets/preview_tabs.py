@@ -3683,7 +3683,11 @@ class PreviewTabWidget(QTabWidget):
         self.setCurrentIndex(index)
         self.setCurrentWidget(page)
         page.show()
-        page.show_self_dotplot(sequence_id)
+        # The new page queued its usual first view while loading; switch to the
+        # dotplot after that has run, or it would land on Overview again.
+        QTimer.singleShot(
+            0, lambda pg=page, sid=sequence_id: _qobject_alive(pg) and pg.show_self_dotplot(sid)
+        )
         self._apply_zoom_to_current_tab()
         self._sync_tab_bar_visible()
         return page

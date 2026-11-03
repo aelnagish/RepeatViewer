@@ -264,5 +264,8 @@ def test_self_dotplot_opens_in_a_new_tab_and_details_extracts_go_next_to_tree(qa
     overview.showSelfDotplotRequested.emit("D")
     assert tabs.count() == 2 and tabs.tabText(1) == "Dotplot: D"
     assert tabs.widget(0) is page and tabs.currentIndex() == 1
+    for _ in range(5):
+        qapp.processEvents()
+    assert tabs.widget(1)._fasta_stack.currentIndex() == 2          # Dotplot (Self), not Overview
     tabs.open_file(aln, replace=False)                 # the file's own tab is still the alignment
     assert tabs.currentWidget() is page and tabs.count() == 2
