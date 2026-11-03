@@ -255,6 +255,26 @@ def make_process_output_box(
     return box, checkbox, close_box
 
 
+def make_citation_box(parent: QWidget, html: str) -> QGroupBox:
+    """Options-tab group listing tool paper citations (clickable DOIs)."""
+    box = QGroupBox("Citation", parent)
+    box.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+    layout = QVBoxLayout(box)
+    layout.setContentsMargins(12, 10, 12, 10)
+    layout.setSpacing(4)
+    layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+    label = QLabel(parent)
+    label.setWordWrap(True)
+    label.setTextFormat(Qt.TextFormat.RichText)
+    label.setOpenExternalLinks(True)
+    label.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+    # RichText ignores QFont for HTML; set size in markup (smaller than body).
+    label.setText(f"<div style='font-size:11px'>{html}</div>")
+    label.setObjectName("ToolCitationBody")
+    layout.addWidget(label)
+    return box
+
+
 def make_cancel_save_run_bar(
     dialog: QDialog,
     *,
@@ -2095,6 +2115,9 @@ class AlignParamsDialog(QDialog):
             )
         )
         options_layout.addWidget(process_box)
+        from repeatviewer.tool_citations import CITATION_ALIGN
+
+        options_layout.addWidget(make_citation_box(self, CITATION_ALIGN))
         options_layout.addStretch(1)
 
         self._aligner_tabs = QTabWidget(self)
@@ -5857,7 +5880,6 @@ class HmmerParamsDialog(QDialog):
         self._right_click_buttons: dict[str, QRadioButton] = {}
         for label, value in (
             ("Run HMMER with saved parameters", HMMER_RIGHT_CLICK_RUN),
-            ("Open this dialog", HMMER_RIGHT_CLICK_DIALOG),
         ):
             radio = QRadioButton(label, self)
             radio.setChecked(opts.right_click_action == value)
@@ -6366,7 +6388,6 @@ class ExtendParamsDialog(QDialog):
         self._right_click_buttons: dict[str, QRadioButton] = {}
         for label, value in (
             ("Run MSA Extend with saved parameters", EXTEND_RIGHT_CLICK_RUN),
-            ("Open this dialog", EXTEND_RIGHT_CLICK_DIALOG),
         ):
             radio = QRadioButton(label, self)
             radio.setChecked(opts.right_click_action == value)
@@ -7385,6 +7406,9 @@ class BlastParamsDialog(QDialog):
             )
         )
         options_layout.addWidget(process_box)
+        from repeatviewer.tool_citations import CITATION_BLAST
+
+        options_layout.addWidget(make_citation_box(self, CITATION_BLAST))
         # Absorb leftover height so group boxes stay tight (Align Options pattern).
         options_layout.addStretch(1)
         options_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
@@ -8440,7 +8464,6 @@ class ConsensusParamsDialog(QDialog):
         self._right_click_buttons: dict[str, QRadioButton] = {}
         for label, value in (
             ("Run Consensus with saved parameters", CONSENSUS_RIGHT_CLICK_RUN),
-            ("Open this dialog", CONSENSUS_RIGHT_CLICK_DIALOG),
         ):
             radio = QRadioButton(label, self)
             radio.setChecked(opts.right_click_action == value)
@@ -9153,7 +9176,6 @@ class FlexidotParamsDialog(QDialog):
         for label, value in (
             ("Run Built-in Dotplot", FLEXIDOT_RIGHT_CLICK_BUILTIN),
             ("Run Flexidot", FLEXIDOT_RIGHT_CLICK_FLEXIDOT),
-            ("Open this dialog", FLEXIDOT_RIGHT_CLICK_DIALOG),
         ):
             radio = QRadioButton(label, self)
             radio.setChecked(saved_rc == value)
@@ -9190,6 +9212,9 @@ class FlexidotParamsDialog(QDialog):
         options_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         options_layout.addWidget(rc_box)
         options_layout.addWidget(process_box)
+        from repeatviewer.tool_citations import CITATION_DOTPLOT
+
+        options_layout.addWidget(make_citation_box(self, CITATION_DOTPLOT))
         options_layout.addStretch(1)
         options_tab.setSizePolicy(
             QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
@@ -10202,7 +10227,6 @@ class TeAnnotationDialog(QDialog):
         self._right_click_buttons: dict[str, QRadioButton] = {}
         for label, value in (
             ("Run Sequence annotation with saved selection", TE_ANNOTATION_RIGHT_CLICK_RUN),
-            ("Open this dialog", TE_ANNOTATION_RIGHT_CLICK_DIALOG),
         ):
             radio = QRadioButton(label, self)
             radio.setChecked(opts.right_click_action == value)
@@ -10237,6 +10261,11 @@ class TeAnnotationDialog(QDialog):
         options_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         options_layout.addWidget(rc_box)
         options_layout.addWidget(process_box)
+        from repeatviewer.tool_citations import CITATION_SEQUENCE_ANNOTATION
+
+        options_layout.addWidget(
+            make_citation_box(self, CITATION_SEQUENCE_ANNOTATION)
+        )
         options_layout.addStretch(1)
         options_tab.setSizePolicy(
             QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
@@ -11335,7 +11364,6 @@ class TeaAidParamsDialog(QDialog):
         self._right_click_buttons: dict[str, QRadioButton] = {}
         for label, value in (
             ("Run TE-Aid with saved parameters", TEAID_RIGHT_CLICK_RUN),
-            ("Open this dialog", TEAID_RIGHT_CLICK_DIALOG),
         ):
             radio = QRadioButton(label, self)
             radio.setChecked(opts.right_click_action == value)
@@ -11371,6 +11399,9 @@ class TeaAidParamsDialog(QDialog):
         options_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         options_layout.addWidget(rc_box)
         options_layout.addWidget(process_box)
+        from repeatviewer.tool_citations import CITATION_TEAID
+
+        options_layout.addWidget(make_citation_box(self, CITATION_TEAID))
         options_layout.addStretch(1)
         options_tab.setSizePolicy(
             QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
@@ -12219,7 +12250,6 @@ class MsaCleanParamsDialog(QDialog):
             ("Remove gappy columns", MSA_CLEAN_RIGHT_CLICK_GAPPY),
             ("Clean rows with divergence", MSA_CLEAN_RIGHT_CLICK_DIV),
             ("Clean rows with gaps", MSA_CLEAN_RIGHT_CLICK_GAP),
-            ("Open this dialog", MSA_CLEAN_RIGHT_CLICK_DIALOG),
         ):
             radio = QRadioButton(label, self)
             radio.setChecked(opts.right_click_action == value)
@@ -15835,7 +15865,6 @@ class RepeatQuantifyDialog(QDialog):
         self._right_click_group = QButtonGroup(self)
         self._right_click_buttons: dict[str, QRadioButton] = {}
         for label, value in (
-            ("Opens this window", REPEAT_QUANTIFY_RIGHT_CLICK_DIALOG),
             (
                 "Runs again on the last library and genomes, with saved settings",
                 REPEAT_QUANTIFY_RIGHT_CLICK_RERUN,
@@ -16158,7 +16187,7 @@ class RepeatQuantifyDialog(QDialog):
         action = (
             opts.right_click_action
             if opts.right_click_action in self._right_click_buttons
-            else REPEAT_QUANTIFY_RIGHT_CLICK_DIALOG
+            else REPEAT_QUANTIFY_RIGHT_CLICK_RERUN
         )
         self._right_click_buttons[action].setChecked(True)
         self._show_process_window.setChecked(bool(opts.show_process_window))
@@ -16176,7 +16205,7 @@ class RepeatQuantifyDialog(QDialog):
     def options(self) -> RepeatQuantifyOptions:
         right_click = next(
             (v for v, b in self._right_click_buttons.items() if b.isChecked()),
-            REPEAT_QUANTIFY_RIGHT_CLICK_DIALOG,
+            REPEAT_QUANTIFY_RIGHT_CLICK_RERUN,
         )
         return RepeatQuantifyOptions(
             engine=self.engine(),

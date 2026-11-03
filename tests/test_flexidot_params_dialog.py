@@ -130,7 +130,9 @@ def test_dotplot_right_click_builtin_or_flexidot(qapp: QApplication) -> None:
     labels = [r.text() for r in dlg._right_click_buttons.values()]
     assert "Run Built-in Dotplot" in labels
     assert "Run Flexidot" in labels
-    assert "Open this dialog" in labels
+    assert "Open this dialog" not in labels
+    assert "Run Built-in Dotplot" in labels
+    assert "Run Flexidot" in labels
     assert dlg._right_click_buttons[FLEXIDOT_RIGHT_CLICK_FLEXIDOT].isChecked()
     dlg._right_click_buttons[FLEXIDOT_RIGHT_CLICK_BUILTIN].setChecked(True)
     assert dlg.options().right_click_action == FLEXIDOT_RIGHT_CLICK_BUILTIN

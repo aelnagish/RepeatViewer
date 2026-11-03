@@ -38,7 +38,7 @@ def test_normalize_flexidot_right_click_action() -> None:
     )
     assert (
         normalize_flexidot_right_click_action("dialog")
-        == FLEXIDOT_RIGHT_CLICK_DIALOG
+        == FLEXIDOT_RIGHT_CLICK_BUILTIN
     )
     # Legacy “run with saved parameters” → Built-in.
     assert (

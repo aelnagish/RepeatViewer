@@ -370,6 +370,7 @@ from repeatviewer.job_options import (
     CONSENSUS_RIGHT_CLICK_DIALOG,
     TEAID_RIGHT_CLICK_DIALOG,
     HMMER_RIGHT_CLICK_DIALOG,
+    MSA_CLEAN_RIGHT_CLICK_COMBINED,
     MSA_CLEAN_RIGHT_CLICK_DIALOG,
     TE_ANNOTATION_RIGHT_CLICK_DIALOG,
     load_align_options,
@@ -414,7 +415,6 @@ from repeatviewer.job_options import (
     save_tsd_search_options,
     save_tree_options,
     save_map_options,
-    MAP_RIGHT_CLICK_DIALOG,
     TeGenomeMapOptions,
     TeDivergencePlotOptions,
     MsaPlotJobOptions,
@@ -5076,10 +5076,7 @@ class MainWindow(NcbiDownloadActionsMixin, PrimerActionsMixin, QMainWindow):
             self._start_map_job(files, self._map_options)
 
     def _quick_map_right_click(self) -> None:
-        """Right-click: map with saved settings, or open the dialog (Options tab)."""
-        if self._map_options.right_click_action == MAP_RIGHT_CLICK_DIALOG:
-            self._open_map_dialog()
-            return
+        """Right-click: map with saved settings (Options → Minimap2 / HISAT2)."""
         self._run_map_default()
 
     def _open_map_dialog(self, *, require_selection: bool = False) -> None:
@@ -13078,11 +13075,8 @@ class MainWindow(NcbiDownloadActionsMixin, PrimerActionsMixin, QMainWindow):
             self._set_status_message("MSA Extend settings saved", 4000)
 
     def _quick_extend_right_click(self) -> None:
-        """Right-click MSA Extend: run with saved settings, or open the dialog."""
-        if self._extend_options.right_click_action == EXTEND_RIGHT_CLICK_DIALOG:
-            self._open_extend_dialog()
-        else:
-            self._run_extend()
+        """Right-click MSA Extend: run with saved settings."""
+        self._run_extend()
 
     def _run_tsd_search(self) -> None:
         self._apply_function("tsd_search", tsd_search_options=self._tsd_search_options)
@@ -13133,18 +13127,12 @@ class MainWindow(NcbiDownloadActionsMixin, PrimerActionsMixin, QMainWindow):
         self._present_te_viz_dialog(dialog, _accepted)
 
     def _quick_teaid_right_click(self) -> None:
-        """Right-click TE-Aid: run with saved settings, or open the dialog."""
-        if self._teaid_options.right_click_action == TEAID_RIGHT_CLICK_DIALOG:
-            self._open_teaid_dialog()
-        else:
-            self._run_teaid()
+        """Right-click TE-Aid: run with saved settings."""
+        self._run_teaid()
 
     def _quick_hmmer_right_click(self) -> None:
-        """Right-click HMMER: run with saved settings, or open the dialog."""
-        if self._hmmer_options.right_click_action == HMMER_RIGHT_CLICK_DIALOG:
-            self._open_hmmer_dialog()
-        else:
-            self._run_hmmer()
+        """Right-click HMMER: run with saved settings."""
+        self._run_hmmer()
 
     def _modify_teaid_parameters(self) -> None:
         """Menu: same Cancel / Save / Run dialog as the TE-Aid toolbar button."""
@@ -13298,11 +13286,8 @@ class MainWindow(NcbiDownloadActionsMixin, PrimerActionsMixin, QMainWindow):
             self._set_status_message("Consensus settings saved", 4000)
 
     def _quick_consensus_right_click(self) -> None:
-        """Right-click Consensus: run with saved settings, or open the dialog."""
-        if self._consensus_options.right_click_action == CONSENSUS_RIGHT_CLICK_DIALOG:
-            self._open_consensus_dialog()
-        else:
-            self._run_consensus()
+        """Right-click Consensus: run with saved settings."""
+        self._run_consensus()
 
     def _modify_consensus_parameters(self) -> None:
         """Menu: same Cancel / Save / Run dialog as the Consensus toolbar button."""
@@ -13476,13 +13461,11 @@ class MainWindow(NcbiDownloadActionsMixin, PrimerActionsMixin, QMainWindow):
         self._present_te_viz_dialog(dialog, _accepted)
 
     def _quick_flexidot_right_click(self) -> None:
-        """Right-click Dotplot: run Built-in, Flexidot, or open the dialog."""
+        """Right-click Dotplot: run Built-in or Flexidot (Options tab)."""
         action = normalize_flexidot_right_click_action(
             self._flexidot_options.right_click_action
         )
-        if action == FLEXIDOT_RIGHT_CLICK_DIALOG:
-            self._open_flexidot_dialog()
-        elif action == FLEXIDOT_RIGHT_CLICK_FLEXIDOT:
+        if action == FLEXIDOT_RIGHT_CLICK_FLEXIDOT:
             self._run_flexidot_saved()
         else:
             self._run_builtin_dotplot_saved()
@@ -13607,11 +13590,8 @@ class MainWindow(NcbiDownloadActionsMixin, PrimerActionsMixin, QMainWindow):
         self._present_te_viz_dialog(dialog, _accepted)
 
     def _quick_te_annotation_right_click(self) -> None:
-        """Right-click TE annotation: run with saved selection, or open the dialog."""
-        if self._te_annotation_options.right_click_action == TE_ANNOTATION_RIGHT_CLICK_DIALOG:
-            self._open_te_annotation_dialog()
-        else:
-            self._run_te_annotation_saved()
+        """Right-click Sequence Annotation: run with saved selection."""
+        self._run_te_annotation_saved()
 
     def _run_orf_prediction(self) -> None:
         self._apply_function(
@@ -13718,9 +13698,8 @@ class MainWindow(NcbiDownloadActionsMixin, PrimerActionsMixin, QMainWindow):
         """Right-click MSA Clean: run the action chosen in the Options tab."""
         action = self._msa_clean_options.right_click_action
         if action == MSA_CLEAN_RIGHT_CLICK_DIALOG:
-            self._open_msa_clean_dialog()
-        else:
-            self._apply_msa_clean(action)
+            action = MSA_CLEAN_RIGHT_CLICK_COMBINED
+        self._apply_msa_clean(action)
 
     def _run_default_msa_clean(self) -> None:
         self._apply_msa_clean("msa_clean")

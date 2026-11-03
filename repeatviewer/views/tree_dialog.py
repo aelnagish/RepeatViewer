@@ -62,6 +62,7 @@ from repeatviewer.job_options import (
     opening_dialog_tab,
     persistable_dialog_tab,
 )
+from repeatviewer.tool_citations import CITATION_TREE
 from repeatviewer.views.tool_dialogs import (
     TOOL_PARAMS_DIALOG_WIDTH,
     TOOL_PARAMS_FIELD_WIDTH,
@@ -72,6 +73,7 @@ from repeatviewer.views.tool_dialogs import (
     dialog_should_run,
     executable_checkbox_row,
     make_cancel_save_run_bar,
+    make_citation_box,
     make_executable_status_label,
     make_process_output_box,
     resolve_system_executable,
@@ -723,6 +725,7 @@ class TreeParamsDialog(QDialog):
         ol.addWidget(rc_box)
         ol.addWidget(exe_box)
         ol.addWidget(process_box)
+        ol.addWidget(make_citation_box(self, CITATION_TREE))
         ol.addStretch(1)
 
     # ------------------------------------------------------------------ helpers

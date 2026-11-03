@@ -18,7 +18,7 @@ from repeatviewer.backends.primers import design as dz  # noqa: E402
 from repeatviewer.backends.primers import jobs as pj  # noqa: E402
 from repeatviewer.job_options import (  # noqa: E402
     PRIMER_DIALOG_TAB_REGIONS,
-    PRIMER_RIGHT_CLICK_DIALOG,
+    PRIMER_RIGHT_CLICK_RUN,
     PrimerOptions,
     load_primer_options,
     save_primer_options,
@@ -93,7 +93,7 @@ def test_design_dialog_settings_round_trip(qapp, isolated_settings, data):
         check_genome=True, genome_fasta=str(data.genome), genome_max_products=3,
         target_start=10, target_end=50, num_return=7,
     )
-    opts = PrimerOptions(design=start.to_dict(), right_click_action=PRIMER_RIGHT_CLICK_DIALOG,
+    opts = PrimerOptions(design=start.to_dict(), right_click_action=PRIMER_RIGHT_CLICK_RUN,
                          last_dialog_tab=PRIMER_DIALOG_TAB_REGIONS)
     d = PrimerDesignDialog(initial=opts, files=[data.te_aln])
     assert d._tab_bar.currentIndex() == 1  # reopens on Regions
@@ -104,7 +104,7 @@ def test_design_dialog_settings_round_trip(qapp, isolated_settings, data):
                 "target_start", "target_end", "num_return"):
         assert getattr(s, key) == pytest.approx(getattr(start, key)) if isinstance(
             getattr(start, key), float) else getattr(s, key) == getattr(start, key), key
-    assert out.right_click_action == PRIMER_RIGHT_CLICK_DIALOG
+    assert out.right_click_action == PRIMER_RIGHT_CLICK_RUN
 
 
 def test_restore_defaults_uses_mode_preset(qapp, isolated_settings, data):
@@ -164,13 +164,13 @@ def test_database_dialog_lists_and_analyses(qapp, isolated_settings, data):
 def test_primer_options_persist(qapp, isolated_settings):
     opts = PrimerOptions(design=dz.DesignSettings(mode=dz.MODE_FISH, fish_label="Cy5").to_dict(),
                          database_path="/x/db.fa", save_design_to_database=True,
-                         right_click_action=PRIMER_RIGHT_CLICK_DIALOG)
+                         right_click_action=PRIMER_RIGHT_CLICK_RUN)
     save_primer_options(opts)
     back = load_primer_options()
     assert back.design_settings().mode == dz.MODE_FISH
     assert back.design_settings().fish_label == "Cy5"
     assert back.database_path == "/x/db.fa" and back.save_design_to_database
-    assert back.right_click_action == PRIMER_RIGHT_CLICK_DIALOG
+    assert back.right_click_action == PRIMER_RIGHT_CLICK_RUN
     # Unknown / old keys never break loading.
     QSettings().setValue("primers/design_json", "{not json")
     assert load_primer_options().design_settings().mode == dz.MODE_PCR
