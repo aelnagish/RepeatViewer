@@ -27,7 +27,9 @@ import math
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QPointF, QRectF, QSettings, QSizeF, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import (
+    QEvent, QLineF, QPointF, QRectF, QSettings, QSizeF, Qt, QTimer, QUrl, Signal,
+)
 from PySide6.QtGui import (
     QBrush,
     QDesktopServices,
@@ -44,6 +46,7 @@ from PySide6.QtGui import (
     QPalette,
     QPen,
     QPolygonF,
+    QTransform,
 )
 from PySide6.QtWidgets import (
     QApplication,
@@ -128,9 +131,10 @@ SUPPORT_HELP = (
     "at SH-aLRT 80 or more and UFBoot 95 or more.<br>"
     "FastME bootstrap: 70 or more. FastTree: local support from 0 to 1, close to 1 is strong.<br>"
     "<b>Branch length</b>: substitutions per site.<br>"
-    "<b>Hide crowded</b>: a label that would overlap another is left out (labels on longer "
-    "branches are kept first), and lengths are not written on branches too short to "
-    "carry them. Hover over a branch end or zoom in to read more.<br>"
+    "<b>Hide crowded</b>: a label is shown only if it fits on its branch and touches no "
+    "line, tip name or other label (labels on longer branches are kept first). Turn it "
+    "off to see every label. Hover over a branch to read its length and support.<br>"
+    "<b>Hide zeros</b>: no label on branches whose length is 0 or rounds to 0.<br>"
     "<b>Decimals</b>: places after the point for branch lengths (0.0277 shows as 0.03 "
     "with 2). Hover over a tip name for the length with more digits. "
     "<b>Font</b>: Auto = 80 % of the tip-name font."
@@ -193,7 +197,8 @@ class TreeViewOptions:
     align_labels: bool = False       # tip names on one line / circle, dotted lines to the tips
     branch_lengths: str = tl.BRANCHES_PROPORTIONAL
     spread: int = 100                # % : tree size relative to the font (circular: open centre)
-    hide_crowded: bool = True        # skip branch labels that would overlap others
+    hide_crowded: bool = True        # skip branch labels that would touch lines, names, labels
+    hide_zeros: bool = True          # no length label when it is 0 or rounds to 0
     root_angle: int = 0              # circular / radial: turn the tree (degrees)
     flip: bool = False               # mirror left-right
     line_weight: float = 1.2
@@ -355,12 +360,13 @@ def shorten(text: str, max_chars: int, keep_end: bool = True) -> str:
     return "…" + text[-max_chars:] if keep_end else text[:max_chars] + "…"
 
 
-class _LabelSpace:
-    """Rectangles already taken by labels; a coarse grid keeps lookups fast."""
+class _Obstacles:
+    """Lines and boxes branch labels must not touch; a coarse grid keeps lookups fast."""
 
     def __init__(self, cell: float) -> None:
         self._cell = max(4.0, cell)
-        self._grid: dict[tuple[int, int], list[QRectF]] = {}
+        self._lines: dict[tuple[int, int], list[QLineF]] = {}
+        self._shapes: dict[tuple[int, int], list[QPolygonF]] = {}
 
     def _cells(self, r: QRectF):
         c = self._cell
@@ -368,12 +374,58 @@ class _LabelSpace:
             for gy in range(int(math.floor(r.top() / c)), int(math.floor(r.bottom() / c)) + 1):
                 yield gx, gy
 
-    def free(self, r: QRectF) -> bool:
-        return not any(o.intersects(r) for key in self._cells(r) for o in self._grid.get(key, ()))
+    def add_line(self, a: QPointF, b: QPointF) -> None:
+        # Long lines are cut into pieces about one cell long, so each sits in few cells.
+        n = max(1, int(math.ceil(QLineF(a, b).length() / self._cell)))
+        for k in range(n):
+            p = a + (b - a) * (k / n)
+            q = a + (b - a) * ((k + 1) / n)
+            piece = QLineF(p, q)
+            for key in self._cells(QRectF(p, q).normalized()):
+                self._lines.setdefault(key, []).append(piece)
 
-    def take(self, r: QRectF) -> None:
-        for key in self._cells(r):
-            self._grid.setdefault(key, []).append(r)
+    def add_path(self, path: QPainterPath) -> None:
+        for poly in path.toSubpathPolygons():
+            for k in range(len(poly) - 1):
+                if poly[k] != poly[k + 1]:
+                    self.add_line(poly[k], poly[k + 1])
+
+    def add_shape(self, poly: QPolygonF) -> None:
+        for key in self._cells(poly.boundingRect()):
+            self._shapes.setdefault(key, []).append(poly)
+
+    def hits(self, poly: QPolygonF) -> bool:
+        edges = [QLineF(poly[k], poly[(k + 1) % len(poly)]) for k in range(len(poly))]
+        for key in self._cells(poly.boundingRect()):
+            for line in self._lines.get(key, ()):
+                if poly.containsPoint(line.p1(), Qt.FillRule.OddEvenFill):
+                    return True
+                if any(e.intersects(line)[0] == QLineF.IntersectionType.BoundedIntersection
+                       for e in edges):
+                    return True
+            for other in self._shapes.get(key, ()):
+                if other.intersects(poly):
+                    return True
+        return False
+
+
+def _is_zero_text(text: str) -> bool:
+    """True for "0", "0.00", "-0.00" and the like."""
+    try:
+        return float(text) == 0.0
+    except ValueError:
+        return False
+
+
+def _branch_tooltip(node: tl.Node, n_seqs: int, has_lengths: bool) -> str:
+    lines = []
+    if has_lengths:
+        lines.append(f"Branch length: {tl.branch_length_text(node.length, 4)}")
+    if node.support:
+        lines.append(f"Support: {node.support}")
+    if n_seqs > 1:
+        lines.append(f"{n_seqs} sequences below")
+    return "\n".join(lines)
 
 
 def build_tree_scene(
@@ -430,6 +482,15 @@ def build_tree_scene(
         pen.setCapStyle(Qt.PenCapStyle.FlatCap)
         return pen
 
+    # Lines, names and labels already drawn: branch labels must not touch them.
+    obstacles = _Obstacles(fm_small.height() * 2.0)
+    n_below = [0] * len(shown.nodes)        # sequences under each node (tooltips)
+    for node in reversed(shown.nodes):
+        if node.is_tip:
+            n_below[node.index] = info[node.index].n_tips if node.index in info else 1
+        if node.parent is not None:
+            n_below[node.parent] += n_below[node.index]
+
     # --- branches: one item per node (its own branch + its connector) -------
     depth = [d + layout.inner for d in tl.depths(geom)]
     for node in shown.nodes:
@@ -466,7 +527,12 @@ def build_tree_scene(
         item = _BranchItem(path)
         item.setPen(pen_for(i))
         item.setData(ROLE_NODE, i)
+        if not for_export:
+            tip_text = _branch_tooltip(node, n_below[i], shown.has_lengths)
+            if tip_text:
+                item.setToolTip(tip_text)
         scene.addItem(item)
+        obstacles.add_path(path)
 
     # --- collapsed clades: triangles ------------------------------------------
     for i, ci in info.items():
@@ -491,6 +557,7 @@ def build_tree_scene(
         if not for_export:
             item.setToolTip(f"Collapsed clade: {ci.n_tips} sequences\nRight-click to expand")
         scene.addItem(item)
+        obstacles.add_shape(tri)
 
     # --- where each tip's dot and name start ----------------------------------------
     # At the end of its branch (or collapsed triangle), or, with aligned names, on
@@ -519,6 +586,7 @@ def build_tree_scene(
                 leader = QPainterPath(end)
                 leader.lineTo(target)
                 scene.addPath(leader, leader_pen)
+                obstacles.add_path(leader)
             end = target
         anchors[tip] = end
 
@@ -533,6 +601,7 @@ def build_tree_scene(
         circle = scene.addEllipse(QRectF(cx - dot / 2.0, cy - dot / 2.0, dot, dot),
                                   QPen(QColor(color).darker(130), 0.6), QBrush(QColor(color)))
         circle.setData(ROLE_NODE, tip)
+        obstacles.add_shape(QPolygonF(circle.rect()))
         if not for_export and tip in display.tip_notes:
             circle.setToolTip(display.tip_notes[tip])
     if dot:
@@ -578,50 +647,70 @@ def build_tree_scene(
                     item.setPos(anchor.x(), anchor.y() - h / 2.0)
                 item.setRotation(rotation)
             scene.addItem(item)
+            obstacles.add_shape(item.mapToScene(item.boundingRect()))
 
     # --- branch labels ------------------------------------------------------------
+    # Each label runs along its branch (turned so it never reads upside down), 2 px
+    # off the line: lengths in the middle, support values at the node end. With
+    # "Hide crowded" a label must fit on its branch and touch no line, tip name or
+    # other label; it tries the other side of the branch before giving up.
     if opts.branch_labels != BRANCH_LABELS_NONE:
         label_brush = QBrush(muted)
-        candidates: list[tuple[float, QGraphicsSimpleTextItem]] = []
+        support_mode = opts.branch_labels == BRANCH_LABELS_SUPPORT
+        ascent, cap = fm_small.ascent(), fm_small.capHeight()
+        label_gap = 2.0
+        candidates: list[tuple[float, int, str]] = []
         for node in shown.nodes:
             if node.parent is None:
                 continue
-            if opts.branch_labels == BRANCH_LABELS_SUPPORT:
+            if support_mode:
                 text = node.support
             else:
                 text = tl.branch_length_text(node.length, decimals=decimals)
+                if opts.hide_zeros and _is_zero_text(text):
+                    continue
             if not text:
                 continue
+            branch_px = max(0.0, geom.nodes[node.index].length) * sx
+            candidates.append((branch_px, node.index, text))
+        candidates.sort(key=lambda c: -c[0])     # longest branches first
+
+        for branch_px, i, text in candidates:
             item = QGraphicsSimpleTextItem(text)
             item.setFont(small)
             item.setBrush(label_brush)
+            item.setData(ROLE_NODE, i)
             w = item.boundingRect().width()
-            h = fm_small.height()
-            if opts.branch_labels == BRANCH_LABELS_SUPPORT:
-                p = px(layout.xy[node.index])
-                if layout.kind == tl.LAYOUT_RECTANGULAR:
-                    item.setPos(p.x() - w - 2.0 if rect_dir > 0 else p.x() + 2.0, p.y() - h)
-                else:
-                    item.setPos(p.x() + 2.0, p.y() - h)
+            if opts.hide_crowded and w + 4.0 > branch_px:
+                continue                       # wider than its branch
+            if layout.kind == tl.LAYOUT_RECTANGULAR:
+                u = QPointF(rect_dir, 0.0)
+                rotation = 0.0
             else:
-                p = px(layout.branch_mid[node.index])
-                item.setPos(p.x() - w / 2.0, p.y() - h)
-            branch_px = max(0.0, geom.nodes[node.index].length) * sx
-            if (opts.hide_crowded and opts.branch_labels == BRANCH_LABELS_LENGTH
-                    and branch_px < w * 0.5):
-                continue          # a length label wider than twice its branch says little
-            candidates.append((branch_px, item))
-        # Longest branches first; with "Hide crowded labels" a label that would
-        # overlap one already placed is left out.
-        candidates.sort(key=lambda c: -c[0])
-        space = _LabelSpace(fm_small.height() * 2.0)
-        for _length, item in candidates:
-            if opts.hide_crowded:
-                rect = item.boundingRect().translated(item.pos()).adjusted(-1, 0, 1, 0)
-                if not space.free(rect):
+                a = math.radians(layout.node_angle[i])
+                u = QPointF(math.cos(a), -math.sin(a))   # parent -> node on screen
+                rotation, _flipped = tl.label_rotation(layout.node_angle[i])
+            if support_mode:
+                centre = px(layout.xy[i]) - u * (w / 2.0 + 3.0)
+            else:
+                centre = px(layout.branch_mid[i])
+            for side in (1, -1):               # above the line, then below
+                t = QTransform()
+                t.translate(centre.x(), centre.y())
+                t.rotate(rotation)
+                if side > 0:
+                    t.translate(-w / 2.0, -label_gap - ascent)
+                else:
+                    t.translate(-w / 2.0, label_gap - (ascent - cap))
+                ink_box = QRectF(0.0, ascent - cap, w, cap).adjusted(-1.0, -1.0, 1.0, 1.0)
+                poly = t.map(QPolygonF(ink_box))
+                if opts.hide_crowded and obstacles.hits(poly):
                     continue
-                space.take(rect)
-            scene.addItem(item)
+                item.setTransform(t)
+                if opts.hide_crowded:
+                    obstacles.add_shape(poly)
+                scene.addItem(item)
+                break
 
     # --- legend for the trait colours ------------------------------------------------
     if display.legend is not None:
@@ -969,6 +1058,8 @@ class TreePanel(QWidget):
         self._scale_check = QCheckBox("Scale bar", self)
         self._align_check = QCheckBox("Align names", self)
         self._crowded_check = QCheckBox("Hide crowded", self)
+        self._zeros_check = QCheckBox("Hide zeros", self)
+        self._zeros_check.setToolTip("No label on branches whose length is 0 or rounds to 0.")
         self._lengths_box = NoWheelComboBox(self)
         for label, value in (("Proportional", tl.BRANCHES_PROPORTIONAL),
                              ("Equal", tl.BRANCHES_EQUAL),
@@ -1133,7 +1224,7 @@ class TreePanel(QWidget):
         sec.add("Show", self._branch_box)
         sec.add("Decimals", self._digits_spin)
         sec.add("Font", self._bfont_spin)
-        sec.add("", self._crowded_check)
+        sec.add("", _pair(panel, self._crowded_check, self._zeros_check))
         pl.addWidget(sec)
         sec = _Section("Branches", panel, key="branches")
         sec.add("Width", self._lw_spin)
@@ -1236,7 +1327,7 @@ class TreePanel(QWidget):
                     self._tiplabel_box, self._keep_box):
             box.currentIndexChanged.connect(self._on_controls_changed)
         for check in (self._tips_check, self._scale_check, self._align_check,
-                      self._crowded_check, self._flip_check):
+                      self._crowded_check, self._zeros_check, self._flip_check):
             check.toggled.connect(self._on_controls_changed)
         for spin in (self._font_spin, self._spread_spin, self._maxchars_spin, self._digits_spin,
                      self._bfont_spin, self._lw_spin, self._scale_len, self._sfont_spin):
@@ -1283,6 +1374,7 @@ class TreePanel(QWidget):
             self._scale_check.setChecked(self._opts.scale_bar)
             self._align_check.setChecked(self._opts.align_labels)
             self._crowded_check.setChecked(self._opts.hide_crowded)
+            self._zeros_check.setChecked(self._opts.hide_zeros)
             self._font_spin.setValue(self._opts.font_pt)
             self._spread_spin.setValue(int(spread_factor(self._opts) * 100))
             angle = int(self._opts.root_angle) % 360
@@ -1316,6 +1408,7 @@ class TreePanel(QWidget):
         self._keep_box.setEnabled(tips and self._maxchars_spin.value() > 0)
         labels = self._branch_box.currentData()
         self._crowded_check.setEnabled(labels != BRANCH_LABELS_NONE)
+        self._zeros_check.setEnabled(labels == BRANCH_LABELS_LENGTH)
         self._bfont_spin.setEnabled(labels != BRANCH_LABELS_NONE)
         self._digits_spin.setEnabled(labels == BRANCH_LABELS_LENGTH)
         proportional = self._lengths_box.currentData() == tl.BRANCHES_PROPORTIONAL
@@ -1379,6 +1472,7 @@ class TreePanel(QWidget):
             branch_lengths=str(self._lengths_box.currentData()),
             spread=self._spread_spin.value(),
             hide_crowded=self._crowded_check.isChecked(),
+            hide_zeros=self._zeros_check.isChecked(),
             root_angle=self._angle_slider.value() * 5,
             flip=self._flip_check.isChecked(),
             tip_label=str(self._tiplabel_box.currentData() or TIP_LABEL_NAME),
