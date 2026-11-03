@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import platform
 import shutil
 from dataclasses import dataclass
 from datetime import datetime
@@ -10,7 +11,7 @@ from pathlib import Path
 from typing import Literal
 
 from PySide6.QtCore import QEvent, QObject, QRect, Qt, QThread, QTimer, Signal, Slot
-from PySide6.QtGui import QMouseEvent
+from PySide6.QtGui import QFont, QMouseEvent, QPalette
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -23,6 +24,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QMenu,
     QMessageBox,
     QProgressDialog,
     QPushButton,
@@ -33,6 +35,7 @@ from PySide6.QtWidgets import (
     QTabBar,
     QTableWidget,
     QTableWidgetItem,
+    QToolTip,
     QVBoxLayout,
     QWidget,
 )
@@ -78,6 +81,7 @@ from repeatviewer.project import (
     normalize_annotation_name,
     user_fields_from_kind,
 )
+from repeatviewer.ui.platform import reveal_in_file_manager
 from repeatviewer.widgets.database_index_runner import find_database_index_runner
 from repeatviewer.widgets.help_button import field_with_help, make_help_button
 from repeatviewer.widgets.path_browse import PathBrowseRow
@@ -89,14 +93,14 @@ _NAME_HELP = (
     "BLAST index folders. It defaults to the file name; you can change it."
 )
 _ANNOTATION_NAME_HELP = (
-    "<b>Annotation name</b> is the short label shown on the Annotation tab "
+    "<b>Short name</b> is the short label shown on the Annotation tab "
     f"(maximum {ANNOTATION_NAME_MAX_LENGTH} characters). "
     "Leave it empty if you do not show this database in the annotation control panel. "
     "When you check “Display in the annotation control panel”, it defaults to Name "
     f"(truncated to {ANNOTATION_NAME_MAX_LENGTH})."
 )
 _DISPLAY_IN_ANNOTATION_HELP = (
-    f"An Annotation name is required (max {ANNOTATION_NAME_MAX_LENGTH} characters)."
+    f"A Short name is required (max {ANNOTATION_NAME_MAX_LENGTH} characters)."
 )
 _HMM_SETUP_HELP = (
     "<b>How to add an HMM database</b><br><br>"
@@ -138,6 +142,25 @@ _CDD_SETUP_HELP = (
     "Name defaults to the folder name (same rule as other database types).<br>"
     "5. Click <b>OK</b>. Source packages run <code>makeprofiledb</code> once "
     "on first prepare (can take a long time); preformatted LE sets skip that step."
+)
+# Help next to Add… (download / library links).
+_RECOMMENDED_DATABASES_HELP = (
+    "<b>Recommended databases</b><br>"
+    "<table cellspacing='0' cellpadding='2'>"
+    "<tr><td><a href=\"https://www.dfam.org/\">Dfam</a></td>"
+    "<td>https://www.dfam.org/</td></tr>"
+    "<tr><td><a href=\"https://www.girinst.org/repbase/\">Repbase</a></td>"
+    "<td>https://www.girinst.org/repbase/</td></tr>"
+    "<tr><td><a href=\"https://repeatexplorer.org/\">REXdb</a></td>"
+    "<td>https://repeatexplorer.org/</td></tr>"
+    "<tr><td><a href=\"https://repeatsdb.org/home\">RepeatDB</a></td>"
+    "<td>https://repeatsdb.org/home</td></tr>"
+    "<tr><td><a href=\"https://ftp.ncbi.nih.gov/pub/mmdb/cdd/\">CDD</a></td>"
+    "<td>https://ftp.ncbi.nih.gov/pub/mmdb/cdd/</td></tr>"
+    "<tr><td><a href=\"https://ftp.ncbi.nih.gov/pub/mmdb/cdd/little_endian/\">"
+    "CDD separated</a></td>"
+    "<td>https://ftp.ncbi.nih.gov/pub/mmdb/cdd/little_endian/</td></tr>"
+    "</table>"
 )
 _SET_AS_MAIN_GENOME_HELP = (
     "Marks the selected FASTA DNA file as the reference genome. "
@@ -222,11 +245,64 @@ def database_name_from_pick(payload: object) -> str | None:
 
 
 class _MiddleElideDelegate(QStyledItemDelegate):
-    """Force middle-ellipsis like the Files panel (keep start + file name)."""
+    """Middle-ellipsis (start…end). macOS styles often ignore option.textElideMode."""
 
     def initStyleOption(self, option: QStyleOptionViewItem, index) -> None:  # noqa: N802
         super().initStyleOption(option, index)
         option.textElideMode = Qt.TextElideMode.ElideMiddle
+
+    @staticmethod
+    def _text_rect(opt: QStyleOptionViewItem) -> QRect:
+        style = opt.widget.style() if opt.widget is not None else QApplication.style()
+        text_rect = style.subElementRect(
+            QStyle.SubElement.SE_ItemViewItemText, opt, opt.widget
+        )
+        if not text_rect.isValid() or text_rect.width() <= 0:
+            return opt.rect.adjusted(4, 0, -4, 0)
+        return text_rect
+
+    def paint(self, painter, option, index) -> None:  # noqa: N802
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        opt.textElideMode = Qt.TextElideMode.ElideMiddle
+        text = opt.text
+        # Draw chrome without text, then paint middle-elided text ourselves.
+        opt.text = ""
+        style = opt.widget.style() if opt.widget is not None else QApplication.style()
+        style.drawControl(
+            QStyle.ControlElement.CE_ItemViewItem, opt, painter, opt.widget
+        )
+        if not text:
+            return
+        text_rect = self._text_rect(opt)
+        elided = opt.fontMetrics.elidedText(
+            text, Qt.TextElideMode.ElideMiddle, text_rect.width()
+        )
+        painter.save()
+        painter.setFont(opt.font)
+        if opt.state & QStyle.StateFlag.State_Selected:
+            painter.setPen(opt.palette.color(QPalette.ColorRole.HighlightedText))
+        else:
+            painter.setPen(opt.palette.color(QPalette.ColorRole.Text))
+        align = int(opt.displayAlignment) | int(Qt.AlignmentFlag.AlignVCenter)
+        painter.drawText(text_rect, align, elided)
+        painter.restore()
+
+    def helpEvent(self, event, view, option, index) -> bool:  # noqa: N802
+        """Tooltip only when the cell text is truncated; no rename hints."""
+        if event is None or event.type() != QEvent.Type.ToolTip:
+            return False
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        text = str(opt.text or "")
+        if not text:
+            return False
+        text_rect = self._text_rect(opt)
+        if opt.fontMetrics.horizontalAdvance(text) <= text_rect.width():
+            QToolTip.hideText()
+            return True
+        QToolTip.showText(event.globalPos(), text, view)
+        return True
 
 
 def _is_checked_state(state: object) -> bool:
@@ -428,8 +504,8 @@ def _name_clash_message(name: str) -> str:
 
 def _annotation_name_clash_message(ann_name: str) -> str:
     return (
-        f"The annotation name “{ann_name}” is already used. "
-        "Choose a unique Annotation name."
+        f"The short name “{ann_name}” is already used. "
+        "Choose a unique Short name."
     )
 
 
@@ -1109,7 +1185,7 @@ class ManageReferencesDialog(QDialog):
         self._table.setHorizontalHeaderLabels(
             [
                 "Name",
-                "Annotation name",
+                "Short name",
                 "Type",
                 "Path / source",
                 "Time",
@@ -1131,6 +1207,8 @@ class ManageReferencesDialog(QDialog):
         self._table.setItemDelegateForColumn(_COL_PATH, self._elide_delegate)
         self._table.setItemDelegateForColumn(_COL_ANNOTATION, self._check_delegate)
         header = self._table.horizontalHeader()
+        # Do not bold / emphasize header cells when a row is selected.
+        header.setHighlightSections(False)
         header.setSectionsClickable(True)
         header.setSortIndicatorShown(True)
         header.setSortIndicator(self._sort_column, self._sort_order)
@@ -1161,8 +1239,13 @@ class ManageReferencesDialog(QDialog):
         )
         self._table.itemSelectionChanged.connect(self._update_buttons)
         self._table.itemChanged.connect(self._on_item_changed)
+        self._table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._table.customContextMenuRequested.connect(self._on_table_context_menu)
 
         self._add_btn = QPushButton("Add…", self)
+        self._add_help = make_help_button(
+            self, "Recommended databases", _RECOMMENDED_DATABASES_HELP
+        )
         self._remove_btn = QPushButton("Remove", self)
         self._select_btn = QPushButton("Select", self)
         self._select_btn.setToolTip(
@@ -1185,6 +1268,7 @@ class ManageReferencesDialog(QDialog):
 
         btn_row = QHBoxLayout()
         btn_row.addWidget(self._add_btn)
+        btn_row.addWidget(self._add_help)
         btn_row.addWidget(self._remove_btn)
         btn_row.addWidget(self._select_btn)
         btn_row.addWidget(self._set_main_btn)
@@ -1192,8 +1276,19 @@ class ManageReferencesDialog(QDialog):
         btn_row.addStretch(1)
         btn_row.addWidget(self._save_btn)
 
+        self._reference_genome_path: Path | None = None
         self._current_label = QLabel(self)
         self._current_label.setWordWrap(True)
+        self._current_label.setTextFormat(Qt.TextFormat.RichText)
+        self._current_label.setOpenExternalLinks(False)
+        self._current_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextBrowserInteraction
+        )
+        self._current_label.linkActivated.connect(self._on_reference_genome_link)
+        self._current_label.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._current_label.customContextMenuRequested.connect(
+            self._on_reference_genome_context_menu
+        )
 
         layout = QVBoxLayout(self)
         layout.addLayout(tab_row)
@@ -1308,6 +1403,58 @@ class ManageReferencesDialog(QDialog):
             self._sort_column, self._sort_order
         )
         self._populate()
+
+    @staticmethod
+    def _reveal_in_finder_label() -> str:
+        return (
+            "Reveal in Finder"
+            if platform.system() == "Darwin"
+            else "Show in File Manager"
+        )
+
+    def _exec_path_context_menu(self, global_pos, path: Path | str) -> None:
+        """Reveal in Finder / Copy Path (same menu as the status file link)."""
+        path_str = str(path).strip()
+        if not path_str:
+            return
+        try:
+            resolved = Path(path_str).expanduser().resolve()
+        except OSError:
+            resolved = Path(path_str)
+        menu = QMenu(self)
+        menu.addAction(
+            self._reveal_in_finder_label(),
+            lambda p=resolved: reveal_in_file_manager(p),
+        )
+        menu.addSeparator()
+        menu.addAction(
+            "Copy Path",
+            lambda s=path_str: QApplication.clipboard().setText(s),
+        )
+        menu.exec(global_pos)
+
+    def _on_table_context_menu(self, pos) -> None:
+        """Right-click Path / source → Reveal in Finder / Copy Path."""
+        index = self._table.indexAt(pos)
+        if not index.isValid() or index.column() != _COL_PATH:
+            return
+        row = index.row()
+        if row < 0 or row >= len(self._rows):
+            return
+        path = str(self._rows[row].path_display or "").strip()
+        if not path:
+            return
+        self._exec_path_context_menu(
+            self._table.viewport().mapToGlobal(pos), path
+        )
+
+    def _on_reference_genome_context_menu(self, pos) -> None:
+        path = self._reference_genome_path
+        if path is None:
+            return
+        self._exec_path_context_menu(
+            self._current_label.mapToGlobal(pos), path
+        )
 
     def _sort_rows(self, rows: list[_RefRow]) -> list[_RefRow]:
         col = self._sort_column
@@ -1628,21 +1775,20 @@ class ManageReferencesDialog(QDialog):
             | Qt.ItemFlag.ItemIsEditable
         )
         readonly = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
+        bold_font: QFont | None = None
+        if any(row.is_main for row in filtered):
+            bold_font = QFont(self._table.font())
+            bold_font.setBold(True)
         for i, row in enumerate(filtered):
             ann_display = row.annotation_name if row.annotation_name.strip() else "-"
             name_item = QTableWidgetItem(row.name)
             name_item.setFlags(editable)
             name_item.setData(Qt.ItemDataRole.UserRole, row.name)
-            name_item.setToolTip(f"{row.name}\nDouble-click to rename")
             self._table.setItem(i, _COL_NAME, name_item)
 
             ann_item = QTableWidgetItem(ann_display)
             ann_item.setFlags(editable)
             ann_item.setData(Qt.ItemDataRole.UserRole, row.annotation_name)
-            tip = row.annotation_name or "(empty)"
-            ann_item.setToolTip(
-                f"{tip}\nDouble-click to edit (max {ANNOTATION_NAME_MAX_LENGTH})"
-            )
             self._table.setItem(i, _COL_ANN_NAME, ann_item)
 
             type_item = QTableWidgetItem(kind_label(row.kind))
@@ -1651,7 +1797,6 @@ class ManageReferencesDialog(QDialog):
 
             path_item = QTableWidgetItem(row.path_display)
             path_item.setFlags(readonly)
-            path_item.setToolTip(row.path_display)
             self._table.setItem(i, _COL_PATH, path_item)
 
             time_item = QTableWidgetItem(_format_time(row.created_at))
@@ -1673,6 +1818,12 @@ class ManageReferencesDialog(QDialog):
                 else Qt.CheckState.Unchecked
             )
             self._table.setItem(i, _COL_ANNOTATION, check_item)
+
+            if row.is_main and bold_font is not None:
+                for col in range(_COL_COUNT):
+                    cell = self._table.item(i, col)
+                    if cell is not None:
+                        cell.setFont(bold_font)
         self._table.blockSignals(False)
         self._update_current_label()
         self._update_buttons()
@@ -1680,7 +1831,9 @@ class ManageReferencesDialog(QDialog):
     def _update_current_label(self) -> None:
         genome = self._project.genome_file
         if genome is None:
+            self._reference_genome_path = None
             self._current_label.setText("Reference genome: (none)")
+            self._current_label.setToolTip("")
             return
         # Prefer the managed / BLAST display name when available.
         label = genome.name
@@ -1698,8 +1851,28 @@ class ManageReferencesDialog(QDialog):
                 ):
                     label = db.name
                     break
-        self._current_label.setText(f"Reference genome: {label}")
-        self._current_label.setToolTip(str(genome))
+        try:
+            resolved = genome.expanduser().resolve()
+        except OSError:
+            resolved = Path(genome)
+        self._reference_genome_path = resolved
+        safe = (
+            str(label)
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+        )
+        self._current_label.setText(
+            f'Reference genome: <a href="reveal">{safe}</a>'
+        )
+        self._current_label.setToolTip(
+            f"Click: show in file manager\n{resolved}"
+        )
+
+    def _on_reference_genome_link(self, _href: str) -> None:
+        path = self._reference_genome_path
+        if path is not None:
+            reveal_in_file_manager(path)
 
     def _selected_rows(self) -> list[_RefRow]:
         indices = sorted({idx.row() for idx in self._table.selectedIndexes()})
@@ -1915,10 +2088,6 @@ class ManageReferencesDialog(QDialog):
                 self._table.blockSignals(True)
                 ann_cell.setData(Qt.ItemDataRole.UserRole, ann)
                 ann_cell.setText(ann if ann else "-")
-                ann_cell.setToolTip(
-                    f"{ann or '(empty)'}\nDouble-click to edit "
-                    f"(max {ANNOTATION_NAME_MAX_LENGTH})"
-                )
                 self._table.blockSignals(False)
             return ann
 
@@ -2001,7 +2170,6 @@ class ManageReferencesDialog(QDialog):
         self._table.blockSignals(True)
         item.setText(new_name)
         item.setData(Qt.ItemDataRole.UserRole, new_name)
-        item.setToolTip(f"{new_name}\nDouble-click to rename")
         self._table.blockSignals(False)
         self._persist_all()
         self._update_current_label()
@@ -2052,10 +2220,6 @@ class ManageReferencesDialog(QDialog):
         self._table.blockSignals(True)
         item.setText(new_ann if new_ann else "-")
         item.setData(Qt.ItemDataRole.UserRole, new_ann)
-        item.setToolTip(
-            f"{new_ann or '(empty)'}\nDouble-click to edit "
-            f"(max {ANNOTATION_NAME_MAX_LENGTH})"
-        )
         self._table.blockSignals(False)
         self._persist_all()
 

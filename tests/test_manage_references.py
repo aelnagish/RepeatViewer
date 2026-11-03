@@ -223,6 +223,17 @@ def test_manage_database_dialog_smoke(qapp, isolated_settings, tmp_path, monkeyp
     assert dialog._section_bar.expanding() is False
     assert dialog._section_bar.drawBase() is False
     assert dialog._table.columnCount() == 6
+    assert dialog._add_help is not None
+    tip = dialog._add_help.toolTip()
+    assert "Dfam" in tip and "https://www.dfam.org/" in tip
+    assert "Repbase" in tip and "REXdb" in tip and "RepeatDB" in tip
+    assert "CDD separated" in tip
+    assert "preformatted little-endian" not in tip
+    assert " — " not in tip
+    # Order: Dfam → Repbase → REXdb → RepeatDB → CDD → CDD separated
+    assert tip.index("Dfam") < tip.index("Repbase") < tip.index("REXdb")
+    assert tip.index("REXdb") < tip.index("RepeatDB") < tip.index(">CDD<")
+    assert tip.index(">CDD<") < tip.index("CDD separated")
     # BLAST tab → genomes / FASTA
     dialog._section_bar.setCurrentIndex(0)
     dialog._legacy_role = "all"
@@ -533,4 +544,181 @@ def test_add_rejects_duplicate_annotation_name(qapp, tmp_path, monkeypatch) -> N
     dialog._on_ok()
     assert dialog.result() != int(QDialog.DialogCode.Accepted)
     assert dialog.result_annotation() is None
-    assert any("unique Annotation name" in msg for msg in warnings)
+    assert any("unique Short name" in msg for msg in warnings)
+
+
+def test_reference_genome_label_is_finder_link(
+    qapp, isolated_settings, tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr(
+        "repeatviewer.views.manage_references_dialog.prepare_index_is_ready",
+        lambda *_a, **_k: True,
+    )
+    monkeypatch.setattr(
+        "repeatviewer.views.manage_references_dialog.describe_database_problem",
+        lambda *_a, **_k: None,
+    )
+    ref = tmp_path / "ref.fa"
+    ref.write_text(">c\nAAAA\n")
+    genomes = [
+        ManagedGenome(name="RefGenome", path=ref, created_at="2026-01-01T00:00:00")
+    ]
+    save_managed_genomes_to_settings(genomes)
+    project = RepeatViewerProject(managed_genomes=genomes, genome_file=ref)
+    dialog = ManageReferencesDialog(project)
+    html = dialog._current_label.text()
+    assert "Reference genome:" in html
+    assert '<a href="reveal">RefGenome</a>' in html
+    revealed: list[Path] = []
+    monkeypatch.setattr(
+        "repeatviewer.views.manage_references_dialog.reveal_in_file_manager",
+        lambda path: revealed.append(path),
+    )
+    dialog._on_reference_genome_link("reveal")
+    assert revealed and revealed[0] == ref.resolve()
+
+    # Right-click menu: Reveal in Finder + Copy Path (not the Qt link menu).
+    from PySide6.QtCore import QPoint
+    from PySide6.QtWidgets import QApplication
+
+    actions: list[str] = []
+
+    class _CaptureMenu:
+        def __init__(self, *_a, **_k) -> None:
+            self._actions: list[tuple[str, object]] = []
+
+        def addAction(self, text, slot=None):  # noqa: N802
+            actions.append(text)
+            self._actions.append((text, slot))
+            return text
+
+        def addSeparator(self) -> None:  # noqa: N802
+            actions.append("---")
+
+        def exec(self, _pos):  # noqa: A003
+            return None
+
+    monkeypatch.setattr(
+        "repeatviewer.views.manage_references_dialog.QMenu",
+        _CaptureMenu,
+    )
+    dialog._on_reference_genome_context_menu(QPoint(0, 0))
+    assert actions[0] in {"Reveal in Finder", "Show in File Manager"}
+    assert actions[1] == "---"
+    assert actions[2] == "Copy Path"
+    dialog.close()
+
+
+def test_reference_genome_row_is_bold(qapp, isolated_settings, tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "repeatviewer.views.manage_references_dialog.prepare_index_is_ready",
+        lambda *_a, **_k: True,
+    )
+    monkeypatch.setattr(
+        "repeatviewer.views.manage_references_dialog.describe_database_problem",
+        lambda *_a, **_k: None,
+    )
+    ref = tmp_path / "ref.fa"
+    other = tmp_path / "other.fa"
+    ref.write_text(">c\nAAAA\n")
+    other.write_text(">c\nTTTT\n")
+    genomes = [
+        ManagedGenome(name="RefGenome", path=ref, created_at="2026-01-01T00:00:00"),
+        ManagedGenome(name="Other", path=other, created_at="2026-01-02T00:00:00"),
+    ]
+    save_managed_genomes_to_settings(genomes)
+    project = RepeatViewerProject(managed_genomes=genomes, genome_file=ref)
+    dialog = ManageReferencesDialog(project)
+    dialog._section_bar.setCurrentIndex(0)
+    dialog._populate()
+    assert dialog._table.rowCount() == 2
+    by_name = {
+        dialog._table.item(r, 0).text(): r for r in range(dialog._table.rowCount())
+    }
+    ref_row = by_name["RefGenome"]
+    other_row = by_name["Other"]
+    assert dialog._table.item(ref_row, 0).font().bold()
+    assert dialog._table.item(ref_row, 3).font().bold()
+    assert not dialog._table.item(other_row, 0).font().bold()
+    dialog.close()
+
+
+def test_copy_path_context_menu(qapp, isolated_settings, tmp_path, monkeypatch) -> None:
+    from PySide6.QtCore import QPoint
+    from PySide6.QtWidgets import QApplication
+
+    monkeypatch.setattr(
+        "repeatviewer.views.manage_references_dialog.prepare_index_is_ready",
+        lambda *_a, **_k: True,
+    )
+    monkeypatch.setattr(
+        "repeatviewer.views.manage_references_dialog.describe_database_problem",
+        lambda *_a, **_k: None,
+    )
+    genome = tmp_path / "g.fa"
+    genome.write_text(">c\nAAAA\n")
+    genomes = [
+        ManagedGenome(name="G", path=genome, created_at="2026-01-01T00:00:00")
+    ]
+    save_managed_genomes_to_settings(genomes)
+    project = RepeatViewerProject(managed_genomes=genomes, genome_file=genome)
+    dialog = ManageReferencesDialog(project)
+    dialog._legacy_role = "all"
+    dialog._section_bar.setCurrentIndex(0)
+    dialog._populate()
+    assert dialog._table.rowCount() >= 1
+    assert dialog._rows
+    full_path = dialog._rows[0].path_display
+
+    copied: list[str] = []
+    labels: list[str] = []
+
+    class _FakeMenu:
+        def __init__(self, *_a, **_k) -> None:
+            pass
+
+        def addAction(self, text, slot=None):  # noqa: N802
+            labels.append(text)
+            if text == "Copy Path" and callable(slot):
+                slot()
+            return text
+
+        def addSeparator(self) -> None:  # noqa: N802
+            labels.append("---")
+
+        def exec(self, _global_pos):  # noqa: A003
+            return None
+
+    monkeypatch.setattr(
+        "repeatviewer.views.manage_references_dialog.QMenu",
+        _FakeMenu,
+    )
+    monkeypatch.setattr(
+        QApplication.clipboard(),
+        "setText",
+        lambda text: copied.append(text),
+    )
+    index = dialog._table.model().index(0, 3)
+    rect = dialog._table.visualRect(index)
+    pos = rect.center() if rect.isValid() and not rect.isEmpty() else QPoint(5, 5)
+    monkeypatch.setattr(dialog._table, "indexAt", lambda _pos: index)
+    dialog._on_table_context_menu(pos)
+    assert labels[0] in {"Reveal in Finder", "Show in File Manager"}
+    assert labels[1] == "---"
+    assert labels[2] == "Copy Path"
+    assert copied == [full_path]
+    dialog.close()
+
+
+def test_middle_elide_delegate_keeps_path_ends(qapp) -> None:
+    from PySide6.QtGui import QFontMetrics
+
+    from repeatviewer.views.manage_references_dialog import _MiddleElideDelegate
+
+    long_path = "/Users/panstrugamacbook/Documents/GitHub/very/long/path/to/genome.fa"
+    fm = QFontMetrics(qapp.font())
+    elided = fm.elidedText(long_path, Qt.TextElideMode.ElideMiddle, 120)
+    assert "…" in elided or "..." in elided
+    assert elided.endswith("ome.fa") or "genome.fa" in elided
+    assert elided.startswith("/Users")
+    assert hasattr(_MiddleElideDelegate(), "paint")
