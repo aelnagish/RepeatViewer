@@ -1043,8 +1043,9 @@ class TreePanel(QWidget):
     """Controls + canvas for one tree file."""
 
     fileWritten = Signal(object)  # Path of an exported figure or saved tree
-    # (alignment path, record ids): open the alignment in Preview with these rows selected
-    alignmentRequested = Signal(object, object)
+    # (alignment path, record ids, folder for extracts): open the alignment in
+    # Preview with these rows selected; its extracts are saved next to the tree
+    alignmentRequested = Signal(object, object, object)
 
     def __init__(self, path: Path | None = None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1750,7 +1751,7 @@ class TreePanel(QWidget):
         if not ids:
             self._update_status(f"Not found in {source.path.name}: {', '.join(missing[:3])}")
             return False
-        self.alignmentRequested.emit(source.path, ids)
+        self.alignmentRequested.emit(source.path, ids, self._path.parent)
         message = f"{source.path.name}: {len(ids)} sequence{'s' if len(ids) != 1 else ''} selected"
         if missing:
             message += f", {len(missing)} not found"

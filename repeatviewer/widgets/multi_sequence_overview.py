@@ -9795,6 +9795,15 @@ class MultiSequenceOverviewPanel(QWidget):
             self._on_region_zoom(max(0.0, center - context / 2.0), center + context / 2.0)
         return True
 
+    def set_extract_folder(self, folder: Path | None) -> None:
+        """Where Extract writes its files (default: next to this file). Set when the
+        alignment was opened from a tree, so extracts land next to the tree."""
+        self._extract_folder = Path(folder) if folder else None
+
+    def _output_folder(self) -> Path:
+        folder = getattr(self, "_extract_folder", None)
+        return folder if folder is not None and folder.is_dir() else self._path.parent
+
     def select_records(self, record_ids: list[str]) -> int:
         """Select these sequences (whole rows, as a click on their names does) and
         scroll the first into view. Returns how many were found."""
@@ -10670,6 +10679,25 @@ class MultiSequenceOverviewPanel(QWidget):
 
         return ungap_sequence(sequence)[0]
 
+    def _ungap_fasta_file(self, path: Path) -> None:
+        """Remove gaps from every sequence of a FASTA, headers unchanged, 60 per line."""
+        out: list[str] = []
+        seq: list[str] = []
+
+        def flush() -> None:
+            text = self._strip_alignment_gaps("".join(seq))
+            out.extend(text[i : i + 60] for i in range(0, len(text), 60))
+            seq.clear()
+
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if line.startswith(">"):
+                flush()
+                out.append(line)
+            elif line.strip():
+                seq.append(line.strip())
+        flush()
+        path.write_text("\n".join(out) + "\n", encoding="utf-8")
+
     def _copy_region_sequence(
         self, start: int, end: int, *, without_gaps: bool = False
     ) -> None:
@@ -10766,6 +10794,8 @@ class MultiSequenceOverviewPanel(QWidget):
             default_name = msa_extract_name_stem(self._path, primary)
         else:
             default_name = f"{primary}_{lo}_{hi}"
+        if without_gaps:
+            default_name += "_nogap"
         dialog = _ExtractSequenceDialog(
             sequence_id=primary if len(targets) == 1 else f"{len(targets)}_sequences",
             sequence_length=seq_len,
@@ -10781,7 +10811,7 @@ class MultiSequenceOverviewPanel(QWidget):
         from repeatviewer.backends.dotplot import reverse_complement
 
         safe = "".join(ch if ch.isalnum() or ch in "-_." else "_" for ch in name)
-        out_path = self._path.parent / f"{safe}.fasta"
+        out_path = self._output_folder() / f"{safe}.fasta"
         if out_path.exists():
             answer = QMessageBox.question(
                 self,
@@ -10845,14 +10875,14 @@ class MultiSequenceOverviewPanel(QWidget):
             )
             return
 
+        out_dir = self._output_folder()
         if self.is_msa_mode() and len(ids) == 1:
-            proposed = proposed_msa_extract_path(
-                self._path, ids[0], self._path.parent
-            )
+            proposed = proposed_msa_extract_path(self._path, ids[0], out_dir)
         else:
-            proposed = proposed_extract_path(
-                self._path, ids, self._path.parent, single_file=True
-            )
+            proposed = proposed_extract_path(self._path, ids, out_dir, single_file=True)
+        if without_gaps:
+            # keep the gapped and the ungapped extract apart: name_nogap.fa
+            proposed = proposed.with_name(f"{proposed.stem}_nogap{proposed.suffix}")
         confirmed = confirm_existing_file_path(
             self,
             proposed,
@@ -10864,31 +10894,21 @@ class MultiSequenceOverviewPanel(QWidget):
         if confirmed is None:
             return
 
-        if without_gaps:
-            try:
-                lines: list[str] = []
-                for rid in ids:
-                    seq = self._strip_alignment_gaps(self._sequence_text_for_id(rid))
-                    lines.append(f">{rid}")
-                    for offset in range(0, len(seq), 60):
-                        lines.append(seq[offset : offset + 60])
-                confirmed.write_text("\n".join(lines) + "\n", encoding="utf-8")
-                written = [confirmed]
-            except (OSError, ValueError) as exc:
-                QMessageBox.warning(self, title, str(exc))
-                return
-        else:
-            try:
-                written = extract_records(
-                    self._path,
-                    set(ids),
-                    self._path.parent,
-                    single_file=True,
-                    output_path=confirmed,
-                )
-            except SequenceComposeError as exc:
-                QMessageBox.warning(self, title, str(exc))
-                return
+        try:
+            # Full FASTA headers from the file in both cases.
+            written = extract_records(
+                self._path,
+                set(ids),
+                confirmed.parent,
+                single_file=True,
+                output_path=confirmed,
+            )
+            if without_gaps:
+                for out in written:
+                    self._ungap_fasta_file(out)
+        except (SequenceComposeError, OSError, ValueError) as exc:
+            QMessageBox.warning(self, title, str(exc))
+            return
 
         for path in written:
             self.sequenceExtracted.emit(path)

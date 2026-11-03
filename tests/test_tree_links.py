@@ -82,7 +82,7 @@ def test_double_click_tip_asks_preview_to_select_it(qapp, tmp_path):
 
     panel = TreePanel(_run(tmp_path))
     asked = []
-    panel.alignmentRequested.connect(lambda path, ids: asked.append((Path(path).name, list(ids))))
+    panel.alignmentRequested.connect(lambda path, ids, folder: asked.append((Path(path).name, list(ids))))
     idx = next(n.index for n in panel._display.model.nodes if n.name == "D")
     panel._on_node_double_clicked(idx)
     assert asked == [("sat.fa_tree.aln.fa", ["D"])]
@@ -222,3 +222,27 @@ def test_without_gaps_strips_gaps_when_the_input_was_an_alignment(tmp_path):
     assert got.records == [("A copy", "ACGTACGT"), ("D copy", "GTACGTAA")]
     aligned = tk.clade_sequences(tree, ["D"], aligned=True)
     assert aligned.records == [("D", "--GTACGTAA")]
+
+
+def test_extract_from_tree_alignment_saves_next_to_tree_without_gaps(qapp, tmp_path):
+    from repeatviewer.widgets.preview_tabs import PreviewTabWidget
+
+    tree = _run(tmp_path)
+    details = tmp_path / "sat.fa_tree_details"
+    aln = details / "sat.fa_tree.aln.fa"            # where tree runs keep it
+    (tmp_path / "sat.fa_tree.aln.fa").rename(aln)
+    aln.write_text(ALN.replace(">D\n", ">D copy 7 chr2:10-20\n"))
+    tabs = PreviewTabWidget()
+    tabs.resize(1000, 700)
+    tabs.open_file(tree, replace=False)
+    written = []
+    tabs.sequenceExtracted.connect(written.append)
+    tabs.currentWidget().tree_panel().show_in_alignment("D")
+    overview = tabs.currentWidget()._annotation_overview
+    overview._extract_selected(without_gaps=True)
+    overview._extract_selected(without_gaps=False)
+    assert [p.parent for p in written] == [tmp_path, tmp_path]        # next to the tree
+    nogap, gapped = written
+    assert nogap.name.endswith("_D_nogap.fa") and gapped.name.endswith("_D.fa")
+    assert nogap.read_text() == ">D copy 7 chr2:10-20\nGTACGTAA\n"    # full header, no gaps
+    assert gapped.read_text().splitlines() == [">D copy 7 chr2:10-20", "--GTACGTAA"]

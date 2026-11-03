@@ -722,8 +722,8 @@ class FilePreviewPage(QWidget):
     dotplotRegionSelected = Signal(dict)  # payload from window.__flexidotLastClick
     fileWritten = Signal(object)  # Path of a file written from the preview (e.g. tree export)
     openFileRequested = Signal(object)  # Path a preview asks to open (contig view → Results)
-    # Tree view → "Show in alignment": (alignment path, record ids to select)
-    alignmentRequested = Signal(object, object)
+    # Tree view → "Show in alignment": (alignment path, record ids, extract folder)
+    alignmentRequested = Signal(object, object, object)
     blastRequested = Signal(object)  # FASTA a preview sends to BLAST (contig view right-click)
     # Source FASTAs of a temporary multi-file preview, to combine into a real file.
     saveSelectionAsFileRequested = Signal(list)
@@ -1993,11 +1993,13 @@ class FilePreviewPage(QWidget):
             view.load_path(self.path, fit_after_load=False)
         return view
 
-    def select_records(self, record_ids: list[str]) -> bool:
+    def select_records(self, record_ids: list[str], *, extract_folder: object = None) -> bool:
         """Show the alignment / sequence view with these records selected and the
         first one scrolled into view. False if none of them is in this file."""
         view = self._show_annotation_for_find()
         if self._multi_fasta_mode:
+            if extract_folder:
+                view.set_extract_folder(Path(extract_folder))
             return view.select_records(record_ids) > 0
         return bool(record_ids)
 
@@ -3656,9 +3658,12 @@ class PreviewTabWidget(QTabWidget):
             self.open_file(path, replace=False)
         self._sync_tab_bar_visible()
 
-    def show_records_in_alignment(self, path: object, record_ids: object) -> bool:
+    def show_records_in_alignment(
+        self, path: object, record_ids: object, extract_folder: object = None
+    ) -> bool:
         """Open ``path`` in a tab of its own (or the tab it is already in), show its
-        alignment and select ``record_ids`` (tree → "Show in alignment")."""
+        alignment and select ``record_ids`` (tree → "Show in alignment").
+        ``extract_folder``: where that tab's Extract saves (the tree's folder)."""
         resolved = Path(path).expanduser().resolve()
         if not self.open_file(resolved, replace=False):
             return False
@@ -3671,7 +3676,7 @@ class PreviewTabWidget(QTabWidget):
         self.setCurrentIndex(index)
         self.setCurrentWidget(widget)
         widget.show()
-        return widget.select_records(list(record_ids or []))
+        return widget.select_records(list(record_ids or []), extract_folder=extract_folder)
 
     def show_annotation_for_path(self, path: Path) -> None:
         """Open ``path`` in preview (if needed) and switch to its Annotation tab."""
