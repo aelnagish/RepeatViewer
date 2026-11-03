@@ -17,7 +17,6 @@ from PySide6.QtWidgets import QMenu, QMessageBox
 from repeatviewer.backends.job_cancel import CANCELLED_MESSAGE
 from repeatviewer.job_options import (
     PRIMER_DIALOG_TAB_PRIMERS,
-    PRIMER_RIGHT_CLICK_DIALOG,
     PrimerOptions,
     load_primer_options,
     persistable_dialog_tab,
@@ -223,9 +222,6 @@ class PrimerActionsMixin:
         self._start_primer_job(PRIMER_JOB_DESIGN, files, self._primer_options)
 
     def _quick_primer_design_right_click(self) -> None:
-        if self._primer_options.right_click_action == PRIMER_RIGHT_CLICK_DIALOG:
-            self._open_primer_design_dialog()
-            return
         self._run_primer_design_default()
 
     def _open_primer_design_dialog(self, *, mode: str | None = None) -> None:
@@ -444,9 +440,6 @@ class PrimerActionsMixin:
         self._present_te_viz_dialog(dialog, _accepted)
 
     def _quick_map_primers_right_click(self) -> None:
-        if self._primer_options.map_right_click_action == PRIMER_RIGHT_CLICK_DIALOG:
-            self._open_map_primers_dialog()
-            return
         if not self._primers_ready():
             return
         files = self._primer_candidate_files()

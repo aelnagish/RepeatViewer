@@ -16,7 +16,7 @@ from repeatviewer.job_options import (
     MAP_HISAT2_STRAND_RF,
     MAP_MULTI_ALL,
     MAP_NO_COVERAGE_SKIP,
-    MAP_RIGHT_CLICK_DIALOG,
+    MAP_RIGHT_CLICK_RUN,
     MapOptions,
 )
 
@@ -142,7 +142,7 @@ def test_options_round_trip(qapp, tmp_path):
         save_unused=False,
         lift_annotations=False,
         max_display_reads=500,
-        right_click_action=MAP_RIGHT_CLICK_DIALOG,
+        right_click_action=MAP_RIGHT_CLICK_RUN,
         show_process_window=True,
         use_system_path=True,
     )
@@ -323,6 +323,29 @@ def test_settings_use_align_field_width(qapp, tmp_path):
     assert "Up to 50 places (-N 50)" in {
         dlg._multi_mm.itemText(i) for i in range(dlg._multi_mm.count())
     }
+
+
+def test_options_right_click_engine_radios(qapp, tmp_path):
+    """Options tab: BLAST-style Minimap2 / HISAT2 radios; no 'Open this'."""
+    from repeatviewer.job_options import DIALOG_TAB_OPTIONS
+    from PySide6.QtWidgets import QRadioButton
+
+    dlg, _ref, _q = _dialog(
+        qapp,
+        tmp_path,
+        initial=MapOptions(engine=MAP_ENGINE_HISAT2, last_dialog_tab=DIALOG_TAB_OPTIONS),
+    )
+    dlg._tab_bar.setCurrentIndex(dlg._TAB_OPTIONS)
+    labels = [b.text() for b in dlg._right_click_buttons.values()]
+    assert labels == ["Minimap2", "HISAT2"]
+    assert "Open this window" not in {
+        r.text() for r in dlg.findChildren(QRadioButton)
+    }
+    assert dlg._right_click_buttons[MAP_ENGINE_HISAT2].isChecked()
+    # On Options, Save uses the radio choice (not the hidden engine tab).
+    dlg._right_click_buttons[MAP_ENGINE_MINIMAP2].setChecked(True)
+    assert dlg.options().engine == MAP_ENGINE_MINIMAP2
+    assert dlg.options().right_click_action == MAP_RIGHT_CLICK_RUN
 
 
 def test_restore_defaults(qapp, tmp_path):

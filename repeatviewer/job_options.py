@@ -715,9 +715,12 @@ FLEXIDOT_RIGHT_CLICK_ACTIONS = (
 
 
 def normalize_flexidot_right_click_action(raw: object) -> str:
-    """Return ``builtin``, ``flexidot``, or ``dialog`` for Dotplot right-click."""
+    """Return ``builtin`` or ``flexidot`` for Dotplot right-click."""
     value = str(raw or FLEXIDOT_RIGHT_CLICK_BUILTIN).strip().lower()
-    if value in FLEXIDOT_RIGHT_CLICK_ACTIONS:
+    # "Open this dialog" removed from Options — treat as Built-in.
+    if value == FLEXIDOT_RIGHT_CLICK_DIALOG:
+        return FLEXIDOT_RIGHT_CLICK_BUILTIN
+    if value in (FLEXIDOT_RIGHT_CLICK_BUILTIN, FLEXIDOT_RIGHT_CLICK_FLEXIDOT):
         return value
     # Old “Run Dotplot with saved parameters” → Built-in (default engine).
     if value in {"run", "default", "saved"}:
@@ -2141,7 +2144,7 @@ class RepeatQuantifyOptions:
     # CPU threads for BLASTn and RepeatMasker (passed as ``threads``).
     threads: int = 4
     # Options tab.
-    right_click_action: str = REPEAT_QUANTIFY_RIGHT_CLICK_DIALOG
+    right_click_action: str = REPEAT_QUANTIFY_RIGHT_CLICK_RERUN
     show_process_window: bool = DEFAULT_SHOW_PROCESS_WINDOW
     close_process_window_when_finished: bool = DEFAULT_CLOSE_PROCESS_WINDOW_WHEN_FINISHED
 
@@ -3068,7 +3071,7 @@ class PrimerOptions:
     painting: dict = field(default_factory=dict)
     database_path: str = ""
     right_click_action: str = PRIMER_RIGHT_CLICK_RUN
-    map_right_click_action: str = PRIMER_RIGHT_CLICK_DIALOG
+    map_right_click_action: str = PRIMER_RIGHT_CLICK_RUN
     annotate_design: bool = True
     save_design_to_database: bool = False
     show_process_window: bool = DEFAULT_SHOW_PROCESS_WINDOW
@@ -3170,7 +3173,7 @@ class NcbiDownloadOptions:
     page_size: int = 100
     email: str = ""
     api_key: str = ""
-    right_click_action: str = NCBI_RIGHT_CLICK_DIALOG
+    right_click_action: str = NCBI_RIGHT_CLICK_CLIPBOARD
     show_process_window: bool = False
     close_process_window_when_finished: bool = DEFAULT_CLOSE_PROCESS_WINDOW_WHEN_FINISHED
     last_dialog_tab: str = NCBI_DIALOG_TAB_SEARCH

@@ -35,7 +35,6 @@ from repeatviewer.job_options import (
     DIALOG_TAB_OPTIONS,
     MAP_CONSENSUS_THRESHOLDS,
     MAP_DIALOG_TABS,
-    MAP_ENGINE_AUTO,
     MAP_ENGINE_HISAT2,
     MAP_ENGINE_MINIMAP2,
     MAP_HISAT2_DNA,
@@ -61,12 +60,12 @@ from repeatviewer.job_options import (
     MAP_NO_COVERAGE_N,
     MAP_NO_COVERAGE_REFERENCE,
     MAP_NO_COVERAGE_SKIP,
-    MAP_RIGHT_CLICK_DIALOG,
     MAP_RIGHT_CLICK_RUN,
     MapOptions,
     opening_dialog_tab,
     persistable_dialog_tab,
 )
+from repeatviewer.tool_citations import CITATION_MAPPING
 from repeatviewer.views.tool_dialogs import (
     TOOL_PARAMS_DIALOG_WIDTH,
     TOOL_PARAMS_FIELD_WIDTH,
@@ -75,6 +74,7 @@ from repeatviewer.views.tool_dialogs import (
     dialog_should_run,
     executable_checkbox_row,
     make_cancel_save_run_bar,
+    make_citation_box,
     make_executable_status_label,
     make_process_output_box,
     resolve_system_executable,
@@ -206,12 +206,6 @@ HISAT2_SOFTCLIP_INFO = (
     "HISAT2 <code>--no-softclip</code>: disallow soft-clipping at read ends. "
     "Off by default."
 )
-_RIGHT_CLICK_ENGINE_HELP = (
-    "When right-click runs the tool: <b>Auto</b> picks minimap2 or HISAT2 from the "
-    "input; otherwise the saved engine from the last Minimap2 / HISAT2 tab you used."
-)
-
-
 _PANEL_TARGET_INPUTS = "inputs"
 _PANEL_TARGET_REFERENCE = "reference"
 
@@ -687,45 +681,34 @@ class MapReferenceDialog(QDialog):
         self._sync_field_column()
         # No stretch: dialog height follows content (avoids a tall empty window).
 
-        # --- Options page ----------------------------------------------------
+        # --- Options page (BLAST-style: pick mapper for right-click / Save) ---
+        self._right_click_group = QButtonGroup(self)
         self._right_click_buttons: dict[str, QRadioButton] = {}
-        group = QButtonGroup(self)
-        rc_box = QGroupBox("Right-click on Mapping", self)
+        rc_box = QGroupBox("Right-click action", self)
         rcl = QVBoxLayout(rc_box)
+        rcl.setSpacing(6)
+        rc_label = QLabel(
+            "Right-clicking the Mapping button runs, with saved settings:",
+            self,
+        )
+        rc_label.setWordWrap(True)
+        rcl.addWidget(rc_label)
+        saved_engine = (
+            opts.engine
+            if opts.engine in (MAP_ENGINE_MINIMAP2, MAP_ENGINE_HISAT2)
+            else MAP_ENGINE_MINIMAP2
+        )
         for label, value in (
-            ("Map with saved settings", MAP_RIGHT_CLICK_RUN),
-            ("Open this window", MAP_RIGHT_CLICK_DIALOG),
+            ("Minimap2", MAP_ENGINE_MINIMAP2),
+            ("HISAT2", MAP_ENGINE_HISAT2),
         ):
             radio = QRadioButton(label, self)
-            radio.setChecked(opts.right_click_action == value)
-            group.addButton(radio)
+            radio.setChecked(saved_engine == value)
+            self._right_click_group.addButton(radio)
             self._right_click_buttons[value] = radio
             rcl.addWidget(radio)
         if not any(b.isChecked() for b in self._right_click_buttons.values()):
-            self._right_click_buttons[MAP_RIGHT_CLICK_RUN].setChecked(True)
-
-        self._rc_engine = QComboBox(self)
-        self._rc_engine.addItem(mr.ENGINE_LABELS[MAP_ENGINE_AUTO], MAP_ENGINE_AUTO)
-        self._rc_engine.addItem("minimap2", MAP_ENGINE_MINIMAP2)
-        self._rc_engine.addItem("HISAT2", MAP_ENGINE_HISAT2)
-        rc_engine = opts.engine if opts.engine in (
-            MAP_ENGINE_AUTO,
-            MAP_ENGINE_MINIMAP2,
-            MAP_ENGINE_HISAT2,
-        ) else MAP_ENGINE_AUTO
-        self._set_combo(self._rc_engine, rc_engine)
-        self._rc_engine.setFixedWidth(TOOL_PARAMS_FIELD_WIDTH)
-        rc_engine_row = QWidget(self)
-        rcel = QHBoxLayout(rc_engine_row)
-        rcel.setContentsMargins(0, 0, 0, 0)
-        rcel.addWidget(QLabel("Mapper for right-click / Save:", self))
-        rcel.addWidget(
-            field_with_help(
-                self._rc_engine, "Right-click mapper", _RIGHT_CLICK_ENGINE_HELP
-            )
-        )
-        rcel.addStretch(1)
-        rcl.addWidget(rc_engine_row)
+            self._right_click_buttons[MAP_ENGINE_MINIMAP2].setChecked(True)
 
         self._use_system_path = QCheckBox(
             system_path_executable_label("Minimap2"), self
@@ -790,6 +773,7 @@ class MapReferenceDialog(QDialog):
         ol.addWidget(rc_box)
         ol.addWidget(exe_box)
         ol.addWidget(process_box)
+        ol.addWidget(make_citation_box(self, CITATION_MAPPING))
 
         self._tab_bar = QTabBar(self)
         self._tab_bar.setExpanding(False)
@@ -892,13 +876,29 @@ class MapReferenceDialog(QDialog):
         if idx >= 0:
             combo.setCurrentIndex(idx)
 
+    def _options_engine(self) -> str:
+        for value, radio in self._right_click_buttons.items():
+            if radio.isChecked():
+                return value
+        return MAP_ENGINE_MINIMAP2
+
+    def _set_options_engine(self, engine: str) -> None:
+        key = (
+            engine
+            if engine in (MAP_ENGINE_MINIMAP2, MAP_ENGINE_HISAT2)
+            else MAP_ENGINE_MINIMAP2
+        )
+        radio = self._right_click_buttons.get(key)
+        if radio is not None:
+            radio.setChecked(True)
+
     def _active_engine(self) -> str:
         if self._tab_bar.currentIndex() == self._TAB_HISAT2:
             return MAP_ENGINE_HISAT2
         if self._tab_bar.currentIndex() == self._TAB_MINIMAP2:
             return MAP_ENGINE_MINIMAP2
-        # Options tab: keep last engine radio / combo
-        return str(self._rc_engine.currentData() or MAP_ENGINE_AUTO)
+        # Options tab: mapper radios (BLAST-style program chooser).
+        return self._options_engine()
 
     def current_dialog_tab(self) -> str:
         """Active Map window tab key (minimap2 / hisat2 / options)."""
@@ -915,9 +915,9 @@ class MapReferenceDialog(QDialog):
         on_hs = index == self._TAB_HISAT2
         self._stack.setCurrentIndex(1 if on_options else 0)
         self._apply_engine_row_visibility(on_mm=on_mm, on_hs=on_hs)
-        # Keep Options mapper in sync when leaving an engine tab.
+        # Keep Options mapper radios in sync when leaving an engine tab.
         if index in (self._TAB_MINIMAP2, self._TAB_HISAT2):
-            self._set_combo(self._rc_engine, self._active_engine())
+            self._set_options_engine(self._active_engine())
         if on_options:
             self._advanced_settings_btn.setVisible(False)
             if self._advanced_settings_btn.isChecked():
@@ -1260,8 +1260,7 @@ class MapReferenceDialog(QDialog):
             (self._save_variants, d.save_variants),
         ):
             box.setChecked(value)
-        self._right_click_buttons[d.right_click_action].setChecked(True)
-        self._set_combo(self._rc_engine, MAP_ENGINE_AUTO)
+        self._set_options_engine(MAP_ENGINE_MINIMAP2)
         self._show_process_window.setChecked(d.show_process_window)
         self._close_process_window.setChecked(d.close_process_window_when_finished)
         self._use_system_path.setChecked(d.use_system_path)
@@ -1310,17 +1309,13 @@ class MapReferenceDialog(QDialog):
         return True
 
     def options(self) -> MapOptions:
-        right_click = next(
-            (v for v, b in self._right_click_buttons.items() if b.isChecked()),
-            MAP_RIGHT_CLICK_RUN,
-        )
         ref = self._reference.path()
-        # Engine: current engine tab when on Minimap2/HISAT2; Options combo otherwise.
+        # Engine: current engine tab when on Minimap2/HISAT2; Options radios otherwise.
         if self._tab_bar.currentIndex() in (self._TAB_MINIMAP2, self._TAB_HISAT2):
             engine = self._active_engine()
-            self._set_combo(self._rc_engine, engine)
+            self._set_options_engine(engine)
         else:
-            engine = str(self._rc_engine.currentData() or MAP_ENGINE_AUTO)
+            engine = self._options_engine()
         multi = (
             self._multi_hs.currentData()
             if self._tab_bar.currentIndex() == self._TAB_HISAT2
@@ -1362,7 +1357,7 @@ class MapReferenceDialog(QDialog):
             save_variants=self._save_variants.isChecked(),
             lift_annotations=self._lift.isChecked(),
             max_display_reads=self._display.value(),
-            right_click_action=right_click,
+            right_click_action=MAP_RIGHT_CLICK_RUN,
             show_process_window=self._show_process_window.isChecked(),
             close_process_window_when_finished=(
                 self._close_process_window.isChecked()

@@ -69,7 +69,6 @@ from repeatviewer.job_options import (
     PRIMER_DIALOG_TAB_SELECTION,
     PRIMER_DIALOG_TAB_SPECIFICITY,
     PRIMER_DIALOG_TABS,
-    PRIMER_RIGHT_CLICK_DIALOG,
     PRIMER_RIGHT_CLICK_RUN,
     PrimerOptions,
     opening_dialog_tab,
@@ -1099,13 +1098,10 @@ class PrimerDesignDialog(_TabbedToolDialog):
         rc_box = QGroupBox("Right-click on Primers", self)
         rcl = QVBoxLayout(rc_box)
         self._rc_run = QRadioButton("Design with saved settings", self)
-        self._rc_dialog = QRadioButton("Open this window", self)
+        self._rc_run.setChecked(True)
         grp = QButtonGroup(self)
-        for b in (self._rc_run, self._rc_dialog):
-            grp.addButton(b)
-            rcl.addWidget(b)
-        (self._rc_dialog if initial.right_click_action == PRIMER_RIGHT_CLICK_DIALOG
-         else self._rc_run).setChecked(True)
+        grp.addButton(self._rc_run)
+        rcl.addWidget(self._rc_run)
         res_box = QGroupBox("Results", self)
         rl = QVBoxLayout(res_box)
         self._annotate = QCheckBox("Add the best pair to the sequence annotations", self)
@@ -1759,8 +1755,7 @@ class PrimerDesignDialog(_TabbedToolDialog):
             design=self.design_settings().to_dict(),
             painting=self.painting_settings().to_dict(),
             database_path=str(db) if db else "",
-            right_click_action=(PRIMER_RIGHT_CLICK_DIALOG if self._rc_dialog.isChecked()
-                                else PRIMER_RIGHT_CLICK_RUN),
+            right_click_action=PRIMER_RIGHT_CLICK_RUN,
             annotate_design=self._annotate.isChecked(),
             save_design_to_database=self._to_db.isChecked(),
             show_process_window=self._show_process.isChecked(),
@@ -2116,13 +2111,10 @@ class MapPrimersDialog(_TabbedToolDialog):
         rc_box = QGroupBox("Right-click on Map Primers", self)
         rcl = QVBoxLayout(rc_box)
         self._rc_run = QRadioButton("Map with saved settings", self)
-        self._rc_dialog = QRadioButton("Open this window", self)
+        self._rc_run.setChecked(True)
         rgrp = QButtonGroup(self)
-        for b in (self._rc_run, self._rc_dialog):
-            rgrp.addButton(b)
-            rcl.addWidget(b)
-        (self._rc_dialog if initial.map_right_click_action == PRIMER_RIGHT_CLICK_DIALOG
-         else self._rc_run).setChecked(True)
+        rgrp.addButton(self._rc_run)
+        rcl.addWidget(self._rc_run)
         lay.addWidget(rc_box)
         res_box = QGroupBox("Results", self)
         rl = QVBoxLayout(res_box)
@@ -2313,8 +2305,7 @@ class MapPrimersDialog(_TabbedToolDialog):
         return replace(
             self._opts, map=self.map_settings().to_dict(),
             database_path=str(db) if db else "",
-            map_right_click_action=(PRIMER_RIGHT_CLICK_DIALOG if self._rc_dialog.isChecked()
-                                    else PRIMER_RIGHT_CLICK_RUN),
+            map_right_click_action=PRIMER_RIGHT_CLICK_RUN,
             show_process_window=self._show_process.isChecked(),
             close_process_window_when_finished=self._close_process.isChecked(),
         )

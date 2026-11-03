@@ -47,7 +47,6 @@ from repeatviewer.job_options import (
     NCBI_DIALOG_TAB_SEARCH,
     NCBI_DIALOG_TABS,
     NCBI_RIGHT_CLICK_CLIPBOARD,
-    NCBI_RIGHT_CLICK_DIALOG,
     NcbiDownloadOptions,
     opening_dialog_tab,
 )
@@ -120,10 +119,8 @@ ACCOUNT_HELP = (
     "ncbi.nlm.nih.gov."
 )
 RIGHT_CLICK_HELP = (
-    "<b>Download the accessions on the clipboard</b>: copy accessions from a paper or a "
-    "table, then right-click the toolbar button. They are downloaded with the saved "
-    "format into the folder open in the Files panel.<br>"
-    "<b>Open this window</b>: right-click does the same as a click."
+    "Copy accessions from a paper or a table, then right-click the toolbar button. "
+    "They are downloaded with the saved format into the folder open in the Files panel."
 )
 
 _COLUMNS = {
@@ -359,16 +356,14 @@ class NcbiDownloadDialog(QDialog):
         rcl = QVBoxLayout(rc_box)
         for label, value in (
             ("Download the accessions on the clipboard with saved settings", NCBI_RIGHT_CLICK_CLIPBOARD),
-            ("Open this window", NCBI_RIGHT_CLICK_DIALOG),
         ):
             radio = QRadioButton(label, self)
-            radio.setChecked(initial.right_click_action == value)
+            radio.setChecked(True)
             rc_group.addButton(radio)
             self._right_click_buttons[value] = radio
         rcl.addWidget(field_with_help(
             self._right_click_buttons[NCBI_RIGHT_CLICK_CLIPBOARD], "Right-click", RIGHT_CLICK_HELP
         ))
-        rcl.addWidget(self._right_click_buttons[NCBI_RIGHT_CLICK_DIALOG])
 
         self._email = QLineEdit(initial.email, self)
         self._email.setPlaceholderText("optional")
@@ -784,7 +779,7 @@ class NcbiDownloadDialog(QDialog):
 
     def options(self) -> NcbiDownloadOptions:
         rc = next((k for k, b in self._right_click_buttons.items() if b.isChecked()),
-                  NCBI_RIGHT_CLICK_DIALOG)
+                  NCBI_RIGHT_CLICK_CLIPBOARD)
         return replace(
             self._opts,
             database=self.database(),
@@ -838,7 +833,12 @@ class NcbiDownloadDialog(QDialog):
         self._refseq_only.setChecked(False)
         self._latest_only.setChecked(True)
         self._page_size.setValue(d.page_size)
-        self._right_click_buttons[d.right_click_action].setChecked(True)
+        rc = (
+            d.right_click_action
+            if d.right_click_action in self._right_click_buttons
+            else NCBI_RIGHT_CLICK_CLIPBOARD
+        )
+        self._right_click_buttons[rc].setChecked(True)
         self._show_process_window.setChecked(d.show_process_window)
         self._close_process_window.setChecked(d.close_process_window_when_finished)
         self._file_name_edited = False
