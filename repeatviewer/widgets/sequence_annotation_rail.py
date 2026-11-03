@@ -551,7 +551,8 @@ class _CollapsibleSection(QWidget):
         self._expanded = bool(expanded)
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(6)
+        # Match tree Display rail: compact header ↔ body / collapsed rows.
+        root.setSpacing(3)
 
         self._header = QWidget(self)
         self._header.setObjectName("annotationSectionHeader")
@@ -560,7 +561,7 @@ class _CollapsibleSection(QWidget):
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
         )
         header_row = QHBoxLayout(self._header)
-        header_row.setContentsMargins(0, 2, 0, 2)
+        header_row.setContentsMargins(0, 0, 0, 0)
         header_row.setSpacing(6)
 
         self._arrow = QLabel(self._header)
@@ -569,15 +570,13 @@ class _CollapsibleSection(QWidget):
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
         )
         self._title = QLabel(title, self._header)
-        title_font = self._title.font()
-        title_font.setBold(True)
-        self._title.setFont(title_font)
+        # Regular weight — same as tree Display section headers.
         self._title.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
         )
         arrow_font = self._arrow.font()
         # 3/4 of the title size (half was too small; 3/2 of that).
-        arrow_font.setPointSizeF(max(6.0, title_font.pointSizeF() * 0.75))
+        arrow_font.setPointSizeF(max(6.0, self._title.font().pointSizeF() * 0.75))
         self._arrow.setFont(arrow_font)
         # Arrow on the left of the title (Display / Annotation / Find / Others).
         header_row.addWidget(self._arrow, 0)
@@ -589,7 +588,7 @@ class _CollapsibleSection(QWidget):
         self._body = QWidget(self)
         self._body_layout = QVBoxLayout(self._body)
         self._body_layout.setContentsMargins(0, 0, 0, 0)
-        self._body_layout.setSpacing(6)
+        self._body_layout.setSpacing(3)
         self._body.setVisible(self._expanded)
         root.addWidget(self._body)
 
@@ -958,8 +957,9 @@ class SequenceAnnotationRail(QWidget):
     def _build_show_page(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(10, 10, 10, 10)
-        layout.setSpacing(8)
+        # Same compact spacing as the tree Display rail.
+        layout.setContentsMargins(10, 6, 10, 6)
+        layout.setSpacing(4)
         display_title, self._tracks_divider = _page_title_with_rule("Display", page)
         layout.addWidget(display_title)
 

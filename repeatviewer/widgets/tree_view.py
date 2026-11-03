@@ -963,13 +963,16 @@ class _Section(QWidget):
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(6)
+        # Tight header ↔ body gap (collapsed rows stay compact).
+        root.setSpacing(3)
 
         self._header = QWidget(self)
         self._header.setCursor(Qt.CursorShape.PointingHandCursor)
         self._header.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         head = QHBoxLayout(self._header)
-        head.setContentsMargins(0, 2, 0, 2)
+        # Half the previous vertical pad so Layout / Tip names / … sit closer
+        # to their dividers.
+        head.setContentsMargins(0, 0, 0, 0)
         head.setSpacing(6)
 
         # Arrow left of title; "?" flush right when help is provided.
@@ -979,15 +982,12 @@ class _Section(QWidget):
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
         )
         self._title = QLabel(title, self._header)
-        # Same weight/size as MSA Display → Tracks (_section_label).
-        title_font = self._title.font()
-        title_font.setBold(True)
-        self._title.setFont(title_font)
+        # Regular weight (page titles like Display stay bold elsewhere).
         self._title.setSizePolicy(
             QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred
         )
         arrow_font = self._arrow.font()
-        arrow_font.setPointSizeF(max(6.0, title_font.pointSizeF() * 0.75))
+        arrow_font.setPointSizeF(max(6.0, self._title.font().pointSizeF() * 0.75))
         self._arrow.setFont(arrow_font)
         head.addWidget(self._arrow, 0)
         head.addWidget(self._title, 0)
@@ -1005,9 +1005,9 @@ class _Section(QWidget):
         self.labels: list[QLabel] = []
         self.body = QWidget(self)
         self.form = QFormLayout(self.body)
-        self.form.setContentsMargins(0, 0, 0, 4)
+        self.form.setContentsMargins(0, 0, 0, 2)
         self.form.setHorizontalSpacing(6)
-        self.form.setVerticalSpacing(4)
+        self.form.setVerticalSpacing(2)
         self.form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         self.form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         root.addWidget(self.body)
@@ -1555,8 +1555,9 @@ class TreePanel(QWidget):
         # --- options panel (right) — MSA Display section + divider pattern -----
         panel = QWidget(self)
         pl = QVBoxLayout(panel)
-        pl.setContentsMargins(10, 10, 10, 10)
-        pl.setSpacing(8)
+        pl.setContentsMargins(10, 6, 10, 6)
+        # Half the old gap between section headers / dividers.
+        pl.setSpacing(4)
 
         def _add_section(sec: _Section) -> None:
             if pl.count() > 0:
