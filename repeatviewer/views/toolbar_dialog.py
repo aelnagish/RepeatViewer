@@ -64,8 +64,7 @@ TOOLS_TOOLBAR_IDS: tuple[str, ...] = (
     "fastga",
     "tree",
     "map_reference",
-    "primer_design",
-    "primer_map",
+    "primers",
     "repeat_quantify",
     "extend",
     "tsd_search",
@@ -112,8 +111,7 @@ TOOLBAR_LABELS: dict[str, str] = {
     "fastga": "FastGA",
     "tree": "Tree",
     "map_reference": "Mapping",
-    "primer_design": "Primers",
-    "primer_map": "Map Primers",
+    "primers": "Primers and Probes",
     "repeat_quantify": "Repeat Quantify",
     "blast": "BLAST",
     "hmmer": "HMMER",
@@ -233,6 +231,21 @@ def _repeat_quantify_migration_done() -> bool:
     return done
 
 
+# Old ids that became one button: Primers + Map Primers -> Primers and Probes.
+# A rename only (the old ids no longer exist), so it is safe on every load.
+_RENAMED_TOOLBAR_IDS = {"primer_design": "primers", "primer_map": "primers"}
+
+
+def _rename_old_toolbar_ids(ids: list[str]) -> list[str]:
+    out: list[str] = []
+    for tool_id in ids:
+        new = _RENAMED_TOOLBAR_IDS.get(tool_id, tool_id)
+        if new in out and not is_toolbar_separator(new):
+            continue
+        out.append(new)
+    return out
+
+
 def load_toolbar_order(registry: PluginRegistry | None = None) -> list[str]:
     from PySide6.QtCore import QSettings
 
@@ -249,6 +262,7 @@ def load_toolbar_order(registry: PluginRegistry | None = None) -> list[str]:
         ids = [str(item) for item in raw]
     else:
         ids = [part.strip() for part in str(raw).split(",") if part.strip()]
+    ids = _rename_old_toolbar_ids(ids)
     known = set(labels)
     visible = normalize_toolbar_order(
         [tool_id for tool_id in ids if tool_id in known or is_toolbar_separator(tool_id)],
