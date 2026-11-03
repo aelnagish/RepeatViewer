@@ -10415,7 +10415,11 @@ class MainWindow(NcbiDownloadActionsMixin, PrimerActionsMixin, QMainWindow):
         dialog.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, False)
 
     def _iter_open_tool_dialogs(self):
+        # Raised in this order, so later ones end up on top: the Primer Database
+        # first, so a tool window opened from it (Map Primers, Check Primers) is
+        # never buried under it.
         for attr in (
+            "_primer_database_dialog",
             "_te_viz_input_dialog",
             "_blast_params_dialog",
             "_hmmer_params_dialog",
@@ -10423,7 +10427,7 @@ class MainWindow(NcbiDownloadActionsMixin, PrimerActionsMixin, QMainWindow):
             "_manage_references_dialog",
             "_define_database_dialog",
             "_plugin_run_dialog",
-            "_primer_database_dialog",
+            "_primer_check_dialog",
         ):
             dialog = getattr(self, attr, None)
             if dialog is None:
@@ -10804,6 +10808,7 @@ class MainWindow(NcbiDownloadActionsMixin, PrimerActionsMixin, QMainWindow):
             self._sync_blast_params_dialog_from_files(panel_path)
             self._sync_hmmer_params_dialog_from_files(panel_path)
             self._sync_tree_trait_dialog_from_files(panel_path)
+            self._sync_primer_check_dialog_from_files(panel_path)
             filled_transfer = self._sync_transfer_source_from_files(panel_path)
             if not filled_transfer:
                 self._stop_transfer_session_on_file_navigation(panel_path)
@@ -10824,6 +10829,12 @@ class MainWindow(NcbiDownloadActionsMixin, PrimerActionsMixin, QMainWindow):
             return True
         if self._plugin_run_dialog is not None and self._plugin_run_dialog.isVisible():
             return True
+        check = getattr(self, "_primer_check_dialog", None)
+        try:
+            if check is not None and check.isVisible():
+                return True
+        except RuntimeError:
+            pass
         return self._tree_trait_dialog_open()
 
     def _showing_selection_preview(self) -> bool:
@@ -11520,6 +11531,16 @@ class MainWindow(NcbiDownloadActionsMixin, PrimerActionsMixin, QMainWindow):
                 self._apply_function("hmmer", hmmer_options=self._hmmer_options)
         else:
             self._set_status_message("HMMER settings saved", 4000)
+
+    def _sync_primer_check_dialog_from_files(self, clicked_path: Path | None = None) -> None:
+        dialog = getattr(self, "_primer_check_dialog", None)
+        if dialog is None or clicked_path is None:
+            return
+        try:
+            if dialog.isVisible():
+                dialog.apply_path_from_panel(clicked_path)
+        except RuntimeError:
+            self._primer_check_dialog = None
 
     def _sync_hmmer_params_dialog_from_files(
         self, clicked_path: Path | None = None
