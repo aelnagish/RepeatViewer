@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import sys
 import re
 from dataclasses import dataclass
 from glob import escape as glob_escape
@@ -5455,6 +5456,49 @@ class _OverviewToolbarSlot(QWidget):
         self.setMask(QRegion(self.rect()))
 
 
+def tree_built_from(alignment: Path) -> Path | None:
+    """The tree a tree run built from ``alignment`` (``x.aln.fa`` or
+    ``x_masked.aln.fa`` in ``x_details/`` or next to ``x.treefile``; IQ-TREE's
+    ``aln.fa.treefile``), or None."""
+    alignment = Path(alignment)
+    here = alignment.parent
+    folders = [here.parent, here] if here.name.endswith("_details") else [here]
+    names = [f"{alignment.name}.treefile"]
+    if alignment.name.endswith(".aln.fa"):
+        base = alignment.name[: -len(".aln.fa")]
+        names.insert(0, f"{base}.treefile")
+    for folder in folders:
+        for name in names:
+            tree = folder / name
+            if tree.is_file():
+                return tree
+    return None
+
+
+def confirm_delete_sequences(
+    parent: QWidget, count: int, path: Path, tree: Path | None
+) -> bool:
+    """Ask before sequences are deleted from an alignment file (Delete / Cancel)."""
+    undo = "Cmd+Z" if sys.platform == "darwin" else "Ctrl+Z"
+    plural = "s" if count != 1 else ""
+    box = QMessageBox(parent)
+    box.setIcon(QMessageBox.Icon.Warning)
+    box.setWindowTitle("Delete sequences")
+    box.setText(f"Delete {count} sequence{plural} from {Path(path).name}?")
+    info = f"The file is changed on disk. {undo} undoes it while this tab is open."
+    if tree is not None:
+        info += (
+            f"\n\nThe tree {tree.name} was built from this alignment. Show in alignment "
+            "and As aligned extract will no longer find the deleted sequences."
+        )
+    box.setInformativeText(info)
+    cancel = box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+    delete = box.addButton("Delete", QMessageBox.ButtonRole.DestructiveRole)
+    box.setDefaultButton(cancel)
+    box.exec()
+    return box.clickedButton() is delete
+
+
 class MultiSequenceOverviewPanel(QWidget):
     """Annotation overview: names (left) | tracks + scale (right)."""
 
@@ -7701,6 +7745,10 @@ class MultiSequenceOverviewPanel(QWidget):
                 title,
                 "Cannot delete every sequence. Leave at least one.",
             )
+            return
+        if hard_delete and not confirm_delete_sequences(
+            self, len(row_set), self._path, tree_built_from(self._path)
+        ):
             return
 
         self._push_feature_undo_snapshot()

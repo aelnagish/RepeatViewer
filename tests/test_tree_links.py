@@ -269,3 +269,28 @@ def test_self_dotplot_opens_in_a_new_tab_and_details_extracts_go_next_to_tree(qa
     assert tabs.widget(1)._fasta_stack.currentIndex() == 2          # Dotplot (Self), not Overview
     tabs.open_file(aln, replace=False)                 # the file's own tab is still the alignment
     assert tabs.currentWidget() is page and tabs.count() == 2
+
+
+def test_deleting_sequences_asks_first_and_names_the_tree(qapp, tmp_path, monkeypatch):
+    from repeatviewer.widgets import multi_sequence_overview as mso
+    from repeatviewer.widgets.preview_tabs import PreviewTabWidget
+
+    tree = _run(tmp_path)
+    aln = tmp_path / "sat.fa_tree_details" / "sat.fa_tree.aln.fa"
+    (tmp_path / "sat.fa_tree.aln.fa").rename(aln)
+    assert mso.tree_built_from(aln) == tree
+    assert mso.tree_built_from(tmp_path / "sat.fa") is None
+    asked = []
+    answer = [False]
+    monkeypatch.setattr(mso, "confirm_delete_sequences",
+                        lambda parent, n, path, t: asked.append((n, t)) or answer[0])
+    tabs = PreviewTabWidget()
+    tabs.open_file(aln, replace=False)
+    page = tabs.currentWidget()
+    page.select_records(["B", "C"])
+    overview = page._annotation_overview
+    overview._delete_selected_msa_rows(hard_delete=True)          # Cancel
+    assert asked == [(2, tree)] and aln.read_text().count(">") == 6
+    answer[0] = True
+    overview._delete_selected_msa_rows(hard_delete=True)          # Delete
+    assert aln.read_text().count(">") == 4
