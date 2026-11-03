@@ -634,3 +634,50 @@ def test_branches_have_tooltips(qapp, tree_file):
     tips = [i.toolTip() for i in panel.scene().items() if isinstance(i, _BranchItem)]
     assert any("Branch length: 0.05" in t and "Support: 92/97" in t and "2 sequences below" in t
                for t in tips)
+
+
+# --- click area is fixed on screen (Nov 2026) --------------------------------------
+
+@pytest.mark.parametrize("zoom", [0.6, 1.0, 4.0])
+def test_branch_click_area_is_eight_screen_pixels_at_any_zoom(qapp, tree_file, zoom):
+    from repeatviewer.widgets.tree_view import TreePanel, TreeViewOptions, _BranchItem
+
+    panel = TreePanel(tree_file)
+    panel.set_options(TreeViewOptions(branch_labels="none", tip_labels=False, scale_bar=False))
+    canvas = panel.canvas()
+    canvas.resize(900, 700)
+    canvas.resetTransform()
+    canvas.scale(zoom, zoom)
+    # F's branch: a long horizontal line from the root
+    f = next(n.index for n in panel._display.model.nodes if n.name == "F")
+    item = next(i for i in panel.scene().items() if isinstance(i, _BranchItem) and i.data(0) == f)
+    poly = item.path().toSubpathPolygons()[0]
+    mid = (poly[0] + poly[1]) / 2.0
+    canvas.centerOn(mid)
+    on_screen = canvas.mapFromScene(mid)
+    from PySide6.QtCore import QPoint
+    assert canvas.node_at(on_screen) == f
+    assert canvas.node_at(on_screen + QPoint(0, 6)) == f       # near enough (F is the last row)
+    assert canvas.node_at(on_screen + QPoint(0, 14)) == -1     # too far: empty space
+
+
+def test_nearest_branch_wins(qapp, tmp_path):
+    from PySide6.QtCore import QPoint
+    from repeatviewer.widgets.tree_view import TreePanel, TreeViewOptions, _BranchItem
+
+    path = tmp_path / "two.treefile"
+    path.write_text("(A:1,B:1);\n")
+    panel = TreePanel(path)
+    panel.set_options(TreeViewOptions(branch_labels="none", tip_labels=False, scale_bar=False))
+    canvas = panel.canvas()
+    canvas.resize(900, 700)
+    canvas.resetTransform()                      # rows 17 px apart on screen
+    nodes = {n.name: n.index for n in panel._display.model.nodes if n.name}
+    def mid(name):
+        item = next(i for i in panel.scene().items()
+                    if isinstance(i, _BranchItem) and i.data(0) == nodes[name])
+        poly = item.path().toSubpathPolygons()[0]
+        return canvas.mapFromScene((poly[0] + poly[1]) / 2.0)
+    a, b = mid("A"), mid("B")
+    assert canvas.node_at(a + QPoint(0, 3 if b.y() > a.y() else -3)) == nodes["A"]
+    assert canvas.node_at(b + QPoint(0, -3 if b.y() > a.y() else 3)) == nodes["B"]

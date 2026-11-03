@@ -28,7 +28,7 @@ from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 from PySide6.QtCore import (
-    QEvent, QLineF, QPointF, QRectF, QSettings, QSizeF, Qt, QTimer, QUrl, Signal,
+    QEvent, QLineF, QPointF, QRect, QRectF, QSettings, QSizeF, Qt, QTimer, QUrl, Signal,
 )
 from PySide6.QtGui import (
     QBrush,
@@ -107,6 +107,8 @@ _TOP_BUTTON_STYLE = (
 )
 _MARGIN_PX = 24.0
 _HIT_WIDTH = 7.0           # clickable width around a branch, in pixels
+_PICK_RADIUS_PX = 8        # a click reaches the nearest branch / tip within this many
+                           # screen pixels, whatever the zoom
 _SELECTED = QColor(0, 110, 230)
 ROLE_NODE = 0              # QGraphicsItem.data key: display node index
 
@@ -961,6 +963,13 @@ def _pair(parent: QWidget, *widgets: QWidget) -> QWidget:
     return row
 
 
+def _point_segment_distance(p: QPointF, a: QPointF, b: QPointF) -> float:
+    dx, dy = b.x() - a.x(), b.y() - a.y()
+    length2 = dx * dx + dy * dy
+    t = 0.0 if length2 == 0 else max(0.0, min(1.0, ((p.x() - a.x()) * dx + (p.y() - a.y()) * dy) / length2))
+    return math.hypot(p.x() - (a.x() + t * dx), p.y() - (a.y() + t * dy))
+
+
 class TreeCanvas(QGraphicsView):
     """Zoom with the wheel or trackpad, drag to pan, double-click empty space to fit, a tip to see its sequence.
 
@@ -981,11 +990,39 @@ class TreeCanvas(QGraphicsView):
         self._press = None
 
     def node_at(self, view_pos) -> int:
-        for item in self.items(view_pos):
+        """The branch, tip or collapsed clade nearest to ``view_pos`` on screen, within
+        ``_PICK_RADIUS_PX`` whatever the zoom; a name or label under the mouse wins.
+        -1 when nothing is that close (empty space)."""
+        r = _PICK_RADIUS_PX
+        pos = QPointF(view_pos)
+        best, best_d = -1, float(r) + 0.001
+        area = QRect(int(pos.x()) - r, int(pos.y()) - r, 2 * r + 1, 2 * r + 1)
+        for item in self.items(area):
             value = item.data(ROLE_NODE)
-            if value is not None:
-                return int(value)
-        return -1
+            if value is None:
+                continue
+            d = self._screen_distance(item, pos)
+            if d < best_d:
+                best, best_d = int(value), d
+                if d == 0.0 and not isinstance(item, _BranchItem):
+                    break          # right on a tip name, label or triangle
+        return best
+
+    def _screen_distance(self, item, pos: QPointF) -> float:
+        """Distance in screen pixels from ``pos`` to ``item`` (0 inside a name or shape)."""
+        to_view = item.sceneTransform() * self.viewportTransform()
+        if isinstance(item, _BranchItem):
+            best = float("inf")
+            for poly in item.path().toSubpathPolygons():
+                pts = [to_view.map(p) for p in poly]
+                for a, b in zip(pts, pts[1:]):
+                    best = min(best, _point_segment_distance(pos, a, b))
+            return best
+        box = to_view.map(QPolygonF(item.boundingRect()))
+        if box.containsPoint(pos, Qt.FillRule.OddEvenFill):
+            return 0.0
+        n = len(box)
+        return min(_point_segment_distance(pos, box[k], box[(k + 1) % n]) for k in range(n))
 
     def zoom_by(self, factor: float) -> None:
         current = self.transform().m11()
