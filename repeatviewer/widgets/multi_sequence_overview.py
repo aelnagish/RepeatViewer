@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import math
+import sys
 import re
 from dataclasses import dataclass
+from glob import escape as glob_escape
 from pathlib import Path
 
 from PySide6.QtCore import (
@@ -5454,6 +5456,49 @@ class _OverviewToolbarSlot(QWidget):
         self.setMask(QRegion(self.rect()))
 
 
+def tree_built_from(alignment: Path) -> Path | None:
+    """The tree a tree run built from ``alignment`` (``x.aln.fa`` or
+    ``x_masked.aln.fa`` in ``x_details/`` or next to ``x.treefile``; IQ-TREE's
+    ``aln.fa.treefile``), or None."""
+    alignment = Path(alignment)
+    here = alignment.parent
+    folders = [here.parent, here] if here.name.endswith("_details") else [here]
+    names = [f"{alignment.name}.treefile"]
+    if alignment.name.endswith(".aln.fa"):
+        base = alignment.name[: -len(".aln.fa")]
+        names.insert(0, f"{base}.treefile")
+    for folder in folders:
+        for name in names:
+            tree = folder / name
+            if tree.is_file():
+                return tree
+    return None
+
+
+def confirm_delete_sequences(
+    parent: QWidget, count: int, path: Path, tree: Path | None
+) -> bool:
+    """Ask before sequences are deleted from an alignment file (Delete / Cancel)."""
+    undo = "Cmd+Z" if sys.platform == "darwin" else "Ctrl+Z"
+    plural = "s" if count != 1 else ""
+    box = QMessageBox(parent)
+    box.setIcon(QMessageBox.Icon.Warning)
+    box.setWindowTitle("Delete sequences")
+    box.setText(f"Delete {count} sequence{plural} from {Path(path).name}?")
+    info = f"The file is changed on disk. {undo} undoes it while this tab is open."
+    if tree is not None:
+        info += (
+            f"\n\nThe tree {tree.name} was built from this alignment. Show in alignment "
+            "and As aligned extract will no longer find the deleted sequences."
+        )
+    box.setInformativeText(info)
+    cancel = box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+    delete = box.addButton("Delete", QMessageBox.ButtonRole.DestructiveRole)
+    box.setDefaultButton(cancel)
+    box.exec()
+    return box.clickedButton() is delete
+
+
 class MultiSequenceOverviewPanel(QWidget):
     """Annotation overview: names (left) | tracks + scale (right)."""
 
@@ -7701,6 +7746,10 @@ class MultiSequenceOverviewPanel(QWidget):
                 "Cannot delete every sequence. Leave at least one.",
             )
             return
+        if hard_delete and not confirm_delete_sequences(
+            self, len(row_set), self._path, tree_built_from(self._path)
+        ):
+            return
 
         self._push_feature_undo_snapshot()
         if hard_delete:
@@ -9795,6 +9844,43 @@ class MultiSequenceOverviewPanel(QWidget):
             self._on_region_zoom(max(0.0, center - context / 2.0), center + context / 2.0)
         return True
 
+    def set_extract_folder(self, folder: Path | None) -> None:
+        """Where Extract writes its files (default: next to this file). Set when the
+        alignment was opened from a tree, so extracts land next to the tree."""
+        self._extract_folder = Path(folder) if folder else None
+
+    def _output_folder(self) -> Path:
+        folder = getattr(self, "_extract_folder", None)
+        if folder is not None and folder.is_dir():
+            return folder
+        here = self._path.parent
+        # An alignment inside a tree run's details folder (x_details/x.aln.fa next
+        # to x.treefile): extracts go next to the tree, however the file was opened.
+        if here.name.endswith("_details"):
+            base = here.name[: -len("_details")]
+            if base and any(here.parent.glob(f"{glob_escape(base)}*.treefile")):
+                return here.parent
+        return here
+
+    def select_records(self, record_ids: list[str]) -> int:
+        """Select these sequences (whole rows, as a click on their names does) and
+        scroll the first into view. Returns how many were found."""
+        rows = []
+        for rid in record_ids:
+            row = self._row_for_id(rid)
+            if row >= 0 and row not in rows:
+                rows.append(row)
+        if not rows:
+            return 0
+        self._bars.set_find_hits({}, None)
+        self._bars.clear_feature_selection(repaint=False)
+        if self._bars.region_selection() is not None:
+            self._bars.set_region_selection(None)
+        self._bars.set_selected_rows(rows)
+        self._sync_names_column()
+        self._scroll_to_row(rows[0])
+        return len(rows)
+
     def clear_find_hits(self) -> None:
         self._bars.set_find_hits({}, None)
         self._find_items = []
@@ -10651,6 +10737,25 @@ class MultiSequenceOverviewPanel(QWidget):
 
         return ungap_sequence(sequence)[0]
 
+    def _ungap_fasta_file(self, path: Path) -> None:
+        """Remove gaps from every sequence of a FASTA, headers unchanged, 60 per line."""
+        out: list[str] = []
+        seq: list[str] = []
+
+        def flush() -> None:
+            text = self._strip_alignment_gaps("".join(seq))
+            out.extend(text[i : i + 60] for i in range(0, len(text), 60))
+            seq.clear()
+
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if line.startswith(">"):
+                flush()
+                out.append(line)
+            elif line.strip():
+                seq.append(line.strip())
+        flush()
+        path.write_text("\n".join(out) + "\n", encoding="utf-8")
+
     def _copy_region_sequence(
         self, start: int, end: int, *, without_gaps: bool = False
     ) -> None:
@@ -10747,6 +10852,8 @@ class MultiSequenceOverviewPanel(QWidget):
             default_name = msa_extract_name_stem(self._path, primary)
         else:
             default_name = f"{primary}_{lo}_{hi}"
+        if without_gaps:
+            default_name += "_nogap"
         dialog = _ExtractSequenceDialog(
             sequence_id=primary if len(targets) == 1 else f"{len(targets)}_sequences",
             sequence_length=seq_len,
@@ -10762,7 +10869,7 @@ class MultiSequenceOverviewPanel(QWidget):
         from repeatviewer.backends.dotplot import reverse_complement
 
         safe = "".join(ch if ch.isalnum() or ch in "-_." else "_" for ch in name)
-        out_path = self._path.parent / f"{safe}.fasta"
+        out_path = self._output_folder() / f"{safe}.fasta"
         if out_path.exists():
             answer = QMessageBox.question(
                 self,
@@ -10826,14 +10933,14 @@ class MultiSequenceOverviewPanel(QWidget):
             )
             return
 
+        out_dir = self._output_folder()
         if self.is_msa_mode() and len(ids) == 1:
-            proposed = proposed_msa_extract_path(
-                self._path, ids[0], self._path.parent
-            )
+            proposed = proposed_msa_extract_path(self._path, ids[0], out_dir)
         else:
-            proposed = proposed_extract_path(
-                self._path, ids, self._path.parent, single_file=True
-            )
+            proposed = proposed_extract_path(self._path, ids, out_dir, single_file=True)
+        if without_gaps:
+            # keep the gapped and the ungapped extract apart: name_nogap.fa
+            proposed = proposed.with_name(f"{proposed.stem}_nogap{proposed.suffix}")
         confirmed = confirm_existing_file_path(
             self,
             proposed,
@@ -10845,31 +10952,21 @@ class MultiSequenceOverviewPanel(QWidget):
         if confirmed is None:
             return
 
-        if without_gaps:
-            try:
-                lines: list[str] = []
-                for rid in ids:
-                    seq = self._strip_alignment_gaps(self._sequence_text_for_id(rid))
-                    lines.append(f">{rid}")
-                    for offset in range(0, len(seq), 60):
-                        lines.append(seq[offset : offset + 60])
-                confirmed.write_text("\n".join(lines) + "\n", encoding="utf-8")
-                written = [confirmed]
-            except (OSError, ValueError) as exc:
-                QMessageBox.warning(self, title, str(exc))
-                return
-        else:
-            try:
-                written = extract_records(
-                    self._path,
-                    set(ids),
-                    self._path.parent,
-                    single_file=True,
-                    output_path=confirmed,
-                )
-            except SequenceComposeError as exc:
-                QMessageBox.warning(self, title, str(exc))
-                return
+        try:
+            # Full FASTA headers from the file in both cases.
+            written = extract_records(
+                self._path,
+                set(ids),
+                confirmed.parent,
+                single_file=True,
+                output_path=confirmed,
+            )
+            if without_gaps:
+                for out in written:
+                    self._ungap_fasta_file(out)
+        except (SequenceComposeError, OSError, ValueError) as exc:
+            QMessageBox.warning(self, title, str(exc))
+            return
 
         for path in written:
             self.sequenceExtracted.emit(path)

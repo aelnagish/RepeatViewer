@@ -43,7 +43,7 @@ def test_every_layout_draws(qapp, tree_file, layout):
     panel = TreePanel(tree_file)
     panel.set_options(TreeViewOptions(layout=layout, branch_labels="length"))
     assert not panel.scene().sceneRect().isEmpty()
-    assert "0.4" in _texts(panel)  # F's branch length
+    assert "0.40" in _texts(panel)  # F's branch length
 
 
 def test_tip_names_and_labels_can_be_hidden(qapp, tree_file):
@@ -499,14 +499,14 @@ def test_hide_crowded_drops_overlapping_branch_labels(qapp, tmp_path):
     path = tmp_path / "crowd.treefile"
     path.write_text(f"(({inner}):0.5,X:1.0);\n")
     panel = TreePanel(path)
-    opts = dict(branch_labels="length", layout=tl.LAYOUT_RECTANGULAR)
+    opts = dict(branch_labels="length", layout=tl.LAYOUT_RECTANGULAR, hide_zeros=False)
     panel.set_options(TreeViewOptions(**opts, hide_crowded=False))
     before = len([i for i in panel.scene().items() if isinstance(i, QGraphicsSimpleTextItem)])
     panel.set_options(TreeViewOptions(**opts, hide_crowded=True))
     after = len([i for i in panel.scene().items() if isinstance(i, QGraphicsSimpleTextItem)])
     assert after < before - 30
     texts = _texts(panel)
-    assert "0.5" in texts and "1" in texts               # long branches keep their labels
+    assert "0.50" in texts and "1.00" in texts           # long branches keep their labels
 
 
 def test_branch_transform_hides_scale_bar_and_spread_grows_tree(qapp, tree_file):
@@ -553,7 +553,7 @@ def test_max_length_digits_and_line_weight(qapp, tmp_path):
     path = tmp_path / "long.treefile"
     path.write_text("((Knob_reg_crosat13_2646-3101:0.123456,B:0.2):0.1,C:0.3);\n")
     panel = TreePanel(path)
-    panel.set_options(TreeViewOptions(max_chars=9, branch_labels="length", branch_digits=2,
+    panel.set_options(TreeViewOptions(max_chars=9, branch_labels="length", branch_decimals=2,
                                       line_weight=3.0))
     texts = _texts(panel)
     assert "…2646-3101" in texts and "0.12" in texts
@@ -619,3 +619,145 @@ def test_copy_newick_and_options_panel(qapp, tree_file):
     assert not any(s.is_expanded() for s in sections)  # every section starts folded
     sections[0].set_expanded(True)
     assert panel._layout_box.isVisible()
+
+
+# --- branch labels keep off lines and names (Nov 2026) ----------------------------
+
+CROWDED = ("((((A1:0.002,A2:0):0,(A3:0.0154,A4:0.0277):0.0019):0.0012,(B1:0.21,B2:0):0.03)95/99:0.02,"
+           "(((C1:0,C2:0.004):0,(C3:0.1288,(C4:0,C5:0.0166):0.0013):0.06906)80/90:0.0089,"
+           "(D1:0.08365,(D2:0.0194,(D3:0,D4:0.0135):0.0015):0.1537):0.0034):0.0213,"
+           + ",".join(f"E{i}:{0.001 * i:.4f}" for i in range(30)) + ");\n")
+
+
+def _branch_label_items(panel):
+    from repeatviewer.widgets.tree_view import _is_zero_text
+    names = set()
+    for node in panel._display.model.nodes:
+        names.add(node.name)
+    return [i for i in panel.scene().items() if isinstance(i, QGraphicsSimpleTextItem)
+            and i.text() not in names and not i.text().endswith(" more")
+            and (i.text().replace(".", "").replace("/", "").isdigit() or _is_zero_text(i.text()))]
+
+
+@pytest.mark.parametrize("layout", tl.LAYOUTS)
+@pytest.mark.parametrize("labels", ["length", "support"])
+@pytest.mark.parametrize("lengths", [tl.BRANCHES_PROPORTIONAL, tl.BRANCHES_EQUAL])
+def test_branch_labels_touch_no_line_or_name(qapp, tmp_path, layout, labels, lengths):
+    from PySide6.QtCore import QLineF
+    from PySide6.QtGui import QPolygonF
+    from repeatviewer.widgets.tree_view import TreePanel, TreeViewOptions, _BranchItem
+
+    path = tmp_path / "crowd.treefile"
+    path.write_text(CROWDED)
+    panel = TreePanel(path)
+    panel.set_options(TreeViewOptions(layout=layout, branch_labels=labels, branch_lengths=lengths,
+                                      scale_bar=False))
+    labels_shown = _branch_label_items(panel)
+    if lengths == tl.BRANCHES_EQUAL or labels == "length":
+        assert labels_shown, "some labels should still fit"
+    segments = []
+    for item in panel.scene().items():
+        if isinstance(item, _BranchItem):
+            for poly in item.path().toSubpathPolygons():
+                segments += [QLineF(poly[k], poly[k + 1]) for k in range(len(poly) - 1)]
+    names = [i for i in panel.scene().items()
+             if isinstance(i, QGraphicsSimpleTextItem) and i not in labels_shown]
+    for lab in labels_shown:
+        r = lab.boundingRect()
+        box = lab.mapToScene(QPolygonF(r.adjusted(0, r.height() * 0.3, 0, -r.height() * 0.3)))
+        edges = [QLineF(box[k], box[(k + 1) % 4]) for k in range(4)]
+        for seg in segments:
+            hit = any(e.intersects(seg)[0] == QLineF.IntersectionType.BoundedIntersection
+                      for e in edges)
+            assert not hit, f"label {lab.text()} crosses a branch ({layout}, {labels}, {lengths})"
+        for other in names:
+            assert not box.intersects(other.mapToScene(other.boundingRect())), \
+                f"label {lab.text()} overlaps tip name {other.text()}"
+
+
+def test_hide_zeros_is_on_by_default_and_can_be_turned_off(qapp, tmp_path):
+    from repeatviewer.widgets.tree_view import TreePanel, TreeViewOptions
+
+    path = tmp_path / "zeros.treefile"
+    path.write_text("((A:0,B:0.001):0.5,(C:0.3,D:0.2):0.4);\n")
+    panel = TreePanel(path)
+    assert TreeViewOptions().hide_zeros
+    panel.set_options(TreeViewOptions(branch_labels="length", hide_crowded=False))
+    texts = _texts(panel)
+    assert "0" not in texts and "0.00" not in texts and "0.50" in texts
+    panel.set_options(TreeViewOptions(branch_labels="length", hide_crowded=False, hide_zeros=False))
+    texts = _texts(panel)
+    assert "0" in texts and "0.00" in texts
+
+
+def test_circular_labels_run_along_their_branch(qapp, tmp_path):
+    from repeatviewer.widgets.tree_view import TreePanel, TreeViewOptions
+
+    path = tmp_path / "star.treefile"
+    path.write_text("(" + ",".join(f"T{i}:{0.5 + i / 100:.2f}" for i in range(12)) + ");\n")
+    panel = TreePanel(path)
+    panel.set_options(TreeViewOptions(layout=tl.LAYOUT_CIRCULAR, branch_labels="length"))
+    angles = {round(i.sceneTransform().map(QLineF_x()).angle()) % 180 for i in _branch_label_items(panel)}
+    assert len(angles) > 3          # not all horizontal any more
+
+
+def QLineF_x():
+    from PySide6.QtCore import QLineF
+    return QLineF(0, 0, 1, 0)
+
+
+def test_branches_have_tooltips(qapp, tree_file):
+    from repeatviewer.widgets.tree_view import TreePanel, TreeViewOptions, _BranchItem
+
+    panel = TreePanel(tree_file)
+    panel.set_options(TreeViewOptions())
+    tips = [i.toolTip() for i in panel.scene().items() if isinstance(i, _BranchItem)]
+    assert any("Branch length: 0.05" in t and "Support: 92/97" in t and "2 sequences below" in t
+               for t in tips)
+
+
+# --- click area is fixed on screen (Nov 2026) --------------------------------------
+
+@pytest.mark.parametrize("zoom", [0.6, 1.0, 4.0])
+def test_branch_click_area_is_eight_screen_pixels_at_any_zoom(qapp, tree_file, zoom):
+    from repeatviewer.widgets.tree_view import TreePanel, TreeViewOptions, _BranchItem
+
+    panel = TreePanel(tree_file)
+    panel.set_options(TreeViewOptions(branch_labels="none", tip_labels=False, scale_bar=False))
+    canvas = panel.canvas()
+    canvas.resize(900, 700)
+    canvas.resetTransform()
+    canvas.scale(zoom, zoom)
+    # F's branch: a long horizontal line from the root
+    f = next(n.index for n in panel._display.model.nodes if n.name == "F")
+    item = next(i for i in panel.scene().items() if isinstance(i, _BranchItem) and i.data(0) == f)
+    poly = item.path().toSubpathPolygons()[0]
+    mid = (poly[0] + poly[1]) / 2.0
+    canvas.centerOn(mid)
+    on_screen = canvas.mapFromScene(mid)
+    from PySide6.QtCore import QPoint
+    assert canvas.node_at(on_screen) == f
+    assert canvas.node_at(on_screen + QPoint(0, 6)) == f       # near enough (F is the last row)
+    assert canvas.node_at(on_screen + QPoint(0, 14)) == -1     # too far: empty space
+
+
+def test_nearest_branch_wins(qapp, tmp_path):
+    from PySide6.QtCore import QPoint
+    from repeatviewer.widgets.tree_view import TreePanel, TreeViewOptions, _BranchItem
+
+    path = tmp_path / "two.treefile"
+    path.write_text("(A:1,B:1);\n")
+    panel = TreePanel(path)
+    panel.set_options(TreeViewOptions(branch_labels="none", tip_labels=False, scale_bar=False))
+    canvas = panel.canvas()
+    canvas.resize(900, 700)
+    canvas.resetTransform()                      # rows 17 px apart on screen
+    nodes = {n.name: n.index for n in panel._display.model.nodes if n.name}
+    def mid(name):
+        item = next(i for i in panel.scene().items()
+                    if isinstance(i, _BranchItem) and i.data(0) == nodes[name])
+        poly = item.path().toSubpathPolygons()[0]
+        return canvas.mapFromScene((poly[0] + poly[1]) / 2.0)
+    a, b = mid("A"), mid("B")
+    assert canvas.node_at(a + QPoint(0, 3 if b.y() > a.y() else -3)) == nodes["A"]
+    assert canvas.node_at(b + QPoint(0, -3 if b.y() > a.y() else 3)) == nodes["B"]

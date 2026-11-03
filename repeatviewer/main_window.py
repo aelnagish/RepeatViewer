@@ -8870,12 +8870,12 @@ class MainWindow(NcbiDownloadActionsMixin, PrimerActionsMixin, QMainWindow):
         self._sync_sidecar_in_file_list(path, select=False)
 
     def _on_preview_sequence_extracted(self, path: object) -> None:
-        """Replace Preview with the extracted FASTA; ◀ returns to the source.
+        """A file written from a Preview (Extract Sequence, consensus…): open it in a
+        new Preview tab, keeping the source tab open.
 
-        Matches Extract Sequences from File: green tint on the new file, light
-        blue tint on the MSA/source file, deep-blue selection on the output.
-        Shared by single-sequence and MSA Extract Sequence (and other preview
-        writes that emit ``sequenceExtracted``, e.g. consensus).
+        Files shows the folder the file was saved in (switching to it when it is
+        another folder), the new file green and selected deep blue, the source file
+        light blue: the same tints as Extract Sequences from File.
         """
         if not isinstance(path, Path) or not path.is_file():
             return
@@ -8892,24 +8892,33 @@ class MainWindow(NcbiDownloadActionsMixin, PrimerActionsMixin, QMainWindow):
                 if candidate is not None and candidate.is_file() and candidate != resolved:
                     source = candidate
         sources = [source] if source is not None else []
-        if self._current_folder is not None:
-            # Same job tinting as Files → Extract Sequences from File.
-            self._populate_file_list(
-                self._current_folder,
-                new_outputs=[resolved],
-                source_files=sources,
-                open_preview=False,
-            )
-            self._auto_open_outputs([resolved], source_files=sources)
-            return
-        if (
-            source is not None
-            and hasattr(self, "_folder_nav")
-            and self._folder_nav is not None
-        ):
-            self._folder_nav.set_file(source, record_history=True)
-        self._sync_sidecar_in_file_list(resolved, select=True)
-        self._open_file_in_preview(resolved)
+        was_suppress = self._file_list.suppress_selection_preview()
+        self._file_list.set_suppress_selection_preview(True)
+        try:
+            current = self._current_folder.expanduser().resolve() if self._current_folder else None
+            if current != resolved.parent:
+                self._navigate_to_folder(
+                    resolved.parent,
+                    new_outputs=[resolved],
+                    source_files=sources,
+                    record_history=True,
+                    open_preview=False,
+                )
+            else:
+                self._populate_file_list(
+                    current,
+                    new_outputs=[resolved],
+                    source_files=sources,
+                    open_preview=False,
+                )
+            self._file_list.clearSelection()
+            self._file_list.setCurrentItem(None)
+            self._select_path_in_file_list(resolved)
+        finally:
+            if not was_suppress:
+                QTimer.singleShot(0, self._file_list.clear_suppress_selection_preview)
+        # New tab; the alignment / sequence it came from stays open in its own tab.
+        self._open_preview_tab(resolved, replace=False)
 
     def _on_preview_open_additional_tab(self, path: object) -> None:
         """Open a derived FASTA (e.g. MSA clean) as an additional Preview tab."""

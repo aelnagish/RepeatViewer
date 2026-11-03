@@ -77,39 +77,53 @@ def test_rows_consensus_and_unaligned(tmp_path):
     assert not tk.read_alignment(g).aligned
 
 
-def test_double_click_tip_opens_alignment_highlighted(qapp, tmp_path):
+def test_double_click_tip_asks_preview_to_select_it(qapp, tmp_path):
     from repeatviewer.widgets.tree_view import TreePanel
 
     panel = TreePanel(_run(tmp_path))
-    canvas = panel.canvas()
-    canvas.resize(800, 600)
-    item = next(i for i in panel.scene().items()
-                if isinstance(i, QGraphicsSimpleTextItem) and i.text() == "D")
-    idx = canvas.node_at(canvas.mapFromScene(item.sceneBoundingRect().center()))
+    asked = []
+    panel.alignmentRequested.connect(lambda path, ids, folder: asked.append((Path(path).name, list(ids))))
+    idx = next(n.index for n in panel._display.model.nodes if n.name == "D")
     panel._on_node_double_clicked(idx)
-    win = panel._aln_window
-    assert win is not None and win.path.name == "sat.fa_tree.aln.fa"
-    qapp.processEvents()
-    assert win.canvas.highlighted == 3
-    assert "D:" in win._status.text()
-    # another tip reuses the window
-    assert panel.show_in_alignment("F") and panel._aln_window is win
-    assert win.canvas.highlighted == 5
-    win.canvas.set_differences_only(True)
-    win.canvas.grab()                                  # paints without error
-    # right-click menu offers it for a tip
+    assert asked == [("sat.fa_tree.aln.fa", ["D"])]
+    # a clade selects all of its rows; unknown names are skipped
+    assert panel.show_in_alignment(["C", "D", "nope"])
+    assert asked[-1] == ("sat.fa_tree.aln.fa", ["C", "D"])
     menu = QMenu()
     panel._add_clade_actions(menu, ("F",))
     assert {a.text(): a.isEnabled() for a in menu.actions()}["Show in alignment"]
-    win.close()
+    menu = QMenu()
+    panel._add_clade_actions(menu, ("C", "D", "E"))
+    assert {a.text(): a.isEnabled() for a in menu.actions()}["Show clade in alignment (3)"]
+
+
+def test_preview_opens_alignment_with_rows_selected(qapp, tmp_path):
+    from repeatviewer.widgets.preview_tabs import PreviewTabWidget
+
+    tree = _run(tmp_path)
+    tabs = PreviewTabWidget()
+    tabs.resize(1000, 700)
+    tabs.open_file(tree, replace=False)
+    tree_page = tabs.currentWidget()
+    tree_page.tree_panel().show_in_alignment(["C", "E"])
+    page = tabs.currentWidget()
+    assert page is not tree_page and page.path.name == "sat.fa_tree.aln.fa"
+    overview = page._annotation_overview
+    assert [overview._record_ids[r] for r in overview._bars.selected_rows()] == ["C", "E"]
+    # asking again reuses that tab
+    tree_page.tree_panel().show_in_alignment("A")
+    assert tabs.currentWidget() is page and tabs.count() == 2
+    assert [overview._record_ids[r] for r in overview._bars.selected_rows()] == ["A"]
 
 
 def test_double_click_empty_space_still_fits(qapp, tmp_path):
     from repeatviewer.widgets.tree_view import TreePanel
 
     panel = TreePanel(_run(tmp_path))
+    asked = []
+    panel.alignmentRequested.connect(lambda *a: asked.append(a))
     panel._on_node_double_clicked(-1)
-    assert panel._aln_window is None
+    assert asked == []
 
 
 def test_distance_matrices():
@@ -199,8 +213,89 @@ def test_extract_from_the_clade_menu(qapp, tmp_path):
     panel._add_clade_actions(menu, ("C", "D", "E"))
     sub = next(a.menu() for a in menu.actions() if a.menu() is not None)
     assert sub.title() == "Extract sequences (3)"
-    assert [a.text() for a in sub.actions()] == ["Original sequences…", "As aligned…"]
+    assert [a.text() for a in sub.actions()] == ["Without gaps…", "As aligned…"]
     written = []
     panel.fileWritten.connect(written.append)
     out = panel.extract_sequences(("D", "E"), aligned=True, path=tmp_path / "de.fa")
     assert out.read_text().startswith(">D\n--GTACGTAA\n>E\n") and written == [out]
+
+
+def test_without_gaps_strips_gaps_when_the_input_was_an_alignment(tmp_path):
+    tree = _run(tmp_path)
+    (tmp_path / "sat.fa").write_text(ALN)            # the tree was built from an MSA
+    got = tk.clade_sequences(tree, ["A", "D"], aligned=False)
+    assert got.records == [("A copy", "ACGTACGT"), ("D copy", "GTACGTAA")]
+    aligned = tk.clade_sequences(tree, ["D"], aligned=True)
+    assert aligned.records == [("D", "--GTACGTAA")]
+
+
+def test_extract_from_tree_alignment_saves_next_to_tree_without_gaps(qapp, tmp_path):
+    from repeatviewer.widgets.preview_tabs import PreviewTabWidget
+
+    tree = _run(tmp_path)
+    details = tmp_path / "sat.fa_tree_details"
+    aln = details / "sat.fa_tree.aln.fa"            # where tree runs keep it
+    (tmp_path / "sat.fa_tree.aln.fa").rename(aln)
+    aln.write_text(ALN.replace(">D\n", ">D copy 7 chr2:10-20\n"))
+    tabs = PreviewTabWidget()
+    tabs.resize(1000, 700)
+    tabs.open_file(tree, replace=False)
+    written = []
+    tabs.sequenceExtracted.connect(written.append)
+    tabs.currentWidget().tree_panel().show_in_alignment("D")
+    overview = tabs.currentWidget()._annotation_overview
+    overview._extract_selected(without_gaps=True)
+    overview._extract_selected(without_gaps=False)
+    assert [p.parent for p in written] == [tmp_path, tmp_path]        # next to the tree
+    nogap, gapped = written
+    assert nogap.name.endswith("_D_nogap.fa") and gapped.name.endswith("_D.fa")
+    assert nogap.read_text() == ">D copy 7 chr2:10-20\nGTACGTAA\n"    # full header, no gaps
+    assert gapped.read_text().splitlines() == [">D copy 7 chr2:10-20", "--GTACGTAA"]
+
+
+def test_self_dotplot_opens_in_a_new_tab_and_details_extracts_go_next_to_tree(qapp, tmp_path):
+    from repeatviewer.widgets.preview_tabs import PreviewTabWidget
+
+    _run(tmp_path)
+    aln = tmp_path / "sat.fa_tree_details" / "sat.fa_tree.aln.fa"
+    (tmp_path / "sat.fa_tree.aln.fa").rename(aln)
+    tabs = PreviewTabWidget()
+    tabs.resize(1000, 700)
+    tabs.open_file(aln, replace=False)                 # opened from Files, not the tree
+    page = tabs.currentWidget()
+    page.select_records(["D"])
+    overview = page._annotation_overview
+    assert overview._output_folder() == tmp_path       # next to the tree anyway
+    overview.showSelfDotplotRequested.emit("D")
+    assert tabs.count() == 2 and tabs.tabText(1) == "Dotplot: D"
+    assert tabs.widget(0) is page and tabs.currentIndex() == 1
+    for _ in range(5):
+        qapp.processEvents()
+    assert tabs.widget(1)._fasta_stack.currentIndex() == 2          # Dotplot (Self), not Overview
+    tabs.open_file(aln, replace=False)                 # the file's own tab is still the alignment
+    assert tabs.currentWidget() is page and tabs.count() == 2
+
+
+def test_deleting_sequences_asks_first_and_names_the_tree(qapp, tmp_path, monkeypatch):
+    from repeatviewer.widgets import multi_sequence_overview as mso
+    from repeatviewer.widgets.preview_tabs import PreviewTabWidget
+
+    tree = _run(tmp_path)
+    aln = tmp_path / "sat.fa_tree_details" / "sat.fa_tree.aln.fa"
+    (tmp_path / "sat.fa_tree.aln.fa").rename(aln)
+    assert mso.tree_built_from(aln) == tree
+    assert mso.tree_built_from(tmp_path / "sat.fa") is None
+    asked = []
+    answer = [False]
+    monkeypatch.setattr(mso, "confirm_delete_sequences",
+                        lambda parent, n, path, t: asked.append((n, t)) or answer[0])
+    tabs = PreviewTabWidget()
+    tabs.open_file(aln, replace=False)
+    page = tabs.currentWidget()
+    page.select_records(["B", "C"])
+    overview = page._annotation_overview
+    overview._delete_selected_msa_rows(hard_delete=True)          # Cancel
+    assert asked == [(2, tree)] and aln.read_text().count(">") == 6
+    answer[0] = True
+    overview._delete_selected_msa_rows(hard_delete=True)          # Delete
+    assert aln.read_text().count(">") == 4

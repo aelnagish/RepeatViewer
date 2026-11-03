@@ -722,6 +722,10 @@ class FilePreviewPage(QWidget):
     dotplotRegionSelected = Signal(dict)  # payload from window.__flexidotLastClick
     fileWritten = Signal(object)  # Path of a file written from the preview (e.g. tree export)
     openFileRequested = Signal(object)  # Path a preview asks to open (contig view → Results)
+    # Tree view → "Show in alignment": (alignment path, record ids, extract folder)
+    alignmentRequested = Signal(object, object, object)
+    # Overview right-click → "Show self-dotplot": (file path, sequence id), new tab
+    selfDotplotTabRequested = Signal(object, str)
     blastRequested = Signal(object)  # FASTA a preview sends to BLAST (contig view right-click)
     # Source FASTAs of a temporary multi-file preview, to combine into a real file.
     saveSelectionAsFileRequested = Signal(list)
@@ -1467,6 +1471,7 @@ class FilePreviewPage(QWidget):
                 QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
             )
             self._tree_panel.fileWritten.connect(self.fileWritten.emit)
+            self._tree_panel.alignmentRequested.connect(self.alignmentRequested.emit)
             self._stack.addWidget(self._tree_panel)
         self._stack.setCurrentWidget(self._tree_panel)
         self._tree_panel.load_tree(path)
@@ -1542,11 +1547,19 @@ class FilePreviewPage(QWidget):
         return self._dotplot_panel
 
     def _on_overview_show_self_dotplot(self, sequence_id: str) -> None:
-        """Overview context menu → Dotplot (Self) for the chosen sequence."""
+        """Overview context menu → Dotplot (Self) for the chosen sequence, in a new
+        Preview tab so the alignment stays open in this one."""
         sid = str(sequence_id or "").strip()
         if not sid:
             return
-        self._pending_dotplot_sequence_id = sid
+        if getattr(self, "_dotplot_in_new_tab", False):     # set by the Preview tabs
+            self.selfDotplotTabRequested.emit(self.path, sid)
+            return
+        self.show_self_dotplot(sid)
+
+    def show_self_dotplot(self, sequence_id: str) -> None:
+        """Switch this page to Dotplot (Self) for ``sequence_id``."""
+        self._pending_dotplot_sequence_id = str(sequence_id)
         self._activate_fasta_tab(DefaultFastaPreviewTab.DOTPLOT)
 
     def _on_overview_sequence_order_changed(self) -> None:
@@ -1989,6 +2002,16 @@ class FilePreviewPage(QWidget):
         if not self._multi_fasta_mode and view._map.data() is None:
             view.load_path(self.path, fit_after_load=False)
         return view
+
+    def select_records(self, record_ids: list[str], *, extract_folder: object = None) -> bool:
+        """Show the alignment / sequence view with these records selected and the
+        first one scrolled into view. False if none of them is in this file."""
+        view = self._show_annotation_for_find()
+        if self._multi_fasta_mode:
+            if extract_folder:
+                view.set_extract_folder(Path(extract_folder))
+            return view.select_records(record_ids) > 0
+        return bool(record_ids)
 
     def annotation_features_for_find(self) -> dict | None:
         """Annotations as open in the viewer (unsaved edits included), or None."""
@@ -3123,6 +3146,9 @@ class PreviewTabWidget(QTabWidget):
         page.dotplotRegionSelected.connect(self.dotplotRegionSelected.emit)
         page.fileWritten.connect(self.fileWritten.emit)
         page.openFileRequested.connect(self.openFileRequested.emit)
+        page.alignmentRequested.connect(self.show_records_in_alignment)
+        page.selfDotplotTabRequested.connect(self.open_self_dotplot_tab)
+        page._dotplot_in_new_tab = True
         page.blastRequested.connect(self.blastRequested.emit)
         page.saveSelectionAsFileRequested.connect(self.saveSelectionAsFileRequested.emit)
         self._wheel_zoom_filter.register_page(page)
@@ -3644,6 +3670,48 @@ class PreviewTabWidget(QTabWidget):
             self.open_file(path, replace=False)
         self._sync_tab_bar_visible()
 
+    def open_self_dotplot_tab(self, path: object, sequence_id: str) -> FilePreviewPage | None:
+        """A second tab on the same file, showing Dotplot (Self) for one sequence.
+        It is an extra view: the file's own tab stays the one Files and reloads use."""
+        resolved = Path(path).expanduser().resolve()
+        if not resolved.is_file():
+            return None
+        page = FilePreviewPage(resolved)
+        page._extra_view = True
+        index = self._add_preview_page(page, name=f"Dotplot: {sequence_id}")
+        self.setTabToolTip(index, f"{resolved.name}, Dotplot (Self) of {sequence_id}")
+        self.setCurrentIndex(index)
+        self.setCurrentWidget(page)
+        page.show()
+        # The new page queued its usual first view while loading; switch to the
+        # dotplot after that has run, or it would land on Overview again.
+        QTimer.singleShot(
+            0, lambda pg=page, sid=sequence_id: _qobject_alive(pg) and pg.show_self_dotplot(sid)
+        )
+        self._apply_zoom_to_current_tab()
+        self._sync_tab_bar_visible()
+        return page
+
+    def show_records_in_alignment(
+        self, path: object, record_ids: object, extract_folder: object = None
+    ) -> bool:
+        """Open ``path`` in a tab of its own (or the tab it is already in), show its
+        alignment and select ``record_ids`` (tree → "Show in alignment").
+        ``extract_folder``: where that tab's Extract saves (the tree's folder)."""
+        resolved = Path(path).expanduser().resolve()
+        if not self.open_file(resolved, replace=False):
+            return False
+        index = self._path_to_index.get(str(resolved))
+        if index is None or not (0 <= index < self.count()):
+            return False
+        widget = self.widget(index)
+        if not isinstance(widget, FilePreviewPage):
+            return False
+        self.setCurrentIndex(index)
+        self.setCurrentWidget(widget)
+        widget.show()
+        return widget.select_records(list(record_ids or []), extract_folder=extract_folder)
+
     def show_annotation_for_path(self, path: Path) -> None:
         """Open ``path`` in preview (if needed) and switch to its Annotation tab."""
         resolved = path.expanduser().resolve()
@@ -3745,5 +3813,5 @@ class PreviewTabWidget(QTabWidget):
         self._path_to_index.clear()
         for index in range(self.count()):
             widget = self.widget(index)
-            if isinstance(widget, FilePreviewPage):
-                self._path_to_index[str(widget.path)] = index
+            if isinstance(widget, FilePreviewPage) and not getattr(widget, "_extra_view", False):
+                self._path_to_index.setdefault(str(widget.path), index)
