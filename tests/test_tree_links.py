@@ -246,3 +246,23 @@ def test_extract_from_tree_alignment_saves_next_to_tree_without_gaps(qapp, tmp_p
     assert nogap.name.endswith("_D_nogap.fa") and gapped.name.endswith("_D.fa")
     assert nogap.read_text() == ">D copy 7 chr2:10-20\nGTACGTAA\n"    # full header, no gaps
     assert gapped.read_text().splitlines() == [">D copy 7 chr2:10-20", "--GTACGTAA"]
+
+
+def test_self_dotplot_opens_in_a_new_tab_and_details_extracts_go_next_to_tree(qapp, tmp_path):
+    from repeatviewer.widgets.preview_tabs import PreviewTabWidget
+
+    _run(tmp_path)
+    aln = tmp_path / "sat.fa_tree_details" / "sat.fa_tree.aln.fa"
+    (tmp_path / "sat.fa_tree.aln.fa").rename(aln)
+    tabs = PreviewTabWidget()
+    tabs.resize(1000, 700)
+    tabs.open_file(aln, replace=False)                 # opened from Files, not the tree
+    page = tabs.currentWidget()
+    page.select_records(["D"])
+    overview = page._annotation_overview
+    assert overview._output_folder() == tmp_path       # next to the tree anyway
+    overview.showSelfDotplotRequested.emit("D")
+    assert tabs.count() == 2 and tabs.tabText(1) == "Dotplot: D"
+    assert tabs.widget(0) is page and tabs.currentIndex() == 1
+    tabs.open_file(aln, replace=False)                 # the file's own tab is still the alignment
+    assert tabs.currentWidget() is page and tabs.count() == 2

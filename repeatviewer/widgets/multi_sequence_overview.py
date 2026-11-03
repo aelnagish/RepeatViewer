@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass
+from glob import escape as glob_escape
 from pathlib import Path
 
 from PySide6.QtCore import (
@@ -9802,7 +9803,16 @@ class MultiSequenceOverviewPanel(QWidget):
 
     def _output_folder(self) -> Path:
         folder = getattr(self, "_extract_folder", None)
-        return folder if folder is not None and folder.is_dir() else self._path.parent
+        if folder is not None and folder.is_dir():
+            return folder
+        here = self._path.parent
+        # An alignment inside a tree run's details folder (x_details/x.aln.fa next
+        # to x.treefile): extracts go next to the tree, however the file was opened.
+        if here.name.endswith("_details"):
+            base = here.name[: -len("_details")]
+            if base and any(here.parent.glob(f"{glob_escape(base)}*.treefile")):
+                return here.parent
+        return here
 
     def select_records(self, record_ids: list[str]) -> int:
         """Select these sequences (whole rows, as a click on their names does) and
