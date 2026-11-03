@@ -435,10 +435,13 @@ def label_rotation(angle_deg: float) -> tuple[float, bool]:
 # --------------------------------------------------------------------------
 
 
-def branch_length_text(length: float, digits: int = 4) -> str:
-    """Branch length with ``digits`` significant digits (Geneious style)."""
+def branch_length_text(length: float, digits: int = 4, *, decimals: int | None = None) -> str:
+    """Branch length with ``digits`` significant digits (Geneious style), or
+    rounded to ``decimals`` places after the point when given (0.0277 -> "0.03")."""
     if length == 0:
         return "0"
+    if decimals is not None:
+        return f"{length:.{max(0, decimals)}f}"
     return f"{length:.{digits}g}"
 
 

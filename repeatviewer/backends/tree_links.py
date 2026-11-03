@@ -246,7 +246,8 @@ def _read_fasta_records(path: Path) -> list[tuple[str, str]]:
 
 def clade_sequences(tree_path: Path, tips: list[str], *, aligned: bool) -> Extracted:
     """Sequences of ``tips``: from the tree run's input FASTA with their original
-    headers (``aligned=False``) or from the tree's alignment, gaps kept."""
+    headers and without gaps (``aligned=False``; also when the input was itself an
+    alignment) or from the tree's alignment, gaps kept."""
     tree_path = Path(tree_path)
     if not aligned:
         rb = run_base(tree_path)
@@ -275,7 +276,8 @@ def clade_sequences(tree_path: Path, tips: list[str], *, aligned: bool) -> Extra
                     if seq is None:
                         missing.append(tip)
                     else:
-                        records.append((header, seq))
+                        # the input may itself be an alignment: always without gaps
+                        records.append((header, seq.replace("-", "").replace(".", "")))
                 if records or not missing:
                     return Extracted(records, missing)
         # no input FASTA to go back to: the alignment without gaps
