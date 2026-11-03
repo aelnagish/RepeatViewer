@@ -114,8 +114,9 @@ TIPS_HELP = (
     "<b>Align</b>: all tip names on one line (rectangular) or one circle (circular), "
     "joined to their branches by dotted lines, so they never sit on top of each other. "
     "Not for the radial layout.<br>"
-    "<b>Show</b>: the name, or the name with a column of the trait table next to it "
-    "(chromosome, array, lineage…), or that column instead of the name.<br>"
+    "<b>Text</b>: the name, or the name with a column of the trait table next to it "
+    "(chromosome, array, lineage…), or that column instead of the name. The trait "
+    "table is made in Colour tips → Trait table.<br>"
     "<b>Max length</b>: shorten long names to this many characters, keeping their end "
     "(where the coordinates are) or their start. Off = full names. Hover over a tip for "
     "the full name."
@@ -165,9 +166,12 @@ EDIT_HELP = (
     "<b>Right-click a branch</b> (or select it and use <b>Edit</b>) to reroot there, swap "
     "its branches, collapse or colour its clade, or show that clade only.<br>"
     "<b>Extract sequences</b> (same menu) saves the copies of that clade to a new FASTA "
-    "next to the tree: the original sequences from your input, or as aligned.<br>"
-    "<b>Double-click a tip</b> (or right-click it → Show in alignment) to see that sequence "
-    "in the tree's alignment, highlighted.<br>"
+    "next to the tree: <b>Without gaps</b> (your original records, full headers) or "
+    "<b>As aligned</b> (the tree's alignment, gaps kept).<br>"
+    "<b>Double-click a tip</b> (or right-click it → Show in alignment) to open the tree's "
+    "alignment in a Preview tab with that sequence selected; right-click a clade → "
+    "Show clade in alignment selects all of its sequences. There, right-click → "
+    "Extract Sequence or Copy Sequence.<br>"
     "Undo: Cmd+Z / Ctrl+Z. Redo: Cmd+Shift+Z / Ctrl+Shift+Z.<br>"
     "Colours and collapsed clades are remembered for this tree. Rerooting and swapping "
     "change the tree: the file is never overwritten, use <b>Save → Tree</b>."
@@ -923,6 +927,29 @@ class _Section(QWidget):
         self.form.addRow(text, widget)
 
 
+_COL1_PX = 64      # options panel: width of the first column (number boxes, first tick box)
+_COL_GAP_PX = 6    # space before the second column
+
+
+def _grid_row(parent: QWidget, first: QWidget, second: QWidget) -> QWidget:
+    """Two-column row of the options panel: ``first`` as wide as the number boxes,
+    ``second`` starting at the same x in every row and, if it is a box, running to
+    the right edge like the drop-down boxes above it."""
+    row = QWidget(parent)
+    lay = QHBoxLayout(row)
+    lay.setContentsMargins(0, 0, 0, 0)
+    lay.setSpacing(_COL_GAP_PX)
+    first.setFixedWidth(_COL1_PX)
+    lay.addWidget(first, 0)
+    if isinstance(second, QComboBox):
+        second.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        lay.addWidget(second, 1)
+    else:
+        lay.addWidget(second, 0)
+        lay.addStretch(1)
+    return row
+
+
 def _pair(parent: QWidget, *widgets: QWidget) -> QWidget:
     row = QWidget(parent)
     lay = QHBoxLayout(row)
@@ -1016,6 +1043,8 @@ class TreePanel(QWidget):
     """Controls + canvas for one tree file."""
 
     fileWritten = Signal(object)  # Path of an exported figure or saved tree
+    # (alignment path, record ids): open the alignment in Preview with these rows selected
+    alignmentRequested = Signal(object, object)
 
     def __init__(self, path: Path | None = None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1182,10 +1211,8 @@ class TreePanel(QWidget):
         for spin in (self._spread_spin, self._maxchars_spin, self._font_spin, self._digits_spin,
                      self._bfont_spin, self._lw_spin, self._collapse_spin, self._collapse_dist,
                      self._scale_len, self._sfont_spin):
-            spin.setFixedWidth(64)
+            spin.setFixedWidth(_COL1_PX)
         self._keep_box.setMinimumContentsLength(3)
-        self._keep_box.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        self._keep_box.setFixedWidth(64)
 
         # --- top row: actions only ---------------------------------------------
         self._options_btn = QPushButton(self)
@@ -1222,16 +1249,17 @@ class TreePanel(QWidget):
         sec.add("", self._flip_check)
         pl.addWidget(sec)
         sec = _Section("Tip names", panel, help_text=TIPS_HELP, key="tips")
-        sec.add("", _pair(panel, self._tips_check, self._align_check))
-        sec.add("Show", self._tiplabel_box)
-        sec.add("Max", _pair(panel, self._maxchars_spin, self._keep_box))
+        sec.add("", _grid_row(panel, self._tips_check, self._align_check))
+        sec.add("Text", self._tiplabel_box)
+        sec.add("Max", _grid_row(panel, self._maxchars_spin, self._keep_box))
         sec.add("Font", self._font_spin)
         pl.addWidget(sec)
         sec = _Section("Branch labels", panel, help_text=SUPPORT_HELP, key="branch_labels")
         sec.add("Show", self._branch_box)
         sec.add("Decimals", self._digits_spin)
         sec.add("Font", self._bfont_spin)
-        sec.add("", _pair(panel, self._crowded_check, self._zeros_check))
+        sec.add("", self._crowded_check)
+        sec.add("", self._zeros_check)
         pl.addWidget(sec)
         sec = _Section("Branches", panel, key="branches")
         sec.add("Width", self._lw_spin)
@@ -1299,7 +1327,6 @@ class TreePanel(QWidget):
         self._canvas.nodeClicked.connect(self._on_node_clicked)
         self._canvas.nodeContextMenu.connect(self._on_context_menu)
         self._canvas.nodeDoubleClicked.connect(self._on_node_double_clicked)
-        self._aln_window = None
         self._status = QLabel(self)
         self._status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
 
@@ -1694,11 +1721,12 @@ class TreePanel(QWidget):
 
         return tree_links.sequences_for_tree(self._path) if self._path else None
 
-    def show_in_alignment(self, tip: str) -> bool:
-        """Open (or reuse) the alignment window and highlight ``tip``."""
+    def show_in_alignment(self, tips) -> bool:
+        """Open the tree's alignment in a Preview tab with ``tips`` (one name or a
+        clade) selected, so its right-click menu (Extract, Copy…) works on them."""
         from repeatviewer.backends import tree_links
-        from repeatviewer.widgets.alignment_view import AlignmentWindow
 
+        tips = [tips] if isinstance(tips, str) else list(tips)
         source = self._sequence_source()
         if source is None:
             QMessageBox.information(
@@ -1706,26 +1734,29 @@ class TreePanel(QWidget):
                 "No alignment or FASTA was found for this tree. RepeatViewer looks for "
                 "the tree run's .aln.fa, or a FASTA with the tree's name next to it.")
             return False
-        win = self._aln_window
-        if win is None or win.path != source.path or not win.isVisible():
-            if win is not None:
-                win.close()
-            try:
-                aln = tree_links.read_alignment(source.path, aligned=source.aligned)
-            except OSError as exc:
-                QMessageBox.warning(self, "Show in alignment", f"Could not read {source.path.name}:\n{exc}")
-                return False
-            win = AlignmentWindow(source.path, aln, note=source.note, parent=self)
-            win.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
-            win.destroyed.connect(lambda *_a: setattr(self, "_aln_window", None))
-            self._aln_window = win
-            win.show()
-            # scroll once the window has its size
-            QTimer.singleShot(0, lambda w=win, t=tip: self._highlight_in(w, t))
-        else:
-            win.raise_()
-            win.activateWindow()
-            self._highlight_in(win, tip)
+        try:
+            aln = tree_links.read_alignment(source.path, aligned=source.aligned)
+        except OSError as exc:
+            QMessageBox.warning(self, "Show in alignment", f"Could not read {source.path.name}:\n{exc}")
+            return False
+        ids, missing = [], []
+        for tip in tips:
+            row = aln.row_of(tip)
+            if row is None:
+                missing.append(tip)
+            else:
+                name = aln.names[row]
+                ids.append(name.split()[0] if name.split() else name)
+        if not ids:
+            self._update_status(f"Not found in {source.path.name}: {', '.join(missing[:3])}")
+            return False
+        self.alignmentRequested.emit(source.path, ids)
+        message = f"{source.path.name}: {len(ids)} sequence{'s' if len(ids) != 1 else ''} selected"
+        if missing:
+            message += f", {len(missing)} not found"
+        if source.note:
+            message += f" ({source.note})"
+        self._update_status(message)
         return True
 
     def extract_sequences(self, key, *, aligned: bool, path: Path | None = None) -> Path | None:
@@ -1767,12 +1798,6 @@ class TreePanel(QWidget):
         self.fileWritten.emit(path)
         return path
 
-    def _highlight_in(self, win, tip: str) -> None:
-        if self._aln_window is not win:
-            return
-        if not win.show_tip(tip):
-            self._update_status(f"{tip} is not in {win.path.name}")
-
     def select_clade(self, key: tuple[str, ...] | None) -> None:
         self._selected = tuple(sorted(key)) if key else None
         self._redraw(refit=False)
@@ -1810,11 +1835,21 @@ class TreePanel(QWidget):
         if key:
             n = len(key)
             sub = QMenu("Extract sequence" if n == 1 else f"Extract sequences ({n})", menu)
+            sub.setToolTipsVisible(True)
             menu.addMenu(sub)
-            sub.addAction("Original sequences…" if n > 1 else "Original sequence…",
-                          lambda: self.extract_sequences(key, aligned=False))
-            sub.addAction("As aligned…", lambda: self.extract_sequences(key, aligned=True))
+            act = sub.addAction("Without gaps…", lambda: self.extract_sequences(key, aligned=False))
+            act.setToolTip("Your original records with their full headers, gaps removed, "
+                           "not rotated or masked.")
+            act = sub.addAction("As aligned…", lambda: self.extract_sequences(key, aligned=True))
+            source = self._sequence_source()
+            act.setToolTip("The rows of the tree's alignment"
+                           + (f" ({source.path.name})" if source is not None else "")
+                           + ": gaps kept, rotated or masked as in this run.")
             sub.setEnabled(self._path is not None)
+            if n > 1:
+                act = menu.addAction(f"Show clade in alignment ({n})",
+                                     lambda: self.show_in_alignment(list(key)))
+                act.setEnabled(source is not None)
         if node is not None and node.is_tip and idx not in d.info:
             menu.addSeparator()
             act = menu.addAction("Show in alignment", lambda: self.show_in_alignment(node.name))

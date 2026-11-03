@@ -9795,6 +9795,25 @@ class MultiSequenceOverviewPanel(QWidget):
             self._on_region_zoom(max(0.0, center - context / 2.0), center + context / 2.0)
         return True
 
+    def select_records(self, record_ids: list[str]) -> int:
+        """Select these sequences (whole rows, as a click on their names does) and
+        scroll the first into view. Returns how many were found."""
+        rows = []
+        for rid in record_ids:
+            row = self._row_for_id(rid)
+            if row >= 0 and row not in rows:
+                rows.append(row)
+        if not rows:
+            return 0
+        self._bars.set_find_hits({}, None)
+        self._bars.clear_feature_selection(repaint=False)
+        if self._bars.region_selection() is not None:
+            self._bars.set_region_selection(None)
+        self._bars.set_selected_rows(rows)
+        self._sync_names_column()
+        self._scroll_to_row(rows[0])
+        return len(rows)
+
     def clear_find_hits(self) -> None:
         self._bars.set_find_hits({}, None)
         self._find_items = []
