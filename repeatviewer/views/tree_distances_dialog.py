@@ -14,10 +14,10 @@ import numpy as np
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QApplication,
-    QComboBox,
     QDialog,
     QFileDialog,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QPushButton,
     QTableWidget,
@@ -26,11 +26,18 @@ from PySide6.QtWidgets import (
 )
 
 from repeatviewer.backends import tree_links as tk
+from repeatviewer.widgets.combo_boxes import NoWheelComboBox as QComboBox
 from repeatviewer.widgets.help_button import make_help_button
 
 MAX_SHOWN = 400          # larger matrices are saved, not shown
 SOURCE_TREE = "tree"
 SOURCE_ALIGNMENT = "alignment"
+# Default dialog size: half of the previous 760×520 so long tip names
+# do not dominate the Preview; the window and columns stay drag-resizable.
+_DIALOG_WIDTH = 380
+_DIALOG_HEIGHT = 520
+_MIN_COL_WIDTH = 56
+_MIN_ROW_LABEL_WIDTH = 72
 
 HELP = (
     "<b>Tree (patristic)</b>: the sum of the branch lengths on the path between two tips, "
@@ -47,7 +54,12 @@ class TreeDistancesDialog(QDialog):
     def __init__(self, tree_path: Path, model, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle(f"Distance matrix: {Path(tree_path).name}")
-        self.resize(760, 520)
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, False)
+        self.setModal(False)
+        self.setWindowModality(Qt.WindowModality.NonModal)
+        self.resize(_DIALOG_WIDTH, _DIALOG_HEIGHT)
+        self.setMinimumSize(300, 240)
+        self.setSizeGripEnabled(True)
         self._tree_path = Path(tree_path)
         self._model = model
         self._source = tk.sequences_for_tree(self._tree_path)
@@ -64,6 +76,14 @@ class TreeDistancesDialog(QDialog):
         self._note.setStyleSheet("color: palette(mid);")
         self._table = QTableWidget(self)
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        hh = self._table.horizontalHeader()
+        hh.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        hh.setStretchLastSection(False)
+        hh.setMinimumSectionSize(_MIN_COL_WIDTH)
+        vh = self._table.verticalHeader()
+        vh.setDefaultAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        )
         copy_btn = QPushButton("Copy", self)
         copy_btn.clicked.connect(self._copy)
         save_btn = QPushButton("Save as TSV…", self)
@@ -93,6 +113,27 @@ class TreeDistancesDialog(QDialog):
     def matrix(self) -> tuple[list[str], np.ndarray]:
         return self._names, self._matrix
 
+    def _apply_half_widths(self) -> None:
+        """Data columns at half content width; tip-name column full width (figure 1)."""
+        n = self._table.columnCount()
+        if n <= 0:
+            return
+        self._table.resizeColumnsToContents()
+        for c in range(n):
+            self._table.setColumnWidth(
+                c, max(_MIN_COL_WIDTH, self._table.columnWidth(c) // 2)
+            )
+        vh = self._table.verticalHeader()
+        fm = vh.fontMetrics()
+        label_w = max(
+            (fm.horizontalAdvance(name) for name in self._names),
+            default=_MIN_ROW_LABEL_WIDTH,
+        ) + 16
+        # Row labels like the original matrix: wide enough for the tip names.
+        # Cap so a long name does not consume the whole half-width dialog.
+        cap = max(200, int(self.width() * 0.65))
+        vh.setFixedWidth(max(_MIN_ROW_LABEL_WIDTH, min(label_w, cap)))
+
     def _compute(self, *_args) -> None:
         if self.source == SOURCE_ALIGNMENT and self._source is not None:
             aln = tk.read_alignment(self._source.path)
@@ -115,13 +156,22 @@ class TreeDistancesDialog(QDialog):
         self._table.setColumnCount(n)
         self._table.setHorizontalHeaderLabels(self._names)
         self._table.setVerticalHeaderLabels(self._names)
+        for i, name in enumerate(self._names):
+            for header_item in (
+                self._table.horizontalHeaderItem(i),
+                self._table.verticalHeaderItem(i),
+            ):
+                if header_item is not None:
+                    header_item.setToolTip(name)
         for a in range(n):
             for b in range(n):
                 v = self._matrix[a, b]
                 item = QTableWidgetItem("NA" if not np.isfinite(v) else f"{v:.4g}")
-                item.setTextAlignment(int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter))
+                item.setTextAlignment(
+                    Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+                )
                 self._table.setItem(a, b, item)
-        self._table.resizeColumnsToContents()
+        self._apply_half_widths()
 
     def default_path(self) -> Path:
         kind = "patristic" if self.source == SOURCE_TREE else "pdistance"

@@ -150,14 +150,19 @@ def test_alignment_in_details_folder_is_found_first(tmp_path):
     assert src.path == tmp_path / "sat.fa_tree_details" / "sat.fa_tree.aln.fa" and src.aligned
 
 
-def test_save_menu_and_report_button(qapp, tmp_path):
+def test_export_button_and_report_button(qapp, tmp_path):
     from repeatviewer.widgets.tree_view import TreePanel
 
     tree = _run(tmp_path)
     panel = TreePanel(tree)
-    texts = [a.text() for a in panel._save_btn.menu().actions() if a.text()]
-    assert texts == ["SVG", "PDF", "PNG", "Tree (.treefile)", "Distance matrix (.tsv)",
-                     "Copy Newick"]
+    # Export opens a Type+File dialog (no save submenu). Distance / Newick live under Edit.
+    assert panel._save_btn.text() == "Export"
+    assert panel._save_btn.menu() is None
+    panel._fill_edit_menu()
+    edit_texts = [a.text() for a in panel._edit_menu.actions() if a.text()]
+    assert "Distance matrix…" in edit_texts
+    assert "Copy Newick" in edit_texts
+    assert "Save tree (.treefile)" in edit_texts
     assert panel.report_path() is None and not panel._report_btn.isEnabled()
     report = tmp_path / "sat.fa_tree_details" / "sat.fa_tree_report.html"
     report.write_text("<html></html>")

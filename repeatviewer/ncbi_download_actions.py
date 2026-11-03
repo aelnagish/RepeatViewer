@@ -25,7 +25,6 @@ from PySide6.QtWidgets import QMessageBox
 from repeatviewer.backends import ncbi_download as nd
 from repeatviewer.backends.job_cancel import CANCELLED_MESSAGE
 from repeatviewer.job_options import (
-    NCBI_RIGHT_CLICK_CLIPBOARD,
     NcbiDownloadOptions,
     load_ncbi_download_options,
     save_ncbi_download_options,
@@ -277,10 +276,8 @@ class NcbiDownloadActionsMixin:
     # ---------------------------------------------------------- right-click
 
     def _quick_ncbi_download_right_click(self) -> None:
+        """Right-click: download clipboard accessions with saved settings."""
         text = QGuiApplication.clipboard().text() or ""
-        if self._ncbi_options.right_click_action != NCBI_RIGHT_CLICK_CLIPBOARD:
-            self._open_ncbi_download_dialog()
-            return
         accessions = nd.clipboard_accessions(text)
         if not accessions:
             QMessageBox.information(

@@ -3,7 +3,8 @@
 Opens ``.treefile`` (IQ-TREE), ``.nwk``, ``.newick``, ``.tre`` and ``.tree``.
 
 * View: rectangular, circular and radial layouts; tip names, support or
-  branch-length labels, font size, scale bar, zoom and pan.
+  branch-length labels, font size, scale bar, zoom and pan. Display settings
+  live in the right Display rail (same chrome as the sequence Annotation view).
 * Edit (right-click a branch, or the Edit menu for the selected branch):
   reroot here, midpoint root, swap branches, collapse / expand a clade,
   colour a clade, show one clade only; collapse all branches below a support
@@ -27,16 +28,18 @@ import math
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QPointF, QRectF, QSettings, QSizeF, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, QSizeF, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import (
     QBrush,
     QDesktopServices,
+    QGuiApplication,
     QLinearGradient,
     QColor,
     QFont,
     QFontMetricsF,
     QImage,
     QKeySequence,
+    QMouseEvent,
     QPageSize,
     QPainter,
     QPainterPath,
@@ -50,10 +53,13 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QColorDialog,
     QComboBox,
+    QDialog,
     QFileDialog,
     QFormLayout,
+    QGraphicsEllipseItem,
     QGraphicsPathItem,
     QGraphicsPolygonItem,
+    QGraphicsRectItem,
     QGraphicsScene,
     QGraphicsSimpleTextItem,
     QGraphicsView,
@@ -62,10 +68,8 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
-    QScrollArea,
+    QRubberBand,
     QSizePolicy,
-    QSlider,
-    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -75,7 +79,18 @@ from repeatviewer.backends import tree_layout as tl
 from repeatviewer.backends import tree_traits as tt
 from repeatviewer.widgets.combo_boxes import NoWheelComboBox
 from repeatviewer.widgets.help_button import make_help_button
-from repeatviewer.widgets.spin_boxes import NoWheelDoubleSpinBox, NoWheelSpinBox
+from repeatviewer.widgets.preview_controls import (
+    ANNOTATION_FIT_BUTTON_RENDERED_WIDTH,
+    ANNOTATION_ZOOM_SLIDER_WIDTH,
+    OVERVIEW_SELECT_FIT_HEIGHT,
+    OVERVIEW_TOOLBAR_HEIGHT,
+    ZOOM_SLIDER_HEIGHT,
+    apply_annotation_zoom_slider_style,
+    make_overview_zoom_button,
+)
+from repeatviewer.widgets.sequence_annotation_rail import _h_divider
+from repeatviewer.widgets.spin_boxes import NoWheelDoubleSpinBox, NoWheelSlider, NoWheelSpinBox
+from repeatviewer.widgets.tree_display_rail import TreeDisplayRail
 
 BRANCH_LABELS_NONE = "none"
 BRANCH_LABELS_SUPPORT = "support"
@@ -89,19 +104,6 @@ _TRACKPAD_ZOOM_BASE = 1.0022
 _MIN_TREE_PX = 260.0       # smallest drawing size (rectangular width / radius)
 _RECT_TREE_WIDTH_PX = 520.0
 SPREAD_MIN, SPREAD_MAX = 100, 500   # % (Spread)
-PANEL_WIDTH = 244          # options panel (px); fits every open section plus a scroll bar
-# Compact action buttons: as wide as their text (the native macOS push button
-# has a large minimum width).
-_TOP_BUTTON_STYLE = (
-    "QPushButton { padding: 2px 10px; min-width: 0px; min-height: 18px;"
-    " border: 1px solid palette(mid); border-radius: 5px; background: palette(button); }"
-    "QPushButton:hover { background: palette(midlight); }"
-    "QPushButton:pressed, QPushButton:checked { background: palette(midlight); }"
-    "QPushButton:disabled { color: palette(mid); }"
-    "QPushButton[menu=\"true\"] { padding-right: 20px; }"
-    "QPushButton::menu-indicator { subcontrol-origin: padding;"
-    " subcontrol-position: right center; right: 6px; }"
-)
 _MARGIN_PX = 24.0
 _HIT_WIDTH = 7.0           # clickable width around a branch, in pixels
 _SELECTED = QColor(0, 110, 230)
@@ -347,6 +349,40 @@ def _pixel_scale(layout: tl.Layout, n_tips: int, row_h: float,
     return s, s
 
 
+def selection_branch_nodes(
+    display: Display, selected: tuple[str, ...] | None
+) -> frozenset[int]:
+    """Display nodes whose branch should be blue for ``selected`` tips.
+
+    For a multi-tip selection this is the spanning subtree: every branch on a
+    path between selected tips, including the LCA connector — not only the tip
+    stubs (so internal segments between selected tips are highlighted too).
+    """
+    if not selected:
+        return frozenset()
+    sel = set(selected)
+    n_sel = len(sel)
+    keys = display.keys
+    nodes = display.model.nodes
+    counts = [sum(1 for tip in keys[i] if tip in sel) for i in range(len(nodes))]
+    out: set[int] = set()
+    for i, node in enumerate(nodes):
+        under = counts[i]
+        if under <= 0:
+            continue
+        if under < n_sel:
+            # Proper edge on a path between selected tips (includes tip stubs).
+            out.add(i)
+            continue
+        # under == n_sel: highlight only the LCA (no child holds every selected tip).
+        if node.is_tip:
+            if node.name in sel:
+                out.add(i)
+        elif node.children and all(counts[c] < n_sel for c in node.children):
+            out.add(i)
+    return frozenset(out)
+
+
 def shorten(text: str, max_chars: int, keep_end: bool = True) -> str:
     """Tip name cut to ``max_chars`` (0 = unchanged), keeping its end or start."""
     if max_chars <= 0 or len(text) <= max_chars:
@@ -421,9 +457,15 @@ def build_tree_scene(
         c = display.colors[i]
         return QColor(c) if c else QColor(ink)
 
+    selected_branches = (
+        frozenset()
+        if for_export or selected is None
+        else selection_branch_nodes(display, selected)
+    )
+
     def pen_for(i: int, width: float | None = None) -> QPen:
         width = opts.line_weight if width is None else width
-        is_sel = selected is not None and display.keys[i] == selected and not for_export
+        is_sel = i in selected_branches
         pen = QPen(_SELECTED if is_sel else color_for(i), max(2.6, width + 1.4) if is_sel else width)
         pen.setCosmetic(not for_export)
         pen.setCapStyle(Qt.PenCapStyle.FlatCap)
@@ -548,9 +590,17 @@ def build_tree_scene(
             else:
                 text = shorten(display.tip_text.get(tip, node.name), opts.max_chars,
                                opts.keep_end)
+            tip_sel = (
+                selected is not None
+                and not for_export
+                and (display.keys[tip] == selected or node.name in selected)
+            )
             item = QGraphicsSimpleTextItem(text)
-            item.setFont(font)
-            item.setBrush(QBrush(color_for(tip)))
+            tip_font = QFont(font)
+            if tip_sel:
+                tip_font.setBold(True)
+            item.setFont(tip_font)
+            item.setBrush(QBrush(_SELECTED if tip_sel else color_for(tip)))
             item.setData(ROLE_NODE, tip)
             if not for_export:
                 tip_text = f"{node.name}\nBranch length: {tl.branch_length_text(node.length, digits)}"
@@ -576,6 +626,17 @@ def build_tree_scene(
                     item.setTransformOriginPoint(0.0, h / 2.0)
                     item.setPos(anchor.x(), anchor.y() - h / 2.0)
                 item.setRotation(rotation)
+            if tip_sel:
+                # Soft blue wash behind the name (follows rotation as a child).
+                pad = 2.5
+                wash = QColor(_SELECTED)
+                wash.setAlphaF(0.18)
+                bg = QGraphicsRectItem(
+                    item.boundingRect().adjusted(-pad, -pad, pad, pad), item
+                )
+                bg.setBrush(QBrush(wash))
+                bg.setPen(QPen(Qt.PenStyle.NoPen))
+                bg.setZValue(-1)
             scene.addItem(item)
 
     # --- branch labels ------------------------------------------------------------
@@ -704,7 +765,7 @@ def _draw_legend(scene: QGraphicsScene, scale: tt.ColourScale, font: QFont, smal
 
 
 def export_tree(model: tl.TreeModel | Display, opts: TreeViewOptions, out: Path, *,
-                title: str = "") -> Path:
+                title: str = "", png_dpi: int | None = None) -> Path:
     """Write the tree to ``out`` (.svg, .pdf or .png), black on white."""
     scene = QGraphicsScene()
     build_tree_scene(scene, model, opts, ink=QColor(0, 0, 0), muted=QColor(70, 70, 70),
@@ -744,11 +805,13 @@ def export_tree(model: tl.TreeModel | Display, opts: TreeViewOptions, out: Path,
         finally:
             painter.end()
     elif ext == ".png":
-        image = QImage(int(math.ceil(rect.width() * PNG_SCALE)),
-                       int(math.ceil(rect.height() * PNG_SCALE)), QImage.Format.Format_ARGB32)
+        dpi = int(png_dpi) if png_dpi and png_dpi > 0 else int(round(72 * PNG_SCALE))
+        scale = max(1.0, float(dpi) / 72.0)
+        image = QImage(int(math.ceil(rect.width() * scale)),
+                       int(math.ceil(rect.height() * scale)), QImage.Format.Format_ARGB32)
         image.fill(QColor(255, 255, 255))
-        image.setDotsPerMeterX(int(72 * PNG_SCALE / 0.0254))
-        image.setDotsPerMeterY(int(72 * PNG_SCALE / 0.0254))
+        image.setDotsPerMeterX(int(dpi / 0.0254))
+        image.setDotsPerMeterY(int(dpi / 0.0254))
         painter = QPainter(image)
         try:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
@@ -782,49 +845,79 @@ def _fish_files(folder: Path) -> set[str] | None:
 
 
 class _Section(QWidget):
-    """Collapsible group for the options panel (heading ▸/▾ and an optional "?")."""
+    """Collapsible Display section (MSA Tracks font; arrow left, ? right-aligned)."""
 
     def __init__(self, title: str, parent: QWidget, *, help_text: str = "",
                  key: str = "", expanded: bool = False) -> None:
         super().__init__(parent)
-        self._key = key       # sections always start folded; opening one lasts for this view
-        self.toggle = QToolButton(self)
-        self.toggle.setText(title)
-        self.toggle.setCheckable(True)
-        self.toggle.setChecked(expanded)
-        self.toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        self.toggle.setAutoRaise(True)
-        self.toggle.setStyleSheet("QToolButton { border: none; background: transparent; "
-                                  "padding: 2px 0px; }")
-        f = self.toggle.font()
-        f.setBold(True)
-        self.toggle.setFont(f)
-        self.toggle.toggled.connect(self._on_toggled)
-        head = QHBoxLayout()
-        head.setContentsMargins(0, 0, 0, 0)
-        head.setSpacing(4)
-        head.addWidget(self.toggle)
+        self._key = key
+        self._title_text = title
+        self._expanded = bool(expanded)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(6)
+
+        self._header = QWidget(self)
+        self._header.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._header.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        head = QHBoxLayout(self._header)
+        head.setContentsMargins(0, 2, 0, 2)
+        head.setSpacing(6)
+
+        # Arrow left of title; "?" flush right when help is provided.
+        self._arrow = QLabel(self._header)
+        self._arrow.setFixedWidth(12)
+        self._arrow.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        )
+        self._title = QLabel(title, self._header)
+        # Same weight/size as MSA Display → Tracks (_section_label).
+        title_font = self._title.font()
+        title_font.setBold(True)
+        self._title.setFont(title_font)
+        self._title.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred
+        )
+        arrow_font = self._arrow.font()
+        arrow_font.setPointSizeF(max(6.0, title_font.pointSizeF() * 0.75))
+        self._arrow.setFont(arrow_font)
+        head.addWidget(self._arrow, 0)
+        head.addWidget(self._title, 0)
         head.addStretch(1)
         if help_text:
-            head.addWidget(make_help_button(parent, title, help_text))
+            help_btn = make_help_button(self._header, title, help_text)
+            help_btn.setCursor(Qt.CursorShape.ArrowCursor)
+            head.addWidget(help_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._header.mousePressEvent = self._on_header_pressed  # type: ignore[method-assign]
+        root.addWidget(self._header)
+
+        # Compatibility for older tests that looked for a checkable toggle.
+        self.toggle = self._title
+
         self.labels: list[QLabel] = []
         self.body = QWidget(self)
         self.form = QFormLayout(self.body)
-        self.form.setContentsMargins(12, 1, 0, 5)
+        self.form.setContentsMargins(0, 0, 0, 4)
         self.form.setHorizontalSpacing(6)
-        self.form.setVerticalSpacing(3)
+        self.form.setVerticalSpacing(4)
         self.form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         self.form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(0)
-        lay.addLayout(head)
-        lay.addWidget(self.body)
-        self._on_toggled(expanded, save=False)
+        root.addWidget(self.body)
+        self.set_expanded(self._expanded)
 
-    def _on_toggled(self, on: bool, *, save: bool = True) -> None:
-        self.toggle.setArrowType(Qt.ArrowType.DownArrow if on else Qt.ArrowType.RightArrow)
-        self.body.setVisible(on)
+    def is_expanded(self) -> bool:
+        return bool(self._expanded)
+
+    def set_expanded(self, expanded: bool) -> None:
+        self._expanded = bool(expanded)
+        self.body.setVisible(self._expanded)
+        self._arrow.setText("▼" if self._expanded else "▶")
+
+    def _on_header_pressed(self, event) -> None:  # noqa: ANN001
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.set_expanded(not self._expanded)
+        event.accept()
 
     def add(self, label: str, widget: QWidget) -> None:
         text = QLabel(label, self.body)
@@ -844,24 +937,48 @@ def _pair(parent: QWidget, *widgets: QWidget) -> QWidget:
     return row
 
 
+def _slider_value_row(
+    parent: QWidget, slider: QWidget, value: QLabel, *, value_width: int = 44
+) -> QWidget:
+    """Slider fills the row; value label stays fixed on the right (aligned lengths)."""
+    row = QWidget(parent)
+    lay = QHBoxLayout(row)
+    lay.setContentsMargins(0, 0, 0, 0)
+    lay.setSpacing(6)
+    slider.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+    value.setFixedWidth(value_width)
+    value.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+    value.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+    lay.addWidget(slider, 1)
+    lay.addWidget(value, 0)
+    return row
+
+
 class TreeCanvas(QGraphicsView):
-    """Zoom with the wheel or trackpad, drag to pan, double-click empty space to fit, a tip to see its sequence.
+    """Shift+scroll to zoom, scroll to pan, left-drag to select tips, middle/Alt-drag to pan.
 
     Clicking a branch, tip or collapsed clade reports its display node index."""
 
     nodeClicked = Signal(int)                 # -1 = empty space
     nodeContextMenu = Signal(int, object)     # index (-1 = empty), global QPoint
     nodeDoubleClicked = Signal(int)           # -1 = empty space
+    zoomChanged = Signal()                    # after wheel / zoom_by / fit
+    rubberBandNodes = Signal(object)          # list[int] tip/collapsed indices in the band
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setScene(QGraphicsScene(self))
         self.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         self.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
-        self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+        # Left-drag = rubber-band tip select; pan with middle button or Alt+left-drag.
+        self.setDragMode(QGraphicsView.DragMode.NoDrag)
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
         self.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorViewCenter)
-        self._press = None
+        self._press: QPoint | None = None
+        self._rubber_origin: QPoint | None = None
+        self._rubber: QRubberBand | None = None
+        self._panning = False
+        self._pan_last: QPoint | None = None
 
     def node_at(self, view_pos) -> int:
         for item in self.items(view_pos):
@@ -870,10 +987,44 @@ class TreeCanvas(QGraphicsView):
                 return int(value)
         return -1
 
+    def tip_nodes_in_view_rect(self, view_rect: QRect) -> list[int]:
+        """Display indices of tip labels / trait dots intersecting ``view_rect``."""
+        if view_rect.isEmpty():
+            return []
+        scene_rect = self.mapToScene(view_rect).boundingRect()
+        found: list[int] = []
+        seen: set[int] = set()
+        for item in self.scene().items(
+            scene_rect, Qt.ItemSelectionMode.IntersectsItemShape
+        ):
+            if not isinstance(item, (QGraphicsSimpleTextItem, QGraphicsEllipseItem)):
+                continue
+            value = item.data(ROLE_NODE)
+            if value is None:
+                continue
+            idx = int(value)
+            if idx in seen:
+                continue
+            seen.add(idx)
+            found.append(idx)
+        return found
+
+    def current_scale(self) -> float:
+        return abs(float(self.transform().m11()))
+
     def zoom_by(self, factor: float) -> None:
         current = self.transform().m11()
         target = min(40.0, max(0.02, current * factor))
         self.scale(target / current, target / current)
+        self.zoomChanged.emit()
+
+    def set_scale(self, scale: float) -> None:
+        target = min(40.0, max(0.02, float(scale)))
+        current = self.current_scale()
+        if current <= 1e-12:
+            return
+        self.scale(target / current, target / current)
+        self.zoomChanged.emit()
 
     def fit(self, *, max_scale: float = 1.0) -> None:
         rect = self.scene().sceneRect()
@@ -886,31 +1037,106 @@ class TreeCanvas(QGraphicsView):
         s = min(view.width() / rect.width(), view.height() / rect.height(), max_scale)
         self.scale(s, s)
         self.centerOn(rect.center())
+        self.zoomChanged.emit()
 
     def wheelEvent(self, event) -> None:  # noqa: N802 (Qt API)
+        # Match MSA: Shift+scroll zooms; plain scroll pans the view.
+        mods = event.modifiers() | QGuiApplication.keyboardModifiers()
+        if not (mods & Qt.KeyboardModifier.ShiftModifier):
+            super().wheelEvent(event)
+            return
         pixel = event.pixelDelta()
         angle = event.angleDelta()
         if not pixel.isNull() and (pixel.y() != 0 or pixel.x() != 0):
             dy = float(pixel.y() if pixel.y() != 0 else pixel.x())
             factor = _TRACKPAD_ZOOM_BASE ** dy
-        elif angle.y() != 0:
-            factor = _ZOOM_STEP ** (angle.y() / 120.0)
+        elif angle.y() != 0 or angle.x() != 0:
+            delta = float(angle.y() if angle.y() != 0 else angle.x())
+            factor = _ZOOM_STEP ** (delta / 120.0)
         else:
             return
         self.zoom_by(factor)
         event.accept()
 
+    def _want_pan(self, event: QMouseEvent) -> bool:
+        if event.button() == Qt.MouseButton.MiddleButton:
+            return True
+        if event.button() != Qt.MouseButton.LeftButton:
+            return False
+        mods = event.modifiers() | QGuiApplication.keyboardModifiers()
+        return bool(mods & Qt.KeyboardModifier.AltModifier)
+
+    def _clear_rubber(self) -> None:
+        if self._rubber is not None:
+            self._rubber.hide()
+            self._rubber.deleteLater()
+            self._rubber = None
+        self._rubber_origin = None
+
     def mousePressEvent(self, event) -> None:  # noqa: N802 (Qt API)
-        self._press = event.position().toPoint()
+        if self._want_pan(event):
+            self._panning = True
+            self._pan_last = event.position().toPoint()
+            self._clear_rubber()
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            event.accept()
+            return
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._press = event.position().toPoint()
+            self._rubber_origin = self._press
+            event.accept()
+            return
         super().mousePressEvent(event)
 
-    def mouseReleaseEvent(self, event) -> None:  # noqa: N802 (Qt API)
-        super().mouseReleaseEvent(event)
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802 (Qt API)
         pos = event.position().toPoint()
-        if (event.button() == Qt.MouseButton.LeftButton and self._press is not None
-                and (pos - self._press).manhattanLength() < 4):
-            self.nodeClicked.emit(self.node_at(pos))
-        self._press = None
+        if self._panning and self._pan_last is not None:
+            delta = pos - self._pan_last
+            self._pan_last = pos
+            hbar = self.horizontalScrollBar()
+            vbar = self.verticalScrollBar()
+            hbar.setValue(hbar.value() - delta.x())
+            vbar.setValue(vbar.value() - delta.y())
+            event.accept()
+            return
+        if (
+            self._rubber_origin is not None
+            and event.buttons() & Qt.MouseButton.LeftButton
+        ):
+            if (pos - self._rubber_origin).manhattanLength() >= 4:
+                if self._rubber is None:
+                    self._rubber = QRubberBand(
+                        QRubberBand.Shape.Rectangle, self.viewport()
+                    )
+                self._rubber.setGeometry(QRect(self._rubber_origin, pos).normalized())
+                self._rubber.show()
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802 (Qt API)
+        pos = event.position().toPoint()
+        if event.button() in (Qt.MouseButton.MiddleButton, Qt.MouseButton.LeftButton) and self._panning:
+            self._panning = False
+            self._pan_last = None
+            self.unsetCursor()
+            event.accept()
+            return
+        if event.button() == Qt.MouseButton.LeftButton:
+            if self._rubber is not None and self._rubber.isVisible():
+                rect = self._rubber.geometry()
+                self._clear_rubber()
+                self.rubberBandNodes.emit(self.tip_nodes_in_view_rect(rect))
+            elif (
+                self._press is not None
+                and (pos - self._press).manhattanLength() < 4
+            ):
+                self.nodeClicked.emit(self.node_at(pos))
+            self._press = None
+            self._clear_rubber()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
     def contextMenuEvent(self, event) -> None:  # noqa: N802 (Qt API)
         self.nodeContextMenu.emit(self.node_at(event.pos()), event.globalPos())
@@ -973,41 +1199,79 @@ class TreePanel(QWidget):
                              ("Equal", tl.BRANCHES_EQUAL),
                              ("Square root", tl.BRANCHES_SQRT)):
             self._lengths_box.addItem(label, value)
-        self._spread_spin = NoWheelSpinBox(self)
-        self._spread_spin.setRange(SPREAD_MIN, SPREAD_MAX)
-        self._spread_spin.setSingleStep(25)
-        self._spread_spin.setSuffix(" %")
-        self._spread_spin.setFixedWidth(80)
+        self._spread_slider = NoWheelSlider(Qt.Orientation.Horizontal, self)
+        self._spread_slider.setObjectName("annotationZoomSlider")
+        self._spread_slider.setRange(SPREAD_MIN, SPREAD_MAX)
+        self._spread_slider.setSingleStep(25)
+        self._spread_slider.setPageStep(50)
+        self._spread_slider.setValue(100)
+        self._spread_slider.setMinimumWidth(72)
+        self._spread_slider.setFixedHeight(18)
+        self._spread_slider.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+        apply_annotation_zoom_slider_style(self._spread_slider)
+        self._spread_slider.setToolTip(
+            "Tree size relative to the font (circular: also opens the centre)."
+        )
+        self._spread_label = QLabel("100%", self)
+        self._spread_label.setMinimumWidth(40)
+        self._spread_label.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
         self._font_spin = NoWheelSpinBox(self)
         self._font_spin.setRange(5, 36)
         self._font_spin.setSuffix(" pt")
         self._font_spin.setFixedWidth(70)
-        fit_btn = QPushButton("Fit", self)
-        fit_btn.setToolTip("Show the whole tree (or double-click an empty part of the tree).")
-        fit_btn.clicked.connect(lambda: self._canvas.fit(max_scale=4.0))
-        # One Save menu for everything written from the viewer (names: rule 1).
-        self._save_btn = QPushButton("Save", self)
-        save_menu = QMenu(self._save_btn)
-        for label, ext in EXPORT_FORMATS:
-            act = save_menu.addAction(label, lambda checked=False, e=ext: self._export(e))
-            act.setToolTip("The figure as shown" + (" (300 dpi)" if ext == "png" else "") + ".")
-        save_menu.addSeparator()
-        save_menu.addAction("Tree (.treefile)", self._save_tree_as)
-        save_menu.addAction("Distance matrix (.tsv)", self._open_distances)
-        save_menu.addSeparator()
-        save_menu.addAction("Copy Newick", self._copy_newick)
-        save_menu.setToolTipsVisible(True)
-        self._save_btn.setMenu(save_menu)
-        self._save_btn.setToolTip("Save the figure, the tree or a distance matrix "
-                                  "(next to the tree, with the tree's name).")
+        self._fit_btn = QPushButton("Fit", self)
+        self._fit_btn.setToolTip("Show the whole tree (or double-click an empty part of the tree).")
+        self._fit_btn.setFixedWidth(ANNOTATION_FIT_BUTTON_RENDERED_WIDTH)
+        self._fit_btn.setFixedHeight(OVERVIEW_SELECT_FIT_HEIGHT)
+        self._fit_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self._fit_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._fit_btn.clicked.connect(self._on_fit_clicked)
+        # Export opens an MSA-style Type + File dialog (SVG / PDF / PNG).
+        self._save_btn = QPushButton("Export", self)
+        self._save_btn.setFixedHeight(OVERVIEW_SELECT_FIT_HEIGHT)
+        self._save_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self._save_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._save_btn.setToolTip(
+            "Export the tree figure (SVG, PDF or PNG) — choose type and file."
+        )
+        self._save_btn.clicked.connect(self._open_export_dialog)
 
+        # Edit lives on the Display rail (native chrome like MSA Delete/Save).
+        # Undo is Ctrl/Cmd+Z (and in the Edit menu) — no separate Undo button.
         self._edit_btn = QPushButton("Edit", self)
+        self._edit_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._edit_btn.setMinimumWidth(0)
+        self._edit_btn.setToolTip("Edit the selected tip or clade. Undo: Ctrl+Z / Cmd+Z.")
         self._edit_menu = QMenu(self._edit_btn)
         self._edit_menu.aboutToShow.connect(self._fill_edit_menu)
         self._edit_btn.setMenu(self._edit_menu)
-        self._undo_btn = QPushButton("Undo", self)
-        self._undo_btn.setToolTip("Undo the last edit (Cmd+Z / Ctrl+Z).")
-        self._undo_btn.clicked.connect(self.undo)
+
+        zoom_out = make_overview_zoom_button("−", self)
+        zoom_out.setToolTip("Zoom out (Shift+scroll)")
+        zoom_out.clicked.connect(lambda: self._nudge_zoom(-3))
+        zoom_in = make_overview_zoom_button("+", self)
+        zoom_in.setToolTip("Zoom in (Shift+scroll)")
+        zoom_in.clicked.connect(lambda: self._nudge_zoom(3))
+        self._zoom_out_btn = zoom_out
+        self._zoom_in_btn = zoom_in
+        self._zoom_slider = NoWheelSlider(Qt.Orientation.Horizontal, self)
+        self._zoom_slider.setObjectName("annotationZoomSlider")
+        self._zoom_slider.setRange(0, 100)
+        self._zoom_slider.setValue(0)
+        self._zoom_slider.setFixedWidth(ANNOTATION_ZOOM_SLIDER_WIDTH)
+        self._zoom_slider.setMinimumWidth(ANNOTATION_ZOOM_SLIDER_WIDTH)
+        self._zoom_slider.setFixedHeight(ZOOM_SLIDER_HEIGHT)
+        self._zoom_slider.setToolTip(
+            "Tree size: left = fit, right = zoom in. Drag, − / +, or Shift+scroll."
+        )
+        apply_annotation_zoom_slider_style(self._zoom_slider)
+        self._zoom_slider.valueChanged.connect(self._on_zoom_slider)
+        self._fit_scale = 1.0
+        self._zoom_block = False
         self._collapse_spin = NoWheelSpinBox(self)
         self._collapse_spin.setRange(0, 100)
         self._collapse_spin.setSpecialValueText("Off")
@@ -1025,11 +1289,21 @@ class TreePanel(QWidget):
         self._traits_btn.setMenu(traits_menu)
 
         # --- controls added with the options panel -----------------------------
-        self._angle_slider = QSlider(Qt.Orientation.Horizontal, self)
+        self._angle_slider = NoWheelSlider(Qt.Orientation.Horizontal, self)
+        self._angle_slider.setObjectName("annotationZoomSlider")
         self._angle_slider.setRange(0, 71)            # steps of 5°
         self._angle_slider.setPageStep(9)
+        self._angle_slider.setMinimumWidth(72)
+        self._angle_slider.setFixedHeight(18)
+        self._angle_slider.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+        apply_annotation_zoom_slider_style(self._angle_slider)
         self._angle_label = QLabel("0°", self)
-        self._angle_label.setMinimumWidth(30)
+        self._angle_label.setMinimumWidth(36)
+        self._angle_label.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
         self._flip_check = QCheckBox("Flip", self)
         self._flip_check.setToolTip("Mirror the tree left to right.")
         self._tiplabel_box = NoWheelComboBox(self)
@@ -1080,7 +1354,7 @@ class TreePanel(QWidget):
             combo.setMinimumContentsLength(4)
             combo.setMaximumWidth(16777215)
             combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        for spin in (self._spread_spin, self._maxchars_spin, self._font_spin, self._digits_spin,
+        for spin in (self._maxchars_spin, self._font_spin, self._digits_spin,
                      self._bfont_spin, self._lw_spin, self._collapse_spin, self._collapse_dist,
                      self._scale_len, self._sfont_spin):
             spin.setFixedWidth(64)
@@ -1088,107 +1362,114 @@ class TreePanel(QWidget):
         self._keep_box.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self._keep_box.setFixedWidth(64)
 
-        # --- top row: actions only ---------------------------------------------
-        self._options_btn = QPushButton(self)
-        self._options_btn.setCheckable(True)
-        self._options_btn.setToolTip("Show or hide the options panel.")
-        # All actions on the right, compact: Fit, Edit (+ its "?"), Undo, Save, Options.
-        for btn in (fit_btn, self._edit_btn, self._undo_btn, self._save_btn, self._options_btn):
-            btn.setStyleSheet(_TOP_BUTTON_STYLE)
-            btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        for btn in (self._edit_btn, self._save_btn):
-            btn.setProperty("menu", True)
-            btn.setStyleSheet(_TOP_BUTTON_STYLE)
+        # --- top row: − / + / slider · Fit · Export (MSA order)
+        self._status = QLabel(self)
+        self._status.setObjectName("TreeToolbarStatus")
+        self._status.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        self._status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self._status.setStyleSheet("color: palette(mid);")
+
         top = QHBoxLayout()
         top.setSpacing(6)
+        top.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+        top.addWidget(self._zoom_out_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+        top.addWidget(self._zoom_in_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+        top.addWidget(self._zoom_slider, 0, Qt.AlignmentFlag.AlignVCenter)
+        top.addWidget(self._fit_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+        top.addWidget(self._save_btn, 0, Qt.AlignmentFlag.AlignVCenter)
         top.addStretch(1)
-        top.addWidget(fit_btn)
-        top.addWidget(self._edit_btn)
-        top.addWidget(make_help_button(self, "Editing the tree", EDIT_HELP))
-        top.addWidget(self._undo_btn)
-        top.addWidget(self._save_btn)
-        top.addWidget(self._options_btn)
+        top.addWidget(self._status, 0, Qt.AlignmentFlag.AlignVCenter)
 
-        # --- options panel (right) ---------------------------------------------
+        # --- options panel (right) — MSA Display section + divider pattern -----
         panel = QWidget(self)
         pl = QVBoxLayout(panel)
-        pl.setContentsMargins(6, 6, 6, 6)
-        pl.setSpacing(2)
+        pl.setContentsMargins(10, 10, 10, 10)
+        pl.setSpacing(8)
+
+        def _add_section(sec: _Section) -> None:
+            if pl.count() > 0:
+                pl.addWidget(_h_divider(panel))
+            pl.addWidget(sec)
+
         sec = _Section("Layout", panel, help_text=DRAW_HELP, key="layout")
         sec.add("Layout", self._layout_box)
         sec.add("Order", self._order_box)
         sec.add("Branches", self._lengths_box)
-        sec.add("Spread", self._spread_spin)
-        sec.add("Angle", _pair(panel, self._angle_slider, self._angle_label))
+        # Same value-column width so Spread / Angle tracks end flush.
+        self._spread_row = _slider_value_row(
+            panel, self._spread_slider, self._spread_label, value_width=44
+        )
+        sec.add("Spread", self._spread_row)
+        self._angle_row = _slider_value_row(
+            panel, self._angle_slider, self._angle_label, value_width=44
+        )
+        sec.add("Angle", self._angle_row)
         sec.add("", self._flip_check)
-        pl.addWidget(sec)
+        self._layout_section = sec
+        _add_section(sec)
         sec = _Section("Tip names", panel, help_text=TIPS_HELP, key="tips")
         sec.add("", _pair(panel, self._tips_check, self._align_check))
         sec.add("Show", self._tiplabel_box)
         sec.add("Max", _pair(panel, self._maxchars_spin, self._keep_box))
         sec.add("Font", self._font_spin)
-        pl.addWidget(sec)
-        sec = _Section("Branch labels", panel, help_text=SUPPORT_HELP, key="branch_labels")
-        sec.add("Show", self._branch_box)
+        _add_section(sec)
+        sec = _Section("Branches", panel, help_text=SUPPORT_HELP, key="branches")
+        sec.add("Labels", self._branch_box)
         sec.add("Digits", self._digits_spin)
         sec.add("Font", self._bfont_spin)
         sec.add("", self._crowded_check)
-        pl.addWidget(sec)
-        sec = _Section("Branches", panel, key="branches")
         sec.add("Width", self._lw_spin)
-        pl.addWidget(sec)
+        _add_section(sec)
         sec = _Section("Collapse", panel, help_text=COLLAPSE_HELP, key="collapse")
         sec.add("Support", self._collapse_spin)
         sec.add("Distance", self._collapse_dist)
-        pl.addWidget(sec)
+        _add_section(sec)
         sec = _Section("Colour tips", panel, help_text=TRAITS_HELP, key="colour")
         sec.add("By", self._color_box)
         sec.add("", _pair(panel, self._traits_btn))
-        pl.addWidget(sec)
+        _add_section(sec)
         sec = _Section("Scale bar", panel, help_text=SCALE_HELP, key="scale")
         sec.add("", self._scale_check)
         sec.add("Length", self._scale_len)
         sec.add("Font", self._sfont_spin)
-        pl.addWidget(sec)
+        _add_section(sec)
         self._report_btn = QPushButton("Open run report", self)
         self._report_btn.setToolTip("The tree run's report (in its _details folder).")
         self._report_btn.clicked.connect(self._open_report)
         sec = _Section("Statistics", panel, key="stats")
         sec.form.addRow(self._stats_label)
         sec.form.addRow(_pair(panel, self._report_btn))
-        pl.addWidget(sec)
+        _add_section(sec)
         pl.addStretch(1)
         # one label column for all sections, so every field starts at the same x
         labels = [lab for sec in panel.findChildren(_Section) for lab in sec.labels]
         width = max((lab.sizeHint().width() for lab in labels), default=0)
         for lab in labels:
             lab.setFixedWidth(width)
-        self._options_panel = QScrollArea(self)
-        self._options_panel.setWidget(panel)
-        self._options_panel.setWidgetResizable(True)
-        self._options_panel.setFrameShape(QScrollArea.Shape.NoFrame)
-        self._options_panel.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._options_panel.setFixedWidth(PANEL_WIDTH)
-        # One surface: the panel shows the window's own background.
-        panel.setAutoFillBackground(False)
-        self._options_panel.viewport().setAutoFillBackground(False)
-        # Same colour as the Preview header bar (theme: palette(midlight)).
-        self._options_panel.setObjectName("TreeOptionsPanel")
-        self._options_panel.setStyleSheet(
-            "QScrollArea#TreeOptionsPanel { background: palette(midlight); border: none;"
-            " border-left: 1px solid palette(mid); }"
-            "QScrollArea#TreeOptionsPanel > QWidget > QWidget { background: transparent; }")
-        # Smaller controls, as in dense macOS tool panels.
-        small = QFont(panel.font())
-        small.setPointSizeF(max(9.0, small.pointSizeF() - 1.0))
-        panel.setFont(small)
-        for w in panel.findChildren(QWidget):
-            w.setAttribute(Qt.WidgetAttribute.WA_MacSmallSize, True)
-        self._options_panel.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
-        show_panel = str(QSettings().value("tree_view/options_panel", True)).lower() in ("1", "true")
-        self._options_btn.toggled.connect(self._show_options_panel)
-        self._options_btn.setChecked(show_panel)
-        self._show_options_panel(show_panel, save=False)
+        # Keep section titles at MSA Tracks size (do not shrink with MacSmallSize).
+        for sec in panel.findChildren(_Section):
+            sec._title.setAttribute(Qt.WidgetAttribute.WA_MacSmallSize, False)
+
+        # Edit footer (MSA Annotation Delete/Save button chrome; Undo = Ctrl/Cmd+Z).
+        edit_footer = QWidget(self)
+        edit_footer.setObjectName("treeDisplayFooter")
+        efl = QVBoxLayout(edit_footer)
+        efl.setContentsMargins(10, 8, 10, 10)
+        efl.setSpacing(8)
+        efl.addWidget(_h_divider(edit_footer))
+        edit_row = QHBoxLayout()
+        edit_row.setContentsMargins(0, 0, 0, 0)
+        edit_row.setSpacing(8)
+        edit_help = make_help_button(edit_footer, "Editing the tree", EDIT_HELP)
+        edit_row.addWidget(self._edit_btn, 1)
+        edit_row.addWidget(edit_help, 0)
+        efl.addLayout(edit_row)
+
+        # MSA-style right rail: Window surface + Display tab + section dividers.
+        self._rail = TreeDisplayRail(panel, self, footer=edit_footer)
+        self._options_panel = self._rail.options_scroll()
 
         self._canvas = TreeCanvas(self)
         # No box and no own background: the tree sits on whatever the Preview
@@ -1200,34 +1481,33 @@ class TreePanel(QWidget):
         self._canvas.nodeClicked.connect(self._on_node_clicked)
         self._canvas.nodeContextMenu.connect(self._on_context_menu)
         self._canvas.nodeDoubleClicked.connect(self._on_node_double_clicked)
+        self._canvas.rubberBandNodes.connect(self._on_rubber_band_nodes)
+        self._canvas.zoomChanged.connect(self._sync_zoom_slider_from_canvas)
         self._aln_window = None
-        self._status = QLabel(self)
-        self._status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
 
-        # Button row: a full-width strip in the Preview header colour, line below.
+        # Toolbar only over the tree column — Display rail is full height (MSA-like).
+        # Status (tips / nodes / support legend) sits on the right, like MSA sequence count.
         toolbar = QWidget(self)
         toolbar.setObjectName("TreeToolbar")
         toolbar.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        toolbar.setFixedHeight(OVERVIEW_TOOLBAR_HEIGHT)
         toolbar.setStyleSheet("QWidget#TreeToolbar { background: palette(midlight);"
                               " border: none; border-bottom: 1px solid palette(mid); }")
-        top.setContentsMargins(8, 4, 8, 4)
+        top.setContentsMargins(6, 2, 8, 2)
         toolbar.setLayout(top)
-        # Status line under the tree only, so the options panel reaches the bottom.
-        self._status.setContentsMargins(8, 2, 8, 2)
         left = QVBoxLayout()
         left.setContentsMargins(0, 0, 0, 0)
         left.setSpacing(0)
+        left.addWidget(toolbar, 0)
         left.addWidget(self._canvas, stretch=1)
-        left.addWidget(self._status)
         middle = QHBoxLayout()
         middle.setContentsMargins(0, 0, 0, 0)
         middle.setSpacing(0)
         middle.addLayout(left, stretch=1)
-        middle.addWidget(self._options_panel)
+        middle.addWidget(self._rail, stretch=0)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        layout.addWidget(toolbar)
         layout.addLayout(middle, stretch=1)
 
         self._apply_options_to_controls()
@@ -1237,11 +1517,11 @@ class TreePanel(QWidget):
         for check in (self._tips_check, self._scale_check, self._align_check,
                       self._crowded_check, self._flip_check):
             check.toggled.connect(self._on_controls_changed)
-        for spin in (self._font_spin, self._spread_spin, self._maxchars_spin, self._digits_spin,
+        for spin in (self._font_spin, self._maxchars_spin, self._digits_spin,
                      self._bfont_spin, self._lw_spin, self._scale_len, self._sfont_spin):
             spin.valueChanged.connect(self._on_controls_changed)
+        self._spread_slider.valueChanged.connect(self._on_controls_changed)
         self._angle_slider.valueChanged.connect(self._on_controls_changed)
-        self._update_undo_button()
 
         if path is not None:
             self.load_tree(path)
@@ -1283,7 +1563,9 @@ class TreePanel(QWidget):
             self._align_check.setChecked(self._opts.align_labels)
             self._crowded_check.setChecked(self._opts.hide_crowded)
             self._font_spin.setValue(self._opts.font_pt)
-            self._spread_spin.setValue(int(spread_factor(self._opts) * 100))
+            spread_pct = int(spread_factor(self._opts) * 100)
+            self._spread_slider.setValue(spread_pct)
+            self._spread_label.setText(f"{spread_pct}%")
             angle = int(self._opts.root_angle) % 360
             self._angle_slider.setValue(angle // 5)
             self._angle_label.setText(f"{angle}°")
@@ -1321,11 +1603,16 @@ class TreePanel(QWidget):
         self._scale_check.setEnabled(proportional)
         for w in (self._scale_len, self._sfont_spin):
             w.setEnabled(proportional and self._scale_check.isChecked())
+        # Angle turns circular / radial trees; keep the row visible for all layouts.
         rect = kind == tl.LAYOUT_RECTANGULAR
+        self._layout_section.form.setRowVisible(self._angle_row, True)
         self._angle_slider.setEnabled(not rect)
         self._angle_label.setEnabled(not rect)
-        self._angle_slider.setToolTip("Rectangular trees have no angle." if rect else
-                                      "Turn the tree (steps of 5°).")
+        self._angle_slider.setToolTip(
+            "Rectangular trees have no angle — switch Layout to Circular or Radial."
+            if rect
+            else "Turn the tree (steps of 5°)."
+        )
 
     def _fill_tiplabel_box(self) -> None:
         """Name, and name + / only each trait-table column (when there is a table)."""
@@ -1349,11 +1636,48 @@ class TreePanel(QWidget):
             self._block = was
 
     def _show_options_panel(self, on: bool, *, save: bool = True) -> None:
-        self._options_panel.setVisible(on)
-        self._options_btn.setText("Options ▸" if on else "◂ Options")
-        self._options_btn.setChecked(on)
-        if save:
-            QSettings().setValue("tree_view/options_panel", bool(on))
+        """Show or collapse the Display rail (keeps the vertical Display tab)."""
+        self._rail.set_panel_collapsed(not bool(on), persist=save)
+
+    def _on_fit_clicked(self) -> None:
+        self._canvas.fit(max_scale=4.0)
+        self._fit_scale = max(1e-6, self._canvas.current_scale())
+        self._set_zoom_slider_value(0)
+
+    def _nudge_zoom(self, delta: int) -> None:
+        self._zoom_slider.setValue(
+            max(0, min(100, int(self._zoom_slider.value()) + int(delta)))
+        )
+
+    def _set_zoom_slider_value(self, value: int) -> None:
+        self._zoom_block = True
+        try:
+            self._zoom_slider.setValue(max(0, min(100, int(value))))
+        finally:
+            self._zoom_block = False
+
+    def _on_zoom_slider(self, value: int) -> None:
+        if self._zoom_block:
+            return
+        base = self._fit_scale if self._fit_scale > 1e-9 else 1.0
+        # 0 → fit scale; 100 → 16× fit (comfortable for tip labels).
+        target = base * (16.0 ** (max(0, min(100, int(value))) / 100.0))
+        self._zoom_block = True
+        try:
+            self._canvas.set_scale(target)
+        finally:
+            self._zoom_block = False
+
+    def _sync_zoom_slider_from_canvas(self) -> None:
+        if self._zoom_block:
+            return
+        base = self._fit_scale if self._fit_scale > 1e-9 else self._canvas.current_scale()
+        if base <= 1e-12:
+            return
+        ratio = max(1e-12, self._canvas.current_scale() / base)
+        # Invert scale = base * 16^(v/100)
+        value = int(round(100.0 * math.log(ratio) / math.log(16.0)))
+        self._set_zoom_slider_value(value)
 
     def set_options(self, opts: TreeViewOptions) -> None:
         self._opts = replace(opts)
@@ -1365,6 +1689,8 @@ class TreePanel(QWidget):
             return
         global _last_options
         old = self._opts
+        spread_pct = int(self._spread_slider.value())
+        self._spread_label.setText(f"{spread_pct}%")
         self._angle_label.setText(f"{self._angle_slider.value() * 5}°")
         self._opts = replace(
             old,
@@ -1376,7 +1702,7 @@ class TreePanel(QWidget):
             scale_bar=self._scale_check.isChecked(),
             align_labels=self._align_check.isChecked(),
             branch_lengths=str(self._lengths_box.currentData()),
-            spread=self._spread_spin.value(),
+            spread=spread_pct,
             hide_crowded=self._crowded_check.isChecked(),
             root_angle=self._angle_slider.value() * 5,
             flip=self._flip_check.isChecked(),
@@ -1394,7 +1720,8 @@ class TreePanel(QWidget):
         refit = (self._opts.layout != old.layout or self._opts.spread != old.spread
                  or self._opts.branch_lengths != old.branch_lengths
                  or self._opts.align_labels != old.align_labels
-                 or self._opts.flip != old.flip or self._opts.max_chars != old.max_chars)
+                 or self._opts.flip != old.flip or self._opts.max_chars != old.max_chars
+                 or self._opts.root_angle != old.root_angle)
         self._redraw(refit=refit)
         self._save_view_state()
 
@@ -1424,7 +1751,6 @@ class TreePanel(QWidget):
             self._file_model = self._model = self._display = None
             self._canvas.scene().clear()
             self._status.setText(f"Could not read {self._path.name}: {exc}")
-            self._update_undo_button()
             return False
         self._model = self._file_model
         self._load_view_state()
@@ -1432,7 +1758,6 @@ class TreePanel(QWidget):
         if not self._model.has_support and self._opts.branch_labels == BRANCH_LABELS_SUPPORT:
             self._opts = replace(self._opts, branch_labels=BRANCH_LABELS_NONE)
         self._apply_options_to_controls()
-        self._update_undo_button()
         self._redraw(refit=True)
         return True
 
@@ -1510,6 +1835,8 @@ class TreePanel(QWidget):
                          selected=self._selected)
         if refit:
             self._canvas.fit(max_scale=1.0)
+            self._fit_scale = max(1e-6, self._canvas.current_scale())
+            self._set_zoom_slider_value(0)
         self._update_status()
 
     def _update_status(self, message: str = "") -> None:
@@ -1527,9 +1854,19 @@ class TreePanel(QWidget):
         self._report_btn.setEnabled(self.report_path() is not None)
         if not m.has_lengths:
             parts.append("no branch lengths in the file")
+        support_tip = ""
         if m.has_support and self._opts.branch_labels == BRANCH_LABELS_SUPPORT:
             if any("/" in n.support for n in m.nodes):
                 parts.append("support: SH-aLRT/UFBoot")
+                support_tip = (
+                    "Branch labels are SH-aLRT / UFBoot (e.g. 92/97).\n"
+                    "Well supported at SH-aLRT ≥ 80 and UFBoot ≥ 95."
+                )
+            else:
+                support_tip = (
+                    "Branch labels are support values from the tree file.\n"
+                    "FastME bootstrap: trust ≥ 70. FastTree local support: 0–1, near 1 is strong."
+                )
         if d.n_contracted:
             parts.append(f"{d.n_contracted} weak branches collapsed")
         if self._state.subtree:
@@ -1541,11 +1878,14 @@ class TreePanel(QWidget):
         if message:
             parts.append(message)
         self._status.setText(" · ".join(parts))
+        self._status.setToolTip(support_tip)
 
     def showEvent(self, event) -> None:  # noqa: N802 (Qt API)
         super().showEvent(event)
         if self._model is not None:
             self._canvas.fit(max_scale=1.0)
+            self._fit_scale = max(1e-6, self._canvas.current_scale())
+            self._set_zoom_slider_value(0)
 
     # ------------------------------------------------------------ selection and menus
 
@@ -1557,6 +1897,25 @@ class TreePanel(QWidget):
     def _on_node_clicked(self, index: int) -> None:
         key = self._key_for(index)
         self._selected = None if key == self._selected else key
+        self._redraw(refit=False)
+
+    def _on_rubber_band_nodes(self, indices) -> None:
+        """Left-drag rectangle: select every tip (or collapsed clade) whose label is hit."""
+        d = self._display
+        if d is None:
+            return
+        names: set[str] = set()
+        for raw in indices or ():
+            try:
+                i = int(raw)
+            except (TypeError, ValueError):
+                continue
+            if i < 0 or i >= len(d.keys):
+                continue
+            node = d.model.nodes[i]
+            if node.is_tip or i in d.info:
+                names.update(d.keys[i])
+        self._selected = tuple(sorted(names)) if names else None
         self._redraw(refit=False)
 
     def _tip_at(self, index: int) -> str | None:
@@ -1728,29 +2087,55 @@ class TreePanel(QWidget):
         act = menu.addAction("Redo", self.redo)
         act.setEnabled(bool(self._redo))
         menu.addAction("Save tree (.treefile)", self._save_tree_as)
+        menu.addAction("Distance matrix…", self._open_distances)
+        menu.addAction("Copy Newick", self._copy_newick)
 
     def _fill_edit_menu(self) -> None:
         menu = self._edit_menu
         menu.clear()
         if self._selected:
-            title = menu.addAction(f"Selected clade ({len(self._selected)} tips)")
+            d = self._display
+            is_clade = d is not None and self._selected in d.keys
+            label = (
+                f"Selected clade ({len(self._selected)} tips)"
+                if is_clade
+                else f"Selected tips ({len(self._selected)})"
+            )
+            title = menu.addAction(label)
             title.setEnabled(False)
             self._add_clade_actions(menu, self._selected)
         else:
-            hint = menu.addAction("Click a branch to select it")
+            hint = menu.addAction("Click a branch, or drag over tip names")
             hint.setEnabled(False)
         menu.addSeparator()
         self._add_tree_actions(menu)
+
+    def _click_in_selection(self, key: tuple[str, ...] | None) -> bool:
+        """True when ``key`` is already covered by the current multi/clade selection."""
+        if not key or not self._selected:
+            return False
+        if key == self._selected:
+            return True
+        # Tip or collapsed clade inside a rubber-band / clade selection.
+        return all(name in self._selected for name in key)
+
+    def _select_for_context_menu(self, index: int) -> tuple[str, ...] | None:
+        """Update selection for a right-click; keep multi-select when clicking inside it."""
+        key = self._key_for(index)
+        if key is None:
+            return self._selected
+        if not self._click_in_selection(key):
+            self._selected = key
+            self._redraw(refit=False)
+        return self._selected
 
     def _on_context_menu(self, index: int, global_pos) -> None:
         if self._model is None:
             return
         menu = QMenu(self)
-        key = self._key_for(index)
-        if key is not None:
-            self._selected = key
-            self._redraw(refit=False)
-            self._add_clade_actions(menu, key)
+        selected = self._select_for_context_menu(index)
+        if selected is not None:
+            self._add_clade_actions(menu, selected)
             menu.addSeparator()
         self._add_tree_actions(menu)
         menu.exec(global_pos)
@@ -1763,13 +2148,8 @@ class TreePanel(QWidget):
             self._undo.append((self._model, self._state.copy(), replace(self._opts)))
             del self._undo[:-50]
         self._redo.clear()
-        self._update_undo_button()
-
-    def _update_undo_button(self) -> None:
-        self._undo_btn.setEnabled(bool(self._undo))
 
     def _after_edit(self, message: str = "", *, refit: bool = False) -> None:
-        self._update_undo_button()
         self._redraw(refit=refit)
         if message:
             self._update_status(message)
@@ -2223,24 +2603,48 @@ class TreePanel(QWidget):
 
     # ------------------------------------------------------------ export
 
-    def _export(self, ext: str) -> None:
+    def _open_export_dialog(self) -> None:
+        """MSA-style Export window: choose Type (SVG/PDF/PNG) and File."""
         if self._display is None or self._path is None:
-            QMessageBox.information(self, "Save figure", "There is no tree to save.")
+            QMessageBox.information(self, "Export", "There is no tree to export.")
             return
-        default = export_default_path(self._path, self._opts.layout, ext)
-        label = dict((e, lab) for lab, e in EXPORT_FORMATS)[ext]
-        chosen, _ = QFileDialog.getSaveFileName(
-            self, f"Save figure as {label}", str(default), f"{label} (*.{ext})"
+        from repeatviewer.views.export_tree_dialog import ExportTreeDialog
+
+        dialog = ExportTreeDialog(
+            source_path=self._path,
+            layout_tag=str(self._opts.layout or "tree"),
+            default_format="svg",
+            parent=self.window() if self.window() is not None else self,
         )
-        if not chosen:
+        if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-        out = Path(chosen)
-        if out.suffix.lower() != f".{ext}":
-            out = out.with_name(out.name + f".{ext}")
+        out = dialog.chosen_path()
+        if out is None:
+            return
+        try:
+            export_tree(
+                self._display,
+                self._opts,
+                out,
+                title=self._path.name,
+                png_dpi=dialog.dpi(),
+            )
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "Export", f"Could not write {out.name}:\n{exc}")
+            return
+        self._update_status(f"exported {out.name}")
+        self.fileWritten.emit(out)
+
+    def _export(self, ext: str) -> None:
+        """Legacy helper used by tests: write a figure next to the tree."""
+        if self._display is None or self._path is None:
+            QMessageBox.information(self, "Export", "There is no tree to export.")
+            return
+        out = export_default_path(self._path, self._opts.layout, ext)
         try:
             export_tree(self._display, self._opts, out, title=self._path.name)
         except Exception as exc:  # noqa: BLE001
-            QMessageBox.warning(self, "Save figure", f"Could not write {out.name}:\n{exc}")
+            QMessageBox.warning(self, "Export", f"Could not write {out.name}:\n{exc}")
             return
-        self._update_status(f"saved {out.name}")
+        self._update_status(f"exported {out.name}")
         self.fileWritten.emit(out)

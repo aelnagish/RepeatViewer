@@ -7542,8 +7542,7 @@ class MainWindow(NcbiDownloadActionsMixin, PrimerActionsMixin, QMainWindow):
                 lambda: self._open_ncbi_download_dialog(),
                 tooltip=(
                     "Click: search NCBI and download.\n"
-                    "Right-click: action chosen in the Options tab "
-                    "(default: open this window)."
+                    "Right-click: download clipboard accessions with saved settings."
                 ),
                 right_click_slot=self._quick_ncbi_download_right_click,
             )

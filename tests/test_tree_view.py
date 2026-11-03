@@ -132,6 +132,81 @@ def test_clicking_a_branch_selects_its_clade(qapp, tree_file):
     assert panel._selected is None
 
 
+def test_rubber_band_selects_multiple_tips(qapp, tree_file):
+    from PySide6.QtCore import QRect
+    from PySide6.QtWidgets import QGraphicsSimpleTextItem
+
+    panel = _panel(qapp, tree_file)
+    canvas = panel.canvas()
+    canvas.resize(800, 600)
+    canvas.fit(max_scale=1.0)
+    labels = {
+        i.text(): i
+        for i in panel.scene().items()
+        if isinstance(i, QGraphicsSimpleTextItem) and i.text() in {"A", "B", "C", "D"}
+    }
+    assert "A" in labels and "B" in labels
+    # Scene rect covering tip labels A and B.
+    ra = labels["A"].sceneBoundingRect()
+    rb = labels["B"].sceneBoundingRect()
+    scene_box = ra.united(rb).adjusted(-4, -4, 4, 4)
+    view_poly = canvas.mapFromScene(scene_box)
+    view_rect = view_poly.boundingRect()
+    indices = canvas.tip_nodes_in_view_rect(QRect(view_rect))
+    panel._on_rubber_band_nodes(indices)
+    assert panel._selected is not None
+    assert "A" in panel._selected and "B" in panel._selected
+    assert len(panel._selected) >= 2
+
+
+def test_right_click_keeps_multi_tip_selection(qapp, tree_file):
+    panel = _panel(qapp, tree_file)
+    panel._selected = ("A", "B", "D")
+    tip_a = next(
+        i for i, n in enumerate(panel.display().model.nodes) if n.name == "A"
+    )
+    tip_c = next(
+        i for i, n in enumerate(panel.display().model.nodes) if n.name == "C"
+    )
+    # Right-click tip A (already in the selection) must not shrink it.
+    assert panel._select_for_context_menu(tip_a) == ("A", "B", "D")
+    assert panel._selected == ("A", "B", "D")
+    # Right-click a tip outside the selection replaces it.
+    assert panel._select_for_context_menu(tip_c) == ("C",)
+    assert panel._selected == ("C",)
+
+
+def test_multi_tip_selection_highlights_internal_branches(qapp, tree_file):
+    """Spanning subtree between selected tips is blue — not only tip stubs."""
+    from repeatviewer.widgets.tree_view import selection_branch_nodes
+
+    panel = _panel(qapp, tree_file)
+    d = panel.display()
+    # Two tips that share an internal parent (not the whole tree).
+    tips = [n.name for n in d.model.nodes if n.is_tip]
+    assert len(tips) >= 3
+    selected = tuple(sorted(tips[:2]))
+    highlighted = selection_branch_nodes(d, selected)
+    tip_idxs = {
+        i for i, n in enumerate(d.model.nodes) if n.is_tip and n.name in selected
+    }
+    assert tip_idxs <= highlighted
+    # At least one internal node on the path between them is included.
+    internal = {i for i in highlighted if not d.model.nodes[i].is_tip}
+    assert internal, "expected internal branches between the two tips"
+    # Path above the LCA of the two tips is not highlighted.
+    n_sel = len(selected)
+    counts = [sum(1 for t in d.keys[i] if t in selected) for i in range(len(d.model.nodes))]
+    above_lca = {
+        i
+        for i, n in enumerate(d.model.nodes)
+        if counts[i] == n_sel
+        and not n.is_tip
+        and any(counts[c] == n_sel for c in n.children)
+    }
+    assert highlighted.isdisjoint(above_lca)
+
+
 def test_reroot_midpoint_and_undo(qapp, tree_file):
     panel = _panel(qapp, tree_file)
     before = te.to_newick(panel.model())
@@ -455,7 +530,7 @@ def test_new_drawing_options_are_remembered(qapp, tree_file):
     panel = TreePanel(tree_file)
     panel._align_check.setChecked(True)
     panel._lengths_box.setCurrentIndex(panel._lengths_box.findData(tl.BRANCHES_SQRT))
-    panel._spread_spin.setValue(200)
+    panel._spread_slider.setValue(200)
     again = TreePanel(tree_file)
     o = again.options()
     assert o.align_labels and o.branch_lengths == tl.BRANCHES_SQRT and o.spread == 200
@@ -522,20 +597,25 @@ def test_collapse_by_distance_and_expand(qapp, tmp_path):
 
 def test_copy_newick_and_options_panel(qapp, tree_file):
     from PySide6.QtWidgets import QApplication
-    from repeatviewer.widgets.tree_view import TreePanel
+    from repeatviewer.widgets.tree_view import TreePanel, _Section
 
     panel = TreePanel(tree_file)
     panel._copy_newick()
     text = QApplication.clipboard().text()
     assert text.startswith("(") and text.rstrip().endswith(";") and "A" in text
     panel.show()
-    panel._options_btn.setChecked(False)
-    assert not panel._options_panel.isVisible()
-    panel._options_btn.setChecked(True)
-    assert panel._options_panel.isVisible()
-    from PySide6.QtWidgets import QToolButton
-    toggles = [b for b in panel._options_panel.widget().findChildren(QToolButton) if b.isCheckable()]
-    assert [b.text() for b in toggles[:3]] == ["Layout", "Tip names", "Branch labels"]
-    assert not any(b.isChecked() for b in toggles)      # every section starts folded
-    toggles[0].setChecked(True)
+    assert panel._save_btn.text() == "Export"
+    assert panel._edit_btn.parent() is not None
+    assert not hasattr(panel, "_tip_count_label")
+    # Display rail: collapse / expand.
+    panel._show_options_panel(False, save=False)
+    assert panel._rail.is_panel_collapsed()
+    assert not panel._options_panel.isVisibleTo(panel)
+    panel._show_options_panel(True, save=False)
+    assert not panel._rail.is_panel_collapsed()
+    assert panel._options_panel.isVisibleTo(panel)
+    sections = panel._options_panel.widget().findChildren(_Section)
+    assert [s._title_text for s in sections[:3]] == ["Layout", "Tip names", "Branches"]
+    assert not any(s.is_expanded() for s in sections)  # every section starts folded
+    sections[0].set_expanded(True)
     assert panel._layout_box.isVisible()

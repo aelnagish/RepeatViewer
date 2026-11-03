@@ -224,10 +224,33 @@ def test_extract_assembly_zip(tmp_path):
 
 
 def test_dialog_ticks_names_and_options(qapp, tmp_path):
-    from repeatviewer.job_options import NcbiDownloadOptions
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QGroupBox
+
+    from repeatviewer.job_options import (
+        DIALOG_TAB_OPTIONS,
+        NCBI_RIGHT_CLICK_CLIPBOARD,
+        NcbiDownloadOptions,
+    )
     from repeatviewer.views.ncbi_download_dialog import NcbiDownloadDialog, missing_accessions
 
     dlg = NcbiDownloadDialog(initial=NcbiDownloadOptions(), folder=tmp_path)
+    labels = [dlg._db_combo.itemText(i) for i in range(dlg._db_combo.count())]
+    assert "Genome Assembly" in labels
+    assert "..." not in "".join(labels)
+    assert dlg._db_combo.view().textElideMode() == Qt.TextElideMode.ElideNone
+    # Options: no right-click chooser; window shrinks to content.
+    search_h = dlg.height()
+    dlg._tab_bar.setCurrentIndex(dlg._TAB_OPTIONS)
+    qapp.processEvents()
+    assert dlg.height() < search_h
+    assert not any(
+        "Right-click" in (g.title() or "")
+        for g in dlg._options_page.findChildren(QGroupBox)
+    )
+    assert dlg.options().right_click_action == NCBI_RIGHT_CLICK_CLIPBOARD
+    assert dlg.current_dialog_tab() == DIALOG_TAB_OPTIONS
+    dlg._tab_bar.setCurrentIndex(dlg._TAB_SEARCH)
     dlg._search_edit.setText("CroSat")
     dlg.add_records([_rec("MG815809.1", uid="1", length=84), _rec("MG815808.1", uid="2")])
     assert dlg._table.rowCount() == 2

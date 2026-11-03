@@ -118,11 +118,6 @@ ACCOUNT_HELP = (
     "large downloads faster. Create one for free under <b>Account settings</b> on "
     "ncbi.nlm.nih.gov."
 )
-RIGHT_CLICK_HELP = (
-    "Copy accessions from a paper or a table, then right-click the toolbar button. "
-    "They are downloaded with the saved format into the folder open in the Files panel."
-)
-
 _COLUMNS = {
     nd.DB_NUCLEOTIDE: ("", "Accession", "Description", "Organism", "Length (bp)", "Type", "Updated"),
     nd.DB_PROTEIN: ("", "Accession", "Description", "Organism", "Length (aa)", "Type", "Updated"),
@@ -200,6 +195,12 @@ class NcbiDownloadDialog(QDialog):
         self._db_combo = QComboBox(self)
         for key in nd.DATABASES:
             self._db_combo.addItem(nd.DATABASE_LABELS[key], key)
+        # Full "Genome Assembly" in closed field and popup (no middle-elide).
+        self._db_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        self._db_combo.view().setTextElideMode(Qt.TextElideMode.ElideNone)
+        fm = self._db_combo.fontMetrics()
+        widest = max(fm.horizontalAdvance(nd.DATABASE_LABELS[k]) for k in nd.DATABASES)
+        self._db_combo.setMinimumWidth(widest + 40)
         self._set_combo(self._db_combo, self._database)
         self._db_combo.currentIndexChanged.connect(self._on_database_changed)
 
@@ -350,26 +351,13 @@ class NcbiDownloadDialog(QDialog):
         spl.addLayout(out)
 
         # --------------------------------------------------------- Options tab
-        self._right_click_buttons: dict[str, QRadioButton] = {}
-        rc_group = QButtonGroup(self)
-        rc_box = QGroupBox("Right-click on Download from NCBI", self)
-        rcl = QVBoxLayout(rc_box)
-        for label, value in (
-            ("Download the accessions on the clipboard with saved settings", NCBI_RIGHT_CLICK_CLIPBOARD),
-        ):
-            radio = QRadioButton(label, self)
-            radio.setChecked(True)
-            rc_group.addButton(radio)
-            self._right_click_buttons[value] = radio
-        rcl.addWidget(field_with_help(
-            self._right_click_buttons[NCBI_RIGHT_CLICK_CLIPBOARD], "Right-click", RIGHT_CLICK_HELP
-        ))
-
         self._email = QLineEdit(initial.email, self)
         self._email.setPlaceholderText("optional")
+        self._email.setFixedWidth(280)
         self._api_key = QLineEdit(initial.api_key, self)
         self._api_key.setPlaceholderText("optional")
         self._api_key.setEchoMode(QLineEdit.EchoMode.PasswordEchoOnEdit)
+        self._api_key.setFixedWidth(280)
         self._page_size = QSpinBox(self)
         self._page_size.setRange(20, nd.MAX_PAGE_SIZE)
         self._page_size.setSingleStep(20)
@@ -378,7 +366,11 @@ class NcbiDownloadDialog(QDialog):
         account = QGroupBox("NCBI account", self)
         al = QFormLayout(account)
         al.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        al.addRow("Email:", _wide_with_help(self._email, "NCBI account", ACCOUNT_HELP))
+        al.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
+        al.addRow(
+            "Email:",
+            field_with_help(self._email, "NCBI account", ACCOUNT_HELP),
+        )
         al.addRow("API key:", self._api_key)
         al.addRow("Results per page:", self._page_size)
 
@@ -390,14 +382,14 @@ class NcbiDownloadDialog(QDialog):
                 close_when_finished=initial.close_process_window_when_finished,
             )
         )
-        options_page = QWidget(self)
-        ol = QVBoxLayout(options_page)
+        self._options_page = QWidget(self)
+        ol = QVBoxLayout(self._options_page)
         ol.setContentsMargins(16, 14, 16, 14)
         ol.setSpacing(14)
         ol.setAlignment(Qt.AlignmentFlag.AlignTop)
-        ol.addWidget(rc_box)
         ol.addWidget(account)
         ol.addWidget(process_box)
+        account.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
 
         # -------------------------------------------------------------- frame
         self._tab_bar = QTabBar(self)
@@ -405,16 +397,18 @@ class NcbiDownloadDialog(QDialog):
         self._tab_bar.setDocumentMode(True)
         self._tab_bar.addTab("Search")
         self._tab_bar.addTab("Options")
+        self._search_page = search_page
         self._stack = QStackedWidget(self)
+        self._stack.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
         self._stack.addWidget(search_page)
-        self._stack.addWidget(options_page)
-        self._tab_bar.currentChanged.connect(self._stack.setCurrentIndex)
+        self._stack.addWidget(self._options_page)
         open_tab = opening_dialog_tab(initial.last_dialog_tab, allowed=NCBI_DIALOG_TABS,
                                       first_tab=NCBI_DIALOG_TAB_SEARCH)
         self._tab_bar.setCurrentIndex(
             self._TAB_OPTIONS if open_tab == DIALOG_TAB_OPTIONS else self._TAB_SEARCH
         )
         self._stack.setCurrentIndex(self._tab_bar.currentIndex())
+        self._tab_bar.currentChanged.connect(self._on_tab_changed)
 
         restore = QPushButton("Restore Defaults", self)
         restore.setAutoDefault(False)
@@ -440,7 +434,7 @@ class NcbiDownloadDialog(QDialog):
         self._refresh_formats()
         self._sync_filters()
         self._sync_ticked()
-        self.resize(_DIALOG_WIDTH, _DIALOG_HEIGHT)
+        self._fit_to_current_tab()
         if query_text:
             self._search_edit.setText(query_text)
             QTimer.singleShot(0, self.start_search)
@@ -454,6 +448,63 @@ class NcbiDownloadDialog(QDialog):
         idx = combo.findData(value)
         if idx >= 0:
             combo.setCurrentIndex(idx)
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        QTimer.singleShot(0, self._fit_to_current_tab)
+
+    def _on_tab_changed(self, index: int) -> None:
+        self._stack.setCurrentIndex(index)
+        self._fit_to_current_tab()
+
+    def _dialog_chrome_height(self) -> int:
+        lay = self.layout()
+        margins = lay.contentsMargins()
+        tab_h = max(24, self._tab_bar.sizeHint().height())
+        return (
+            margins.top()
+            + margins.bottom()
+            + lay.spacing() * 2
+            + tab_h
+            + self._button_box.sizeHint().height()
+        )
+
+    def _fit_to_current_tab(self) -> None:
+        """Tall Search page; compact Options page (no empty band)."""
+        on_options = self._tab_bar.currentIndex() == self._TAB_OPTIONS
+        page = self._options_page if on_options else self._search_page
+        self._stack.setMaximumHeight(16777215)
+        page.setMaximumHeight(16777215)
+        if on_options:
+            page.ensurePolished()
+            page.adjustSize()
+            root = page.layout()
+            if root is not None:
+                root.invalidate()
+                root.activate()
+            content_h = page.minimumSizeHint().expandedTo(page.sizeHint()).height()
+            if root is not None:
+                content_h = max(
+                    content_h,
+                    root.totalMinimumSize().height(),
+                    root.totalSizeHint().height(),
+                )
+            height = self._dialog_chrome_height() + content_h
+        else:
+            content_h = _DIALOG_HEIGHT - self._dialog_chrome_height()
+            height = _DIALOG_HEIGHT
+        screen = self.screen().availableGeometry() if self.screen() else None
+        if screen is not None:
+            height = min(height, screen.height() - 40)
+            content_h = max(1, height - self._dialog_chrome_height())
+        self._stack.setMinimumHeight(0)
+        self._stack.setMaximumHeight(content_h)
+        page.setMinimumHeight(0)
+        page.setMaximumHeight(content_h)
+        self.setMinimumHeight(0)
+        self.setMaximumHeight(height)
+        self.resize(_DIALOG_WIDTH, height)
+        self.setMaximumHeight(16777215)
 
     def database(self) -> str:
         return str(self._db_combo.currentData() or nd.DB_NUCLEOTIDE)
@@ -778,8 +829,6 @@ class NcbiDownloadDialog(QDialog):
         return dialog_should_run(self)
 
     def options(self) -> NcbiDownloadOptions:
-        rc = next((k for k, b in self._right_click_buttons.items() if b.isChecked()),
-                  NCBI_RIGHT_CLICK_CLIPBOARD)
         return replace(
             self._opts,
             database=self.database(),
@@ -790,7 +839,7 @@ class NcbiDownloadDialog(QDialog):
             page_size=int(self._page_size.value()),
             email=self._email.text().strip(),
             api_key=self._api_key.text().strip(),
-            right_click_action=rc,
+            right_click_action=NCBI_RIGHT_CLICK_CLIPBOARD,
             show_process_window=self._show_process_window.isChecked(),
             close_process_window_when_finished=self._close_process_window.isChecked(),
             last_dialog_tab=self.current_dialog_tab(),
@@ -833,16 +882,13 @@ class NcbiDownloadDialog(QDialog):
         self._refseq_only.setChecked(False)
         self._latest_only.setChecked(True)
         self._page_size.setValue(d.page_size)
-        rc = (
-            d.right_click_action
-            if d.right_click_action in self._right_click_buttons
-            else NCBI_RIGHT_CLICK_CLIPBOARD
-        )
-        self._right_click_buttons[rc].setChecked(True)
+        self._email.setText(d.email)
+        self._api_key.setText(d.api_key)
         self._show_process_window.setChecked(d.show_process_window)
         self._close_process_window.setChecked(d.close_process_window_when_finished)
         self._file_name_edited = False
         self._sync_file_name()
+        self._fit_to_current_tab()
 
 
 def missing_accessions(wanted: list[str], records: list[nd.NcbiRecord]) -> list[str]:

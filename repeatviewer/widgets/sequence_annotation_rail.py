@@ -535,7 +535,7 @@ class _FlowLayout(QLayout):
 
 
 class _CollapsibleSection(QWidget):
-    """Section title matching Annotations headers; click (or right arrow) to expand."""
+    """Section title matching Annotations headers; click (or left arrow) to expand."""
 
     expandedChanged = Signal(bool)
 
@@ -563,6 +563,11 @@ class _CollapsibleSection(QWidget):
         header_row.setContentsMargins(0, 2, 0, 2)
         header_row.setSpacing(6)
 
+        self._arrow = QLabel(self._header)
+        self._arrow.setFixedWidth(12)
+        self._arrow.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        )
         self._title = QLabel(title, self._header)
         title_font = self._title.font()
         title_font.setBold(True)
@@ -570,18 +575,13 @@ class _CollapsibleSection(QWidget):
         self._title.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
         )
-        header_row.addWidget(self._title, 1)
-
-        self._arrow = QLabel(self._header)
-        self._arrow.setFixedWidth(12)
-        self._arrow.setAlignment(
-            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
-        )
         arrow_font = self._arrow.font()
         # 3/4 of the title size (half was too small; 3/2 of that).
         arrow_font.setPointSizeF(max(6.0, title_font.pointSizeF() * 0.75))
         self._arrow.setFont(arrow_font)
+        # Arrow on the left of the title (Display / Annotation / Find / Others).
         header_row.addWidget(self._arrow, 0)
+        header_row.addWidget(self._title, 1)
         self._sync_arrow()
         self._header.mousePressEvent = self._on_header_pressed  # type: ignore[method-assign]
         root.addWidget(self._header)
@@ -616,7 +616,7 @@ class _CollapsibleSection(QWidget):
             self.expandedChanged.emit(expanded)
 
     def _sync_arrow(self) -> None:
-        # Right side disclosure: ▼ expanded, ▶ collapsed.
+        # Left side disclosure: ▼ expanded, ▶ collapsed.
         self._arrow.setText("▼" if self._expanded else "▶")
 
     def _on_header_pressed(self, event) -> None:  # noqa: ANN001
