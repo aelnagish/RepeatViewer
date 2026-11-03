@@ -2355,6 +2355,10 @@ class MainWindow(NcbiDownloadActionsMixin, PrimerActionsMixin, QMainWindow):
         self._task_progress: TaskProgressPanel | None = None
         self._metadata_enrich_thread: QThread | None = None
         self._metadata_enrich_worker: _MetadataEnrichWorker | None = None
+        # Cancelled jobs that are still running. Holding them here keeps the
+        # worker alive until its thread ends (typing in the Files filter
+        # cancels and restarts the job on every key).
+        self._retiring_metadata_jobs: list[tuple[QThread, _MetadataEnrichWorker]] = []
         self._metadata_enrich_generation = 0
         self._pending_metadata_ui: list[tuple[Path, object]] = []
         self._metadata_stat_queue: list[Path] = []
@@ -9252,9 +9256,16 @@ class MainWindow(NcbiDownloadActionsMixin, PrimerActionsMixin, QMainWindow):
             worker.cancel()
         if thread is not None:
             thread.quit()
-            # Job start must not block the GUI for up to 1s waiting on enrichment.
-            if wait_ms > 0:
-                thread.wait(wait_ms)
+            if worker is not None:
+                self._retiring_metadata_jobs.append((thread, worker))
+        # Job start must not block the GUI for up to 1s waiting on enrichment.
+        if wait_ms > 0:
+            for old_thread, _old_worker in list(self._retiring_metadata_jobs):
+                try:
+                    old_thread.quit()
+                    old_thread.wait(wait_ms)
+                except RuntimeError:
+                    pass
 
     def _start_metadata_enrichment(self, paths: list[Path]) -> None:
         from repeatviewer.browser_file_metadata import is_fasta_path
@@ -9291,6 +9302,18 @@ class MainWindow(NcbiDownloadActionsMixin, PrimerActionsMixin, QMainWindow):
         thread.start()
 
     def _on_metadata_enrich_thread_finished(self) -> None:
+        finished_thread = self.sender()
+        retired = [
+            job for job in self._retiring_metadata_jobs if job[0] is finished_thread
+        ]
+        if retired:
+            # A cancelled job ended: let it go, and leave the running one alone.
+            # Clearing the current job here dropped the new worker while it ran.
+            self._retiring_metadata_jobs = [
+                job for job in self._retiring_metadata_jobs
+                if job[0] is not finished_thread
+            ]
+            return
         self._metadata_enrich_thread = None
         self._metadata_enrich_worker = None
         # Final Length/GC batches may still be queued for the UI drain.
