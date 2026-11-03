@@ -67,7 +67,6 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
-    QSlider,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -78,7 +77,8 @@ from repeatviewer.backends import tree_layout as tl
 from repeatviewer.backends import tree_traits as tt
 from repeatviewer.widgets.combo_boxes import NoWheelComboBox
 from repeatviewer.widgets.help_button import make_help_button
-from repeatviewer.widgets.spin_boxes import NoWheelDoubleSpinBox, NoWheelSpinBox
+from repeatviewer.widgets.preview_controls import apply_annotation_zoom_slider_style
+from repeatviewer.widgets.spin_boxes import NoWheelDoubleSpinBox, NoWheelSlider, NoWheelSpinBox
 
 BRANCH_LABELS_NONE = "none"
 BRANCH_LABELS_SUPPORT = "support"
@@ -1117,11 +1117,18 @@ class TreePanel(QWidget):
         self._traits_btn.setMenu(traits_menu)
 
         # --- controls added with the options panel -----------------------------
-        self._angle_slider = QSlider(Qt.Orientation.Horizontal, self)
+        # Same slider as the Annotation and Dotplot panels (accent track, round
+        # handle, no wheel; a click on the track jumps there).
+        self._angle_slider = NoWheelSlider(Qt.Orientation.Horizontal, self)
+        self._angle_slider.setObjectName("annotationZoomSlider")
         self._angle_slider.setRange(0, 71)            # steps of 5°
         self._angle_slider.setPageStep(9)
+        self._angle_slider.setFixedHeight(18)
+        self._angle_slider.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        apply_annotation_zoom_slider_style(self._angle_slider)
         self._angle_label = QLabel("0°", self)
-        self._angle_label.setMinimumWidth(30)
+        self._angle_label.setMinimumWidth(36)
+        self._angle_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self._flip_check = QCheckBox("Flip", self)
         self._flip_check.setToolTip("Mirror the tree left to right.")
         self._tiplabel_box = NoWheelComboBox(self)
@@ -1210,8 +1217,8 @@ class TreePanel(QWidget):
         sec.add("Layout", self._layout_box)
         sec.add("Order", self._order_box)
         sec.add("Branches", self._lengths_box)
+        sec.add("Angle", self._angle_row(panel))
         sec.add("Spread", self._spread_spin)
-        sec.add("Angle", _pair(panel, self._angle_slider, self._angle_label))
         sec.add("", self._flip_check)
         pl.addWidget(sec)
         sec = _Section("Tip names", panel, help_text=TIPS_HELP, key="tips")
@@ -1357,6 +1364,17 @@ class TreePanel(QWidget):
 
     def scene(self) -> QGraphicsScene:
         return self._canvas.scene()
+
+    def _angle_row(self, parent: QWidget) -> QWidget:
+        """Slider across the full width (like the boxes above), value at the right
+        end, with some room above and below so the handle clears its neighbours."""
+        row = QWidget(parent)
+        lay = QHBoxLayout(row)
+        lay.setContentsMargins(0, 4, 0, 4)
+        lay.setSpacing(6)
+        lay.addWidget(self._angle_slider, 1)
+        lay.addWidget(self._angle_label, 0)
+        return row
 
     def canvas(self) -> TreeCanvas:
         return self._canvas
