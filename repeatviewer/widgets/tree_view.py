@@ -131,7 +131,8 @@ SUPPORT_HELP = (
     "<b>Hide crowded</b>: a label that would overlap another is left out (labels on longer "
     "branches are kept first), and lengths are not written on branches too short to "
     "carry them. Hover over a branch end or zoom in to read more.<br>"
-    "<b>Digits</b>: significant digits of branch lengths (0.0188 with 3). "
+    "<b>Decimals</b>: places after the point for branch lengths (0.0277 shows as 0.03 "
+    "with 2). Hover over a tip name for the length with more digits. "
     "<b>Font</b>: Auto = 80 % of the tip-name font."
 )
 DRAW_HELP = (
@@ -199,7 +200,7 @@ class TreeViewOptions:
     tip_label: str = TIP_LABEL_NAME  # "name", "name+col:<column>" or "col:<column>"
     max_chars: int = 0               # shorten tip names to this many characters (0 = off)
     keep_end: bool = True            # shortened names keep their end (coordinates)
-    branch_digits: int = 4           # significant digits of branch lengths
+    branch_decimals: int = 2         # places after the point for branch-length labels
     branch_font_pt: int = 0          # 0 = 80 % of the tip font
     scale_length: float = 0.0        # 0 = automatic
     scale_font_pt: int = 0           # 0 = like the branch labels
@@ -406,7 +407,7 @@ def build_tree_scene(
     scale_font = QFont(font)
     scale_font.setPointSizeF(float(opts.scale_font_pt) if opts.scale_font_pt > 0
                              else small.pointSizeF())
-    digits = max(1, min(8, int(opts.branch_digits)))
+    decimals = max(1, min(8, int(opts.branch_decimals)))
     fm = QFontMetricsF(font)
     fm_small = QFontMetricsF(small)
     row_h = fm.height() * 1.3
@@ -553,7 +554,7 @@ def build_tree_scene(
             item.setBrush(QBrush(color_for(tip)))
             item.setData(ROLE_NODE, tip)
             if not for_export:
-                tip_text = f"{node.name}\nBranch length: {tl.branch_length_text(node.length, digits)}"
+                tip_text = f"{node.name}\nBranch length: {tl.branch_length_text(node.length, 4)}"
                 if tip in display.tip_notes:
                     tip_text += "\n" + display.tip_notes[tip]
                 item.setToolTip(tip_text)
@@ -588,7 +589,7 @@ def build_tree_scene(
             if opts.branch_labels == BRANCH_LABELS_SUPPORT:
                 text = node.support
             else:
-                text = tl.branch_length_text(node.length, digits)
+                text = tl.branch_length_text(node.length, decimals=decimals)
             if not text:
                 continue
             item = QGraphicsSimpleTextItem(text)
@@ -1130,7 +1131,7 @@ class TreePanel(QWidget):
         pl.addWidget(sec)
         sec = _Section("Branch labels", panel, help_text=SUPPORT_HELP, key="branch_labels")
         sec.add("Show", self._branch_box)
-        sec.add("Digits", self._digits_spin)
+        sec.add("Decimals", self._digits_spin)
         sec.add("Font", self._bfont_spin)
         sec.add("", self._crowded_check)
         pl.addWidget(sec)
@@ -1290,7 +1291,7 @@ class TreePanel(QWidget):
             self._flip_check.setChecked(self._opts.flip)
             self._maxchars_spin.setValue(max(0, int(self._opts.max_chars)))
             self._keep_box.setCurrentIndex(0 if self._opts.keep_end else 1)
-            self._digits_spin.setValue(max(1, min(8, int(self._opts.branch_digits))))
+            self._digits_spin.setValue(max(1, min(8, int(self._opts.branch_decimals))))
             self._bfont_spin.setValue(max(0, int(self._opts.branch_font_pt)))
             self._lw_spin.setValue(float(self._opts.line_weight))
             self._scale_len.setValue(max(0.0, float(self._opts.scale_length)))
@@ -1383,7 +1384,7 @@ class TreePanel(QWidget):
             tip_label=str(self._tiplabel_box.currentData() or TIP_LABEL_NAME),
             max_chars=self._maxchars_spin.value(),
             keep_end=bool(self._keep_box.currentData()),
-            branch_digits=self._digits_spin.value(),
+            branch_decimals=self._digits_spin.value(),
             branch_font_pt=self._bfont_spin.value(),
             line_weight=self._lw_spin.value(),
             scale_length=self._scale_len.value(),

@@ -478,7 +478,7 @@ def test_max_length_digits_and_line_weight(qapp, tmp_path):
     path = tmp_path / "long.treefile"
     path.write_text("((Knob_reg_crosat13_2646-3101:0.123456,B:0.2):0.1,C:0.3);\n")
     panel = TreePanel(path)
-    panel.set_options(TreeViewOptions(max_chars=9, branch_labels="length", branch_digits=2,
+    panel.set_options(TreeViewOptions(max_chars=9, branch_labels="length", branch_decimals=2,
                                       line_weight=3.0))
     texts = _texts(panel)
     assert "…2646-3101" in texts and "0.12" in texts

@@ -115,6 +115,10 @@ def test_nice_scale_length(extent, expected):
 def test_branch_length_text():
     assert tl.branch_length_text(0.013912) == "0.01391"
     assert tl.branch_length_text(0.0) == "0"
+    assert tl.branch_length_text(0.02767, decimals=2) == "0.03"
+    assert tl.branch_length_text(0.2088, decimals=2) == "0.21"
+    assert tl.branch_length_text(0.00154, decimals=2) == "0.00"
+    assert tl.branch_length_text(0.0, decimals=2) == "0"
 
 
 def test_branch_transforms_and_inner_space():
