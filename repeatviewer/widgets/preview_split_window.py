@@ -1,10 +1,11 @@
-"""Floating Preview window with two side-by-side panes of the same file."""
+"""Left/right split Preview panes (inline in the Preview dock, or floating)."""
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import QSize, Qt, QTimer, Slot
+from PySide6.QtCore import QSize, Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QHBoxLayout,
@@ -35,7 +36,9 @@ _WINDOW_MIN_HEIGHT = 240
 
 
 class _SplitPreviewPane(QWidget):
-    """One independent Preview copy inside a split window."""
+    """One independent Preview copy inside a split view."""
+
+    closeSplitRequested = Signal()
 
     def __init__(
         self,
@@ -43,6 +46,7 @@ class _SplitPreviewPane(QWidget):
         *,
         source_tabs: PreviewTabWidget,
         parent: QWidget | None = None,
+        initial_fasta_tab: int = -1,
     ) -> None:
         super().__init__(parent)
         self.setMinimumWidth(_PANE_MIN_WIDTH)
@@ -54,6 +58,7 @@ class _SplitPreviewPane(QWidget):
 
         self._zoom_bar = PreviewZoomBar()
         self._annotation_zoom_bar = AnnotationZoomBar()
+        # Actions stay on the Preview dock title bar (not duplicated per pane).
         self._zoom_bar.set_actions_visible(False)
         self._annotation_zoom_bar.set_actions_visible(False)
         try:
@@ -83,16 +88,19 @@ class _SplitPreviewPane(QWidget):
             self,
             annotation_zoom_bar=self._annotation_zoom_bar,
         )
+        self._header.set_split_active(True)
         self._tabs = PreviewTabWidget(
             zoom_bar=self._zoom_bar,
             header_bar=self._header,
             annotation_zoom_bar=self._annotation_zoom_bar,
+            allow_inline_split=False,
         )
         self._tabs.setObjectName("PreviewSplitPaneTabs")
         self._tabs.setMinimumWidth(0)
         self._tabs.tabBar().hide()
         self._tabs.currentChanged.connect(lambda _i: self._sync_title_zoom_host())
         self._header.fasta_tab_changed.connect(lambda _i: self._sync_title_zoom_host())
+        self._header.closeSplitRequested.connect(self.closeSplitRequested.emit)
 
         layout.addWidget(self._zoom_host)
         layout.addWidget(self._header)
@@ -104,7 +112,6 @@ class _SplitPreviewPane(QWidget):
         self._status_bar.setSizeGripEnabled(False)
         self._status_bar.setFixedHeight(26)
         self._task_progress = TaskProgressPanel()
-        # No stretch — pack label+bar next to Stop (see preview_duplicate_window).
         self._status_bar.addPermanentWidget(self._task_progress)
         self._stop_btn = QPushButton("Stop")
         self._stop_btn.setToolTip("Stop the currently running job")
@@ -116,13 +123,53 @@ class _SplitPreviewPane(QWidget):
         layout.addWidget(self._status_bar)
 
         self._source_overview_features = self._snapshot_source_features(source)
-        fasta_tab = source.current_fasta_tab_index()
+        fasta_tab = (
+            int(initial_fasta_tab)
+            if initial_fasta_tab >= 0
+            else source.current_fasta_tab_index()
+        )
+        self._desired_fasta_tab = int(fasta_tab)
         self._tabs.open_file(source.path, replace=True)
-        QTimer.singleShot(0, lambda idx=fasta_tab: self._finish_open(idx))
-        QTimer.singleShot(50, lambda idx=fasta_tab: self._finish_open(idx))
+        # File load is async; re-apply until the FASTA stack is ready (default
+        # tab restore must not overwrite Overview↔Dotplot asymmetric splits).
+        for delay in (0, 50, 120, 250, 500):
+            QTimer.singleShot(delay, lambda: self._finish_open(self._desired_fasta_tab))
 
     def minimumSizeHint(self) -> QSize:  # noqa: N802
         return QSize(_PANE_MIN_WIDTH, 200)
+
+    def preview_page(self) -> FilePreviewPage | None:
+        page = self._tabs.currentWidget()
+        return page if isinstance(page, FilePreviewPage) else None
+
+    def open_path(self, path: Path, *, fasta_tab: int = -1) -> None:
+        """Load ``path`` into this pane (keeps split alive across file clicks)."""
+        resolved = Path(path).expanduser().resolve()
+        if not resolved.is_file():
+            return
+        self._source_overview_features = None
+        if fasta_tab >= 0:
+            self._desired_fasta_tab = int(fasta_tab)
+        self._tabs.open_file(resolved, replace=True)
+        for delay in (0, 80, 200, 400):
+            QTimer.singleShot(delay, lambda: self._finish_open(self._desired_fasta_tab))
+
+    def set_fasta_tab(self, fasta_tab: int) -> None:
+        """Switch this pane to a Text / Overview / Dotplot / Cytogenetics index."""
+        self._desired_fasta_tab = int(fasta_tab)
+        self._finish_open(self._desired_fasta_tab)
+
+    def current_fasta_tab(self) -> int:
+        page = self.preview_page()
+        if page is None:
+            return -1
+        return page.current_fasta_tab_index()
+
+    def focus_sequence(self, sequence_id: str) -> bool:
+        page = self.preview_page()
+        if page is None:
+            return False
+        return bool(page.focus_sequence_for_split(sequence_id))
 
     @staticmethod
     def _snapshot_source_features(source: FilePreviewPage) -> dict | None:
@@ -151,16 +198,33 @@ class _SplitPreviewPane(QWidget):
         self._zoom_host.show()
         self._zoom_bar.show()
 
+    @staticmethod
+    def _apply_fasta_tab(page: FilePreviewPage, fasta_tab: int) -> None:
+        if fasta_tab < 0:
+            return
+        from repeatviewer.widgets.preview_zoom import DefaultFastaPreviewTab
+
+        if fasta_tab == 1:
+            page._open_annotation_tab()
+        elif fasta_tab == 2:
+            page._activate_fasta_tab(DefaultFastaPreviewTab.DOTPLOT)
+        elif fasta_tab == 3:
+            page.open_cyto_tab()
+        else:
+            page.set_fasta_tab_index(0)
+        if page._fasta_stack.currentIndex() != fasta_tab:
+            page.set_fasta_tab_index(fasta_tab)
+
     def _finish_open(self, fasta_tab: int) -> None:
         page = self._tabs.currentWidget()
         if not isinstance(page, FilePreviewPage):
             self._sync_title_zoom_host()
             return
-        if fasta_tab >= 0:
-            if fasta_tab == 1 or page.is_annotation_preview_active():
-                page._open_annotation_tab()
-            if page._fasta_stack.currentIndex() != fasta_tab:
-                page.set_fasta_tab_index(fasta_tab)
+        want = int(fasta_tab)
+        # Always restore Text/Overview/Dotplot — including multi-seq MSA, where
+        # file load defaults to Overview and would otherwise wipe a Dotplot pane.
+        if want >= 0:
+            self._apply_fasta_tab(page, want)
         if page.is_multi_fasta_preview() and page.is_annotation_preview_active():
             overview = getattr(page, "_annotation_overview", None)
             if overview is not None:
@@ -294,8 +358,8 @@ class _SplitPreviewPane(QWidget):
 
     def overview_panel(self) -> MultiSequenceOverviewPanel | None:
         """Multi-FASTA Overview panel for this pane, if loaded."""
-        page = self._tabs.currentWidget()
-        if not isinstance(page, FilePreviewPage):
+        page = self.preview_page()
+        if page is None:
             return None
         overview = getattr(page, "_annotation_overview", None)
         if overview is None:
@@ -306,14 +370,16 @@ class _SplitPreviewPane(QWidget):
 
 
 class PreviewSplitWindow(QWidget):
-    """Floating Preview with two independent left/right panes of the same file.
+    """Two side-by-side Preview panes of the same file.
 
-    Parented to the main window as a Tool window (not global always-on-top).
-    Optional ``Sync left and right view`` links vertical position by sequence
-    row (so the same sequence stays on the same screen level even at different
-    zoom), Displayed annotations, and sequence-row selection. Horizontal
-    position stays independent so each pane can show different columns.
+    Default: embedded in the Preview dock (replaces the single-pane tab view).
+    Optional ``floating=True`` keeps the legacy Tool window.
+    ``Sync left and right view`` links vertical position, Displayed annotations,
+    and selection. Overview↔Dotplot always mirrors the active sequence
+    selection both ways while the split is open.
     """
+
+    closeSplitRequested = Signal()
 
     _WINDOW_FLAGS = (
         Qt.WindowType.Tool
@@ -330,12 +396,31 @@ class PreviewSplitWindow(QWidget):
         *,
         source_tabs: PreviewTabWidget,
         parent: QWidget | None = None,
+        floating: bool = False,
+        left_tab: int = -1,
+        right_tab: int = -1,
     ) -> None:
-        super().__init__(parent, self._WINDOW_FLAGS)
-        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
-        self.setAttribute(Qt.WidgetAttribute.WA_MacAlwaysShowToolWindow, True)
-        self.setWindowTitle(f"Split Preview — {source.path.name}")
-        self.setMinimumSize(_WINDOW_MIN_WIDTH, _WINDOW_MIN_HEIGHT)
+        if floating:
+            super().__init__(parent, self._WINDOW_FLAGS)
+            self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+            self.setAttribute(Qt.WidgetAttribute.WA_MacAlwaysShowToolWindow, True)
+            self.setWindowTitle(f"Split Preview — {source.path.name}")
+            self.setMinimumSize(_WINDOW_MIN_WIDTH, _WINDOW_MIN_HEIGHT)
+        else:
+            super().__init__(parent)
+            self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+            self.setMinimumSize(_PANE_MIN_WIDTH * 2, 200)
+            self.setSizePolicy(
+                QSizePolicy.Policy.Expanding,
+                QSizePolicy.Policy.Expanding,
+            )
+
+        self._floating = bool(floating)
+        self._source_tabs = source_tabs
+        self._current_path = Path(source.path).expanduser().resolve()
+        default_tab = source.current_fasta_tab_index()
+        left_idx = int(left_tab) if left_tab >= 0 else default_tab
+        right_idx = int(right_tab) if right_tab >= 0 else default_tab
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -344,51 +429,164 @@ class PreviewSplitWindow(QWidget):
 
         self._splitter = QSplitter(Qt.Orientation.Horizontal, self)
         self._splitter.setObjectName("PreviewSplitSplitter")
-        # Free left/right ratio down to each pane's minimum width.
         self._splitter.setChildrenCollapsible(False)
-        self._splitter.setHandleWidth(6)
+        self._splitter.setHandleWidth(10)
         self._splitter.setOpaqueResize(True)
+        # Clear vertical band so left/right panes read as separate windows.
+        self._splitter.setStyleSheet(
+            """
+            QSplitter#PreviewSplitSplitter::handle:horizontal {
+                background: #c8cdd4;
+                margin: 0px 2px;
+                border-left: 1px solid #aeb5bf;
+                border-right: 1px solid #aeb5bf;
+                width: 10px;
+            }
+            QSplitter#PreviewSplitSplitter::handle:horizontal:hover {
+                background: #9aa3af;
+                border-left: 1px solid #7f8894;
+                border-right: 1px solid #7f8894;
+            }
+            """
+        )
 
         self._left = _SplitPreviewPane(
-            source, source_tabs=source_tabs, parent=self._splitter
+            source,
+            source_tabs=source_tabs,
+            parent=self._splitter,
+            initial_fasta_tab=left_idx,
         )
         self._right = _SplitPreviewPane(
-            source, source_tabs=source_tabs, parent=self._splitter
+            source,
+            source_tabs=source_tabs,
+            parent=self._splitter,
+            initial_fasta_tab=right_idx,
         )
 
         self._splitter.addWidget(self._left)
         self._splitter.addWidget(self._right)
         self._splitter.setStretchFactor(0, 1)
         self._splitter.setStretchFactor(1, 1)
-        # Ignore child size hints so the handle can move freely within mins.
         self._splitter.setSizes([1000, 1000])
         layout.addWidget(self._splitter, stretch=1)
 
         self._link_enabled = False
         self._link_applying = False
         self._link_wired = False
+        self._seq_link_wired = False
+        self._overview_link_wired = False
+        self._closed = False
 
-        self._size_to_screen()
-        # Equal halves after the window has a real width.
-        QTimer.singleShot(0, self._apply_equal_split)
-        # Overview panels finish loading asynchronously after open.
+        self._left.closeSplitRequested.connect(self.closeSplitRequested.emit)
+        self._right.closeSplitRequested.connect(self.closeSplitRequested.emit)
+        self._left._header.openInPanelRequested.connect(
+            lambda tab, side: self._on_open_in_panel(tab, side)
+        )
+        self._right._header.openInPanelRequested.connect(
+            lambda tab, side: self._on_open_in_panel(tab, side)
+        )
+
+        if floating:
+            self._size_to_screen()
+            QTimer.singleShot(0, self._apply_equal_split)
+            ensure_widget_on_screen(self)
+        else:
+            QTimer.singleShot(0, self._apply_equal_split)
+
         QTimer.singleShot(0, self._setup_view_link)
         QTimer.singleShot(80, self._setup_view_link)
         QTimer.singleShot(250, self._setup_view_link)
-        ensure_widget_on_screen(self)
+
+    def mark_closed(self) -> None:
+        """Stop deferred sync/open work before the widget is destroyed."""
+        self._closed = True
+
+    def open_path(self, path: Path, *, fasta_tab: int = -1) -> None:
+        """Load the same file into both panes (file-list click while split)."""
+        if self._closed:
+            return
+        resolved = Path(path).expanduser().resolve()
+        if not resolved.is_file():
+            return
+        self._current_path = resolved
+        if self._floating:
+            self.setWindowTitle(f"Split Preview — {resolved.name}")
+        # Prefer each pane's desired tab (survives async reload) over the live
+        # stack index, which briefly falls back to Overview during file load.
+        left_tab = int(getattr(self._left, "_desired_fasta_tab", -1))
+        right_tab = int(getattr(self._right, "_desired_fasta_tab", -1))
+        if left_tab < 0:
+            left_tab = self._left.current_fasta_tab()
+        if right_tab < 0:
+            right_tab = self._right.current_fasta_tab()
+        if fasta_tab >= 0:
+            # Keep each pane's current tab when possible; seed only if unknown.
+            if left_tab < 0:
+                left_tab = fasta_tab
+            if right_tab < 0:
+                right_tab = fasta_tab
+        self._left.open_path(resolved, fasta_tab=left_tab)
+        self._right.open_path(resolved, fasta_tab=right_tab)
+        self._link_wired = False
+        self._seq_link_wired = False
+        self._overview_link_wired = False
+        QTimer.singleShot(0, self._setup_view_link)
+        QTimer.singleShot(80, self._setup_view_link)
+        QTimer.singleShot(250, self._setup_view_link)
+
+    def current_path(self) -> Path:
+        return self._current_path
+
+    def set_pane_fasta_tab(self, side: str, fasta_tab: int) -> None:
+        """Switch left or right pane to ``fasta_tab`` (0–3)."""
+        if self._closed:
+            return
+        pane = self._left if str(side) == "left" else self._right
+        pane.set_fasta_tab(int(fasta_tab))
+        QTimer.singleShot(0, self._setup_view_link)
+        QTimer.singleShot(80, self._setup_view_link)
+
+    def _on_open_in_panel(self, tab_index: int, side: str) -> None:
+        self.set_pane_fasta_tab(str(side or "right"), int(tab_index))
 
     def _setup_view_link(self) -> None:
-        """Expose Sync checkboxes and wire left↔right once overviews exist."""
+        """Wire Overview↔Overview Sync when both exist; always wire sequence sync."""
+        if self._closed:
+            return
+        left_page = self._left.preview_page()
+        right_page = self._right.preview_page()
+        if left_page is None or right_page is None:
+            return
+
+        if not self._seq_link_wired:
+            self._seq_link_wired = True
+            left_page.splitSequenceActivated.connect(
+                lambda sid, src=self._left: self._on_pane_sequence(src, sid)
+            )
+            right_page.splitSequenceActivated.connect(
+                lambda sid, src=self._right: self._on_pane_sequence(src, sid)
+            )
+
         left = self._left.overview_panel()
         right = self._right.overview_panel()
-        if left is None or right is None:
-            return
         for overview in (left, right):
+            if overview is None:
+                continue
             rail = getattr(overview, "_rail", None)
             if rail is not None and hasattr(rail, "set_split_sync_available"):
                 rail.set_split_sync_available(True)
-        if self._link_wired:
+            if self._link_enabled and rail is not None:
+                check = getattr(rail, "sync_split_views", None)
+                if check is not None and not check.isChecked():
+                    check.blockSignals(True)
+                    check.setChecked(True)
+                    check.blockSignals(False)
+
+        if left is None or right is None:
             return
+        if self._overview_link_wired:
+            return
+        self._overview_link_wired = True
         self._link_wired = True
 
         for overview in (left, right):
@@ -403,6 +601,89 @@ class PreviewSplitWindow(QWidget):
             overview._bars_scroll.verticalScrollBar().valueChanged.connect(
                 lambda _v, src=overview: self._on_linked_vertical_scroll(src)
             )
+
+    def _peer_pane(self, source: _SplitPreviewPane) -> _SplitPreviewPane | None:
+        if source is self._left:
+            return self._right
+        if source is self._right:
+            return self._left
+        return None
+
+    def _on_pane_sequence(self, source: _SplitPreviewPane, sequence_id: str) -> None:
+        """Mirror sequence selection between Overview and Dotplot panes."""
+        if self._closed or self._link_applying:
+            return
+        sid = str(sequence_id or "").strip()
+        if not sid:
+            return
+        peer = self._peer_pane(source)
+        if peer is None:
+            return
+        src_page = source.preview_page()
+        peer_page = peer.preview_page()
+        if src_page is None or peer_page is None:
+            return
+        src_dot = src_page.is_dotplot_preview_active()
+        peer_dot = peer_page.is_dotplot_preview_active()
+        # Overview↔Overview selection stays behind the Sync checkbox.
+        if not src_dot and not peer_dot:
+            return
+        src_seq = src_page.is_annotation_preview_active() or src_dot
+        peer_seq = peer_page.is_annotation_preview_active() or peer_dot
+        if not src_seq or not peer_seq:
+            return
+        if src_dot == peer_dot:
+            return
+        current = peer_page.current_split_sequence_id()
+        if current == sid and peer_dot:
+            self._link_applying = True
+            try:
+                peer.focus_sequence(sid)
+            finally:
+                self._link_applying = False
+            return
+        if current == sid:
+            return
+        self._link_applying = True
+        try:
+            peer.focus_sequence(sid)
+        finally:
+            self._link_applying = False
+
+    def try_apply_dotplot_view(
+        self, source_page: FilePreviewPage, start: int, end: int
+    ) -> bool:
+        """Dotplot View → highlight peer Overview; keep source on Dotplot.
+
+        Returns True when the peer Annotation/Overview pane accepted the region.
+        """
+        if self._closed:
+            return False
+        if not source_page.is_dotplot_preview_active():
+            return False
+        source_pane: _SplitPreviewPane | None = None
+        if self._left.preview_page() is source_page:
+            source_pane = self._left
+        elif self._right.preview_page() is source_page:
+            source_pane = self._right
+        if source_pane is None:
+            return False
+        peer = self._peer_pane(source_pane)
+        if peer is None:
+            return False
+        peer_page = peer.preview_page()
+        if peer_page is None or not peer_page.is_annotation_preview_active():
+            return False
+        sid = source_page.current_split_sequence_id()
+        self._link_applying = True
+        try:
+            return bool(
+                peer_page.apply_region_highlight(
+                    int(start), int(end), sequence_id=sid
+                )
+            )
+        finally:
+            self._link_applying = False
 
     def _peer_overview(
         self, source: MultiSequenceOverviewPanel
@@ -515,9 +796,13 @@ class PreviewSplitWindow(QWidget):
             self._link_applying = False
 
     def minimumSizeHint(self) -> QSize:  # noqa: N802
-        return QSize(_WINDOW_MIN_WIDTH, _WINDOW_MIN_HEIGHT)
+        if self._floating:
+            return QSize(_WINDOW_MIN_WIDTH, _WINDOW_MIN_HEIGHT)
+        return QSize(_PANE_MIN_WIDTH * 2, 200)
 
     def _apply_equal_split(self) -> None:
+        if self._closed:
+            return
         total = max(2, self._splitter.width())
         half = total // 2
         self._splitter.setSizes([half, total - half])

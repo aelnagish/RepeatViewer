@@ -13776,8 +13776,16 @@ class MainWindow(NcbiDownloadActionsMixin, PrimerActionsMixin, QMainWindow):
         self._ensure_preview_dock_attached()
         if self._dock_preview is not None:
             self._dock_preview.raise_()
-        if self._preview_tabs is not None:
-            self._preview_tabs.show()
+        tabs = self._preview_tabs
+        if tabs is None:
+            return
+        # Inline Split window already fills the Preview host — do not re-show
+        # the single-pane tabs (that stacked a third Overview above the split).
+        if hasattr(tabs, "is_split_active") and tabs.is_split_active():
+            if hasattr(tabs, "keep_split_chrome_hidden"):
+                tabs.keep_split_chrome_hidden()
+            return
+        tabs.show()
 
     def _open_preview_tab(self, path: Path, *, replace: bool = False) -> None:
         if self._preview_tabs is None:

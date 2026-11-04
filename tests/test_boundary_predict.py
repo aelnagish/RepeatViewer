@@ -67,3 +67,37 @@ def test_msa_identity_finds_conserved_core_without_genome():
     assert abs(end - 500) <= 5
     assert result.final is None
     assert any("No project genome" in n for n in result.notes)
+
+
+def test_load_boundary_prediction_json(tmp_path):
+    import json
+
+    fasta = tmp_path / "fam.raw.fa"
+    fasta.write_text(">a\nACGTACGT\n", encoding="utf-8")
+    sidecar = tmp_path / "fam.raw.boundaries_RV.json"
+    sidecar.write_text(
+        json.dumps(
+            {
+                "format_version": 1,
+                "source": "tetrimmer_final_MSA",
+                "msa_width": 8,
+                "msa_identity": {"start": 1, "end": 7},
+                "blast_coverage": {"start": 2, "end": 6},
+                "terminal_repeat": {"start": 1, "end": 7, "type": "LTR"},
+                "final": {"start": 2, "end": 6},
+                "evaluation": "Good",
+                "full_length_hits": 4,
+            }
+        ),
+        encoding="utf-8",
+    )
+    loaded = bp.load_boundary_prediction_json(fasta, msa_width=8)
+    assert loaded is not None
+    assert loaded.msa_identity == (1, 7)
+    assert loaded.blast_coverage == (2, 6)
+    assert loaded.terminal_repeat == (1, 7)
+    assert loaded.terminal_repeat_type == "LTR"
+    assert loaded.final == (2, 6)
+    assert loaded.evaluation == "Good"
+    assert loaded.full_length_hits == 4
+    assert bp.load_boundary_prediction_json(fasta, msa_width=99) is None

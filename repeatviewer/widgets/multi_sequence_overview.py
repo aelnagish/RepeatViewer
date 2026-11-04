@@ -4774,9 +4774,10 @@ class _MsaCoverageYAxis(QWidget):
 class _MsaTopCoverageProfile(QWidget):
     """Filled-area BLAST coverage for the MSA consensus, under the scale ruler.
 
-    Y-scale uses the max depth in the visible viewport with log1p so local
-    peaks do not hide nearby variation. Values are MSA-column aligned
-    (consensus threshold 0 has no gaps).
+    Drawn as a step profile (horizontal per column, vertical jumps) so depth
+    changes are 90°. Y-scale uses the max depth in the visible viewport with
+    log1p so local peaks do not hide nearby variation. Values are MSA-column
+    aligned (consensus threshold 0 has no gaps).
     """
 
     viewportPeakChanged = Signal(float)
@@ -4946,17 +4947,28 @@ class _MsaTopCoverageProfile(QWidget):
                     depth, peak=vis_peak, bottom_y=bottom_y, usable=usable
                 )
 
-            samples: list[tuple[float, float]] = []
+            # Step (histogram) outline: horizontal per column/pixel, vertical
+            # jumps at boundaries — no diagonal slopes between depths.
+            top: list[tuple[float, float]] = []
             if ppb >= 1.0 - 1e-9:
                 c0 = max(0, int((0.0 - origin) / ppb) - 1)
                 c1 = min(n - 1, int((view_w - origin) / ppb) + 1)
+                prev_y: float | None = None
                 for col in range(c0, c1 + 1):
-                    cx = origin + (col + 0.5) * ppb
-                    if cx < -2 or cx > view_w + 2:
+                    x0 = origin + float(col) * ppb
+                    x1 = origin + float(col + 1) * ppb
+                    if x1 < -2 or x0 > view_w + 2:
                         continue
-                    samples.append((cx, _y_for(values[col])))
+                    y = _y_for(values[col])
+                    if prev_y is None:
+                        top.append((x0, y))
+                    elif abs(y - prev_y) > 1e-9:
+                        top.append((x0, y))
+                    top.append((x1, y))
+                    prev_y = y
             else:
                 px_right = int(math.ceil(view_w)) + 1
+                prev_y = None
                 for sx in range(0, px_right):
                     bp0 = (float(sx) - origin) / ppb
                     bp1 = (float(sx) + 1.0 - origin) / ppb
@@ -4972,28 +4984,37 @@ class _MsaTopCoverageProfile(QWidget):
                         v = values[col]
                         if v > peak_v:
                             peak_v = v
-                    samples.append((float(sx) + 0.5, _y_for(peak_v)))
+                    x0 = float(sx)
+                    x1 = float(sx) + 1.0
+                    y = _y_for(peak_v)
+                    if prev_y is None:
+                        top.append((x0, y))
+                    elif abs(y - prev_y) > 1e-9:
+                        top.append((x0, y))
+                    top.append((x1, y))
+                    prev_y = y
 
-            if len(samples) < 2:
-                if samples:
-                    x, y = samples[0]
-                    painter.setPen(QPen(stroke, 1.5))
-                    painter.drawLine(QPointF(x, bottom_y), QPointF(x, y))
+            if not top:
+                return
+            if len(top) == 1:
+                x, y = top[0]
+                painter.setPen(QPen(stroke, 1.5))
+                painter.drawLine(QPointF(x, bottom_y), QPointF(x, y))
                 return
 
             poly = QPolygonF()
-            poly.append(QPointF(samples[0][0], bottom_y))
-            for x, y in samples:
+            poly.append(QPointF(top[0][0], bottom_y))
+            for x, y in top:
                 poly.append(QPointF(x, y))
-            poly.append(QPointF(samples[-1][0], bottom_y))
+            poly.append(QPointF(top[-1][0], bottom_y))
             painter.setBrush(fill)
             painter.drawPolygon(poly)
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.setPen(QPen(stroke, 1.4))
-            for i in range(1, len(samples)):
+            for i in range(1, len(top)):
                 painter.drawLine(
-                    QPointF(samples[i - 1][0], samples[i - 1][1]),
-                    QPointF(samples[i][0], samples[i][1]),
+                    QPointF(top[i - 1][0], top[i - 1][1]),
+                    QPointF(top[i][0], top[i][1]),
                 )
         finally:
             painter.end()
@@ -6468,6 +6489,46 @@ class MultiSequenceOverviewPanel(QWidget):
     def _on_show_standard_boundaries_changed(self, enabled: bool) -> None:
         self._bars.set_show_msa_standard_boundaries(bool(enabled))
         self._sync_scale_standard_boundaries()
+
+    def zoom_to_reference_boundary(self, side: str) -> bool:
+        """Zoom to nucleotide level centered on the left or right reference edge.
+
+        ``side`` is ``\"left\"`` or ``\"right\"``. Uses the same letter-size
+        scale as zoom-slider position ¾. Returns ``False`` when there is no
+        reference extent to target.
+        """
+        if not self._overview_panel_alive():
+            return False
+        extent = self._bars.msa_standard_extent_columns()
+        if extent is None:
+            self.statusMessage.emit("No reference boundary to zoom to.")
+            return False
+        first, last = int(extent[0]), int(extent[1])
+        key = str(side or "").strip().lower()
+        if key in {"left", "l", "5", "start"}:
+            # Left edge of the first reference nucleotide.
+            target_bp = float(first)
+            label = "left"
+        elif key in {"right", "r", "3", "end"}:
+            # Right edge of the last reference nucleotide.
+            target_bp = float(last + 1)
+            label = "right"
+        else:
+            return False
+
+        self._sync_viewport_fill()
+        letter_ppb = self._letter_anchor_ppb()
+        self._bars.set_pixels_per_base(letter_ppb)
+        vp_w = max(1, self._bars_scroll.viewport().width())
+        self._scroll_to_keep_bp_at_viewport_x(target_bp, float(vp_w) * 0.5)
+        self._sync_names_column()
+        self._update_scale()
+        self._sync_zoom_slider_from_ppb()
+        self._sync_header_position_spins()
+        self.statusMessage.emit(
+            f"Zoomed to {label} reference boundary (column {int(target_bp):,})."
+        )
+        return True
         self._sync_standard_name_emphasis()
         self._save_overview_display_settings()
 
@@ -8440,6 +8501,8 @@ class MultiSequenceOverviewPanel(QWidget):
         self._sync_header_position_spins()
         # Restore session coverage cache when width still matches.
         self._restore_blast_coverage_from_json()
+        # Restore TEtrimmer method-boundary guides when sidecar matches width.
+        self._restore_boundaries_from_json()
         # New MSA: always start at top-left (do not keep prior zoom/scroll).
         self._reset_overview_to_start()
         QTimer.singleShot(0, self._try_initial_fit)
@@ -8981,19 +9044,13 @@ class MultiSequenceOverviewPanel(QWidget):
         )
         self._update_window_job_progress(completed, detail)
 
-    @Slot(object)
-    def _on_boundary_finished(self, result: object) -> None:
+    def _apply_boundary_prediction(self, result) -> None:
+        """Draw method guides + rail summary for a ``BoundaryPrediction``."""
         from repeatviewer.backends.boundary_predict import BoundaryPrediction
 
         if not isinstance(result, BoundaryPrediction):
-            self.statusMessage.emit("Boundary prediction finished with an unexpected result.")
             return
-        if list(self._bars.msa_sequences()) != self._boundary_input:
-            self.statusMessage.emit(
-                "Boundary prediction discarded: the MSA changed while it ran."
-            )
-            return
-        # (label, span, color, solid); spans are 0-based start / exclusive end.
+        # (label, span, color); spans are 0-based start / exclusive end.
         methods = [
             ("MSA identity", result.msa_identity, "#1f77b4"),
             ("BLAST coverage", result.blast_coverage, "#2ca02c"),
@@ -9005,7 +9062,9 @@ class MultiSequenceOverviewPanel(QWidget):
             if span is None:
                 lines.append(f"<span style='color:{color}'>┆</span> {label}: none")
                 continue
-            guides.extend([(span[0], QColor(color), False), (span[1], QColor(color), False)])
+            guides.extend(
+                [(span[0], QColor(color), False), (span[1], QColor(color), False)]
+            )
             lines.append(
                 f"<span style='color:{color}'>┆</span> {label}: "
                 f"{span[0] + 1:,}–{span[1]:,}"
@@ -9018,8 +9077,10 @@ class MultiSequenceOverviewPanel(QWidget):
         final_color = "#d62728"
         if result.final is not None:
             guides.extend(
-                [(result.final[0], QColor(final_color), True),
-                 (result.final[1], QColor(final_color), True)]
+                [
+                    (result.final[0], QColor(final_color), True),
+                    (result.final[1], QColor(final_color), True),
+                ]
             )
             head = (
                 f"<b><span style='color:{final_color}'>│</span> Final: "
@@ -9030,15 +9091,44 @@ class MultiSequenceOverviewPanel(QWidget):
             )
         else:
             head = "<b>Final: not defined</b>"
-        detail = (
-            f"{result.sequence_count} sequences · "
-            f"{result.cleaned_columns:,} columns after cleaning"
-        )
+        detail_bits: list[str] = []
+        if result.sequence_count:
+            detail_bits.append(f"{result.sequence_count} sequences")
+        if result.cleaned_columns:
+            detail_bits.append(f"{result.cleaned_columns:,} columns after cleaning")
+        detail = " · ".join(detail_bits)
         notes = "".join(f"<br><i>{n}</i>" for n in result.notes)
-        self._rail.set_boundary_prediction_text(
-            head + "<br>" + "<br>".join(lines) + f"<br>{detail}{notes}"
-        )
+        body = "<br>".join(lines)
+        if detail:
+            body = f"{body}<br>{detail}"
+        self._rail.set_boundary_prediction_text(head + "<br>" + body + notes)
         self._bars.set_predicted_boundaries(guides)
+
+    def _restore_boundaries_from_json(self) -> None:
+        """Load ``*.boundaries_RV.json`` guides when MSA width still matches."""
+        from repeatviewer.backends.boundary_predict import load_boundary_prediction_json
+
+        if not self.is_msa_mode():
+            return
+        width = self._bars.max_length()
+        result = load_boundary_prediction_json(self._path, msa_width=width)
+        if result is None:
+            return
+        self._apply_boundary_prediction(result)
+
+    @Slot(object)
+    def _on_boundary_finished(self, result: object) -> None:
+        from repeatviewer.backends.boundary_predict import BoundaryPrediction
+
+        if not isinstance(result, BoundaryPrediction):
+            self.statusMessage.emit("Boundary prediction finished with an unexpected result.")
+            return
+        if list(self._bars.msa_sequences()) != self._boundary_input:
+            self.statusMessage.emit(
+                "Boundary prediction discarded: the MSA changed while it ran."
+            )
+            return
+        self._apply_boundary_prediction(result)
         if result.final is not None:
             self.statusMessage.emit(
                 f"Boundary prediction · {result.evaluation} · columns "
@@ -10020,6 +10110,15 @@ class MultiSequenceOverviewPanel(QWidget):
                 )
             ]
         if self.add_features_and_save(new_by_id):
+            # Tick Display → Displayed annotations for this type (e.g. LTR).
+            kind = str(feat.feature_type or "").strip()
+            if kind:
+                ensure = getattr(self._rail, "ensure_annotation_kinds_visible", None)
+                if callable(ensure):
+                    ensure((kind,))
+                self._bars.set_visible_annotation_kinds(
+                    self._rail.visible_annotation_kinds()
+                )
             n = len(target_ids)
             self.statusMessage.emit(
                 f"Added “{feat.name}” to {n:,} sequence{'s' if n != 1 else ''}."

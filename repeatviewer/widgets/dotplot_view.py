@@ -2393,6 +2393,8 @@ class DotplotPanel(QWidget):
     rangeSelected = Signal(int, int, int, int)
     # "View select" on x or y: 1-based inclusive (start, end) for that axis.
     viewInAnnotationRequested = Signal(int, int)
+    # Active sequence id changed (combo, gallery thumb, or Split sync).
+    activeSequenceChanged = Signal(str)
 
     def __init__(self, path: Path, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -2777,7 +2779,11 @@ class DotplotPanel(QWidget):
             and plot_seq == self._active_sequence
             and keep == self._coord_keep
         ):
+            gallery = getattr(self, "_gallery", None)
+            if gallery is not None and hasattr(gallery, "set_selected_sequence"):
+                gallery.set_selected_sequence(sid)
             return
+        previous = self._active_sequence_id
         self._active_sequence_id = sid
         self._active_sequence = plot_seq
         self._coord_keep = keep
@@ -2790,6 +2796,11 @@ class DotplotPanel(QWidget):
                 self._sequence_combo.blockSignals(True)
                 self._sequence_combo.setCurrentIndex(idx)
                 self._sequence_combo.blockSignals(False)
+        gallery = getattr(self, "_gallery", None)
+        if gallery is not None and hasattr(gallery, "set_selected_sequence"):
+            gallery.set_selected_sequence(sid)
+        if sid and sid != previous:
+            self.activeSequenceChanged.emit(sid)
 
     def _is_large(self) -> bool:
         if self._active_sequence:
@@ -3580,6 +3591,22 @@ class DotplotPanel(QWidget):
         self._sync_engine_controls()
         self._loaded_for = None
         self.ensure_loaded()
+
+    def focus_sequence_for_split(self, sequence_id: str) -> bool:
+        """Select ``sequence_id`` for Split sync (Grid highlight or Single view)."""
+        sid = str(sequence_id or "").strip()
+        if not sid:
+            return False
+        if sid not in self._sequence_ids and self._sequence_combo.findData(sid) < 0:
+            return False
+        if self._view_mode == "grid" and len(self._sequence_ids) > 1:
+            self.set_active_sequence(
+                sid, self._sequence_for_id(sid), ungap=self._ungap_for_plot
+            )
+            self._show_gallery(reset_page=False, focus_sequence_id=sid)
+            return True
+        self.open_single_for_sequence(sid)
+        return True
 
     def _on_gallery_thumb_clicked(self, sequence_id: str) -> None:
         """Leave Grid and open the clicked sequence as a full Single plot."""

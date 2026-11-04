@@ -97,3 +97,33 @@ def test_max_pairs_one_keeps_only_outermost() -> None:
     assert names[0].startswith("LTR5")
     assert names[1].startswith("LTR3")
     assert not any("_2" in n for n in names)
+
+
+def test_overlapping_left_right_ltr_rejected() -> None:
+    """Left LTR must end before right LTR starts."""
+    record_len = 1000
+    df = pd.DataFrame(
+        [
+            # Overlapping copies: right starts inside left (qend=400, sstart=300).
+            _ltr_row(qstart=10, qend=400, sstart=300, send=990),
+            # Valid non-overlapping pair.
+            _ltr_row(qstart=10, qend=110, sstart=890, send=990),
+        ]
+    )
+    result = detect_terminal_repeat_features(
+        df,
+        record_len,
+        repeat_mode="LTR",
+        ltr_settings=TerminalRepeatSettings(
+            min_length=50,
+            max_length=2000,
+            min_pair_distance=0,
+            max_distance_to_end=500,
+            similarity_threshold=0.5,
+            max_pairs=3,
+        ),
+    )
+    assert result.repeat_type == "LTR"
+    assert len(result.features) == 2
+    left, right = result.features
+    assert left.end < right.start

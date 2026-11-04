@@ -729,6 +729,8 @@ class FilePreviewPage(QWidget):
     blastRequested = Signal(object)  # FASTA a preview sends to BLAST (contig view right-click)
     # Source FASTAs of a temporary multi-file preview, to combine into a real file.
     saveSelectionAsFileRequested = Signal(list)
+    # Split Preview: Overview / Dotplot / Annotation selected a sequence id.
+    splitSequenceActivated = Signal(str)
 
     def __init__(self, path: Path, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1109,7 +1111,10 @@ class FilePreviewPage(QWidget):
         if index == 0:
             QTimer.singleShot(0, self._open_text_tab)
         elif index == 1:
-            QTimer.singleShot(0, self._open_annotation_tab)
+            # force=False: ignore if a later activate already moved off Overview.
+            QTimer.singleShot(
+                0, lambda: self._open_annotation_tab(force=False)
+            )
         elif index == 2:
             QTimer.singleShot(0, self._open_dotplot_tab)
         elif index == 3:
@@ -1155,7 +1160,9 @@ class FilePreviewPage(QWidget):
                 self.apply_text_font_size(load_preview_font_size())
                 QTimer.singleShot(0, self._open_text_tab)
             elif index == 1:
-                QTimer.singleShot(0, self._open_annotation_tab)
+                QTimer.singleShot(
+                    0, lambda: self._open_annotation_tab(force=False)
+                )
             return
         current = self._stack.currentWidget()
         if current is self._text_scroll:
@@ -1391,6 +1398,9 @@ class FilePreviewPage(QWidget):
             self._annotation_overview.sequenceOrderChanged.connect(
                 self._on_overview_sequence_order_changed
             )
+            self._annotation_overview._bars.selectionChanged.connect(
+                self._on_overview_selection_for_split
+            )
             holder_layout = self._fasta_annotation_holder.layout()
             if holder_layout is None:
                 holder_layout = QVBoxLayout(self._fasta_annotation_holder)
@@ -1441,12 +1451,67 @@ class FilePreviewPage(QWidget):
         return self._annotation_panel
 
     @Slot(str)
-    def _on_annotation_active_sequence_changed(self, _seq_id: str) -> None:
+    def _on_annotation_active_sequence_changed(self, seq_id: str) -> None:
+        sid = str(seq_id or "").strip()
+        if sid:
+            self.splitSequenceActivated.emit(sid)
         if self._dotplot_panel is None:
             return
         self._sync_dotplot_active_sequence(self._dotplot_panel)
         if self.is_dotplot_preview_active():
             self._dotplot_panel.ensure_loaded()
+
+    def _on_overview_selection_for_split(self) -> None:
+        """Overview row selection → peer Split pane (Dotplot or Overview)."""
+        overview = self._annotation_overview
+        if overview is None:
+            return
+        sid = overview.selected_record_id()
+        if sid:
+            self.splitSequenceActivated.emit(sid)
+
+    def _on_dotplot_active_sequence_for_split(self, seq_id: str) -> None:
+        sid = str(seq_id or "").strip()
+        if sid:
+            self.splitSequenceActivated.emit(sid)
+
+    def current_split_sequence_id(self) -> str | None:
+        """Active / selected sequence id for Split Overview↔Dotplot sync."""
+        if self.is_dotplot_preview_active():
+            panel = self._dotplot_panel
+            if panel is not None:
+                sid = str(panel.sequence_id() or "").strip()
+                return sid or None
+            return None
+        if self._multi_fasta_mode:
+            overview = self._annotation_overview
+            if overview is not None:
+                return overview.selected_record_id()
+            return None
+        panel = self._annotation_panel
+        if panel is not None:
+            sid = str(panel.active_sequence_id() or "").strip()
+            return sid or None
+        return None
+
+    def focus_sequence_for_split(self, sequence_id: str) -> bool:
+        """Select ``sequence_id`` in the current Overview / Dotplot / Annotation view."""
+        sid = str(sequence_id or "").strip()
+        if not sid:
+            return False
+        if self.is_dotplot_preview_active():
+            panel = self._ensure_dotplot_panel()
+            return bool(panel.focus_sequence_for_split(sid))
+        if self._multi_fasta_mode:
+            if not self.is_annotation_preview_active():
+                self._open_annotation_tab()
+            return self.select_records([sid])
+        if self.is_annotation_preview_active() or self._single_fasta_mode:
+            panel = self._ensure_annotation_panel()
+            if not self.is_annotation_preview_active():
+                self._open_annotation_tab()
+            return bool(panel.ensure_active_sequence(sid))
+        return False
 
     def _show_alignment_dotplot(self, path: Path) -> None:
         """Plot a PAF/.1aln alignment file instead of dumping it as text."""
@@ -1535,6 +1600,9 @@ class FilePreviewPage(QWidget):
             self._dotplot_panel.rangeSelected.connect(self._on_dotplot_range_selected)
             self._dotplot_panel.viewInAnnotationRequested.connect(
                 self._on_dotplot_view_in_annotation
+            )
+            self._dotplot_panel.activeSequenceChanged.connect(
+                self._on_dotplot_active_sequence_for_split
             )
             holder_layout = self._fasta_dotplot_holder.layout()
             if holder_layout is None:
@@ -1848,28 +1916,58 @@ class FilePreviewPage(QWidget):
             self._highlight_fasta_range(int(x_start), int(x_end))
 
     def _on_dotplot_view_in_annotation(self, start: int, end: int) -> None:
-        """Switch to Annotation and highlight the chosen x or y range."""
+        """Highlight the chosen x or y range on Overview/Annotation.
+
+        In an Overview↔Dotplot split, apply the region on the peer Overview and
+        keep this pane on Dotplot (do not flip the Dotplot pane to Overview).
+        """
         self._pending_annotation_selection = (int(start), int(end))
+        host = self._preview_split_host()
+        if host is not None and host.try_apply_dotplot_view(
+            self, int(start), int(end)
+        ):
+            self._pending_annotation_selection = None
+            return
         self._activate_fasta_tab(DefaultFastaPreviewTab.ANNOTATION)
 
-    def _apply_pending_annotation_selection(self) -> None:
-        pending = self._pending_annotation_selection
-        if pending is None:
-            return
+    def _preview_split_host(self):
+        """Return the enclosing ``PreviewSplitWindow`` when this page is a pane."""
+        from repeatviewer.widgets.preview_split_window import PreviewSplitWindow
+
+        widget = self.parent()
+        while widget is not None:
+            if isinstance(widget, PreviewSplitWindow):
+                return widget
+            widget = widget.parent()
+        return None
+
+    def apply_region_highlight(
+        self,
+        start: int,
+        end: int,
+        *,
+        sequence_id: str | None = None,
+    ) -> bool:
+        """Highlight ``[start, end]`` on the visible Overview/Annotation tab.
+
+        Does not change Text/Overview/Dotplot. Returns False if Annotation is
+        not the active FASTA tab (caller should switch tabs instead).
+        """
+        if not self.is_annotation_preview_active():
+            return False
         try:
             if self._multi_fasta_mode:
                 overview = self._ensure_annotation_overview()
                 if not overview.record_ids():
                     overview.load_path(self.path, msa_mode=self._msa_aligned_mode)
-                seq_id = None
-                if self._dotplot_panel is not None:
-                    seq_id = self._dotplot_panel.sequence_id() or None
+                sid = str(sequence_id or "").strip() or None
+                if sid is None and self._dotplot_panel is not None:
+                    sid = self._dotplot_panel.sequence_id() or None
                 overview.select_by_position(
-                    int(pending[0]), int(pending[1]), sequence_id=seq_id
+                    int(start), int(end), sequence_id=sid
                 )
-                # Layout may settle after the tab switch; re-center the row.
-                if seq_id:
-                    row = overview._row_for_id(seq_id)
+                if sid:
+                    row = overview._row_for_id(sid)
                     if row >= 0:
                         QTimer.singleShot(
                             50,
@@ -1883,13 +1981,26 @@ class FilePreviewPage(QWidget):
                 # the whole FASTA, so calling it per selection would be very slow.
                 if getattr(panel, "_loaded_data", None) is None:
                     panel.load_path(self.path)
-                panel.select_by_position(int(pending[0]), int(pending[1]))
+                sid = str(sequence_id or "").strip()
+                if sid:
+                    panel.ensure_active_sequence(sid)
+                panel.select_by_position(int(start), int(end))
         except Exception:  # noqa: BLE001
-            # Do not swallow silently: a missing method here previously made
-            # the whole dotplot/annotation sync a no-op with no visible error.
-            logger.exception("Could not apply dotplot selection to Annotation")
+            logger.exception("Could not apply region highlight to Annotation")
+            return False
+        return True
+
+    def _apply_pending_annotation_selection(self) -> None:
+        pending = self._pending_annotation_selection
+        if pending is None:
             return
-        self._pending_annotation_selection = None
+        seq_id = None
+        if self._dotplot_panel is not None:
+            seq_id = self._dotplot_panel.sequence_id() or None
+        if self.apply_region_highlight(
+            int(pending[0]), int(pending[1]), sequence_id=seq_id
+        ):
+            self._pending_annotation_selection = None
 
     def bind_annotation_header_zoom(self, bar) -> None:
         self._ensure_annotation_panel().bind_annotation_zoom_bar(bar)
@@ -1918,17 +2029,29 @@ class FilePreviewPage(QWidget):
                 self._show_annotation_content(multi=False)
             self.set_fasta_tab_index(1)
             self._refresh_sequence_info_bar()
-            QTimer.singleShot(0, self._open_annotation_tab)
+            # force=False so a later Dotplot restore (split pane) is not undone.
+            QTimer.singleShot(
+                0, lambda: self._open_annotation_tab(force=False)
+            )
             return
         self.set_fasta_tab_index(0)
         self._refresh_sequence_info_bar()
         QTimer.singleShot(0, self._open_text_tab)
 
-    def _open_annotation_tab(self) -> None:
+    def _open_annotation_tab(self, *, force: bool = True) -> None:
+        """Show Overview/Annotation content.
+
+        ``force=True`` (direct calls) switches to the Annotation tab when needed.
+        ``force=False`` (deferred load/activate callbacks) no-ops if another
+        FASTA tab is already showing — so a split Dotplot pane is not yanked
+        back to Overview by a stale callback from file load.
+        """
         self._capture_text_selection_into_pending()
         if self._multi_fasta_mode:
             self._show_annotation_content(multi=True)
             if self._fasta_stack.currentIndex() != 1:
+                if not force:
+                    return
                 self.set_fasta_tab_index(1)
                 return
             self._ensure_annotation_data_loaded(
@@ -1944,6 +2067,8 @@ class FilePreviewPage(QWidget):
         if tab_host is not None and tab_host._annotation_zoom_bar is not None:
             panel.bind_annotation_zoom_bar(tab_host._annotation_zoom_bar)
         if self._fasta_stack.currentIndex() != 1:
+            if not force:
+                return
             self.set_fasta_tab_index(1)
             return
         self._ensure_annotation_data_loaded(progress_detail="Loading annotations…")
@@ -2799,10 +2924,12 @@ class PreviewTabWidget(QTabWidget):
         zoom_bar: QWidget | None = None,
         header_bar: QWidget | None = None,
         annotation_zoom_bar: QWidget | None = None,
+        allow_inline_split: bool = True,
     ) -> None:
         super().__init__(parent)
         from repeatviewer.widgets.preview_controls import PreviewHeaderBar, PreviewZoomBar
 
+        self._allow_inline_split = bool(allow_inline_split)
         self._zoom_bar = zoom_bar if zoom_bar is not None else PreviewZoomBar(self)
         self._header_bar = header_bar
         self._annotation_zoom_bar = annotation_zoom_bar
@@ -2818,7 +2945,7 @@ class PreviewTabWidget(QTabWidget):
             self._zoom_bar.save_text_requested.connect(self._on_save_text_requested)
         if hasattr(self._zoom_bar, "duplicate_window_requested"):
             self._zoom_bar.duplicate_window_requested.connect(self.open_duplicate_window)
-        if hasattr(self._zoom_bar, "split_window_requested"):
+        if self._allow_inline_split and hasattr(self._zoom_bar, "split_window_requested"):
             self._zoom_bar.split_window_requested.connect(self.open_split_window)
         if self._annotation_zoom_bar is not None and hasattr(
             self._annotation_zoom_bar, "duplicate_window_requested"
@@ -2826,8 +2953,10 @@ class PreviewTabWidget(QTabWidget):
             self._annotation_zoom_bar.duplicate_window_requested.connect(
                 self.open_duplicate_window
             )
-        if self._annotation_zoom_bar is not None and hasattr(
-            self._annotation_zoom_bar, "split_window_requested"
+        if (
+            self._allow_inline_split
+            and self._annotation_zoom_bar is not None
+            and hasattr(self._annotation_zoom_bar, "split_window_requested")
         ):
             self._annotation_zoom_bar.split_window_requested.connect(
                 self.open_split_window
@@ -2839,6 +2968,16 @@ class PreviewTabWidget(QTabWidget):
         self._wheel_zoom_filter = PreviewWheelZoomFilter(self, self._zoom_bar)
         if self._header_bar is not None:
             self._header_bar.fasta_tab_changed.connect(self._on_header_fasta_tab_changed)
+            if self._allow_inline_split and hasattr(
+                self._header_bar, "openInPanelRequested"
+            ):
+                self._header_bar.openInPanelRequested.connect(
+                    self._on_header_open_in_panel
+                )
+            if self._allow_inline_split and hasattr(
+                self._header_bar, "closeSplitRequested"
+            ):
+                self._header_bar.closeSplitRequested.connect(self._close_inline_split)
 
         self.setTabBar(PreviewFileTabBar(self))
         self.tabBar().customContextMenuRequested.connect(
@@ -2852,6 +2991,7 @@ class PreviewTabWidget(QTabWidget):
         self._path_to_index: dict[str, int] = {}
         self._lru_order: list[int] = []  # id(FilePreviewPage), most recent first
         self._duplicate_windows: list[QWidget] = []
+        self._inline_split: QWidget | None = None
         self._external_tab_bar_host: QWidget | None = None
         self._title_tab_bar: PreviewFileTabBar | None = None
         self._tab_bar_sync_guard = False
@@ -3015,6 +3155,10 @@ class PreviewTabWidget(QTabWidget):
     def _sync_header_from_current_page(self) -> None:
         if self._header_bar is None:
             return
+        # Split panes own their headers; keep the shared single-pane header down.
+        if self.is_split_active():
+            self._header_bar.hide()
+            return
         widget = self.currentWidget()
         if isinstance(widget, FilePreviewPage) and widget.is_single_fasta_preview():
             # Cytogenetics tab only for sequences that have attached images.
@@ -3132,6 +3276,11 @@ class PreviewTabWidget(QTabWidget):
                 self._tab_bar_sync_guard = False
         self._sync_zoom_bar_enabled(index)
         self._emit_current_path_changed()
+        # Title-bar tab switch while Split is open → load that file in both panes.
+        if self.is_split_active():
+            path = self.current_preview_path()
+            if path is not None:
+                self._sync_inline_split_path(path)
 
     def teardown_all_html_previews(self) -> None:
         for index in range(self.count()):
@@ -3579,19 +3728,210 @@ class PreviewTabWidget(QTabWidget):
         win = PreviewDuplicateWindow(widget, source_tabs=self, parent=host)
         return self._show_floating_preview_window(win)
 
+    def is_split_active(self) -> bool:
+        """True when the Preview dock is showing the inline left/right split."""
+        split = getattr(self, "_inline_split", None)
+        return split is not None and _qobject_alive(split)
+
+    def keep_split_chrome_hidden(self) -> None:
+        """Hide single-pane header/tabs while inline Split window is active."""
+        if not self.is_split_active():
+            return
+        if not self.isHidden():
+            self.hide()
+        header = self._header_bar
+        if header is not None and not header.isHidden():
+            header.hide()
+        split = self._inline_split
+        if split is not None and _qobject_alive(split):
+            split.show()
+
+    def _set_split_action_checked(self, checked: bool) -> None:
+        for bar in (self._zoom_bar, self._annotation_zoom_bar):
+            if bar is not None and hasattr(bar, "set_split_checked"):
+                bar.set_split_checked(checked)
+        header = self._header_bar
+        if header is not None and hasattr(header, "set_split_active"):
+            header.set_split_active(bool(checked))
+        # Actions lives only on the Preview dock title bar (not inside panes).
+        self._ensure_title_bar_actions_visible(for_split=bool(checked))
+        # Dock title stays "Preview" whether split is on or off.
+        self._set_preview_dock_title("Preview")
+
+    def _ensure_title_bar_actions_visible(self, *, for_split: bool) -> None:
+        """Keep the original dock-title Actions button usable during Split window."""
+        zoom = self._zoom_bar
+        if zoom is None:
+            return
+        if hasattr(zoom, "set_actions_visible"):
+            zoom.set_actions_visible(True)
+        if for_split and hasattr(zoom, "set_chrome_mode"):
+            # Actions-only chrome (same as Overview / Dotplot on the title bar).
+            zoom.set_chrome_mode("dotplot")
+        actions = getattr(zoom, "_actions_btn", None)
+        if actions is not None:
+            actions.setVisible(True)
+            actions.setEnabled(True)
+        # Ensure the title-bar host that wraps the zoom/Actions strip is shown.
+        host = zoom.parentWidget()
+        while host is not None:
+            if host.objectName() == "PreviewDockZoomHost":
+                host.show()
+                break
+            host = host.parentWidget()
+        zoom.show()
+
+    def _preview_dock_title_bar(self):
+        """Find the Preview dock title bar (MainWindow hosts it)."""
+        widget = self.parentWidget()
+        while widget is not None:
+            bar = getattr(widget, "_preview_title_bar", None)
+            if bar is not None and hasattr(bar, "set_title"):
+                return bar
+            widget = widget.parentWidget()
+        return None
+
+    def _set_preview_dock_title(self, title: str) -> None:
+        bar = self._preview_dock_title_bar()
+        if bar is not None:
+            bar.set_title(title)
+
     def open_split_window(self) -> bool:
-        """Open a floating left/right split Preview of the current file."""
+        """Toggle an in-dock left/right split of the current Preview file.
+
+        The split replaces the single-pane tab view inside the Preview host and
+        stays active when other files are opened (both panes load the new file).
+        Choose Actions → Split window again to restore the single pane.
+        """
+        if not getattr(self, "_allow_inline_split", True):
+            return False
+        if self.is_split_active():
+            self._close_inline_split()
+            return True
         widget = self.currentWidget()
         if not isinstance(widget, FilePreviewPage):
+            self._set_split_action_checked(False)
+            return False
+        tab = widget.current_fasta_tab_index()
+        return self.open_split_with_tabs(tab, tab)
+
+    def open_split_with_tabs(self, left_tab: int, right_tab: int) -> bool:
+        """Ensure in-dock split with the given Text/Overview/Dotplot indices."""
+        if not getattr(self, "_allow_inline_split", True):
+            return False
+        widget = self.currentWidget()
+        if not isinstance(widget, FilePreviewPage):
+            self._set_split_action_checked(False)
             return False
         path = widget.path.expanduser().resolve()
         if not path.is_file():
+            self._set_split_action_checked(False)
             return False
+
         from repeatviewer.widgets.preview_split_window import PreviewSplitWindow
 
-        host = self.window()
-        win = PreviewSplitWindow(widget, source_tabs=self, parent=host)
-        return self._show_floating_preview_window(win)
+        left_idx = int(left_tab)
+        right_idx = int(right_tab)
+        if self.is_split_active():
+            split = self._inline_split
+            assert isinstance(split, PreviewSplitWindow)
+            if left_idx >= 0:
+                split.set_pane_fasta_tab("left", left_idx)
+            if right_idx >= 0:
+                split.set_pane_fasta_tab("right", right_idx)
+            self._set_split_action_checked(True)
+            return True
+
+        host = self.parentWidget()
+        if host is None or host.layout() is None:
+            win = PreviewSplitWindow(
+                widget,
+                source_tabs=self,
+                parent=self.window(),
+                floating=True,
+                left_tab=left_idx,
+                right_tab=right_idx,
+            )
+            ok = self._show_floating_preview_window(win)
+            self._set_split_action_checked(ok)
+            return ok
+
+        split = PreviewSplitWindow(
+            widget,
+            source_tabs=self,
+            parent=host,
+            floating=False,
+            left_tab=left_idx,
+            right_tab=right_idx,
+        )
+        self._inline_split = split
+        split.closeSplitRequested.connect(self._close_inline_split)
+
+        def _forget(*_args, window=split) -> None:
+            # Only restore single-pane UI when THIS split was still active.
+            # Closing then re-opening split (Additional Tab) must not let the
+            # old window's destroyed callback un-hide the new split.
+            if getattr(self, "_inline_split", None) is not window:
+                return
+            self._inline_split = None
+            self._set_split_action_checked(False)
+            if _qobject_alive(self) and self.isHidden():
+                self.show()
+            header = self._header_bar
+            if header is not None and _qobject_alive(self):
+                self._sync_header_from_current_page()
+
+        split.destroyed.connect(_forget)
+        host_layout = host.layout()
+        # Keep tab widget in the layout but hidden so open_file still updates tabs.
+        self.hide()
+        header = self._header_bar
+        if header is not None:
+            header.hide()
+        host_layout.addWidget(split, stretch=1)
+        split.show()
+        self._set_split_action_checked(True)
+        return True
+
+    def _on_header_open_in_panel(self, tab_index: int, side: str) -> None:
+        """Right-click Text/Overview/Dotplot → open that tab in left/right panel."""
+        widget = self.currentWidget()
+        if not isinstance(widget, FilePreviewPage):
+            return
+        current = widget.current_fasta_tab_index()
+        if current < 0:
+            current = 0
+        want = int(tab_index)
+        side_key = str(side or "right").strip().lower()
+        if side_key == "left":
+            left_tab, right_tab = want, current
+        else:
+            left_tab, right_tab = current, want
+        if self.is_split_active():
+            split = self._inline_split
+            from repeatviewer.widgets.preview_split_window import PreviewSplitWindow
+
+            if isinstance(split, PreviewSplitWindow):
+                split.set_pane_fasta_tab(side_key, want)
+                return
+        self.open_split_with_tabs(left_tab, right_tab)
+
+    def _close_inline_split(self) -> None:
+        split = getattr(self, "_inline_split", None)
+        self._inline_split = None
+        self._set_split_action_checked(False)
+        if split is not None and _qobject_alive(split):
+            if hasattr(split, "mark_closed"):
+                split.mark_closed()
+            split.hide()
+            split.setParent(None)
+            split.deleteLater()
+        if _qobject_alive(self):
+            self.show()
+            self._apply_zoom_to_current_tab()
+            self._sync_header_from_current_page()
+            self._sync_tab_bar_visible()
+            self._emit_current_path_changed()
 
     def _show_floating_preview_window(self, win: QWidget) -> bool:
         """Track, show, and raise a Duplicate / Split preview window."""
@@ -3609,6 +3949,34 @@ class PreviewTabWidget(QTabWidget):
         win.activateWindow()
         return True
 
+    def _split_layout_snapshot(self) -> tuple[int, int] | None:
+        """Left/right FASTA tab indices while inline split is active."""
+        if not self.is_split_active():
+            return None
+        split = self._inline_split
+        if split is None or not _qobject_alive(split):
+            return None
+        left = int(getattr(split._left, "_desired_fasta_tab", -1))
+        right = int(getattr(split._right, "_desired_fasta_tab", -1))
+        if left < 0:
+            left = split._left.current_fasta_tab()
+        if right < 0:
+            right = split._right.current_fasta_tab()
+        if left < 0:
+            left = 1
+        if right < 0:
+            right = 2 if left == 1 else left
+        return left, right
+
+    def _restore_split_layout(self, layout: tuple[int, int] | None) -> None:
+        """Re-open inline split with the given Overview/Dotplot indices."""
+        if layout is None:
+            return
+        left, right = layout
+        self.open_split_with_tabs(int(left), int(right))
+        self.keep_split_chrome_hidden()
+        self._sync_tab_bar_visible()
+
     def open_file(self, path: Path, *, replace: bool = False) -> bool:
         """Open one file. Returns False if the user chose Cancel at the save prompt.
 
@@ -3621,9 +3989,28 @@ class PreviewTabWidget(QTabWidget):
 
         Either way, a file that is already open somewhere just gets focused
         instead of being loaded a second time.
+
+        When the Preview is split, a normal open keeps the split and loads the
+        file into both panes. Additional Tab briefly leaves split so the new
+        file tab is created, then re-opens the same left/right layout on that
+        new tab (so the added tab is also split).
         """
         resolved = path.expanduser().resolve()
         key = str(resolved)
+        fasta_tab = -1
+        current = self.currentWidget()
+        if isinstance(current, FilePreviewPage):
+            fasta_tab = current.current_fasta_tab_index()
+
+        # Additional Tab while split: remember Overview|Dotplot, close split so
+        # the new tab is a real Preview tab, then restore split on that tab.
+        restore_split: tuple[int, int] | None = None
+        if not replace and self.is_split_active():
+            restore_split = self._split_layout_snapshot()
+            self._close_inline_split()
+
+        # While split (replace path), keep each pane's Text/Overview/Dotplot.
+        split_fasta_tab = -1 if self.is_split_active() else fasta_tab
 
         existing = self._path_to_index.get(key)
         if existing is not None:
@@ -3631,10 +4018,14 @@ class PreviewTabWidget(QTabWidget):
                 widget = self.widget(existing)
                 if isinstance(widget, FilePreviewPage):
                     widget.reload_from_disk()
+                    if not self.is_split_active():
+                        split_fasta_tab = widget.current_fasta_tab_index()
                 self.setCurrentIndex(existing)
                 self._apply_zoom_to_current_tab()
                 self._sync_tab_bar_visible()
                 self._emit_current_path_changed()
+                self._sync_inline_split_path(resolved, fasta_tab=split_fasta_tab)
+                self._restore_split_layout(restore_split)
                 return True
             del self._path_to_index[key]
 
@@ -3651,6 +4042,7 @@ class PreviewTabWidget(QTabWidget):
             self._sync_tab_bar_visible()
             # Same tab index: currentChanged may not fire after replace.
             self._emit_current_path_changed()
+            self._sync_inline_split_path(resolved, fasta_tab=split_fasta_tab)
             return True
 
         page = FilePreviewPage(resolved)
@@ -3662,13 +4054,35 @@ class PreviewTabWidget(QTabWidget):
         self._apply_zoom_to_current_tab()
         self._sync_tab_bar_visible()
         self._emit_current_path_changed()
+        self._sync_inline_split_path(resolved, fasta_tab=split_fasta_tab)
+        self._restore_split_layout(restore_split)
         return True
+
+    def _sync_inline_split_path(self, path: Path, *, fasta_tab: int = -1) -> None:
+        """Keep both split panes on ``path`` when inline split is active.
+
+        Pane tab kinds (e.g. Overview | Dotplot) are preserved unless a pane
+        has no tab yet and ``fasta_tab`` is provided as a seed.
+        """
+        split = getattr(self, "_inline_split", None)
+        if split is None or not _qobject_alive(split):
+            return
+        if hasattr(split, "open_path"):
+            split.open_path(path, fasta_tab=fasta_tab)
+        # File-list open / replace can re-show the single-pane stack; tuck it away.
+        self.keep_split_chrome_hidden()
 
     def open_files_in_tabs(self, paths: list[Path]) -> None:
         """Open many files (e.g. right-click); keeps existing tabs and adds new ones."""
+        # Snapshot once so multi-select Additional Tab restores a single split.
+        restore_split = None
+        if self.is_split_active():
+            restore_split = self._split_layout_snapshot()
+            self._close_inline_split()
         for path in paths:
             self.open_file(path, replace=False)
         self._sync_tab_bar_visible()
+        self._restore_split_layout(restore_split)
 
     def open_self_dotplot_tab(self, path: object, sequence_id: str) -> FilePreviewPage | None:
         """A second tab on the same file, showing Dotplot (Self) for one sequence.

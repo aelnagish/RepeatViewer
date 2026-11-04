@@ -733,6 +733,48 @@ def test_msa_name_label_tracks_track_height(qapp: QApplication, tmp_path: Path) 
     panel.close()
 
 
+def test_zoom_to_reference_boundary_centers_at_letter_zoom(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    """Left/Right boundary controls jump to reference edges at nucleotide zoom."""
+    from repeatviewer.widgets.multi_sequence_overview import (
+        MultiSequenceOverviewPanel,
+        _MSA_ZOOM_LETTER_SLIDER,
+    )
+
+    # Gaps outside the reference body so left/right edges are interior columns.
+    ref = ("-" * 20) + ("ACGT" * 80) + ("-" * 20)
+    other = ("N" * 20) + ("ACGT" * 80) + ("N" * 20)
+    fasta = tmp_path / "bounds.fa"
+    fasta.write_text(f">ref\n{ref}\n>other\n{other}\n", encoding="utf-8")
+    panel = MultiSequenceOverviewPanel(fasta)
+    panel.resize(900, 500)
+    panel.show()
+    qapp.processEvents()
+    panel.load_path(fasta, msa_mode=True)
+    qapp.processEvents()
+    panel._bars.set_msa_diff_standard_id("ref")
+    panel._fit_bars()
+    qapp.processEvents()
+    extent = panel._bars.msa_standard_extent_columns()
+    assert extent == (20, 339)
+
+    assert panel.zoom_to_reference_boundary("left") is True
+    qapp.processEvents()
+    assert abs(panel._zoom_slider.value() - _MSA_ZOOM_LETTER_SLIDER) <= 2
+    assert panel._bars.pixels_per_base() >= 6.0
+    hbar = panel._bars_scroll.horizontalScrollBar()
+    vp_w = max(1, panel._bars_scroll.viewport().width())
+    left_x = panel._bars.bp_to_x(20.0) - hbar.value()
+    assert abs(left_x - vp_w * 0.5) < max(8.0, panel._bars.pixels_per_base())
+
+    assert panel.zoom_to_reference_boundary("right") is True
+    qapp.processEvents()
+    right_x = panel._bars.bp_to_x(340.0) - hbar.value()
+    assert abs(right_x - vp_w * 0.5) < max(8.0, panel._bars.pixels_per_base())
+    panel.close()
+
+
 def test_msa_scale_double_click_zooms_to_three_quarter(
     qapp: QApplication, tmp_path: Path
 ) -> None:

@@ -65,6 +65,7 @@ class BrowserDockTitleBar(QWidget):
         self._title.setObjectName("BrowserDockTitleLabel")
         self._title.setToolTip(_TOOLTIP_DOCKED)
         layout.addWidget(self._title, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._default_title = str(title)
 
         self._leading = leading
         if leading is not None:
@@ -101,6 +102,14 @@ class BrowserDockTitleBar(QWidget):
 
         dock.topLevelChanged.connect(self._on_dock_floating_changed)
         self._on_dock_floating_changed(dock.isFloating())
+
+    def set_title(self, title: str) -> None:
+        """Update the dock title label."""
+        text = str(title or "").strip() or self._default_title
+        self._title.setText(text)
+
+    def title(self) -> str:
+        return self._title.text()
 
     def sizeHint(self) -> QSize:  # noqa: N802
         return QSize(max(super().sizeHint().width(), 80), BROWSER_DOCK_TITLE_HEIGHT)

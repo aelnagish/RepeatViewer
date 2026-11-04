@@ -2421,7 +2421,8 @@ class SequenceAnnotationRail(QWidget):
         if check is None:
             return
         overview = bool(getattr(self, "_overview_mode", False))
-        check.setVisible(overview and bool(getattr(self, "_split_sync_available", False)))
+        show = overview and bool(getattr(self, "_split_sync_available", False))
+        check.setVisible(show)
 
     def apply_visible_annotation_kinds(self, keys: frozenset[str] | set[str]) -> None:
         """Set Displayed annotations checkboxes to ``keys`` (Split Preview sync)."""
@@ -2450,10 +2451,10 @@ class SequenceAnnotationRail(QWidget):
         self._emit_annotation_track_kinds()
 
     def ensure_annotation_kinds_visible(self, keys: list[str] | tuple[str, ...] | set[str]) -> None:
-        """Tick Displayed annotations for ``keys`` after a prediction run.
+        """Tick Display → Displayed annotations for ``keys``.
 
-        Feature detection / Similarity should show their results even when the
-        user had previously unchecked that type under Tracks.
+        Used after Feature detection / Similarity runs and after Manually add
+        feature, so new types (e.g. LTR) are visible even if previously unchecked.
         """
         wanted: list[str] = []
         seen: set[str] = set()

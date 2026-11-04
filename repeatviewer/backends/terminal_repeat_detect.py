@@ -122,7 +122,15 @@ def _filter_blast_hits(
     return filtered
 
 
+def _copies_non_overlapping(hit: pd.Series) -> bool:
+    """Left copy ``[qstart, qend]`` must end before right copy ``[s_lo, s_hi]``."""
+    return int(hit["qend"]) < int(hit["s_lo"])
+
+
 def _pair_distance_ok(hit: pd.Series, *, min_pair_distance: int) -> bool:
+    # Always forbid overlapping terminal copies; optional min gap on top.
+    if not _copies_non_overlapping(hit):
+        return False
     if min_pair_distance <= 0:
         return True
     q3 = int(hit["qend"])
@@ -235,6 +243,8 @@ def _check_terminal_repeat(
             & (hits["qend"] != hits["send"])
             & hits["s_forward"]
             & (hits["sstart"] > hits["qstart"])
+            # Left and right LTR must not overlap (right starts after left ends).
+            & (hits["sstart"] > hits["qend"])
         ].copy()
         df_ltr = _filter_blast_hits(
             df_ltr,
@@ -262,6 +272,8 @@ def _check_terminal_repeat(
         & (hits["qend"] != hits["send"])
         & hits["s_inverted"]
         & (hits["s_lo"] > hits["qstart"])
+        # Terminal copies must not overlap.
+        & (hits["s_lo"] > hits["qend"])
     ].copy()
     df_tir = _filter_blast_hits(
         df_tir,
