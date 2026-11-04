@@ -1126,7 +1126,8 @@ class IdiogramTab(QWidget):
         self._side_stack.addWidget(aside)
         self._side_stack.addWidget(self._build_edit_side())
         self._side_stack.addWidget(self._build_paper_side())
-        self._side_stack.setFixedWidth(SIDE_W)
+        self._side_stack.setMinimumWidth(240)
+        self._side_stack.setMaximumWidth(SIDE_W)
 
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -1530,12 +1531,17 @@ class IdiogramTab(QWidget):
             return
         from repeatviewer.views.cyto_karyotype_dialog import KaryotypeDialog
 
-        dialog = KaryotypeDialog(self._folder, self._karyotype.name if self._karyotype else "", self)
-        if dialog.exec():
+        dialog = KaryotypeDialog(self._folder, self._karyotype.name if self._karyotype else "", self.window())
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+
+        def done() -> None:
             self._settings.karyotype = dialog.saved_name() or self._settings.karyotype
             idg.save_settings(self._folder, self._settings)
             self.karyotypesChanged.emit()
             self._rebuild()
+
+        dialog.accepted.connect(done)
+        dialog.show()  # not modal: the Files panel stays clickable (Lengths from assembly)
 
     # ------------------------------------------------------------------ saving
 

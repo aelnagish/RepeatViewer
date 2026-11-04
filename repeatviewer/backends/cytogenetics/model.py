@@ -224,9 +224,20 @@ class Slide:
     technique: str = ""
     counterstain: str = ""
     note: str = ""
+    box: str = ""  # slide or box number
+    probes: str = ""  # probes / hybridisation, free text
+    hyb_temp: str = ""  # hybridisation temperature
+    fixation_date: str = ""
+    microscope: str = ""
+    experimenter: str = ""
+    protocol: str = ""
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+
+# Slide values an image takes unless it was given its own value
+SLIDE_INHERITED = ("species", "accession", "technique", "counterstain", "date", "microscope", "experimenter")
 
 
 def _slides_path(folder: Path) -> Path:
@@ -262,6 +273,61 @@ def add_slide(folder: Path, name: str, **values) -> Slide:
     slides.append(slide)
     save_slides(folder, slides)
     return slide
+
+
+def _inherit(image: CytoImage, old: Slide | None, new: Slide | None) -> bool:
+    """Give the image the new slide's values where it still has the old slide's value (or none)."""
+    changed = False
+    for key in SLIDE_INHERITED:
+        before = getattr(old, key, "") if old is not None else ""
+        value = getattr(new, key, "") if new is not None else ""
+        current = image.metadata.get(key, "")
+        if current in ("", before) and current != value:
+            if value:
+                image.metadata[key] = value
+            else:
+                image.metadata.pop(key, None)
+            changed = True
+    return changed
+
+
+def update_slide(folder: Path, slide: Slide) -> int:
+    """Save the slide's details; its images follow unless they were given their own value. Returns images changed."""
+    from ..cyto_images import load_images, save_images
+
+    slides = load_slides(folder)
+    old = next((s for s in slides if s.id == slide.id), None)
+    slides = [slide if s.id == slide.id else s for s in slides] if old else [*slides, slide]
+    save_slides(folder, slides)
+    images = load_images(folder)
+    changed = [im for im in images if image_details(im).slide_id == slide.id and _inherit(im, old, slide)]
+    if changed:
+        save_images(folder, images)
+    return len(changed)
+
+
+def assign_to_slide(folder: Path, image_ids: list[str], slide_id: str) -> int:
+    """Put images on a slide ("" = no slide). Empty image values are filled from the new slide."""
+    from ..cyto_images import load_images, save_images
+
+    slides = {s.id: s for s in load_slides(folder)}
+    new = slides.get(slide_id)
+    images = load_images(folder)
+    n = 0
+    for im in images:
+        if im.id not in image_ids:
+            continue
+        d = image_details(im)
+        if d.slide_id == (slide_id or ""):
+            continue
+        old = slides.get(d.slide_id)
+        _inherit(im, old, new)
+        d.slide_id = slide_id or ""
+        set_image_details(im, d)
+        n += 1
+    if n:
+        save_images(folder, images)
+    return n
 
 
 def slide_for_image(image: CytoImage, slides: list[Slide]) -> Slide | None:

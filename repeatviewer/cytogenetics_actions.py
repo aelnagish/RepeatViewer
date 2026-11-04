@@ -58,11 +58,17 @@ class CytogeneticsActionsMixin:
 
     def _populate_cytogenetics_menu(self, menu) -> None:
         menu.addAction("Open workspace", lambda: self._open_cytogenetics_workspace())
-        menu.addAction("Import slide session...", self._cytogenetics_import_session)
+        menu.addAction("Import", self._cytogenetics_import_session)
         menu.addAction("Add image...", lambda: self._cytogenetics_library_action("add_image"))
         menu.addAction("Edit lists...", self._cytogenetics_edit_lists)
         menu.addSeparator()
         menu.addAction("Make Chromosome Sizes File", lambda: self._make_chromosome_sizes())
+
+    def _sync_cytogenetics_windows_from_files(self, path: Path) -> None:
+        """A click in the Files or Folders panel fills the path field of an open Cytogenetics window."""
+        from repeatviewer.widgets.cyto_panel_targets import offer
+
+        offer(path)
 
     def _make_chromosome_sizes(self, path: Path | None = None) -> None:
         """Write ``<name>_sizes.txt`` (sequence name and length) for the selected FASTA files, in the background."""

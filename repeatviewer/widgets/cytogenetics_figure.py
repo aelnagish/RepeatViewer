@@ -717,7 +717,8 @@ class FigureTab(QWidget):
         aside.setFrameShape(QFrame.Shape.NoFrame)
         aside.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         aside.setWidget(body)
-        aside.setFixedWidth(SIDE_W)
+        aside.setMinimumWidth(240)
+        aside.setMaximumWidth(SIDE_W)
 
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)

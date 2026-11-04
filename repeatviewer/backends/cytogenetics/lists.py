@@ -283,7 +283,7 @@ def remove_entry(folder: Path, lists: Lists, key: str, name: str) -> None:
 
 def filename_tokens(name: str) -> list[str]:
     stem = Path(name).name
-    for suffix in (".ome.tiff", ".ome.tif", ".tiff", ".tif"):
+    for suffix in (".ome.tiff", ".ome.tif", ".tiff", ".tif", ".jpeg", ".jpg", ".png", ".bmp", ".gif", ".webp"):
         if stem.lower().endswith(suffix):
             stem = stem[: -len(suffix)]
             break

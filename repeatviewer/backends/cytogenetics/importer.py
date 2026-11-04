@@ -47,7 +47,7 @@ def group_channel_files(paths: list[Path], lists: Lists) -> tuple[list[CellGroup
     groups: dict[str, CellGroup] = {}
     unmatched: list[Path] = []
     for path in sorted((Path(p) for p in paths), key=lambda p: natural_key(p.name)):
-        if not ch.is_tiff(path):
+        if not ch.is_image(path):
             unmatched.append(path)
             continue
         dye, index = dye_for_filename(path.name, lists)
@@ -78,7 +78,7 @@ def plan_cells(paths: list[Path], lists: Lists) -> tuple[list[CellGroup], list[s
     singles: list[Path] = []
     multi: list[CellGroup] = []
     for path in sorted((Path(p) for p in paths), key=lambda p: natural_key(str(p))):
-        if not ch.is_tiff(path):
+        if not ch.is_image(path):
             continue
         try:
             info = ch.inspect_tiff(path)
@@ -264,7 +264,7 @@ def scan_tiffs(source: Path, recursive: bool = False) -> list[Path]:
     if not source.is_dir():
         return []
     walker = source.rglob("*") if recursive else source.iterdir()
-    return sorted((p for p in walker if p.is_file() and ch.is_tiff(p) and not p.name.startswith(".")),
+    return sorted((p for p in walker if p.is_file() and ch.is_image(p) and not p.name.startswith(".")),
                   key=lambda p: natural_key(str(p)))
 
 
@@ -289,7 +289,7 @@ def run_request(req: ImportRequest, *, progress=None):
     files = scan_tiffs(req.source, req.recursive)
     groups, errors = plan_cells(files, lists)
     if not groups:
-        return None, [], errors or ["No TIFF files found."]
+        return None, [], errors or ["No picture files found (TIFF, JPG, PNG or BMP)."]
     values = {k: str(req.slide_values.get(k, "")).strip() for k in SLIDE_FIELDS}
     slide = add_slide(folder, req.slide_name or Path(req.source).name, **values)
     metadata = {k: v for k, v in values.items() if v}

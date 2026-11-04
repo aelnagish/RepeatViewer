@@ -47,7 +47,7 @@ def workspace_css() -> str:
     """Only backgrounds of the side columns and a few text colours: every control stays the app's native one."""
     return """
 #cytoAside { background: palette(window); }
-#cytoMain { background: palette(base); }
+#cytoMain { background: palette(window); }
 #cytoPage { background: #DADBDF; }
 QLabel#cytoMuted, QLabel#cytoCrumb { color: gray; }
 QPushButton#cytoLink { background: transparent; border: none; color: palette(link); padding: 0px; text-align: left; }
@@ -101,3 +101,42 @@ def clear_layout(layout) -> None:
             clear_layout(child)
             child.setParent(None)
             child.deleteLater()
+
+
+BOX_CSS = "QFrame#cytoBox { border: 1px solid palette(mid); border-radius: 8px; background: palette(base); }"
+
+
+def rounded_box(inner, parent=None, margin: int = 2):
+    """Put a list, table or canvas in the app's round-edged box (the same frame as the Files and Preview panels)."""
+    from PySide6.QtWidgets import QFrame, QVBoxLayout
+
+    box = QFrame(parent)
+    box.setObjectName("cytoBox")
+    box.setStyleSheet(BOX_CSS)
+    lay = QVBoxLayout(box)
+    lay.setContentsMargins(margin, margin, margin, margin)
+    lay.setSpacing(0)
+    if isinstance(inner, QFrame):
+        inner.setFrameShape(QFrame.Shape.NoFrame)
+    lay.addWidget(inner)
+    return box
+
+
+def form_layout(parent=None):
+    """The form of the app's tool windows: labels right-aligned in one column, fields growing."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QFormLayout
+
+    form = QFormLayout(parent)
+    form.setContentsMargins(0, 0, 0, 0)
+    form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+    form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+    form.setHorizontalSpacing(12)
+    form.setVerticalSpacing(6)
+    return form
+
+
+def section_label(text: str, parent=None):
+    from PySide6.QtWidgets import QLabel
+
+    return QLabel(f"<b>{text}</b>", parent)

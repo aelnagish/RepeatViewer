@@ -125,7 +125,7 @@ class CytogeneticsWorkspace(QWidget):
         self._crumb = QLabel(self)
         self._crumb.setObjectName("cytoCrumb")
         self._crumb.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        self._import_btn = QPushButton("Import slide session", self)
+        self._import_btn = QPushButton("Import", self)
         self._import_btn.setObjectName("cytoPrimary")
         self._import_btn.clicked.connect(lambda: self._pages["Library"].start_import())
 
@@ -139,8 +139,10 @@ class CytogeneticsWorkspace(QWidget):
         corner = QWidget(self)
         cl = QHBoxLayout(corner)
         cl.setContentsMargins(0, 0, 8, 0)
-        cl.addWidget(self._help)
+        cl.addWidget(self._help, 0, Qt.AlignmentFlag.AlignVCenter)
         self._tabs.setCornerWidget(corner, Qt.Corner.TopRightCorner)
+        self._tabs.tabBar().setDrawBase(False)  # no line running above the "?" button
+        corner.setFixedHeight(max(self._tabs.tabBar().sizeHint().height(), self._help.sizeHint().height()))
         self._pages: dict[str, QWidget] = {}
         for name in ws.TAB_NAMES:
             page = {"Library": LibraryTab, "Image": ImageTab, "Signals": SignalsTab, "Idiogram": IdiogramTab, "Figure": FigureTab}.get(name, None)

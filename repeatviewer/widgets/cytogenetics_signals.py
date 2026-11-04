@@ -373,7 +373,8 @@ class SignalsTab(QWidget):
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setWidget(body)
-        scroll.setFixedWidth(SIDE_W)
+        scroll.setMinimumWidth(240)
+        scroll.setMaximumWidth(SIDE_W)
 
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -726,18 +727,26 @@ class SignalsTab(QWidget):
             return
         from repeatviewer.views.cyto_karyotype_dialog import KaryotypeDialog
 
-        dialog = KaryotypeDialog(self._folder, s.karyotype.name if edit and s.karyotype else "", self)
-        accepted = dialog.exec()
-        s.karyotypes = list_karyotypes(self._folder)
-        if accepted and dialog.saved_name():
-            s.karyotype = next((k for k in s.karyotypes if k.name == dialog.saved_name()), s.karyotype)
-            s.details.karyotype = s.karyotype.name if s.karyotype else ""
-            s.dirty = True
-            self._save_timer.start()
-            self.karyotypesChanged.emit()
-        self._fill_karyotypes()
-        self._sync_all()
-        self._canvas.update()
+        dialog = KaryotypeDialog(self._folder, s.karyotype.name if edit and s.karyotype else "", self.window())
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+
+        def done(accepted: int) -> None:
+            s2 = self._session
+            if s2 is None or self._folder is None:
+                return
+            s2.karyotypes = list_karyotypes(self._folder)
+            if accepted and dialog.saved_name():
+                s2.karyotype = next((k for k in s2.karyotypes if k.name == dialog.saved_name()), s2.karyotype)
+                s2.details.karyotype = s2.karyotype.name if s2.karyotype else ""
+                s2.dirty = True
+                self._save_timer.start()
+                self.karyotypesChanged.emit()
+            self._fill_karyotypes()
+            self._sync_all()
+            self._canvas.update()
+
+        dialog.finished.connect(done)
+        dialog.show()  # not modal: the Files panel stays clickable (Lengths from assembly)
 
     def _sync_labels(self) -> None:
         s = self._session

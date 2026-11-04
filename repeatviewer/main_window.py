@@ -8902,6 +8902,7 @@ class MainWindow(
         self._sync_hmmer_params_dialog_from_folder(folder)
         self._sync_create_folder_dialog_from_folder(folder)
         self._sync_transfer_source_from_folder(folder)
+        self._sync_cytogenetics_windows_from_files(folder)
 
     def _refresh_current_folder(self) -> None:
         if self._current_folder and self._current_folder.is_dir():
@@ -10882,6 +10883,7 @@ class MainWindow(
             self._sync_hmmer_params_dialog_from_files(panel_path)
             self._sync_tree_trait_dialog_from_files(panel_path)
             self._sync_primer_check_dialog_from_files(panel_path)
+            self._sync_cytogenetics_windows_from_files(panel_path)
             filled_transfer = self._sync_transfer_source_from_files(panel_path)
             if not filled_transfer:
                 self._stop_transfer_session_on_file_navigation(panel_path)
@@ -10893,6 +10895,10 @@ class MainWindow(
     def _preview_follow_selection_blocked(self) -> bool:
         """True while a dialog uses Files-panel clicks to fill its own fields."""
         if self._file_list.suppress_selection_preview():
+            return True
+        from repeatviewer.widgets.cyto_panel_targets import any_visible as _cyto_window_open
+
+        if _cyto_window_open():
             return True
         if self._define_database_dialog is not None and self._define_database_dialog.isVisible():
             return True

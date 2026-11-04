@@ -17,6 +17,8 @@ import numpy as np
 from .model import ChannelDisplay
 
 TIFF_SUFFIXES = (".tif", ".tiff")
+# Pictures that can be imported as channels or merges (JPG and the rest are read without tifffile)
+IMAGE_SUFFIXES = TIFF_SUFFIXES + (".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp")
 DEFAULT_SATURATED = 0.1  # percent of pixels clipped at each end by Auto levels
 
 
@@ -29,6 +31,59 @@ class ChannelData:
 
 def is_tiff(path: Path) -> bool:
     return Path(path).suffix.lower() in TIFF_SUFFIXES
+
+
+def is_image(path: Path) -> bool:
+    return Path(path).suffix.lower() in IMAGE_SUFFIXES
+
+
+def _read_other(path: Path) -> np.ndarray:
+    """Pixels of any picture without tifffile: Pillow when installed, else Qt (both read LZW TIFFs and JPG)."""
+    try:
+        from PIL import Image  # type: ignore[import-not-found]
+
+        with Image.open(str(path)) as im:
+            if im.mode in ("P", "CMYK", "LA", "YCbCr", "HSV", "1"):
+                im = im.convert("RGBA" if "A" in im.mode or im.mode == "P" else "RGB")
+            return np.array(im)
+    except ImportError:
+        pass
+    from PySide6.QtGui import QImage
+
+    img = QImage(str(path))
+    if img.isNull():
+        raise ValueError(f"{Path(path).name} is not a picture that can be read")
+    if img.isGrayscale():
+        deep = img.depth() > 8
+        img = img.convertToFormat(QImage.Format.Format_Grayscale16 if deep else QImage.Format.Format_Grayscale8)
+        dtype, channels = (np.uint16, 1) if deep else (np.uint8, 1)
+    else:
+        img = img.convertToFormat(QImage.Format.Format_RGB888)
+        dtype, channels = np.uint8, 3
+    width, height, stride = img.width(), img.height(), img.bytesPerLine()
+    raw = np.frombuffer(img.constBits(), dtype=np.uint8, count=stride * height).reshape(height, stride)
+    item = np.dtype(dtype).itemsize
+    raw = raw[:, : width * channels * item].copy()
+    data = raw.view(dtype).reshape(height, width, channels) if channels > 1 else raw.view(dtype).reshape(height, width)
+    return data
+
+
+def _as_rgb_or_grey(array: np.ndarray) -> np.ndarray:
+    """A colour picture whose three planes are equal is a grey channel."""
+    if array.ndim == 3 and array.shape[-1] >= 3:
+        rgb = array[..., :3]
+        if np.array_equal(rgb[..., 0], rgb[..., 1]) and np.array_equal(rgb[..., 1], rgb[..., 2]):
+            return np.ascontiguousarray(rgb[..., 0])
+        return np.ascontiguousarray(rgb)
+    return array
+
+
+def _fallback_error(path: Path, exc: Exception) -> Exception:
+    text = str(exc)
+    if "imagecodecs" in text:
+        text = ("the file is compressed (LZW or similar) and could not be opened. "
+                "Install the decoder with: pip install imagecodecs")
+    return ValueError(f"{Path(path).name}: {text}")
 
 
 def _tifffile():
@@ -74,11 +129,21 @@ def _pixel_size(tif) -> float | None:
 
 
 def read_channel(path: Path) -> ChannelData:
-    """Read one TIFF (grey or RGB). Multi-page files: the first page."""
-    tifffile = _tifffile()
-    with tifffile.TiffFile(str(path)) as tif:
-        array = tif.pages[0].asarray()
-        pixel = _pixel_size(tif)
+    """Read one picture (grey or RGB). Multi-page TIFFs: the first page. Other formats and TIFFs tifffile
+    cannot decode (LZW without imagecodecs) are read with Pillow or Qt."""
+    pixel = None
+    try:
+        if not is_tiff(path):
+            raise ValueError("not a TIFF")
+        tifffile = _tifffile()
+        with tifffile.TiffFile(str(path)) as tif:
+            pixel = _pixel_size(tif)
+            array = tif.pages[0].asarray()
+    except Exception as exc:  # noqa: BLE001 - try the other readers before giving up
+        try:
+            array = _as_rgb_or_grey(_read_other(path))
+        except Exception:  # noqa: BLE001
+            raise _fallback_error(path, exc) from exc
     array = np.asarray(array)
     while array.ndim > 2 and array.shape[0] == 1:
         array = array[0]
@@ -133,7 +198,26 @@ def _channel_names(tif, count: int) -> list[str]:
 
 
 def inspect_tiff(path: Path) -> TiffInfo:
-    """What one TIFF holds: one grey plane, an RGB merge, or several channels (ImageJ, OME, multi-page)."""
+    """What one picture holds: one grey plane, an RGB merge, or several channels (ImageJ, OME, multi-page)."""
+    if not is_tiff(path):
+        return _inspect_other(path)
+    try:
+        return _inspect_tiff(path)
+    except Exception as exc:  # noqa: BLE001
+        try:
+            return _inspect_other(path)
+        except Exception:  # noqa: BLE001
+            raise _fallback_error(path, exc) from exc
+
+
+def _inspect_other(path: Path) -> TiffInfo:
+    array = _as_rgb_or_grey(_read_other(path))
+    if array.ndim == 3:
+        return TiffInfo("rgb", 3, ["red", "green", "blue"], ["#ff3333", "#33ff33", "#4d6bff"])
+    return TiffInfo("grey", 1, [""], ["#ffffff"])
+
+
+def _inspect_tiff(path: Path) -> TiffInfo:
     tifffile = _tifffile()
     with tifffile.TiffFile(str(path)) as tif:
         series = tif.series[0]
@@ -157,6 +241,23 @@ def read_plane(path: Path, index: int = -1) -> ChannelData:
     """
     if index < 0:
         return read_channel(path)
+    try:
+        return _read_plane_tiff(path, index)
+    except Exception as exc:  # noqa: BLE001
+        data = read_channel(path).array  # raises a clear error when nothing can read it
+        if data.ndim == 3:
+            data = data[..., min(index, data.shape[-1] - 1)]
+        elif not is_tiff(path):
+            pass
+        else:
+            raise _fallback_error(path, exc) from exc
+        bits = int(data.dtype.itemsize * 8) if data.dtype.kind in "ui" else 32
+        return ChannelData(array=np.ascontiguousarray(data), bits=bits, pixel_size_um=None)
+
+
+def _read_plane_tiff(path: Path, index: int) -> ChannelData:
+    if not is_tiff(path):
+        raise ValueError("not a TIFF")
     tifffile = _tifffile()
     with tifffile.TiffFile(str(path)) as tif:
         series = tif.series[0]

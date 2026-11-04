@@ -28,6 +28,8 @@ from PySide6.QtWidgets import (
 from repeatviewer.backends.cytogenetics import karyotype as kt
 from repeatviewer.backends.cytogenetics.lists import load_lists
 from repeatviewer.widgets.combo_boxes import NoWheelComboBox
+from repeatviewer.widgets.cyto_panel_targets import PanelPathFields
+from repeatviewer.widgets.cytogenetics_style import rounded_box
 from repeatviewer.widgets.help_button import make_help_button
 
 HELP = (
@@ -403,7 +405,7 @@ class KaryotypeDialog(QDialog):
         note.setStyleSheet("color: palette(dark); font-size: 12px;")
         left = QVBoxLayout()
         left.addLayout(tools)
-        left.addWidget(self._table, 1)
+        left.addWidget(rounded_box(self._table, self), 1)
         left.addWidget(note)
 
         # ---- preview side
@@ -491,7 +493,7 @@ class KaryotypeDialog(QDialog):
         form.addLayout(br)
         right = QVBoxLayout()
         right.addLayout(ph)
-        right.addWidget(self._preview, 1)
+        right.addWidget(rounded_box(self._preview, self), 1)
         right.addLayout(form)
         right_host = QWidget(self)
         right_host.setLayout(right)
@@ -881,8 +883,11 @@ class KaryotypeDialog(QDialog):
 
     def _take_from_assembly(self) -> None:
         dialog = AssemblyLengthsDialog(self._folder, self._k, self)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        dialog.accepted.connect(lambda d=dialog: self._apply_assembly(d))
+        dialog.show()  # not modal: a click on a sizes file or FASTA in the Files panel fills Source
+
+    def _apply_assembly(self, dialog: "AssemblyLengthsDialog") -> None:
         self._seq_names = dialog.sequence_names()
         missing = kt.apply_sizes(self._k, dialog.links(), dialog.sizes())
         self._unit.setCurrentIndex(max(0, self._unit.findData("Mb")))
@@ -1046,7 +1051,7 @@ class _SizesReader(QObject):
             self.done.emit({}, str(exc))
 
 
-class AssemblyLengthsDialog(QDialog):
+class AssemblyLengthsDialog(PanelPathFields, QDialog):
     """Pick a sizes file, index, BED, GFF or FASTA and match its sequences to the chromosomes."""
 
     def __init__(self, folder: Path, karyotype: kt.Karyotype, parent: QWidget | None = None) -> None:
@@ -1066,6 +1071,7 @@ class AssemblyLengthsDialog(QDialog):
                                    file_filter=kt.SIZES_FILTER, start_dir=str(folder),
                                    placeholder="Sizes file, .fai, BED, GFF or FASTA", elide_middle=True)
         self._path.path_changed.connect(self._load)
+        self.watch_path_fields(self._path)
         self._status = QLabel(self)
         self._status.setStyleSheet("color: gray;")
         self._bar = QProgressBar(self)
@@ -1103,7 +1109,7 @@ class AssemblyLengthsDialog(QDialog):
         root.addLayout(source)
         root.addWidget(self._status)
         root.addWidget(self._bar)
-        root.addWidget(self._table, 1)
+        root.addWidget(rounded_box(self._table, self), 1)
         root.addLayout(buttons)
         self._fill()
         QTimer.singleShot(0, self._load)

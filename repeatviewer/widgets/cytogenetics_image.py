@@ -491,7 +491,8 @@ class ImageTab(QWidget):
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setWidget(self._side_body)
-        scroll.setFixedWidth(SIDE_W)
+        scroll.setMinimumWidth(240)
+        scroll.setMaximumWidth(SIDE_W)
 
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
