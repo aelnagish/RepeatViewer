@@ -1,0 +1,234 @@
+"""Channel images: read TIFFs, set levels, compose a colour view, write a preview.
+
+Raw files are never changed: levels, gamma and colours are display settings,
+applied here on a copy. Everything is numpy; no Qt.
+"""
+
+from __future__ import annotations
+
+import re
+import struct
+import zlib
+from dataclasses import dataclass
+from pathlib import Path
+
+import numpy as np
+
+from .model import ChannelDisplay
+
+TIFF_SUFFIXES = (".tif", ".tiff")
+DEFAULT_SATURATED = 0.1  # percent of pixels clipped at each end by Auto levels
+
+
+@dataclass
+class ChannelData:
+    array: np.ndarray  # 2D (grey) or 3D (H, W, 3/4 for an RGB file)
+    bits: int
+    pixel_size_um: float | None
+
+
+def is_tiff(path: Path) -> bool:
+    return Path(path).suffix.lower() in TIFF_SUFFIXES
+
+
+def _tifffile():
+    try:
+        import tifffile
+    except ImportError as exc:  # pragma: no cover - depends on the install
+        raise RuntimeError("Reading channel TIFFs needs tifffile: pip install tifffile") from exc
+    return tifffile
+
+
+def _pixel_size(tif) -> float | None:
+    """Micrometres per pixel from OME, ImageJ or TIFF resolution tags; None if not trustworthy."""
+    ome = getattr(tif, "ome_metadata", None)
+    if ome:
+        m = re.search(r'PhysicalSizeX="([0-9.eE+-]+)"', ome)
+        if m:
+            unit = re.search(r'PhysicalSizeXUnit="([^"]+)"', ome)
+            value = float(m.group(1))
+            u = unit.group(1) if unit else "µm"
+            factor = {"µm": 1.0, "um": 1.0, "nm": 1e-3, "mm": 1e3}.get(u)
+            if factor and value > 0:
+                return value * factor
+    page = tif.pages[0]
+    tag = page.tags.get("XResolution")
+    if tag is None:
+        return None
+    try:
+        num, den = tag.value
+        per_unit = num / den if den else 0.0
+    except (TypeError, ValueError):
+        return None
+    if per_unit <= 0:
+        return None
+    ij = getattr(tif, "imagej_metadata", None) or {}
+    unit = str(ij.get("unit", "")).lower() if isinstance(ij, dict) else ""
+    if unit in ("micron", "µm", "um", "\\u00B5m"):
+        return 1.0 / per_unit
+    res_unit = page.tags.get("ResolutionUnit")
+    res = int(getattr(res_unit, "value", 2)) if res_unit is not None else 2
+    if res == 3:  # centimetre
+        return 1e4 / per_unit
+    return None  # inch resolutions (72/96/300 dpi) say nothing about the sample
+
+
+def read_channel(path: Path) -> ChannelData:
+    """Read one TIFF (grey or RGB). Multi-page files: the first page."""
+    tifffile = _tifffile()
+    with tifffile.TiffFile(str(path)) as tif:
+        array = tif.pages[0].asarray()
+        pixel = _pixel_size(tif)
+    array = np.asarray(array)
+    while array.ndim > 2 and array.shape[0] == 1:
+        array = array[0]
+    if array.ndim == 3 and array.shape[0] in (3, 4) and array.shape[-1] not in (3, 4):
+        array = np.moveaxis(array, 0, -1)
+    bits = int(array.dtype.itemsize * 8) if array.dtype.kind in "ui" else 32
+    return ChannelData(array=array, bits=bits, pixel_size_um=pixel)
+
+
+def split_rgb(array: np.ndarray) -> list[np.ndarray]:
+    """An RGB(A) image as three grey channels (red, green, blue)."""
+    if array.ndim != 3 or array.shape[-1] < 3:
+        raise ValueError("Not an RGB image")
+    return [np.ascontiguousarray(array[..., i]) for i in range(3)]
+
+
+def to_grey(array: np.ndarray) -> np.ndarray:
+    """A channel must be one plane; RGB files are reduced to their brightest plane."""
+    if array.ndim == 2:
+        return array
+    if array.ndim == 3 and array.shape[-1] >= 3:
+        return array[..., :3].max(axis=-1)
+    raise ValueError(f"Unsupported image shape {array.shape}")
+
+
+def _sample(array: np.ndarray, max_pixels: int = 2_000_000) -> np.ndarray:
+    flat = array.reshape(-1)
+    step = max(1, flat.size // max_pixels)
+    return flat[::step]
+
+
+def auto_levels(array: np.ndarray, saturated: float = DEFAULT_SATURATED) -> tuple[float, float]:
+    """(low, high) leaving ``saturated`` percent of pixels clipped at each end."""
+    data = _sample(to_grey(array)).astype(np.float64)
+    if data.size == 0:
+        return 0.0, 1.0
+    low, high = np.percentile(data, [saturated, 100.0 - saturated])
+    if high <= low:
+        low, high = float(data.min()), float(data.max())
+        if high <= low:
+            high = low + 1.0
+    return float(low), float(high)
+
+
+def apply_levels(array: np.ndarray, low: float, high: float, gamma: float = 1.0) -> np.ndarray:
+    """Linear stretch to 0..1 (then gamma). Returns float32."""
+    grey = to_grey(array).astype(np.float32)
+    span = float(high - low) or 1.0
+    out = np.clip((grey - float(low)) / span, 0.0, 1.0)
+    if gamma and abs(gamma - 1.0) > 1e-6:
+        out = np.power(out, 1.0 / float(gamma), dtype=np.float32)
+    return out
+
+
+def hex_to_rgb(color: str) -> tuple[float, float, float]:
+    c = str(color or "").strip().lstrip("#")
+    if len(c) == 3:
+        c = "".join(ch * 2 for ch in c)
+    try:
+        return (int(c[0:2], 16) / 255.0, int(c[2:4], 16) / 255.0, int(c[4:6], 16) / 255.0)
+    except (ValueError, IndexError):
+        return (1.0, 1.0, 1.0)
+
+
+def downsample(array: np.ndarray, max_side: int) -> np.ndarray:
+    """Every n-th pixel so the longer side is at most ``max_side`` (fast, for previews)."""
+    if max_side <= 0:
+        return array
+    step = int(np.ceil(max(array.shape[0], array.shape[1]) / float(max_side)))
+    return array[::step, ::step] if step > 1 else array
+
+
+def composite(layers: list[tuple[np.ndarray, ChannelDisplay]], *, max_side: int = 0) -> np.ndarray:
+    """Additive colour merge of the visible channels. Returns uint8 (H, W, 3).
+
+    Channels whose display has no levels yet use auto levels.
+    """
+    visible = [(a, d) for a, d in layers if d.visible]
+    if not layers:
+        raise ValueError("No channels")
+    shapes = {to_grey(a).shape for a, _ in layers}
+    if len(shapes) != 1:
+        raise ValueError("The channel images do not have the same size: " + ", ".join(f"{w}×{h}" for h, w in sorted(shapes)))
+    h, w = next(iter(shapes))
+    template = downsample(np.zeros((h, w), dtype=np.uint8), max_side)
+    rgb = np.zeros(template.shape + (3,), dtype=np.float32)
+    for array, display in visible:
+        grey = downsample(to_grey(array), max_side)
+        low, high = (display.low, display.high) if display.is_set else auto_levels(grey)
+        scaled = apply_levels(grey, low, high, display.gamma)
+        r, g, b = hex_to_rgb(display.color)
+        rgb[..., 0] += scaled * r
+        rgb[..., 1] += scaled * g
+        rgb[..., 2] += scaled * b
+    return (np.clip(rgb, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
+
+
+def single_channel_view(array: np.ndarray, display: ChannelDisplay, *, grey: bool = False, max_side: int = 0) -> np.ndarray:
+    """One channel alone, in its colour (or grey). uint8 (H, W, 3)."""
+    d = ChannelDisplay(color="#ffffff" if grey else display.color, visible=True,
+                       low=display.low, high=display.high, gamma=display.gamma)
+    return composite([(array, d)], max_side=max_side)
+
+
+def adjustment_log(channels: list[tuple[str, int, ChannelDisplay]]) -> list[str]:
+    """Plain lines for the log and the figure legend. Input: (dye, bits, display)."""
+    if not channels:
+        return []
+    bits = sorted({b for _, b, _ in channels})
+    lines = [f"Raw TIFFs unchanged ({', '.join(str(b) for b in bits)} bit)"]
+    nonlinear = False
+    for dye, _bits, d in channels:
+        if not d.visible:
+            lines.append(f"{dye}: hidden")
+            continue
+        levels = f"levels {d.low:g} to {d.high:g}" if d.is_set else "auto levels"
+        if abs(d.gamma - 1.0) > 1e-6:
+            nonlinear = True
+            lines.append(f"{dye}: {levels}, gamma {d.gamma:g} (non-linear)")
+        else:
+            lines.append(f"{dye}: {levels}, linear")
+    if nonlinear:
+        lines.append("Gamma other than 1.0 is a non-linear change: state it in the figure legend.")
+    return lines
+
+
+def legend_sentence(channels: list[tuple[str, int, ChannelDisplay]]) -> str:
+    """One sentence for a figure legend about the adjustments."""
+    gammas = [d for _, _, d in channels if d.visible and abs(d.gamma - 1.0) > 1e-6]
+    if gammas:
+        return "Brightness and contrast were adjusted for the whole image; gamma was changed for " + \
+            ", ".join(dye for dye, _, d in channels if d in gammas) + "."
+    return "Brightness and contrast were adjusted linearly for the whole image."
+
+
+# ---------------------------------------------------------------------------
+# PNG writer (previews are read by Qt; no Pillow needed)
+# ---------------------------------------------------------------------------
+
+
+def write_png(path: Path, rgb: np.ndarray) -> None:
+    rgb = np.ascontiguousarray(rgb, dtype=np.uint8)
+    if rgb.ndim != 3 or rgb.shape[2] != 3:
+        raise ValueError("write_png expects (H, W, 3) uint8")
+    h, w, _ = rgb.shape
+    raw = b"".join(b"\x00" + rgb[y].tobytes() for y in range(h))
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+
+    png = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)) + \
+        chunk(b"IDAT", zlib.compress(raw, 6)) + chunk(b"IEND", b"")
+    Path(path).write_bytes(png)

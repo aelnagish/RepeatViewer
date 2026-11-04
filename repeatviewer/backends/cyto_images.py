@@ -27,7 +27,9 @@ from typing import Iterable
 
 STORE_DIR_NAME = ".repeatviewer_cytogenetics"
 INDEX_FILE_NAME = "index.json"
-INDEX_VERSION = 1
+# Version 2 adds per-image fields (channels, signals, ...) kept in CytoImage.extra;
+# version 1 files load unchanged.
+INDEX_VERSION = 2
 
 IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".gif", ".webp")
 
@@ -154,6 +156,9 @@ class ImageTarget:
         )
 
 
+_KNOWN_IMAGE_KEYS = frozenset({"id", "file", "original_name", "added", "targets", "metadata"})
+
+
 @dataclass
 class CytoImage:
     """One stored image with its links and optional metadata."""
@@ -164,9 +169,13 @@ class CytoImage:
     added: str = ""
     targets: list[ImageTarget] = field(default_factory=list)
     metadata: dict[str, str] = field(default_factory=dict)
+    # Fields this module does not know (v2 cytogenetics data: channels, signals, ...).
+    # Kept as-is so saving here never drops them.
+    extra: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
+            **self.extra,
             "id": self.id,
             "file": self.file,
             "original_name": self.original_name,
@@ -189,6 +198,7 @@ class CytoImage:
             added=str(raw.get("added", "")),
             targets=targets,
             metadata=metadata,
+            extra={k: v for k, v in raw.items() if k not in _KNOWN_IMAGE_KEYS},
         )
 
     def targets_for_sequence(self, sequence_name: str) -> list[ImageTarget]:
@@ -343,10 +353,19 @@ def remove_image(folder: Path, image_id: str) -> bool:
     keep = [img for img in images if img.id != image_id]
     if len(keep) == len(images):
         return False
+    directory = store_dir(folder)
     for img in images:
-        if img.id == image_id:
+        if img.id != image_id:
+            continue
+        names = [img.file]
+        for channel in img.extra.get("channels") or []:
+            if isinstance(channel, dict) and channel.get("file"):
+                names.append(str(channel["file"]))
+        for name in names:
+            if Path(name).is_absolute():
+                continue  # channel left in place at import (not copied): never delete the user's file
             try:
-                image_file_path(folder, img).unlink()
+                (directory / Path(name).name).unlink()
             except OSError:
                 pass
     save_images(folder, keep)
