@@ -22,12 +22,20 @@ def natural_key(text: str):
 
 @dataclass
 class CellGroup:
-    key: str  # file name without the channel word, e.g. "s12_c03"
-    files: list[tuple[Path, str]] = field(default_factory=list)  # (path, dye)
+    key: str  # file name without the channel word ("s12_c03"), the cell folder ("cell1"), or the file stem
+    files: list[tuple] = field(default_factory=list)  # (path, dye) or (path, dye, plane index)
+    colours: list[str] = field(default_factory=list)  # colour per entry; "" = from the dye
 
     @property
     def dyes(self) -> list[str]:
-        return [d for _, d in self.files]
+        return [f[1] for f in self.files]
+
+    def entries(self) -> list[tuple[Path, str, int]]:
+        return [(f[0], f[1], f[2] if len(f) > 2 else -1) for f in self.files]
+
+    @property
+    def size(self) -> int:
+        return len(self.files)
 
 
 def group_channel_files(paths: list[Path], lists: Lists) -> tuple[list[CellGroup], list[Path]]:
@@ -57,15 +65,75 @@ def group_channel_files(paths: list[Path], lists: Lists) -> tuple[list[CellGroup
     return ordered, unmatched
 
 
+def plan_cells(paths: list[Path], lists: Lists) -> tuple[list[CellGroup], list[str]]:
+    """Every TIFF goes somewhere; nothing needs a dye name. Returns (cells, notes).
+
+    - A multichannel TIFF (ImageJ, OME, several pages) is one cell, split into its channels.
+    - Files named with a dye word (s12_c03_DAPI.tif) are grouped by the rest of the name, as before.
+    - Other files (1.tif, 2.tif …) are grouped by folder: one folder = one cell, one file = one channel,
+      named Channel 1, 2 … in the file order; dye and probe are set later in the Image tab.
+    - An RGB merge on its own becomes one cell with its red, green and blue planes as channels.
+    """
+    notes: list[str] = []
+    singles: list[Path] = []
+    multi: list[CellGroup] = []
+    for path in sorted((Path(p) for p in paths), key=lambda p: natural_key(str(p))):
+        if not ch.is_tiff(path):
+            continue
+        try:
+            info = ch.inspect_tiff(path)
+        except Exception as exc:  # noqa: BLE001 - unreadable file: report, keep going
+            notes.append(f"{path.name}: cannot be read ({exc})")
+            continue
+        if info.kind == "channels":
+            group = CellGroup(key=path.stem)
+            for i in range(info.count):
+                dye = dye_for_filename(info.names[i], lists)[0] if info.names[i] else ""
+                group.files.append((path, dye, i))
+                group.colours.append("" if dye else info.colours[i])
+            multi.append(group)
+        else:
+            singles.append(path)
+    named, rest = group_channel_files(singles, lists)
+    by_folder: dict[Path, list[Path]] = {}
+    for path in rest:
+        by_folder.setdefault(path.parent, []).append(path)
+    for parent, files in by_folder.items():
+        files.sort(key=lambda p: natural_key(p.name))
+        group = CellGroup(key=parent.name)
+        n = 0
+        for path in files:
+            try:
+                info = ch.inspect_tiff(path)
+            except Exception:  # noqa: BLE001 - reported above
+                continue
+            planes = range(3) if info.kind == "rgb" and len(files) == 1 else [-1]
+            for k in planes:
+                group.files.append((path, "", k))
+                group.colours.append(info.colours[k] if k >= 0 else ch.UNKNOWN_COLOURS[n % len(ch.UNKNOWN_COLOURS)])
+                n += 1
+        if group.files:
+            multi.append(group)
+    cells = named + multi
+    # cells with the same name from different folders: add the folder to tell them apart
+    seen: dict[str, int] = {}
+    for g in cells:
+        seen[g.key] = seen.get(g.key, 0) + 1
+    for g in cells:
+        if seen[g.key] > 1:
+            g.key = f"{g.entries()[0][0].parent.name}_{g.key}"
+    return sorted(cells, key=lambda g: natural_key(g.key)), notes
+
+
 def channel_layers(folder: Path, details: ImageDetails, cache: dict | None = None):
     """[(array, display)] for the image's channels, reading each file once per cache."""
     layers = []
     for channel in details.channels:
-        key = str(channel_path(folder, channel))
+        key = f"{channel_path(folder, channel)}#{channel.index}"
         if cache is not None and key in cache:
             array = cache[key]
         else:
-            array = ch.read_channel(channel_path(folder, channel)).array
+            array = ch.read_plane(channel_path(folder, channel), channel.index).array
             if cache is not None:
                 cache[key] = array
         layers.append((array, channel.display))
@@ -73,7 +141,8 @@ def channel_layers(folder: Path, details: ImageDetails, cache: dict | None = Non
 
 
 def refresh_log(details: ImageDetails) -> None:
-    details.adjustment_log = ch.adjustment_log([(c.dye, c.bits, c.display) for c in ordered_channels(details)])
+    named = [(c.dye or f"Channel {details.channels.index(c) + 1}", c.bits, c.display) for c in ordered_channels(details)]
+    details.adjustment_log = ch.adjustment_log(named)
 
 
 def render_preview(folder: Path, image: CytoImage, *, cache: dict | None = None) -> Path:
@@ -116,21 +185,27 @@ def import_cells(
             channels: list[Channel] = []
             layers = []
             pixel = pixel_size_um
-            for path, dye in group.files:
-                data = ch.read_channel(path)
+            stored_as: dict[Path, str] = {}
+            for n, (path, dye, index) in enumerate(group.entries()):
+                data = ch.read_plane(path, index)
                 grey = ch.to_grey(data.array)
                 low, high = ch.auto_levels(grey)
                 cid = new_id()
-                if copy:
-                    stored = directory / f"{image_id}_{cid[:8]}{path.suffix.lower()}"
-                    shutil.copy2(path, stored)
-                    copied.append(stored)
-                    file_ref = stored.name
-                else:
-                    file_ref = str(path.resolve())
-                display = ChannelDisplay(color=dye_color(lists, dye), low=low, high=high)
-                channels.append(Channel(id=cid, file=file_ref, dye=dye, probe=probes_by_dye.get(dye, ""),
-                                        bits=data.bits, original_name=path.name, display=display))
+                if path not in stored_as:
+                    if copy:
+                        stored = directory / f"{image_id}_{cid[:8]}{path.suffix.lower()}"
+                        shutil.copy2(path, stored)
+                        copied.append(stored)
+                        stored_as[path] = stored.name
+                    else:
+                        stored_as[path] = str(path.resolve())
+                file_ref = stored_as[path]
+                colour = group.colours[n] if n < len(group.colours) and group.colours[n] else ""
+                colour = colour or (dye_color(lists, dye) if dye else ch.UNKNOWN_COLOURS[n % len(ch.UNKNOWN_COLOURS)])
+                display = ChannelDisplay(color=colour, low=low, high=high)
+                label = path.name if index < 0 else f"{path.name} · plane {index + 1}"
+                channels.append(Channel(id=cid, file=file_ref, dye=dye, probe=probes_by_dye.get(dye, "") if dye else "",
+                                        bits=data.bits, original_name=label, display=display, index=index))
                 layers.append((grey, display))
                 if pixel is None and data.pixel_size_um:
                     pixel = data.pixel_size_um
@@ -212,10 +287,9 @@ def run_request(req: ImportRequest, *, progress=None):
     folder = Path(req.folder).expanduser().resolve()
     lists = load_lists(folder)
     files = scan_tiffs(req.source, req.recursive)
-    groups, unmatched = group_channel_files(files, lists)
-    errors = [f"{p.name}: no known dye in the file name" for p in unmatched if p.suffix.lower() in (".tif", ".tiff")]
+    groups, errors = plan_cells(files, lists)
     if not groups:
-        return None, [], errors or ["No channel TIFFs found."]
+        return None, [], errors or ["No TIFF files found."]
     values = {k: str(req.slide_values.get(k, "")).strip() for k in SLIDE_FIELDS}
     slide = add_slide(folder, req.slide_name or Path(req.source).name, **values)
     metadata = {k: v for k, v in values.items() if v}
@@ -237,3 +311,16 @@ def run_request(req: ImportRequest, *, progress=None):
     if ensure_used_values(folder, lists) or req.probes_by_dye:
         save_lists(folder, lists)
     return slide, images, errors
+
+
+def add_channel_image(folder: Path, path: Path, *, copy: bool = True) -> CytoImage | None:
+    """Add one multichannel TIFF as a channel image (no slide). Returns the new image, or None."""
+    folder = Path(folder).expanduser().resolve()
+    lists = load_lists(folder)
+    cells, _notes = plan_cells([Path(path)], lists)
+    if not cells:
+        return None
+    images, errors = import_cells(folder, cells[:1], lists=lists, copy=copy)
+    if errors:
+        raise ValueError(errors[0])
+    return images[0] if images else None

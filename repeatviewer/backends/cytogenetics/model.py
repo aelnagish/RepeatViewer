@@ -65,6 +65,7 @@ class Channel:
     bits: int = 8
     original_name: str = ""
     display: ChannelDisplay = field(default_factory=ChannelDisplay)
+    index: int = -1  # plane in a multichannel or RGB file; -1 = the whole first page
 
     def to_dict(self) -> dict:
         return asdict(self)

@@ -116,8 +116,8 @@ def test_run_request(tmp_path):
     req = ImportRequest(folder=data, source=src, slide_name="Slide 12", slide_values={"species": "Crocus sativus", "date": "2026-10-14"},
                         stage="Mitotic metaphase", probes_by_dye={"FITC": "CroSat2"})
     slide, images, errors = run_request(req)
-    assert slide.name == "Slide 12" and len(images) == 2
-    assert errors == ["mystery.tif: no known dye in the file name"]
+    assert slide.name == "Slide 12" and len(images) == 3  # mystery.tif is a cell of its own now
+    assert errors == []
     first = ci.load_images(data)[0]
     assert first.metadata == {"species": "Crocus sativus", "date": "2026-10-14", "stage": "Mitotic metaphase"}
     assert [(t.sequence, t.probe, t.dye) for t in first.targets] == [("CroSat2.fasta", "CroSat2", "FITC")]
@@ -127,7 +127,7 @@ def test_run_request(tmp_path):
     empty = tmp_path / "empty"
     empty.mkdir()
     s2, imgs2, errs2 = run_request(ImportRequest(folder=data, source=empty))
-    assert s2 is None and imgs2 == [] and errs2 == ["No channel TIFFs found."]
+    assert s2 is None and imgs2 == [] and errs2 == ["No TIFF files found."]
     assert len(md.load_slides(data)) == 1
     assert targets_for_probes(ls.load_lists(data), {"FITC": "Unknown"}) == []
 

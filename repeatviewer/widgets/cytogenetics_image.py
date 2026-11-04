@@ -596,9 +596,14 @@ class ImageTab(QWidget):
                 self._chan_lay.addWidget(card)
                 self._cards[i] = card
         else:
-            note = QLabel("A single picture without separate channels. Add a TIFF to turn it into a channel image.", self._chan_host)
+            note = QLabel("One merged picture, no separate channels. Split it into its red, green and blue planes "
+                          "to set levels and mark signals per colour, or add channel TIFFs.", self._chan_host)
             note.setWordWrap(True)
+            note.setObjectName("cytoMuted")
             self._chan_lay.addWidget(note)
+            split = QPushButton("Split into red, green and blue", self._chan_host)
+            split.clicked.connect(self._split_picture)
+            self._chan_lay.addWidget(split)
         self._add_btn.setEnabled(True)
         self._auto_btn.setEnabled(s.is_multichannel)
         self._slide_btn.setEnabled(s.is_multichannel and s.slide_cell_count() > 1)
@@ -612,7 +617,9 @@ class ImageTab(QWidget):
         self._length.setCurrentText("Auto" if not s.scale_length_um else f"{s.scale_length_um:g} µm")
         for w in (self._scale_show, self._pixel, self._length):
             w.blockSignals(False)
-        self._scale_section.setEnabled(s.is_multichannel)
+        self._scale_section.setVisible(s.is_multichannel)
+        self._log_section.setVisible(s.is_multichannel)
+        self._auto_btn.setVisible(s.is_multichannel)
         self._sync_log()
         pos, total, prev_id, next_id = self._neighbours
         self._nav.setText(f"cell {_cell_name(s.image, pos)} of {total}" if total else "")
@@ -673,6 +680,25 @@ class ImageTab(QWidget):
             return
         self._build_panel()
         self._schedule()
+
+    def _split_picture(self) -> None:
+        s = self._session
+        if s is None:
+            return
+        rgb = None
+        image = QImage(str(ci.image_file_path(s.folder, s.image)))
+        if not image.isNull():
+            from repeatviewer.widgets.cytogenetics_signals import _qimage_rgb
+
+            rgb = _qimage_rgb(image)
+        try:
+            s.split_picture(rgb)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "Split picture", str(exc))
+            return
+        self._build_panel()
+        self._render(keep_view=True)
+        self.flush()
 
     def _remove_channel(self, index: int) -> None:
         s = self._session

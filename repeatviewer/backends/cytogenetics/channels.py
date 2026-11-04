@@ -88,6 +88,101 @@ def read_channel(path: Path) -> ChannelData:
     return ChannelData(array=array, bits=bits, pixel_size_um=pixel)
 
 
+UNKNOWN_COLOURS = ("#33ff33", "#ff3333", "#4d6bff", "#ffd400", "#ff33ff", "#33e5ff", "#ffffff", "#ff9933")
+
+
+@dataclass
+class TiffInfo:
+    kind: str  # "grey", "rgb" (a merged colour picture) or "channels" (several planes)
+    count: int  # planes: 1 for grey, 3 for rgb, n for channels
+    names: list[str]
+    colours: list[str]
+
+
+def _channel_axis(series) -> tuple[str, int] | None:
+    axes = str(getattr(series, "axes", ""))
+    shape = tuple(series.shape)
+    for ax in ("C", "I", "Q", "P"):
+        if ax in axes and shape[axes.index(ax)] > 1:
+            return ax, shape[axes.index(ax)]
+    return None
+
+
+def _imagej_luts(tif) -> list[str]:
+    ij = getattr(tif, "imagej_metadata", None) or {}
+    out = []
+    for lut in ij.get("LUTs", []) if isinstance(ij, dict) else []:
+        try:
+            arr = np.asarray(lut)
+            r, g, b = (int(arr[k][-1]) for k in range(3))
+            out.append(f"#{r:02x}{g:02x}{b:02x}")
+        except (IndexError, TypeError, ValueError):
+            out.append("")
+    return out
+
+
+def _channel_names(tif, count: int) -> list[str]:
+    ome = getattr(tif, "ome_metadata", None) or ""
+    names = re.findall(r'<Channel[^>]*\sName="([^"]*)"', ome) if ome else []
+    if not names:
+        ij = getattr(tif, "imagej_metadata", None) or {}
+        labels = ij.get("Labels") if isinstance(ij, dict) else None
+        if isinstance(labels, (list, tuple)):
+            names = [str(x) for x in labels]
+    return [names[i] if i < len(names) else "" for i in range(count)]
+
+
+def inspect_tiff(path: Path) -> TiffInfo:
+    """What one TIFF holds: one grey plane, an RGB merge, or several channels (ImageJ, OME, multi-page)."""
+    tifffile = _tifffile()
+    with tifffile.TiffFile(str(path)) as tif:
+        series = tif.series[0]
+        found = _channel_axis(series)
+        page = tif.pages[0]
+        if found is not None:
+            count = min(found[1], 16)
+            colours = _imagej_luts(tif)
+            colours = [colours[i] if i < len(colours) and colours[i] else UNKNOWN_COLOURS[i % len(UNKNOWN_COLOURS)]
+                       for i in range(count)]
+            return TiffInfo("channels", count, _channel_names(tif, count), colours)
+        if int(getattr(page, "samplesperpixel", 1)) >= 3:
+            return TiffInfo("rgb", 3, ["red", "green", "blue"], ["#ff3333", "#33ff33", "#4d6bff"])
+        return TiffInfo("grey", 1, [""], ["#ffffff"])
+
+
+def read_plane(path: Path, index: int = -1) -> ChannelData:
+    """One plane of a TIFF. ``index`` -1 reads the first page as before; otherwise the channel (or RGB plane).
+
+    Other axes (z, time) are reduced: z by maximum projection, the rest by taking the first.
+    """
+    if index < 0:
+        return read_channel(path)
+    tifffile = _tifffile()
+    with tifffile.TiffFile(str(path)) as tif:
+        series = tif.series[0]
+        pixel = _pixel_size(tif)
+        found = _channel_axis(series)
+        if found is not None:
+            axes = str(series.axes)
+            data = np.asarray(series.asarray())
+            data = np.take(data, index, axis=axes.index(found[0]))
+            axes = axes.replace(found[0], "", 1)
+            for ax in [a for a in axes if a not in "YXS"]:
+                k = axes.index(ax)
+                data = data.max(axis=k) if ax == "Z" else np.take(data, 0, axis=k)
+                axes = axes.replace(ax, "", 1)
+            if data.ndim == 3:  # leftover samples
+                data = data[..., 0]
+        else:
+            data = np.asarray(tif.pages[0].asarray())
+            if data.ndim == 3 and data.shape[0] in (3, 4) and data.shape[-1] not in (3, 4):
+                data = np.moveaxis(data, 0, -1)
+            if data.ndim == 3:
+                data = data[..., min(index, data.shape[-1] - 1)]
+    bits = int(data.dtype.itemsize * 8) if data.dtype.kind in "ui" else 32
+    return ChannelData(array=data, bits=bits, pixel_size_um=pixel)
+
+
 def split_rgb(array: np.ndarray) -> list[np.ndarray]:
     """An RGB(A) image as three grey channels (red, green, blue)."""
     if array.ndim != 3 or array.shape[-1] < 3:

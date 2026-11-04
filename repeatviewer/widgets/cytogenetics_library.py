@@ -694,10 +694,30 @@ class LibraryTab(QWidget):
             return
         from repeatviewer.widgets.cyto_images_ui import IMAGE_FILE_FILTER, AttachImageDialog
 
+        from repeatviewer.backends.cytogenetics import channels as chn
+        from repeatviewer.backends.cytogenetics.importer import add_channel_image
+        from repeatviewer.widgets.cyto_images_ui import edit_image, notify_changed
+
         chosen, _ = QFileDialog.getOpenFileNames(self, "Add cytogenetic image", str(self._folder), IMAGE_FILE_FILTER)
         for path in chosen:
-            if ci.is_image_path(Path(path)):
-                AttachImageDialog(self._folder, source=Path(path), targets=[], allow_no_targets=True, parent=self).exec()
+            path = Path(path)
+            if not ci.is_image_path(path):
+                continue
+            try:
+                multichannel = chn.is_tiff(path) and chn.inspect_tiff(path).kind == "channels"
+            except Exception:  # noqa: BLE001 - unreadable TIFF: let the picture dialog try
+                multichannel = False
+            if multichannel:
+                try:
+                    image = add_channel_image(self._folder, path)
+                except Exception as exc:  # noqa: BLE001
+                    QMessageBox.warning(self, "Add image", f"{path.name} could not be read:\n{exc}")
+                    continue
+                if image is not None:
+                    notify_changed(self._folder)
+                    edit_image(self, self._folder, image, allow_no_targets=True)
+                continue
+            AttachImageDialog(self._folder, source=path, targets=[], allow_no_targets=True, parent=self).exec()
 
     def edit_lists(self) -> None:
         if self._folder is None:

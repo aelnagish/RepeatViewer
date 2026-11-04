@@ -267,11 +267,14 @@ class SignalsTab(QWidget):
                            ("+", lambda: self._canvas.set_zoom(self._canvas.zoom() * 1.25)),
                            ("Fit", lambda: self._canvas.fit())):
             zb = QPushButton(text, self)
+            zb.setFixedWidth(28 if len(text) == 1 else 44)
             zb.clicked.connect(slot)
             bar.addWidget(zb)
         bar.addSpacing(10)
         self._prev = QPushButton("‹", self)
         self._next = QPushButton("›", self)
+        self._prev.setFixedWidth(28)
+        self._next.setFixedWidth(28)
         self._prev.setToolTip("Previous cell of this slide")
         self._next.setToolTip("Next cell of this slide")
         self._prev.clicked.connect(lambda: self._step_cell(-1))
@@ -920,6 +923,7 @@ class SignalsTab(QWidget):
         for cell in cells:
             b = QPushButton(cell.label, self._cells_host)
             b.setCheckable(True)
+            b.setFixedWidth(40)
             b.setChecked(cell.image_id == s.image.id)
             b.setToolTip("marked" if cell.marked else "not marked yet")
             if not cell.marked:
