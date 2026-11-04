@@ -31,6 +31,7 @@ from repeatviewer.backends.cytogenetics import signals_session as ss
 from repeatviewer.backends.cytogenetics.karyotype import list_karyotypes
 from repeatviewer.backends.cytogenetics.model import load_slides
 from repeatviewer.widgets.combo_boxes import NoWheelComboBox
+from repeatviewer.widgets.cytogenetics_style import clear_layout
 from repeatviewer.widgets.cytogenetics_image import ImageCanvas, rgb_to_qimage
 from repeatviewer.widgets.help_button import make_help_button
 from repeatviewer.widgets.sequence_annotation_rail import _CollapsibleSection
@@ -228,10 +229,14 @@ class SignalsTab(QWidget):
         self._auto.setChecked(_read("signals_auto", "true") != "false")
         self._auto.toggled.connect(lambda on: _write("signals_auto", "true" if on else "false"))
         bar.addWidget(self._auto)
-        bar.addStretch(1)
         self._hint = QLabel(self)
-        self._hint.setStyleSheet("color: palette(dark);")
-        bar.addWidget(self._hint)
+        self._hint.setObjectName("cytoMuted")
+        from PySide6.QtWidgets import QSizePolicy
+
+        self._hint.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self._hint.setMinimumWidth(40)
+        self._hint.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        bar.addWidget(self._hint, 1)
         bar.addWidget(make_help_button(self, "Signals", HELP_TEXT))
 
         # ---- cells row
@@ -256,12 +261,12 @@ class SignalsTab(QWidget):
 
         self._chrom_section = _CollapsibleSection("Chromosomes", body, expanded=True)
         self._chrom_count = QLabel(self)
-        self._chrom_count.setStyleSheet("color: palette(dark);")
+        self._chrom_count.setObjectName("cytoMuted")
         self._karyo = NoWheelComboBox(self)
         self._karyo.activated.connect(self._on_karyotype)
         self._edit_karyo = QPushButton("Edit karyotype", self)
         self._edit_karyo.setFlat(True)
-        self._edit_karyo.setStyleSheet("QPushButton { color:#1F4E9A; border:none; } QPushButton:hover { text-decoration: underline; }")
+        self._edit_karyo.setObjectName("cytoLink")
         self._edit_karyo.clicked.connect(lambda: self._open_karyotype(edit=True))
         kr = QHBoxLayout()
         kr.addWidget(QLabel("Karyotype", self))
@@ -294,11 +299,13 @@ class SignalsTab(QWidget):
         self._table.verticalHeader().setVisible(False)
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
-        self._table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        hh = self._table.horizontalHeader()
+        hh.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        hh.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         self._table.setShowGrid(False)
         self._show_idio = QPushButton("Show on idiogram", self)
         self._show_idio.setFlat(True)
-        self._show_idio.setStyleSheet("QPushButton { color:#1F4E9A; border:none; } QPushButton:hover { text-decoration: underline; }")
+        self._show_idio.setObjectName("cytoLink")
         self._show_idio.clicked.connect(self.idiogramRequested)
         self._sum_section.body_layout().addLayout(sum_head)
         self._sum_section.body_layout().addWidget(self._table)
@@ -324,7 +331,6 @@ class SignalsTab(QWidget):
         self._save_timer.setSingleShot(True)
         self._save_timer.setInterval(SAVE_DELAY_MS)
         self._save_timer.timeout.connect(self.flush)
-        self.setStyleSheet("#cytoAside { background: palette(alternate-base); }")
         self._set_tool("select")
         self._show_empty()
 
@@ -589,10 +595,7 @@ class SignalsTab(QWidget):
 
     def _sync_labels(self) -> None:
         s = self._session
-        while self._labels_grid.count():
-            w = self._labels_grid.takeAt(0).widget()
-            if w is not None:
-                w.deleteLater()
+        clear_layout(self._labels_grid)
         self._label_buttons = {}
         if s is None:
             return
@@ -608,17 +611,17 @@ class SignalsTab(QWidget):
             on = label == selected_label
             if on:
                 css = "background:#1F4E9A; color:#FFFFFF; border:1px solid #1F4E9A;"
-            elif label in used:
-                css = "background:#CFE0D4; color:#1C1C1E; border:1px solid #9DBBA5;"
             elif label == nxt and self._tool == "number":
-                css = "background:#EEF2FA; color:#1C1C1E; border:2px solid #1F4E9A;"
-            else:
+                css = "background:#FFFFFF; color:#1C1C1E; border:2px solid #1F4E9A;"
+            elif label in used:
                 css = "background:#EEF2FA; color:#1C1C1E; border:1px solid #C9D3E6;"
+            else:
+                css = "background:#FFFFFF; color:#8A8D93; border:1px dashed #C9D3E6;"
             b.setStyleSheet(f"QPushButton {{ {css} border-radius:5px; padding:4px 0; font-size:12px; }}")
             b.clicked.connect(lambda _c=False, l=label: self._on_label_clicked(l))
             self._labels_grid.addWidget(b, n // 8, n % 8)
             self._label_buttons[label] = b
-        self._chrom_count.setText(f"{len(used & set(labels))} of {len(labels)} numbered")
+        self._chrom_count.setText(f"{len(used & set(labels))} of {len(labels)}")
 
     def _on_label_clicked(self, label: str) -> None:
         s = self._session
@@ -634,13 +637,7 @@ class SignalsTab(QWidget):
             self._sync_labels()
 
     def _clear_layout(self, layout) -> None:
-        while layout.count():
-            item = layout.takeAt(0)
-            w = item.widget()
-            if w is not None:
-                w.deleteLater()
-            elif item.layout() is not None:
-                self._clear_layout(item.layout())
+        clear_layout(layout)
 
     def _sync_selected(self) -> None:
         self._clear_layout(self._sel_lay)
@@ -747,7 +744,10 @@ class SignalsTab(QWidget):
             r = len(rows)
             for c, text in enumerate((", ".join(unsig), "none", "", "")):
                 self._table.setItem(r, c, QTableWidgetItem(text))
-        self._table.setFixedHeight(28 + 24 * max(1, self._table.rowCount()))
+        self._table.resizeRowsToContents()
+        rows_h = sum(self._table.rowHeight(r) for r in range(self._table.rowCount())) or 26
+        self._table.setFixedHeight(self._table.horizontalHeader().sizeHint().height() + rows_h + 4)
+        self._table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
     def _save_summary(self) -> None:
         s = self._session

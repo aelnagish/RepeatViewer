@@ -153,3 +153,14 @@ def test_genome_candidates(tmp_path):
     assert idg.resolve_genome(tmp_path, "b.fa") == tmp_path / "b.fa"
     if importlib.util.find_spec("Bio") is not None:  # Biopython is in the app, not always in a bare test env
         assert idg.sequence_lengths(tmp_path / "a.fasta") == {"Chr2": 6}
+
+
+def test_compute_view(tmp_path):
+    work, k = _folder(tmp_path)
+    _mark_cells(work)
+    view = idg.compute_view(work)
+    assert view.karyotype.name == "Cs" and [r.name for r in view.rows] == ["1", "2"]
+    assert view.probes == ["CroSat2"] and view.colours["CroSat2"].startswith("#")
+    assert view.genome is None and view.rows[0].status == idg.STATUS_UNLINKED
+    empty = idg.compute_view(tmp_path)
+    assert empty.karyotype is None and empty.rows == []

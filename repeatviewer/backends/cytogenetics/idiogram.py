@@ -518,3 +518,80 @@ def title_text(karyotype: Karyotype, probes: list[str]) -> tuple[str, str]:
         return "Signals on the", karyotype.species or karyotype.name
     head = probes[0] if len(probes) == 1 else ", ".join(probes[:-1]) + " and " + probes[-1]
     return f"{head} on the", karyotype.species or karyotype.name
+
+
+# ---------------------------------------------------------------------------
+# Everything the Idiogram view (and the Figure) needs, in one call
+# ---------------------------------------------------------------------------
+
+FALLBACK_COLOURS = ("#2FB457", "#E8405F", "#E8A33D", "#5B74FF", "#B05BD6", "#2BB5C4")
+
+
+@dataclass
+class IdiogramView:
+    karyotype: Karyotype | None
+    settings: IdiogramSettings
+    fish: FishData | None
+    rows: list[ChromosomeRow]
+    heights: list[float]
+    colours: dict[str, str]
+    probes: list[str]  # shown probes
+    lengths: dict[str, int]
+    genome: Path | None
+
+
+def all_probes(folder: Path, fish: FishData | None) -> list[str]:
+    probes: list[str] = sorted(fish.cells_per_probe) if fish else []
+    for image in load_images(folder):
+        for c in image_details(image).channels:
+            if c.probe and c.probe not in probes:
+                probes.append(c.probe)
+    return probes
+
+
+def probe_colours(folder: Path, probes: list[str]) -> dict[str, str]:
+    """Colour of each probe: its channel colour (not white or the DAPI blue), else a fixed palette."""
+    colours: dict[str, str] = {}
+    for image in load_images(folder):
+        for c in image_details(image).channels:
+            if c.probe and c.probe not in colours and c.display.color.lower() not in ("#ffffff", "#5b74ff"):
+                colours[c.probe] = c.display.color
+    for n, p in enumerate(probes):
+        colours.setdefault(p, FALLBACK_COLOURS[n % len(FALLBACK_COLOURS)])
+    return colours
+
+
+def compute_view(folder: Path, settings: IdiogramSettings | None = None, cache: dict | None = None) -> IdiogramView:
+    from .karyotype import list_karyotypes
+
+    folder = Path(folder).expanduser().resolve()
+    settings = settings or load_settings(folder)
+    cache = cache if cache is not None else {}
+    karyotypes = list_karyotypes(folder)
+    k = next((x for x in karyotypes if x.name == settings.karyotype), None) or (karyotypes[0] if karyotypes else None)
+    if k is None:
+        return IdiogramView(None, settings, None, [], [], {}, [], {}, None)
+    fish = collect_fish(folder, k, per_homologue=settings.homologues)
+    genome = resolve_genome(folder, settings.genome)
+    lengths: dict[str, int] = {}
+    if genome is not None:
+        key = ("lengths", str(genome), genome.stat().st_mtime)
+        if key not in cache:
+            try:
+                cache[key] = sequence_lengths(genome)
+            except Exception:  # noqa: BLE001 - unreadable FASTA: no in silico bar
+                cache[key] = {}
+        lengths = cache[key]
+    every = all_probes(folder, fish)
+    probes = [p for p in every if p not in settings.hidden_probes]
+    hits: dict[str, dict] = {}
+    if genome is not None and lengths:
+        for probe in probes:
+            try:
+                hits[probe] = features_for_probe(genome, list(lengths), probe, settings.source(probe), cache)
+            except Exception:  # noqa: BLE001 - a broken annotation file must not stop the view
+                hits[probe] = {}
+    silico = collect_silico(k, lengths, hits, min_array_kb=settings.min_array_kb, flips=settings.flips)
+    rows = build_rows(k, settings, fish, silico, lengths)
+    return IdiogramView(k, settings, fish, rows, relative_heights(rows, settings.lengths),
+                        probe_colours(folder, every), probes, lengths, genome)

@@ -57,8 +57,8 @@ def test_filter_and_facets(tmp_path):
 def test_grouping(tmp_path):
     items = _folder(tmp_path)
     groups = lb.group_items(items, "Slide")
-    assert [g.title for g in groups] == ["Slide 9", "Slide 12", lb.NO_SLIDE]
-    assert groups[1].subtitle == "2026-10-14 · Crocus sativus · CroSat2, 45S · 2 images"
+    assert [g.title for g in groups] == ["Slide 12", "Slide 9", lb.NO_SLIDE]  # dated slides first, newest first
+    assert groups[0].subtitle == "14 Oct 2026 · C. sativus · CroSat2 + 45S · 2 cells"
     by_probe = {g.title: [i.image.id for i in g.items] for g in lb.group_items(items, "Probe")}
     assert by_probe["CroSat2"] == ["1", "2"] and by_probe["No probe"] == ["3"]
     assert [g.title for g in lb.group_items(items, "Probe")][-1] == "No probe"
@@ -135,7 +135,7 @@ def test_run_request(tmp_path):
 def test_details_rows(tmp_path):
     items = _folder(tmp_path)
     rows = dict(lb.details_rows(items[0]))
-    assert rows["Slide"] == "Slide 12" and rows["Channels"] == "channel (CroSat2) · channel (45S)"
+    assert rows["Slide"] == "Slide 12" and rows["Channels"] == "channel · channel (2 TIFFs)"
     assert rows["Signals"] == "2 on 0 chromosomes" and rows["Sequences"] == "CroSat2.fasta"
     assert "Pixel size" not in rows and "Notes" not in rows
 
@@ -147,7 +147,9 @@ def test_probe_info_and_texts(tmp_path):
     assert first.probe_info[0][3] == "CroSat2.fasta"
     assert lb.signals_text(first) == "0 chromosomes numbered, 2 signals marked"
     assert lb.signals_text(items[3]) == "Not marked yet"
-    assert lb.probe_colours(items) == {"CroSat2": "#ffffff", "45S": "#ffffff", "CroSat1": "#ffffff"}
+    assert lb.probe_colours(items) == {}  # white channels and no list entries: no dot colour
+    assert lb.cell_label(items[0]) == "cell 1" or lb.cell_label(items[0]).startswith("cell")
+    assert lb.full_title(items[3]) == items[3].title
 
 
 def test_ticked_means_shown(tmp_path):
@@ -159,3 +161,11 @@ def test_ticked_means_shown(tmp_path):
     assert {i.image.id for i in shown} == {"1", "2"}
     none = lb.include_all_but(items, "probe", {"CroSat1", "CroSat2", "45S"})
     assert lb.apply_filter(items, lb.LibraryFilter(probe=none)) == []
+
+
+def test_texts_like_the_mockup(tmp_path):
+    assert lb.pretty_date("2026-10-14") == "14 Oct 2026" and lb.pretty_date("soon") == "soon"
+    assert lb.short_species("Crocus sativus") == "C. sativus" and lb.short_species("C. sativus") == "C. sativus"
+    items = _folder(tmp_path)
+    groups = lb.group_items(items, "Slide")
+    assert groups[0].subtitle == "14 Oct 2026 · C. sativus · CroSat2 + 45S · 2 cells"

@@ -48,6 +48,14 @@ _COLUMNS = {
 }
 
 
+_FOOTS = {
+    "probes": "A probe can name the sequence it comes from; images with that probe then also show under the sequence.",
+    "species": "Each species points to its karyotype (Signals tab > Edit karyotype), so Signals and Idiogram pick the right one.",
+    "stages": "The stage decides what the Signals tab marks: chromosomes, nuclei or fibres.",
+    "dyes": "Import uses these words to sort TIFFs into channels. Any number of channels per image.",
+}
+
+
 class CytoListsDialog(QDialog):
     """Edit the lists of a data folder. Changes are applied on Save."""
 
@@ -86,9 +94,13 @@ class CytoListsDialog(QDialog):
         for b in (add, merge, remove):
             bar.addWidget(b)
         bar.addWidget(make_help_button(self, "Edit lists", HELP))
+        self._foot = QLabel(self)
+        self._foot.setObjectName("cytoMuted")
+        self._foot.setWordWrap(True)
         right = QVBoxLayout()
         right.addLayout(bar)
         right.addWidget(self._table, 1)
+        right.addWidget(self._foot)
         body = QHBoxLayout()
         body.addWidget(self._nav)
         body.addLayout(right, 1)
@@ -99,7 +111,10 @@ class CytoListsDialog(QDialog):
         cancel.clicked.connect(self.reject)
         save.clicked.connect(self._save)
         buttons = QHBoxLayout()
-        buttons.addStretch(1)
+        note = QLabel("Lists are kept per folder. Renaming here updates every image that uses the entry.", self)
+        note.setObjectName("cytoMuted")
+        note.setWordWrap(True)
+        buttons.addWidget(note, 1)
         buttons.addWidget(cancel)
         buttons.addWidget(save)
         root = QVBoxLayout(self)
@@ -108,6 +123,7 @@ class CytoListsDialog(QDialog):
 
         self._fill_nav()
         self._nav.setCurrentRow(ls.LIST_KEYS.index(self._key))
+        self._fill_table()  # the row may already be current, so currentRowChanged does not fire
 
     # ------------------------------------------------------------------ navigation
 
@@ -132,6 +148,7 @@ class CytoListsDialog(QDialog):
         key = self._key
         cols = _COLUMNS[key]
         self._title.setText(ls.LIST_TITLES[key])
+        self._foot.setText(_FOOTS.get(key, ""))
         self._table.clear()
         self._table.setColumnCount(len(cols) + 2)
         self._table.setHorizontalHeaderLabels(["Name", *[c[0] for c in cols], "Used in"])

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 import json
 import os
 import uuid
@@ -183,6 +185,20 @@ def image_details(image: CytoImage) -> ImageDetails:
 
 def set_image_details(image: CytoImage, details: ImageDetails) -> None:
     image.extra.update(details.to_dict())
+
+
+_DYE_RANK = {"dapi": 0, "hoechst": 0, "pi": 1, "fitc": 2, "gfp": 2, "alexa488": 2, "cy3": 3, "tritc": 3, "alexa555": 3,
+             "texasred": 4, "alexa594": 4, "cy5": 5, "alexa647": 5, "cy7": 6}
+
+
+def ordered_channels(details: ImageDetails) -> list:
+    """Counterstain first, then by wavelength (DAPI, FITC, Cy3, Cy5), others last in their order."""
+    def rank(item):
+        i, c = item
+        key = re.sub(r"[^a-z0-9]", "", c.dye.lower())
+        return (_DYE_RANK.get(key, 50), i)
+    return [c for _i, c in sorted(enumerate(details.channels), key=rank)]
+
 
 
 def channel_path(folder: Path, channel: Channel) -> Path:

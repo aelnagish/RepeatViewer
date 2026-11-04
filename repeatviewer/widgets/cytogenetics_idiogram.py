@@ -31,6 +31,7 @@ from repeatviewer.backends.cytogenetics import idiogram as idg
 from repeatviewer.backends.cytogenetics import karyotype as kt
 from repeatviewer.backends.cytogenetics.model import image_details
 from repeatviewer.widgets.combo_boxes import NoWheelComboBox
+from repeatviewer.widgets.cytogenetics_style import clear_layout
 from repeatviewer.widgets.help_button import make_help_button
 from repeatviewer.widgets.sequence_annotation_rail import _CollapsibleSection
 
@@ -144,8 +145,9 @@ class IdiogramCanvas(QWidget):
                        "No karyotype yet. Make one in the Signals tab (Edit karyotype).")
             return
         small = QFont(self.font())
-        small.setPointSizeF(max(7.5, small.pointSizeF() - 2))
+        small.setPixelSize(10)
         bold = QFont(self.font())
+        bold.setPixelSize(13)
         bold.setBold(True)
         for i, row in enumerate(self.rows):
             fish, asm = self._bars(i)
@@ -330,6 +332,7 @@ class IdiogramCanvas(QWidget):
 class IdiogramTab(QWidget):
     name = "Idiogram"
     karyotypesChanged = Signal()
+    figureRequested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -352,11 +355,13 @@ class IdiogramTab(QWidget):
         f.setPointSizeF(f.pointSizeF() + 2)
         f.setBold(True)
         self._title.setFont(f)
+        self._title.setWordWrap(True)
+        self._title.setMinimumWidth(120)
+        self._title.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self._legend = QHBoxLayout()
         self._legend.setSpacing(14)
         head = QHBoxLayout()
-        head.addWidget(self._title)
-        head.addStretch(1)
+        head.addWidget(self._title, 1)
         head.addLayout(self._legend)
         head.addWidget(make_help_button(self, "Idiogram", HELP_TEXT))
 
@@ -481,7 +486,7 @@ class IdiogramTab(QWidget):
         self._layout_section.add_widget(self._drag)
         edit = QPushButton("Edit karyotype (lengths, centromeres, bands)", self)
         edit.setFlat(True)
-        edit.setStyleSheet(LINK_CSS)
+        edit.setObjectName("cytoLink")
         edit.setCursor(Qt.CursorShape.PointingHandCursor)
         edit.clicked.connect(self._edit_karyotype)
         self._layout_section.add_widget(edit)
@@ -503,8 +508,8 @@ class IdiogramTab(QWidget):
         menu.addAction("Comparison table (TSV)…", self._save_tsv)
         save.setMenu(menu)
         fig = QPushButton("Add to figure", self)
-        fig.setEnabled(False)
-        fig.setToolTip("The Figure tab comes in the next step")
+        fig.setToolTip("Add this idiogram as a panel of the current figure")
+        fig.clicked.connect(self.figureRequested)
         bottom = QHBoxLayout()
         bottom.addWidget(save)
         bottom.addWidget(fig)
@@ -527,7 +532,6 @@ class IdiogramTab(QWidget):
         line.setStyleSheet("color: palette(mid);")
         root.addWidget(line)
         root.addWidget(aside)
-        self.setStyleSheet("#cytoAside { background: palette(alternate-base); } #cytoMain { background: palette(base); }")
 
     # ------------------------------------------------------------------ loading
 
@@ -656,12 +660,7 @@ class IdiogramTab(QWidget):
     # ------------------------------------------------------------------ controls
 
     def _clear(self, layout) -> None:
-        while layout.count():
-            item = layout.takeAt(0)
-            if item.widget() is not None:
-                item.widget().deleteLater()
-            elif item.layout() is not None:
-                self._clear(item.layout())
+        clear_layout(layout)
 
     def _fill_legend(self, probes: list[str], colours: dict[str, str]) -> None:
         self._clear(self._legend)

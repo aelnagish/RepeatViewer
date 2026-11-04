@@ -28,6 +28,7 @@ from repeatviewer.backends import cyto_images as ci
 from repeatviewer.backends.cytogenetics import image_session as isn
 from repeatviewer.backends.cytogenetics.lists import load_lists
 from repeatviewer.widgets.combo_boxes import NoWheelComboBox
+from repeatviewer.widgets.cytogenetics_style import clear_layout
 from repeatviewer.widgets.help_button import make_help_button
 from repeatviewer.widgets.sequence_annotation_rail import _CollapsibleSection
 
@@ -264,19 +265,21 @@ class _ChannelCard(QFrame):
         self._dye.setEditable(True)
         self._dye.addItems(dyes)
         self._dye.setCurrentText(c.dye)
-        self._dye.setFixedWidth(84)
+        self._dye.setFixedWidth(78)
         self._dye.setToolTip("Dye of this channel")
         self._dye.lineEdit().editingFinished.connect(self._on_dye)
         name = QLabel(self)
         name.setStyleSheet("color: palette(dark); font-size: 11px;")
         name.setToolTip(c.original_name or c.file)
-        name.setText(name.fontMetrics().elidedText(c.original_name or Path(c.file).name, Qt.TextElideMode.ElideMiddle, 110))
+        name.setText(name.fontMetrics().elidedText(c.original_name or Path(c.file).name, Qt.TextElideMode.ElideMiddle, 96))
+        name.setMinimumWidth(0)
         self._colour = QPushButton(self)
         self._colour.setFixedSize(24, 24)
         self._colour.setToolTip("Channel colour")
         self._colour.clicked.connect(lambda: self.colourRequested.emit(self._i))
         self.paint_colour()
         remove = QPushButton("×", self)
+        remove.setStyleSheet("QPushButton { padding: 0px; }")
         remove.setFixedSize(24, 24)
         remove.setToolTip("Remove this channel from the image")
         remove.clicked.connect(lambda: self.removeRequested.emit(self._i))
@@ -306,7 +309,8 @@ class _ChannelCard(QFrame):
             row = QHBoxLayout()
             label = QLabel(text, self)
             label.setFixedWidth(46)
-            value.setFixedWidth(78 if text == "Levels" else 46)
+            value.setFixedWidth(84 if text == "Levels" else 34)
+            value.setStyleSheet("font-size: 11px;")
             value.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             row.addWidget(label)
             row.addWidget(slider, 1)
@@ -428,6 +432,7 @@ class ImageTab(QWidget):
         # side panel
         self._side_body = QWidget(self)
         self._side_body.setObjectName("cytoAside")
+        self._side_body.setMaximumWidth(SIDE_W)
         side = QVBoxLayout(self._side_body)
         side.setContentsMargins(10, 4, 10, 8)
         side.setSpacing(12)
@@ -438,14 +443,12 @@ class ImageTab(QWidget):
         self._chan_lay.setContentsMargins(0, 0, 0, 0)
         self._chan_lay.setSpacing(6)
         self._chan_section.add_widget(self._chan_host)
-        row = QHBoxLayout()
         self._add_btn = QPushButton("+ Add channel (TIFF)", self)
         self._auto_btn = QPushButton("Auto levels (0.1 % saturated)", self)
         self._add_btn.clicked.connect(self._add_channel)
         self._auto_btn.clicked.connect(self._auto_all)
-        row.addWidget(self._add_btn)
-        row.addWidget(self._auto_btn)
-        self._chan_section.body_layout().addLayout(row)
+        self._chan_section.add_widget(self._add_btn)
+        self._chan_section.add_widget(self._auto_btn)
         side.addWidget(self._chan_section)
 
         self._scale_section = _CollapsibleSection("Scale bar", self._side_body, expanded=True)
@@ -502,7 +505,6 @@ class ImageTab(QWidget):
         self._save_timer.setInterval(SAVE_DELAY_MS)
         self._save_timer.timeout.connect(self.flush)
         self._sync_mode_buttons()
-        self.setStyleSheet("#cytoAside { background: palette(alternate-base); }")
         self._show_empty()
 
     # ------------------------------------------------------------------ loading
@@ -567,10 +569,7 @@ class ImageTab(QWidget):
 
     def _clear_cards(self) -> None:
         self._cards = []
-        while self._chan_lay.count():
-            w = self._chan_lay.takeAt(0).widget()
-            if w is not None:
-                w.deleteLater()
+        clear_layout(self._chan_lay)
 
     # ------------------------------------------------------------------ side panel
 
@@ -582,13 +581,17 @@ class ImageTab(QWidget):
         dyes = [d.get("name", "") for d in lists.get("dyes", [])] if lists else []
         probes = [p.get("name", "") for p in lists.get("probes", [])] if lists else []
         if s.is_multichannel:
-            for i in range(len(s.channels)):
+            from repeatviewer.backends.cytogenetics.figure import ordered_channels
+
+            order = [s.channels.index(c) for c in ordered_channels(s.details)]
+            self._cards = [None] * len(s.channels)
+            for i in order:
                 card = _ChannelCard(s, i, dyes, probes, self._chan_host)
                 card.changed.connect(self._on_card_changed)
                 card.removeRequested.connect(self._remove_channel)
                 card.colourRequested.connect(self._pick_colour)
                 self._chan_lay.addWidget(card)
-                self._cards.append(card)
+                self._cards[i] = card
         else:
             note = QLabel("A single picture without separate channels. Add a TIFF to turn it into a channel image.", self._chan_host)
             note.setWordWrap(True)

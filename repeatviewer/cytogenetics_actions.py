@@ -53,4 +53,5 @@ class CytogeneticsActionsMixin:
     def _populate_cytogenetics_menu(self, menu) -> None:
         menu.addAction("Open workspace", lambda: self._open_cytogenetics_workspace())
         menu.addAction("Import slide session...", self._cytogenetics_import_session)
+        menu.addAction("Add image...", lambda: self._cytogenetics_library_action("add_image"))
         menu.addAction("Edit lists...", self._cytogenetics_edit_lists)

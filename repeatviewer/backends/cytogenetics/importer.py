@@ -11,7 +11,7 @@ from pathlib import Path
 from ..cyto_images import CytoImage, ImageTarget, image_file_path, load_images, save_images, store_dir
 from . import channels as ch
 from .lists import Lists, dye_color, dye_for_filename, filename_tokens
-from .model import Channel, ChannelDisplay, ImageDetails, image_details, new_id, set_image_details, channel_path
+from .model import Channel, ChannelDisplay, ImageDetails, channel_path, image_details, new_id, ordered_channels, set_image_details
 
 PREVIEW_SIDE = 2048
 
@@ -73,7 +73,7 @@ def channel_layers(folder: Path, details: ImageDetails, cache: dict | None = Non
 
 
 def refresh_log(details: ImageDetails) -> None:
-    details.adjustment_log = ch.adjustment_log([(c.dye, c.bits, c.display) for c in details.channels])
+    details.adjustment_log = ch.adjustment_log([(c.dye, c.bits, c.display) for c in ordered_channels(details)])
 
 
 def render_preview(folder: Path, image: CytoImage, *, cache: dict | None = None) -> Path:

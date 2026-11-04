@@ -29,6 +29,7 @@ class LibraryItem:
     probe_info: list[tuple[str, str, str, str]] = field(default_factory=list)  # probe, dye, colour, sequence
     n_marks: int = 0
     n_signals: int = 0
+    n_expected: int = 0  # chromosomes in the karyotype (2n), 0 when unknown
 
     @property
     def title(self) -> str:
@@ -57,7 +58,21 @@ class LibraryFilter:
 
 
 def build_items(folder: Path) -> list[LibraryItem]:
+    from .lists import dye_color, entry, load_lists
+
+    from .figure import ordered_channels
+    from .karyotype import list_karyotypes
+
     slides = {s.id: s for s in load_slides(folder)}
+    lists = load_lists(folder)
+    karyotypes = list_karyotypes(folder)
+
+    def probe_dye_colour(probe: str, dye: str, colour: str) -> tuple[str, str]:
+        e = entry(lists, "probes", probe) or {}
+        dye = dye or str(e.get("dye") or "")
+        if not colour or colour.lower() == "#ffffff":
+            colour = dye_color(lists, dye, "") if dye else ""
+        return dye, colour
     items = []
     for image in load_images(folder):
         details = image_details(image)
@@ -68,12 +83,15 @@ def build_items(folder: Path) -> list[LibraryItem]:
         slide = slides.get(details.slide_id)
         sequences = {t.probe_label: t.sequence for t in image.targets if t.probe_label and t.sequence}
         info: list[tuple[str, str, str, str]] = []
-        for c in details.channels:
+        channels = ordered_channels(details)
+        for c in channels:
             if c.probe and all(c.probe != row[0] for row in info):
-                info.append((c.probe, c.dye, c.display.color, sequences.get(c.probe, "")))
+                dye, colour = probe_dye_colour(c.probe, c.dye, c.display.color)
+                info.append((c.probe, dye, colour, sequences.get(c.probe, "")))
         for probe in probes:
             if all(probe != row[0] for row in info):
-                info.append((probe, "", "", sequences.get(probe, "")))
+                dye, colour = probe_dye_colour(probe, "", "")
+                info.append((probe, dye, colour, sequences.get(probe, "")))
         items.append(LibraryItem(
             image=image,
             slide=slide,
@@ -82,12 +100,47 @@ def build_items(folder: Path) -> list[LibraryItem]:
             stage=image.metadata.get("stage", ""),
             marked=bool(details.signals),
             channels=len(details.channels),
-            channel_colours=[c.display.color for c in details.channels],
+            channel_colours=[c.display.color for c in channels],
             probe_info=info,
             n_marks=len(details.chromosomes),
             n_signals=len(details.signals),
+            n_expected=_expected(karyotypes, details.karyotype,
+                                 image.metadata.get("species") or (slide.species if slide else "")),
         ))
     return items
+
+
+def _expected(karyotypes, name: str, species: str) -> int:
+    k = next((k for k in karyotypes if name and k.name == name), None)
+    if k is None and species:
+        k = next((k for k in karyotypes if k.species.lower() == species.lower()), None)
+    return k.total_count if k is not None and k.chromosomes else 0
+
+
+_MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+
+def pretty_date(text: str) -> str:
+    """"2026-10-14" -> "14 Oct 2026"; anything else unchanged."""
+    import re
+
+    m = re.match(r"^(\d{4})-(\d{2})-(\d{2})", str(text or ""))
+    if not m:
+        return str(text or "")
+    y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    return f"{d} {_MONTHS[mo - 1]} {y}" if 1 <= mo <= 12 else str(text)
+
+
+def short_species(name: str) -> str:
+    """"Crocus sativus" -> "C. sativus"."""
+    parts = str(name or "").split()
+    if len(parts) >= 2 and parts[0][:1].isupper() and not parts[0].endswith("."):
+        return f"{parts[0][0]}. {' '.join(parts[1:])}"
+    return str(name or "")
+
+
+def _probe_sort_key(value: str):
+    return (value[:1].isdigit(), natural_key(value))
 
 
 def _haystack(item: LibraryItem) -> str:
@@ -155,7 +208,7 @@ def facet_counts(items: list[LibraryItem], flt: LibraryFilter, facet: str) -> li
         visible = matches(item, flt, skip=facet)
         for v in values:
             counts[v] = counts.get(v, 0) + (1 if visible else 0)
-    order = sorted(counts, key=lambda v: (-counts[v] if facet == "signals" else 0, natural_key(v)))
+    order = sorted(counts, key=_probe_sort_key)
     if facet == "signals":
         order = [v for v in (SIGNALS_MARKED, SIGNALS_NOT_MARKED) if v in counts]
     return [(v, counts[v]) for v in order]
@@ -169,20 +222,24 @@ class LibraryGroup:
 
 
 def _slide_subtitle(slide: Slide | None, items: list[LibraryItem]) -> str:
+    """"14 Oct 2026 · C. sativus · CroSat2 (FITC) + 45S rDNA (Cy3) · 9 cells" (as in the mockup)."""
     bits = []
     if slide is not None:
         if slide.date:
-            bits.append(slide.date)
-        if slide.species:
-            bits.append(slide.species)
+            bits.append(pretty_date(slide.date))
+        species = slide.species or next((i.species for i in items if i.species), "")
+        if species:
+            bits.append(short_species(species))
     probes: list[str] = []
     for i in items:
-        for p in i.probes:
-            if p not in probes:
-                probes.append(p)
+        for probe, dye, _colour, _seq in i.probe_info:
+            text = f"{probe} ({dye})" if dye else probe
+            if text not in probes:
+                probes.append(text)
     if probes:
-        bits.append(", ".join(probes))
-    bits.append(f"{len(items)} image{'s' if len(items) != 1 else ''}")
+        bits.append(" + ".join(probes))
+    word = "cell" if slide is not None else "image"
+    bits.append(f"{len(items)} {word}{'s' if len(items) != 1 else ''}")
     return " · ".join(bits)
 
 
@@ -211,7 +268,14 @@ def group_items(items: list[LibraryItem], by: str) -> list[LibraryGroup]:
             buckets.setdefault(key, []).append(item)
     last = {NO_SLIDE, "No probe", "No species", "No stage"}
     groups = []
-    for key in sorted(buckets, key=lambda k: (k in last, natural_key(k))):
+    def order(k: str):
+        if by == "Slide":
+            slide = slides.get(k)
+            date = slide.date if slide is not None else ""
+            return (k in last, "".join(chr(0x10FFFF - ord(ch)) for ch in date) if date else "\U0010FFFF", natural_key(k))
+        return (k in last, _probe_sort_key(k))
+
+    for key in sorted(buckets, key=order):
         members = _sorted_items(buckets[key])
         groups.append(LibraryGroup(key, _slide_subtitle(slides.get(key), members) if by == "Slide"
                                    else f"{len(members)} image{'s' if len(members) != 1 else ''}", members))
@@ -220,13 +284,17 @@ def group_items(items: list[LibraryItem], by: str) -> list[LibraryGroup]:
 
 def details_rows(item: LibraryItem) -> list[tuple[str, str]]:
     """(label, value) rows for the details panel; empty values are left out."""
+    from .figure import ordered_channels
+
     img, slide = item.image, item.slide
     details = image_details(img)
     meta = img.metadata
-    channels = []
-    for c in details.channels:
-        channels.append(f"{c.dye or 'channel'}" + (f" ({c.probe})" if c.probe else ""))
-    pixel = f"{details.pixel_size_um:.4g} µm per pixel" if details.pixel_size_um else ""
+    channels = ordered_channels(details)
+    copied = sum(1 for c in channels if not Path(c.file).is_absolute())
+    channel_text = " · ".join(c.dye or "channel" for c in channels)
+    if channels:
+        channel_text += f" ({len(channels)} TIFF{'s' if len(channels) != 1 else ''}{'' if copied == len(channels) else ', not copied'})"
+    pixel = f"{details.pixel_size_um:.4g} µm" if details.pixel_size_um else ""
     rows = [
         ("Slide", slide.name if slide else ""),
         ("Species", item.species),
@@ -234,9 +302,9 @@ def details_rows(item: LibraryItem) -> list[tuple[str, str]]:
         ("Technique", meta.get("technique", "") or (slide.technique if slide else "")),
         ("Counterstain", meta.get("counterstain", "") or (slide.counterstain if slide else "")),
         ("Cell stage", item.stage),
-        ("Date", item.date),
-        ("Channels", " · ".join(channels)),
+        ("Channels", channel_text),
         ("Pixel size", pixel),
+        ("Date", pretty_date(item.date)),
         ("Probes", ", ".join(item.probes)),
         ("Sequences", ", ".join(dict.fromkeys(t.sequence for t in img.targets))),
         ("Signals", f"{len(details.signals)} on {len(details.chromosomes)} chromosomes" if details.signals else ""),
@@ -258,4 +326,19 @@ def probe_colours(items: list[LibraryItem]) -> dict[str, str]:
 def signals_text(item: LibraryItem) -> str:
     if not item.n_marks and not item.n_signals:
         return "Not marked yet"
-    return f"{item.n_marks} chromosomes numbered, {item.n_signals} signals marked"
+    numbered = f"{item.n_marks} of {item.n_expected}" if item.n_expected else f"{item.n_marks}"
+    return f"{numbered} chromosomes numbered, {item.n_signals} signals marked"
+
+
+def cell_label(item: LibraryItem) -> str:
+    """"cell 03" for cells of a slide (from the file name), else the image title."""
+    import re
+
+    m = re.search(r"(\d+)\D*$", item.image.original_name or "")
+    if item.slide is not None and m:
+        return f"cell {m.group(1).zfill(2)}"
+    return item.title
+
+
+def full_title(item: LibraryItem) -> str:
+    return f"{item.slide.name} · {cell_label(item)}" if item.slide else item.title
