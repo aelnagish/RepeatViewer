@@ -132,6 +132,18 @@ def _facet_values(item: LibraryItem, facet: str) -> list[str]:
     raise ValueError(facet)
 
 
+def facet_values(items: list[LibraryItem], facet: str) -> set[str]:
+    return {v for item in items for v in _facet_values(item, facet)}
+
+
+def include_all_but(items: list[LibraryItem], facet: str, excluded: set[str]) -> set[str]:
+    """Filter set for "everything ticked except ``excluded``" (empty set = no restriction)."""
+    if not excluded:
+        return set()
+    keep = facet_values(items, facet) - excluded
+    return keep or {"\x00none"}
+
+
 def facet_counts(items: list[LibraryItem], flt: LibraryFilter, facet: str) -> list[tuple[str, int]]:
     """Value and image count for one facet, counted with the other facets applied.
 

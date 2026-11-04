@@ -427,6 +427,7 @@ class ImageTab(QWidget):
 
         # side panel
         self._side_body = QWidget(self)
+        self._side_body.setObjectName("cytoAside")
         side = QVBoxLayout(self._side_body)
         side.setContentsMargins(10, 4, 10, 8)
         side.setSpacing(12)
@@ -501,6 +502,7 @@ class ImageTab(QWidget):
         self._save_timer.setInterval(SAVE_DELAY_MS)
         self._save_timer.timeout.connect(self.flush)
         self._sync_mode_buttons()
+        self.setStyleSheet("#cytoAside { background: palette(alternate-base); }")
         self._show_empty()
 
     # ------------------------------------------------------------------ loading

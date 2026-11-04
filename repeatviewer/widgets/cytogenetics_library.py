@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSlider,
     QSplitter,
     QVBoxLayout,
@@ -98,6 +99,7 @@ class _Thumb(QFrame):
         from repeatviewer.widgets.cyto_images_ui import thumbnail
 
         self.setObjectName("cytoThumb")
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.image_id = item.image.id
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         lay = QVBoxLayout(self)
@@ -165,6 +167,7 @@ class LibraryTab(QWidget):
         self._folder: Path | None = None
         self._items: list[lb.LibraryItem] = []
         self._flt = lb.LibraryFilter()
+        self._excluded: dict[str, set[str]] = {}
         self._selected = ""
         self._thumbs: dict[str, _Thumb] = {}
         self._worker: _ImportWorker | None = None
@@ -228,15 +231,22 @@ class LibraryTab(QWidget):
 
         # ---- filters
         self._search = QLineEdit(self)
-        self._search.setPlaceholderText("Search: probe, slide, note")
+        self._search.setPlaceholderText("probe, slide, note")
         self._search.setClearButtonEnabled(True)
         self._search.textChanged.connect(self._on_search)
         self._filter_body = QWidget(self)
         self._filter_lay = QVBoxLayout(self._filter_body)
         self._filter_lay.setContentsMargins(0, 0, 0, 0)
         filters = QWidget(self)
+        filters.setObjectName("cytoAside")
         fl = QVBoxLayout(filters)
-        fl.setContentsMargins(10, 4, 6, 4)
+        fl.setContentsMargins(14, 14, 14, 14)
+        fl.setSpacing(4)
+        search_title = QLabel("Search", filters)
+        f0 = search_title.font()
+        f0.setBold(True)
+        search_title.setFont(f0)
+        fl.addWidget(search_title)
         fl.addWidget(self._search)
         fl.addWidget(self._filter_body)
         fl.addStretch(1)
@@ -244,12 +254,15 @@ class LibraryTab(QWidget):
         filters_scroll.setWidgetResizable(True)
         filters_scroll.setFrameShape(QFrame.Shape.NoFrame)
         filters_scroll.setWidget(filters)
+        filters_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         filters_scroll.setFixedWidth(FILTER_W)
+        filters_scroll.setObjectName("cytoAsideScroll")
 
         # ---- grid
         self._grid_body = QWidget(self)
+        self._grid_body.setObjectName("cytoMain")
         self._grid_lay = QVBoxLayout(self._grid_body)
-        self._grid_lay.setContentsMargins(8, 4, 8, 8)
+        self._grid_lay.setContentsMargins(18, 8, 18, 14)
         self._grid_lay.setSpacing(14)
         self._grid_scroll = QScrollArea(self)
         self._grid_scroll.setWidgetResizable(True)
@@ -262,8 +275,9 @@ class LibraryTab(QWidget):
 
         # ---- details
         self._details_body = QWidget(self)
+        self._details_body.setObjectName("cytoAside")
         self._details_lay = QVBoxLayout(self._details_body)
-        self._details_lay.setContentsMargins(10, 4, 10, 8)
+        self._details_lay.setContentsMargins(14, 14, 14, 14)
         self._details_lay.setSpacing(8)
         details_scroll = QScrollArea(self)
         details_scroll.setWidgetResizable(True)
@@ -277,6 +291,12 @@ class LibraryTab(QWidget):
         split.addWidget(self._grid_scroll)
         split.addWidget(details_scroll)
         split.setStretchFactor(1, 1)
+        split.setHandleWidth(1)
+        self.setStyleSheet(
+            "#cytoAside { background: palette(alternate-base); }"
+            "#cytoMain { background: palette(base); }"
+            "QSplitter::handle { background: palette(mid); }"
+        )
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -299,6 +319,10 @@ class LibraryTab(QWidget):
         if self._selected not in known:
             self._selected = ""
         self._apply()
+        if not self._selected:
+            first = next(iter(self._thumbs), "")
+            if first:
+                self._on_clicked(first)
 
     def set_sequence(self, fasta_name: str) -> None:
         self._flt.sequence = str(fasta_name or "")
@@ -340,14 +364,14 @@ class LibraryTab(QWidget):
             head.setFont(font)
             head.setContentsMargins(0, 8, 0, 0)
             self._filter_lay.addWidget(head)
-            chosen: set[str] = getattr(self._flt, facet)
+            excluded = self._excluded.setdefault(facet, set())
             for value, n in counts:
                 row = QWidget(self._filter_body)
                 rl = QHBoxLayout(row)
                 rl.setContentsMargins(0, 0, 0, 0)
                 rl.setSpacing(6)
                 box = QCheckBox(row)
-                box.setChecked(value in chosen)
+                box.setChecked(value not in excluded)
                 box.toggled.connect(lambda on, f=facet, v=value: self._toggle(f, v, on))
                 rl.addWidget(box)
                 if facet == "probe" and colours.get(value):
@@ -370,23 +394,23 @@ class LibraryTab(QWidget):
             clear = QPushButton("Clear filters", self._filter_body)
             clear.clicked.connect(self._clear_filters)
             self._filter_lay.addWidget(clear)
-        lists = QPushButton("Edit lists (probes, species, stages, dyes)", self._filter_body)
-        lists.setFlat(True)
-        lists.setCursor(Qt.CursorShape.PointingHandCursor)
-        lists.setStyleSheet("QPushButton { color:#1F4E9A; text-align:left; border:none; padding:10px 0 0 0; } "
-                            "QPushButton:hover { text-decoration: underline; }")
-        lists.clicked.connect(self.edit_lists)
+        lists = QLabel("<a href='#' style='color:#1F4E9A'>Edit lists (probes, species, stages, dyes)</a>", self._filter_body)
+        lists.setWordWrap(True)
+        lists.setContentsMargins(0, 12, 0, 0)
+        lists.linkActivated.connect(lambda _l: self.edit_lists())
         self._filter_lay.addWidget(lists)
 
     def _toggle(self, facet: str, value: str, on: bool) -> None:
-        chosen: set[str] = getattr(self._flt, facet)
-        (chosen.add if on else chosen.discard)(value)
+        excluded = self._excluded.setdefault(facet, set())
+        (excluded.discard if on else excluded.add)(value)
+        setattr(self._flt, facet, lb.include_all_but(self._items, facet, excluded))
         # the checkbox that sent this signal is replaced: do it after the signal ends
         QTimer.singleShot(0, self._apply)
 
     def _clear_filters(self) -> None:
         seq = self._flt.sequence
         self._flt = lb.LibraryFilter(sequence=seq)
+        self._excluded = {}
         self._search.blockSignals(True)
         self._search.clear()
         self._search.blockSignals(False)
@@ -430,11 +454,15 @@ class LibraryTab(QWidget):
             sl.setContentsMargins(0, 0, 0, 0)
             sl.setSpacing(4)
             if group.title:
-                head = QLabel(f"<b>{group.title}</b>  <span style='color:gray'>{group.subtitle}</span>", section)
+                head = QLabel(f"<b>{group.title}</b>&nbsp;&nbsp;&nbsp;<span style='color:#5A5D63'>{group.subtitle}</span>", section)
                 head.setTextFormat(Qt.TextFormat.RichText)
                 sl.addWidget(head)
+                rule = QFrame(section)
+                rule.setFrameShape(QFrame.Shape.HLine)
+                rule.setStyleSheet("color: palette(mid);")
+                sl.addWidget(rule)
             grid = QGridLayout()
-            grid.setSpacing(6)
+            grid.setSpacing(12)
             grid.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
             thumbs = []
             for item in group.items:

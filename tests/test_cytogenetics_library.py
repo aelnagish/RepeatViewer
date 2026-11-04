@@ -148,3 +148,14 @@ def test_probe_info_and_texts(tmp_path):
     assert lb.signals_text(first) == "0 chromosomes numbered, 2 signals marked"
     assert lb.signals_text(items[3]) == "Not marked yet"
     assert lb.probe_colours(items) == {"CroSat2": "#ffffff", "45S": "#ffffff", "CroSat1": "#ffffff"}
+
+
+def test_ticked_means_shown(tmp_path):
+    items = _folder(tmp_path)
+    assert lb.include_all_but(items, "probe", set()) == set()
+    keep = lb.include_all_but(items, "probe", {"CroSat1"})
+    assert keep == {"CroSat2", "45S"}
+    shown = lb.apply_filter(items, lb.LibraryFilter(probe=keep))
+    assert {i.image.id for i in shown} == {"1", "2"}
+    none = lb.include_all_but(items, "probe", {"CroSat1", "CroSat2", "45S"})
+    assert lb.apply_filter(items, lb.LibraryFilter(probe=none)) == []

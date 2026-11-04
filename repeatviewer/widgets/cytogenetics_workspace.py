@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
 )
 
 from repeatviewer.backends.cytogenetics import workspace as ws
+from repeatviewer.widgets.cytogenetics_idiogram import IdiogramTab
 from repeatviewer.widgets.cytogenetics_image import ImageTab
 from repeatviewer.widgets.cytogenetics_library import LibraryTab
 from repeatviewer.widgets.cytogenetics_signals import SignalsTab
@@ -107,6 +108,7 @@ class CytogeneticsWorkspace(QWidget):
         self._title.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         font = self._title.font()
         font.setBold(True)
+        font.setPointSizeF(font.pointSizeF() + 1)
         self._title.setFont(font)
 
         self._side_btn = QToolButton(self)
@@ -117,7 +119,7 @@ class CytogeneticsWorkspace(QWidget):
         self._help = make_help_button(self, "Cytogenetics", HELP_TEXT)
 
         self._crumb = QLabel(self)
-        self._crumb.setStyleSheet("color: palette(dark);")
+        self._crumb.setStyleSheet("color: #5A5D63;")
         self._crumb.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self._import_btn = QPushButton("Import slide session", self)
         self._import_btn.setStyleSheet(
@@ -127,7 +129,8 @@ class CytogeneticsWorkspace(QWidget):
         self._import_btn.clicked.connect(lambda: self._pages["Library"].start_import())
 
         header = QHBoxLayout()
-        header.setContentsMargins(10, 6, 10, 2)
+        header.setContentsMargins(16, 8, 16, 6)
+        header.setSpacing(12)
         header.addWidget(self._title)
         header.addWidget(self._crumb, 1)
         header.addWidget(self._import_btn)
@@ -136,9 +139,14 @@ class CytogeneticsWorkspace(QWidget):
 
         self._tabs = QTabWidget(self)
         self._tabs.setDocumentMode(True)
+        self._tabs.tabBar().setStyleSheet(
+            "QTabBar::tab { padding: 7px 16px; margin-right: 2px; color: #45484D; background: transparent;"
+            " border: 1px solid transparent; border-bottom: none; border-top-left-radius: 6px; border-top-right-radius: 6px; }"
+            "QTabBar::tab:selected { background: palette(base); color: palette(text); font-weight: 600; border-color: palette(mid); }"
+        )
         self._pages: dict[str, QWidget] = {}
         for name in ws.TAB_NAMES:
-            page = {"Library": LibraryTab, "Image": ImageTab, "Signals": SignalsTab}.get(name, None)
+            page = {"Library": LibraryTab, "Image": ImageTab, "Signals": SignalsTab, "Idiogram": IdiogramTab}.get(name, None)
             page = page(self) if page else _TabPage(name, self)
             self._pages[name] = page
             self._tabs.addTab(page, name)
@@ -150,6 +158,7 @@ class CytogeneticsWorkspace(QWidget):
         self._pages["Signals"].imageChanged.connect(lambda i: self._on_image_shown(i, "Signals"))
         self._pages["Signals"].idiogramRequested.connect(lambda: self.show_tab("Idiogram"))
         self._pages["Signals"].karyotypesChanged.connect(self.refresh)
+        self._pages["Idiogram"].karyotypesChanged.connect(self.refresh)
 
         self._data_form = QFormLayout()
         self._side = self._build_side()
@@ -170,7 +179,7 @@ class CytogeneticsWorkspace(QWidget):
         root.addWidget(self._split, 1)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
-        self._side_btn.setChecked(_read("side_panel", True, bool))
+        self._side_btn.setChecked(_read("side_panel_v2", False, bool))
         self._on_side_toggled(self._side_btn.isChecked())
         self._tabs.setCurrentIndex(self._tabs.indexOf(self._pages[ws.normalize_tab(_read("tab", ""))]))
         self._import_btn.setVisible(self.tab_name() == "Library")
@@ -220,7 +229,7 @@ class CytogeneticsWorkspace(QWidget):
 
     def _on_side_toggled(self, on: bool) -> None:
         self._side.setVisible(bool(on))
-        _write("side_panel", bool(on))
+        _write("side_panel_v2", bool(on))
 
     # ---------------------------------------------------------------- loading
 

@@ -249,6 +249,7 @@ class SignalsTab(QWidget):
 
         # ---- side panel
         body = QWidget(self)
+        body.setObjectName("cytoAside")
         side = QVBoxLayout(body)
         side.setContentsMargins(10, 4, 10, 8)
         side.setSpacing(12)
@@ -323,6 +324,7 @@ class SignalsTab(QWidget):
         self._save_timer.setSingleShot(True)
         self._save_timer.setInterval(SAVE_DELAY_MS)
         self._save_timer.timeout.connect(self.flush)
+        self.setStyleSheet("#cytoAside { background: palette(alternate-base); }")
         self._set_tool("select")
         self._show_empty()
 
