@@ -184,7 +184,7 @@ class FigurePainter:
             else:
                 self._paint_image_panel(p, r, panel, pt, show_bar=fig.scale_bar and panel.id == last_image)
             if fig.letters:
-                font = QFont("Arial")
+                font = QFont(fig.font_family or "Arial")
                 font.setPixelSize(max(6, int(round(fig.font_pt * 1.5 * pt))))
                 font.setBold(True)
                 p.setFont(font)
@@ -251,7 +251,7 @@ class FigurePainter:
         if fig.chromosome_numbers and details is not None and pic is not None and image is not None:
             full_w = self.full_width.get(panel.id, 0)
             full_h = full_w * (pic.height() / max(pic.width(), 1)) * cw / chh if full_w else 0
-            font = QFont("Arial")
+            font = QFont(fig.font_family or "Arial")
             font.setPixelSize(max(5, int(round(fig.font_pt * 0.9 * pt))))
             font.setBold(True)
             p.setFont(font)
@@ -268,7 +268,7 @@ class FigurePainter:
         if fig.channel_labels:
             label = fg.auto_label(panel, details)
             if label:
-                font = QFont("Arial")
+                font = QFont(fig.font_family or "Arial")
                 font.setPixelSize(max(5, int(round(fig.font_pt * pt))))
                 font.setBold(True)
                 p.setFont(font)
@@ -352,7 +352,7 @@ class FigurePage(QWidget):
             return
         _boxes, h_mm = self.fp.layout()
         self._panels_h = h_mm * self.px_per_mm()
-        font = QFont("Arial")
+        font = QFont(fig.font_family or "Arial")
         font.setPixelSize(max(9, int(round(fig.font_pt * 0.3528 * self.px_per_mm() * 1.25))))
         self.legend.document().setDefaultFont(font)
         self._fit_legend()
@@ -572,13 +572,34 @@ class FigureTab(QWidget):
         app_slider(self._spacing)
         self._spacing.sliderReleased.connect(self._on_page_setting)
         self._spacing.valueChanged.connect(lambda _v: None if self._spacing.isSliderDown() else self._on_page_setting())
-        self._font = NoWheelComboBox(self)
-        for text, pt in fg.FONTS:
-            self._font.addItem(text, pt)
-        self._font.activated.connect(self._on_page_setting)
+        from PySide6.QtWidgets import QFontComboBox, QSpinBox
+
+        self._font = QFontComboBox(self)
+        self._font.setMinimumWidth(60)
+        self._font.setSizeAdjustPolicy(QFontComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self._font.currentFontChanged.connect(self._on_page_setting)
+        self._font_size = QDoubleSpinBox(self)
+        self._font_size.setRange(5, 16)
+        self._font_size.setDecimals(1)
+        self._font_size.setSingleStep(0.5)
+        self._font_size.setSuffix(" pt")
+        self._font_size.setFixedWidth(84)
+        self._font_size.editingFinished.connect(self._on_page_setting)
+        self._rows = QSpinBox(self)
+        self._cols = QSpinBox(self)
+        for box in (self._rows, self._cols):
+            box.setRange(1, 12)
+            box.editingFinished.connect(self._on_page_setting)
+        self._grid_host = QWidget(self)
+        gl = QHBoxLayout(self._grid_host)
+        gl.setContentsMargins(0, 0, 0, 0)
+        gl.addWidget(self._rows, 1)
+        gl.addWidget(QLabel("rows ×", self._grid_host))
+        gl.addWidget(self._cols, 1)
+        gl.addWidget(QLabel("columns", self._grid_host))
         self._custom.setFixedWidth(84)
         for text, w in (("Figure", self._which), ("Name", self._name), ("Width", self._width),
-                        ("Layout", self._layout), ("Spacing", self._spacing), ("Font", self._font)):
+                        ("Layout", self._layout), ("", self._grid_host), ("Spacing", self._spacing), ("Font", self._font)):
             r = QHBoxLayout()
             lab = QLabel(text, self)
             lab.setFixedWidth(90)
@@ -586,6 +607,10 @@ class FigureTab(QWidget):
             r.addWidget(w, 1)
             if w is self._width:
                 r.addWidget(self._custom)
+            if w is self._font:
+                r.addWidget(self._font_size)
+            if w is self._grid_host:
+                self._grid_row = (lab, w)
             page_sec.body_layout().addLayout(r)
         side.addWidget(page_sec)
 
@@ -663,9 +688,8 @@ class FigureTab(QWidget):
         copy_methods.clicked.connect(self._copy_methods)
         copy_legend = QPushButton("Copy legend", self)
         copy_legend.clicked.connect(self._copy_legend)
-        lr.addWidget(copy_methods)
-        lr.addWidget(copy_legend)
-        lr.addStretch(1)
+        lr.addWidget(copy_methods, 1)
+        lr.addWidget(copy_legend, 1)
         legend_sec.body_layout().addLayout(lr)
         again = link_button("Write the legend again (drops your edits)", self)
         again.clicked.connect(self._rewrite_legend)
@@ -791,7 +815,14 @@ class FigureTab(QWidget):
             self._custom.setVisible(fig.width_mm <= 0)
             self._layout.setCurrentIndex(max(0, self._layout.findData(fig.layout)))
             self._spacing.setValue(fig.spacing)
-            self._font.setCurrentIndex(max(0, self._font.findData(fig.font_pt)))
+            self._font.blockSignals(True)
+            self._font.setCurrentFont(QFont(fig.font_family or "Arial"))
+            self._font.blockSignals(False)
+            self._font_size.setValue(fig.font_pt)
+            self._rows.setValue(fig.rows)
+            self._cols.setValue(fig.cols)
+            for w in self._grid_row:
+                w.setVisible(fig.layout == "custom")
             for box, value in ((self._same_crop, fig.same_crop), (self._letters, fig.letters), (self._labels, fig.channel_labels),
                                (self._bar, fig.scale_bar), (self._arrows, fig.arrowheads), (self._numbers, fig.chromosome_numbers)):
                 box.setChecked(value)
@@ -807,26 +838,25 @@ class FigureTab(QWidget):
         self._clear(self._panel_lay)
         fig = self._fig
         slides = {s.id: s.name for s in load_slides(self._folder)} if self._folder else {}
-        for i, panel in enumerate(fig.panels):
-            image = self._painter.images.get(panel.image_id)
-            slide = slides.get(image_details(image).slide_id, "") if image else ""
-            row = QFrame(self._panel_host)
-            row.setCursor(Qt.CursorShape.PointingHandCursor)
-            chosen = panel.id == self._selected
-            row.setStyleSheet(
-                f"QFrame {{ background:{'#E3EBF8' if chosen else '#FFFFFF'}; border:1px solid {'#1F4E9A' if chosen else '#E0E0E4'};"
-                " border-radius:6px; } QLabel { border:none; background:transparent; }")
-            rl = QHBoxLayout(row)
-            rl.setContentsMargins(8, 6, 8, 6)
-            rl.setSpacing(6)
-            letter = QLabel(f"<b>{fg.letter(i)}</b>", row)
-            letter.setFixedWidth(22)
-            src = QLabel(fg.source_text(panel, image, slide), row)
-            src.setStyleSheet("color:#45484D; font-size:12px; border:none;")
-            rl.addWidget(letter)
-            rl.addWidget(src, 1)
-            row.mousePressEvent = lambda _e, pid=panel.id: self._select_panel(pid)  # type: ignore[method-assign]
-            self._panel_lay.addWidget(row)
+        if fig.panels:
+            from PySide6.QtWidgets import QListWidget, QListWidgetItem
+
+            lst = QListWidget(self._panel_host)
+            lst.setTextElideMode(Qt.TextElideMode.ElideRight)
+            lst.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            for i, panel in enumerate(fig.panels):
+                image = self._painter.images.get(panel.image_id)
+                slide = slides.get(image_details(image).slide_id, "") if image else ""
+                text = fg.source_text(panel, image, slide)
+                item = QListWidgetItem(f"{fg.letter(i)}    {text}")
+                item.setToolTip(text)
+                item.setData(Qt.ItemDataRole.UserRole, panel.id)
+                lst.addItem(item)
+                if panel.id == self._selected:
+                    lst.setCurrentItem(item)
+            lst.setFixedHeight(min(8, lst.count()) * max(lst.sizeHintForRow(0), 16) + 2 * lst.frameWidth() + 2)
+            lst.itemClicked.connect(lambda it: self._select_panel(it.data(Qt.ItemDataRole.UserRole)))
+            self._panel_lay.addWidget(lst)
         if not fig.panels:
             empty = QLabel("No panels yet. Use Add to figure in the Library or + Add.", self._panel_host)
             empty.setObjectName("cytoMuted")
@@ -866,12 +896,15 @@ class FigureTab(QWidget):
         for text, slot in (("Move up", lambda: self._move(-1)), ("Move down", lambda: self._move(1)), ("Remove", self._remove)):
             b = QPushButton(text, self._edit_host)
             b.clicked.connect(slot)
-            r.addWidget(b)
+            r.addWidget(b, 1)
+        self._edit_lay.addLayout(r)
         if panel.arrows:
             b = QPushButton("Clear arrowheads", self._edit_host)
             b.clicked.connect(lambda: self._set_panel(panel, arrows=[]))
-            r.addWidget(b)
-        self._edit_lay.addLayout(r)
+            r2 = QHBoxLayout()
+            r2.addWidget(b)
+            r2.addStretch(1)
+            self._edit_lay.addLayout(r2)
 
     # ------------------------------------------------------------------ actions
 
@@ -975,7 +1008,11 @@ class FigureTab(QWidget):
         self._custom.setVisible(fig.width_mm <= 0)
         fig.layout = str(self._layout.currentData())
         fig.spacing = int(self._spacing.value())
-        fig.font_pt = float(self._font.currentData())
+        fig.font_pt = float(self._font_size.value())
+        fig.font_family = self._font.currentFont().family()
+        fig.rows, fig.cols = int(self._rows.value()), int(self._cols.value())
+        for w in self._grid_row:
+            w.setVisible(fig.layout == "custom")
         self._changed()
 
     def _on_marks(self, *_args) -> None:
