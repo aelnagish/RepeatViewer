@@ -21,6 +21,19 @@ from ..cyto_images import store_dir
 SUFFIX = ".karyotype.json"
 ORDERS = ("listed", "length", "ci")
 BAND_KINDS = ("Secondary constriction (NOR)", "DAPI+ heterochromatin", "CMA+ band")
+# How the homologues of one chromosome are named: style -> (menu text, stored suffixes)
+HOMOLOGUE_STYLES = {
+    "letters": ("a, b, c …", "abcdefghijkl"),
+    "capitals": ("A, B, C …", "ABCDEFGHIJKL"),
+    "numbers": ("1, 2, 3 …", ",".join(f".{i}" for i in range(1, 13))),
+}
+GROUP_NAMES = {1: "univalent", 2: "bivalent", 3: "trivalent", 4: "tetravalent", 5: "pentavalent",
+               6: "hexavalent", 7: "heptavalent", 8: "octavalent"}
+
+
+def group_name(copies: int) -> str:
+    """'bivalent', 'trivalent' … for the number of homologues of one chromosome."""
+    return GROUP_NAMES.get(int(copies), f"{int(copies)} homologues")
 
 
 def levan_type(ci: float) -> str:
@@ -68,6 +81,21 @@ class KaryoChromosome:
         """Centromere position from the p telomere, as a fraction of the length."""
         return max(0.0, min(1.0, self.centromere_index / 100.0))
 
+    @property
+    def arms(self) -> tuple[float, float]:
+        """(short arm p, long arm q) in the length unit."""
+        p = self.length * self.centromere_fraction
+        return p, self.length - p
+
+    def set_arms(self, p: float, q: float) -> None:
+        """Set length and centromere index from the two arm lengths (p is always the shorter one)."""
+        p, q = sorted((max(0.0, float(p)), max(0.0, float(q))))
+        total = p + q
+        if total <= 0:
+            return
+        self.length = round(total, 4)
+        self.centromere_index = round(100.0 * p / total, 2)
+
 
 @dataclass
 class Karyotype:
@@ -96,10 +124,24 @@ class Karyotype:
             head += f" {'+' if diff > 0 else '-'} {abs(diff)}"
         return f"{head} = {total}"
 
+    def homologue_suffixes(self) -> list[str]:
+        """Suffixes added to the chromosome name: a, b, c or .1, .2 or the user's own comma separated list."""
+        raw = self.homologue_letters or HOMOLOGUE_STYLES["letters"][1]
+        if "," in raw:
+            return [s.strip() for s in raw.split(",") if s.strip()]
+        return list(raw)
+
+    @property
+    def homologue_style(self) -> str:
+        for key, (_text, stored) in HOMOLOGUE_STYLES.items():
+            if self.homologue_letters == stored:
+                return key
+        return "custom"
+
     def homologue_labels(self, chrom: KaryoChromosome) -> list[str]:
-        letters = self.homologue_letters
+        suffixes = self.homologue_suffixes()
         n = self.copies_of(chrom)
-        return [f"{chrom.name}{letters[i] if i < len(letters) else i + 1}" for i in range(n)]
+        return [f"{chrom.name}{suffixes[i] if i < len(suffixes) else f'.{i + 1}'}" for i in range(n)]
 
     def all_labels(self) -> list[str]:
         return [label for c in self.chromosomes for label in self.homologue_labels(c)]
@@ -257,8 +299,11 @@ def _find(header: list[str], names: tuple[str, ...]) -> int:
 
 
 def chromosome_base_name(label: str) -> str:
-    """'2b' -> '2', 'Chr5a' -> 'Chr5', 'A' -> 'A' (homologue letter after a digit is dropped)."""
+    """'2b' -> '2', 'Chr5a' -> 'Chr5', '3.2' -> '3', 'A' -> 'A' (homologue suffix after a digit is dropped)."""
     label = label.strip()
+    m = re.match(r"^(.*\d)[._-]\d+$", label)
+    if m:
+        return m.group(1)
     m = re.match(r"^(.*\d)([a-zA-Z])$", label)
     return m.group(1) if m else label
 
@@ -410,3 +455,191 @@ def folder_sequence_lengths(folder: Path) -> dict[str, int]:
             except (OSError, ValueError):
                 continue
     return lengths
+
+
+# ---------------------------------------------------------------------------
+# Chromosome sizes: sizes file, .fai, BED, GFF or FASTA
+# ---------------------------------------------------------------------------
+
+SIZES_SUFFIXES = (".sizes", ".genome", ".txt", ".tsv", ".fai", ".bed", ".gff", ".gff3", ".gtf")
+SIZES_FILTER = ("Sizes, index, BED, GFF or FASTA (*.sizes *.genome *.txt *.tsv *.fai *.bed *.gff *.gff3 *.gtf "
+                "*.fa *.fasta *.fna *.fas *.fa.gz *.fasta.gz *.fna.gz);;All files (*)")
+SIZES_OUTPUT_SUFFIX = "_sizes.txt"
+
+
+def is_fasta(path: Path) -> bool:
+    name = Path(path).name.lower()
+    if name.endswith(".gz"):
+        name = name[:-3]
+    return Path(name).suffix in FASTA_SUFFIXES
+
+
+def sizes_path_for(fasta: Path) -> Path:
+    """'genome.fa' -> 'genome.fa_sizes.txt' beside it (full input name kept, then the suffix)."""
+    fasta = Path(fasta)
+    return fasta.with_name(fasta.name + SIZES_OUTPUT_SUFFIX)
+
+
+def _newer(a: Path, b: Path) -> bool:
+    try:
+        return a.is_file() and a.stat().st_mtime >= b.stat().st_mtime
+    except OSError:
+        return False
+
+
+def fasta_sizes(path: Path, progress=None, cancel=None) -> dict[str, int]:
+    """Record name -> length, read line by line (a whole genome never sits in memory).
+
+    ``progress(percent)`` is called now and then; ``cancel()`` returning True stops with an empty result.
+    """
+    import gzip
+
+    path = Path(path)
+    total = max(1, path.stat().st_size)
+    opener = gzip.open if path.name.lower().endswith(".gz") else open
+    sizes: dict[str, int] = {}
+    name, n, done, next_report = None, 0, 0, total // 50
+    with opener(path, "rb") as fh:
+        for line in fh:
+            done += len(line)
+            if line.startswith(b">"):
+                if name is not None:
+                    sizes[name] = n
+                name = line[1:].split(None, 1)[0].decode("utf-8", "replace") if line[1:].strip() else f"seq{len(sizes) + 1}"
+                n = 0
+            else:
+                n += len(line.rstrip(b"\r\n"))
+            if done >= next_report:
+                next_report += total // 50 or 1
+                if cancel is not None and cancel():
+                    return {}
+                if progress is not None:
+                    progress(min(99, int(100 * done / total)))
+    if name is not None:
+        sizes[name] = n
+    return sizes
+
+
+def _two_columns(text: str) -> dict[str, int]:
+    sizes: dict[str, int] = {}
+    for line in text.splitlines():
+        parts = line.strip().split("\t") if "\t" in line else line.split()
+        if len(parts) < 2 or line.startswith(("#", "track", "browser")):
+            continue
+        try:
+            sizes.setdefault(parts[0], int(float(parts[1])))
+        except ValueError:
+            continue  # header line
+    return sizes
+
+
+def _last_end(text: str, name_col: int, end_col: int) -> dict[str, int]:
+    sizes: dict[str, int] = {}
+    regions: dict[str, int] = {}
+    for line in text.splitlines():
+        if line.startswith("##sequence-region"):
+            parts = line.split()
+            if len(parts) >= 4 and parts[3].isdigit():
+                regions[parts[1]] = int(parts[3])
+            continue
+        if not line.strip() or line.startswith(("#", "track", "browser")):
+            continue
+        parts = line.split("\t")
+        if len(parts) <= max(name_col, end_col):
+            continue
+        try:
+            end = int(float(parts[end_col]))
+        except ValueError:
+            continue
+        sizes[parts[name_col]] = max(end, sizes.get(parts[name_col], 0))
+    sizes.update(regions)
+    return sizes
+
+
+def read_sizes(path: Path, progress=None, cancel=None) -> dict[str, int]:
+    """Sequence name -> length in bp from a sizes file, .fai, BED (last end), GFF/GTF or FASTA.
+
+    For FASTA a newer ``.fai`` or ``<name>_sizes.txt`` beside it is used when present.
+    """
+    path = Path(path).expanduser()
+    if is_fasta(path):
+        for side in (Path(str(path) + ".fai"), sizes_path_for(path)):
+            if _newer(side, path):
+                return _two_columns(side.read_text(encoding="utf-8", errors="replace"))
+        return fasta_sizes(path, progress, cancel)
+    text = path.read_text(encoding="utf-8", errors="replace")
+    suffix = path.suffix.lower()
+    if suffix == ".bed":
+        return _last_end(text, 0, 2)
+    if suffix in (".gff", ".gff3", ".gtf"):
+        return _last_end(text, 0, 4)
+    return _two_columns(text)
+
+
+def write_sizes(path: Path, sizes: dict[str, int]) -> Path:
+    path = Path(path)
+    path.write_text("".join(f"{name}\t{n}\n" for name, n in sizes.items()), encoding="utf-8")
+    return path
+
+
+def make_sizes_file(fasta: Path, out: Path | None = None, progress=None, cancel=None) -> Path:
+    """Write ``<name>_sizes.txt`` (name and length per sequence, tab separated) for a FASTA."""
+    fasta = Path(fasta).expanduser().resolve()
+    sizes = fasta_sizes(fasta, progress, cancel)
+    if not sizes:
+        raise ValueError(f"No sequences in {fasta.name}.")
+    return write_sizes(out or sizes_path_for(fasta), sizes)
+
+
+def sizes_sources(folder: Path) -> list[Path]:
+    """Files in ``folder`` that can give chromosome lengths: sizes files and indexes first, then BED/GFF, then FASTA."""
+    def rank(p: Path) -> int:
+        name = p.name.lower()
+        if name.endswith((SIZES_OUTPUT_SUFFIX, ".sizes", ".genome", ".fai")):
+            return 0
+        if is_fasta(p):
+            return 2
+        return 1
+
+    try:
+        files = [p for p in Path(folder).iterdir() if p.is_file() and not p.name.startswith(".")
+                 and (is_fasta(p) or p.suffix.lower() in (".sizes", ".genome", ".fai", ".bed", ".gff", ".gff3", ".gtf")
+                      or p.name.lower().endswith(SIZES_OUTPUT_SUFFIX))]
+    except OSError:
+        return []
+    return sorted(files, key=lambda p: (rank(p), p.name.lower()))
+
+
+def match_sequences(karyotype: Karyotype, names: list[str]) -> dict[str, str]:
+    """Chromosome name -> sequence name: the current link, the same name, or Chr1 / chr01 / Csat_chr1 for '1'."""
+    known = set(names)
+    by_number: dict[str, str] = {}
+    for seq in names:
+        m = re.search(r"(?:chr(?:omosome)?)[_\- ]?0*(\d+)$", seq, re.IGNORECASE)
+        if m and m.group(1) not in by_number:
+            by_number[m.group(1)] = seq
+    out: dict[str, str] = {}
+    for chrom in karyotype.chromosomes:
+        if chrom.assembly_seq in known:
+            out[chrom.name] = chrom.assembly_seq
+        elif chrom.name in known:
+            out[chrom.name] = chrom.name
+        else:
+            seq = by_number.get(chrom.name.lstrip("0") or chrom.name)
+            if seq:
+                out[chrom.name] = seq
+    return out
+
+
+def apply_sizes(karyotype: Karyotype, links: dict[str, str], sizes: dict[str, int]) -> list[str]:
+    """Link the sequences and set lengths in Mb. Returns chromosomes left without a length."""
+    missing = []
+    for chrom in karyotype.chromosomes:
+        seq = links.get(chrom.name, "")
+        chrom.assembly_seq = seq
+        if seq in sizes:
+            chrom.length = round(sizes[seq] / 1e6, 3)
+        else:
+            missing.append(chrom.name)
+    karyotype.unit = "Mb"
+    return missing

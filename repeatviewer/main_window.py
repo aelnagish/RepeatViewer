@@ -614,6 +614,7 @@ _JOB_DISPLAY_TITLES = {
     "hmmer": "HMMER",
     "extend": "MSA Extend",
     "tsd_search": "TSD search",
+    "chromosome_sizes": "Make Chromosome Sizes File",
     "msa_clean": "MSA Clean",
     "msa_clean_gappy": "MSA remove gappy columns",
     "msa_clean_div": "Clean row with divergence",
@@ -2572,6 +2573,7 @@ class MainWindow(
         self._file_list.attach_cyto_image_requested.connect(self._attach_cyto_images)
         self._file_list.annotation_files_dropped.connect(self._import_dropped_annotations)
         self._file_list.cyto_images_requested.connect(self._open_cyto_images)
+        self._file_list.chromosome_sizes_requested.connect(self._make_chromosome_sizes)
         from repeatviewer.widgets.cyto_images_ui import cyto_notifier
 
         cyto_notifier().changed.connect(self._on_cyto_images_changed)

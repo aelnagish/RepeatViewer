@@ -5,10 +5,9 @@ from __future__ import annotations
 import copy
 from pathlib import Path
 
-from PySide6.QtCore import QPointF, QRectF, Qt, Signal
+from PySide6.QtCore import QObject, QPointF, QRectF, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (
-    QApplication,
     QDialog,
     QFileDialog,
     QHBoxLayout,
@@ -17,6 +16,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QSpinBox,
     QTableWidget,
@@ -37,13 +37,32 @@ HELP = (
     "<b>Centromere index</b> is the short arm as percent of the whole chromosome; the type (m, sm, st, t) follows Levan et al. (1964).<br>"
     "<b>Copies</b> can differ from the ploidy (aneuploidy, B chromosomes). Leave it at the ploidy for a normal set.<br>"
     "<b>Order</b>: drag the ⋮⋮ handle to move a chromosome, or use the Order buttons.<br>"
-    "<b>Import measurements</b> reads a table with chromosome and length (and optionally centromere index or p and q), "
+    "<b>Basic number and ploidy</b> apply as you type; chromosomes are added or removed at the end of the list.<br>"
+    "<b>Homologues</b>: how the copies of a chromosome are named (1a, 1b or 1.1, 1.2 or your own list). "
+    "Signals marked under the old names keep them, so choose this before marking.<br>"
+    "<b>Import measurements (TSV)</b> reads a table with chromosome and length (and optionally centromere index or p and q), "
     "for example from KaryoScope.<br>"
-    "<b>Take lengths from assembly</b> links Chr1, Chr01 … to chromosome 1 and uses the sequence lengths in Mb.<br>"
-    "<b>Preview</b>: drag a centromere or a band edge to change it.<br>"
+    "<b>Lengths from assembly</b> reads a sizes file, a .fai index, BED or GFF (last end per sequence) or a FASTA "
+    "(read in the background; a sizes file is saved beside it so the next time is instant). Chr1, Chr01 … are matched "
+    "to chromosome 1; change any match in the table. From R, export a GRanges object with "
+    "<i>rtracklayer::export(gr, \"x.bed\")</i> or write <i>seqlengths(gr)</i> as a two column sizes file.<br>"
+    "<b>Preview</b>: <i>One per type</i> draws each chromosome once, <i>Homologue groups</i> draws every copy "
+    "(bivalent, trivalent … hexavalent). Drag the centromere handle or a band edge to change it.<br>"
+    "<b>Length, short arm p, long arm q</b>: type the arm lengths and the length and centromere index follow.<br>"
     "<b>Bands</b> are positions like \"q 0.92\": 92 % of the way from the centromere to the q telomere."
 )
 
+HELP_ASSEMBLY = (
+    "<b>Source</b>: a sizes file (name and length per line, for example <i>genome.fa_sizes.txt</i>), a .fai index, "
+    "a BED or GFF file (the last end per sequence) or a FASTA file.<br>"
+    "<b>FASTA</b> is read in the background and a sizes file is saved beside it, so the next time is instant. "
+    "Tools > Cytogenetics > Make Chromosome Sizes File makes one for any FASTA.<br>"
+    "<b>From R</b>: <i>rtracklayer::export(gr, \"x.bed\")</i>, or "
+    "<i>write.table(data.frame(names(seqlengths(gr)), seqlengths(gr)), \"x.sizes\", sep = \"\\t\", "
+    "quote = FALSE, row.names = FALSE, col.names = FALSE)</i>.<br>"
+    "<b>Matching</b>: the current link, the same name, or Chr1, chr01, Csat_chr1 … for chromosome 1. "
+    "Choose another sequence in the menu to change it. Save sets the lengths in Mb."
+)
 UNITS = (("µm", "µm"), ("% of genome (relative)", "%"), ("Mb (assembly)", "Mb"))
 PLOIDIES = (1, 2, 3, 4, 5, 6, 8)
 BAND_COLOURS = {
@@ -51,6 +70,7 @@ BAND_COLOURS = {
     "CMA+ band": "#E8A33D",
 }
 CUSTOM_KIND = "Custom…"
+OWN_LIST = "Own list…"
 LINK_CSS = "QPushButton { color:#1F4E9A; border:none; } QPushButton:hover { text-decoration: underline; }"
 
 
@@ -87,7 +107,7 @@ class _ReorderTable(QTableWidget):
 
 
 class KaryoPreview(QWidget):
-    """Chromosome bars side by side. Drag a centromere or a band edge."""
+    """Chromosome bars side by side, one per type or all homologues in groups. Drag a centromere or a band edge."""
 
     selected = Signal(int)
     edited = Signal()
@@ -98,20 +118,34 @@ class KaryoPreview(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setMinimumSize(300, 340)
+        self.setMouseTracking(True)
         self.karyotype: kt.Karyotype | None = None
         self.index = -1
         self.band_index = -1
+        self.groups = False
         self._drag: tuple[str, int] | None = None
+        self._hover = -1
 
-    def _geometry(self, i: int, chrom: kt.KaryoChromosome) -> QRectF:
+    def _bars(self, i: int, chrom: kt.KaryoChromosome) -> list[QRectF]:
+        """One rectangle per drawn bar of chromosome ``i`` (several in homologue groups)."""
         k = self.karyotype
         n = max(1, len(k.chromosomes))
         slot = max(30.0, (self.width() - 16) / n)
         longest = max((c.length for c in k.chromosomes), default=0.0)
+        bottom = 44 if self.groups else 26
         h = self.MAX_H * (chrom.length / longest) if longest > 0 and chrom.length > 0 else self.MAX_H * 0.5
-        h = max(30.0, min(h, self.height() - 40.0))
-        x = 8 + slot * (i + 0.5) - self.BAR_W / 2
-        return QRectF(x, self.height() - 26 - h, self.BAR_W, h)
+        h = max(30.0, min(h, self.height() - bottom - 14.0))
+        copies = max(1, k.copies_of(chrom)) if self.groups else 1
+        gap = 4.0
+        w = self.BAR_W if copies == 1 else max(6.0, min(16.0, (slot - 10 - gap * (copies - 1)) / copies))
+        total = copies * w + gap * (copies - 1)
+        x0 = 8 + slot * (i + 0.5) - total / 2
+        top = self.height() - bottom - h
+        return [QRectF(x0 + j * (w + gap), top, w, h) for j in range(copies)]
+
+    def _group_rect(self, i: int, chrom: kt.KaryoChromosome) -> QRectF:
+        bars = self._bars(i, chrom)
+        return QRectF(bars[0].topLeft(), bars[-1].bottomRight())
 
     def paintEvent(self, event) -> None:  # noqa: N802
         p = QPainter(self)
@@ -122,39 +156,57 @@ class KaryoPreview(QWidget):
             p.setPen(QColor("#5A5D63"))
             p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "No chromosomes")
             return
-        font = QFont(self.font())
-        font.setBold(True)
-        p.setFont(font)
+        accent = self.palette().color(self.palette().ColorRole.Highlight)
+        bold = QFont(self.font())
+        bold.setBold(True)
+        small = QFont(self.font())
+        small.setPointSizeF(max(7.0, small.pointSizeF() - 2))
         for i, c in enumerate(k.chromosomes):
-            r = self._geometry(i, c)
+            bars = self._bars(i, c)
+            group = self._group_rect(i, c)
             if i == self.index:
-                p.setPen(QPen(QColor("#1F4E9A"), 1.5, Qt.PenStyle.DashLine))
+                p.setPen(QPen(accent, 1.2, Qt.PenStyle.DashLine))
                 p.setBrush(Qt.BrushStyle.NoBrush)
-                p.drawRoundedRect(r.adjusted(-8, -8, 8, 22), 8, 8)
-            for b_i, b in enumerate(c.bands):
-                top = r.top() + b.start * r.height()
-                rect = QRectF(r.left(), top, r.width(), max(2.0, (b.end - b.start) * r.height()))
-                if b.kind.startswith("Secondary"):
-                    brush = QBrush(QColor("#8A8D93"), Qt.BrushStyle.BDiagPattern)
+                p.drawRoundedRect(group.adjusted(-8, -8, 8, 22 if not self.groups else 40), 8, 8)
+            for r in bars:
+                radius = r.width() / 2
+                for b_i, b in enumerate(c.bands):
+                    top = r.top() + b.start * r.height()
+                    rect = QRectF(r.left(), top, r.width(), max(2.0, (b.end - b.start) * r.height()))
+                    if b.kind.startswith("Secondary"):
+                        brush = QBrush(QColor("#8A8D93"), Qt.BrushStyle.BDiagPattern)
+                    else:
+                        brush = QBrush(QColor(BAND_COLOURS.get(b.kind, "#8A8D93")))
+                    p.setPen(Qt.PenStyle.NoPen)
+                    p.setBrush(brush)
+                    p.drawRect(rect)
+                p.setPen(QPen(QColor("#6C6F75"), 1.5))
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.drawRoundedRect(r, radius, radius)
+                cy = r.top() + c.centromere_fraction * r.height()
+                if i == self.index or i == self._hover:
+                    # the handle you drag: wider, in the accent colour
+                    p.setPen(QPen(accent, 1.5))
+                    p.setBrush(accent if i == self.index else QColor("#FFFFFF"))
+                    p.drawRoundedRect(QRectF(r.left() - 6, cy - 5, r.width() + 12, 10), 5, 5)
                 else:
-                    brush = QBrush(QColor(BAND_COLOURS.get(b.kind, "#8A8D93")))
-                p.setPen(Qt.PenStyle.NoPen)
-                p.setBrush(brush)
-                p.drawRect(rect)
-            p.setPen(QPen(QColor("#6C6F75"), 1.5))
-            p.setBrush(Qt.BrushStyle.NoBrush)
-            p.drawRoundedRect(r, self.BAR_W / 2, self.BAR_W / 2)
-            cy = r.top() + c.centromere_fraction * r.height()
-            p.setBrush(QColor("#FFFFFF"))
-            p.drawRoundedRect(QRectF(r.left() - 3, cy - 3, r.width() + 6, 6), 3, 3)
+                    p.setBrush(QColor("#FFFFFF"))
+                    p.drawRoundedRect(QRectF(r.left() - 3, cy - 3, r.width() + 6, 6), 3, 3)
+            label_y = group.bottom() + 4
             p.setPen(QColor("#1C1C1E"))
-            p.drawText(QRectF(r.left() - 15, self.height() - 22, r.width() + 30, 18), Qt.AlignmentFlag.AlignCenter, c.name)
+            p.setFont(bold)
+            p.drawText(QRectF(group.center().x() - 40, label_y, 80, 18), Qt.AlignmentFlag.AlignCenter, c.name)
+            if self.groups:
+                p.setFont(small)
+                p.setPen(QColor("#6E6E73"))
+                p.drawText(QRectF(group.center().x() - 45, label_y + 17, 90, 16), Qt.AlignmentFlag.AlignCenter,
+                           kt.group_name(k.copies_of(c)))
             if i == self.index and 0 <= self.band_index < len(c.bands):
                 b = c.bands[self.band_index]
-                p.setPen(QPen(QColor("#1F4E9A"), 2))
+                p.setPen(QPen(accent, 2))
                 for f in (b.start, b.end):
-                    y = r.top() + f * r.height()
-                    p.drawLine(QPointF(r.left() - 6, y), QPointF(r.right() + 6, y))
+                    y = group.top() + f * group.height()
+                    p.drawLine(QPointF(group.left() - 6, y), QPointF(group.right() + 6, y))
 
     def _hit(self, pos: QPointF) -> tuple[str, int] | None:
         k = self.karyotype
@@ -162,19 +214,19 @@ class KaryoPreview(QWidget):
             return None
         if 0 <= self.index < len(k.chromosomes):
             c = k.chromosomes[self.index]
-            r = self._geometry(self.index, c)
-            if 0 <= self.band_index < len(c.bands) and r.left() - 10 <= pos.x() <= r.right() + 10:
+            g = self._group_rect(self.index, c)
+            if 0 <= self.band_index < len(c.bands) and g.left() - 10 <= pos.x() <= g.right() + 10:
                 b = c.bands[self.band_index]
                 for edge, f in (("start", b.start), ("end", b.end)):
-                    if abs(pos.y() - (r.top() + f * r.height())) <= 4:
+                    if abs(pos.y() - (g.top() + f * g.height())) <= 4:
                         return edge, self.index
         for i, c in enumerate(k.chromosomes):
-            r = self._geometry(i, c)
-            cy = r.top() + c.centromere_fraction * r.height()
-            if r.left() - 8 <= pos.x() <= r.right() + 8 and abs(pos.y() - cy) <= 6:
+            g = self._group_rect(i, c)
+            cy = g.top() + c.centromere_fraction * g.height()
+            if g.left() - 8 <= pos.x() <= g.right() + 8 and abs(pos.y() - cy) <= 7:
                 return "centromere", i
         for i, c in enumerate(k.chromosomes):
-            if self._geometry(i, c).adjusted(-8, -8, 8, 8).contains(pos):
+            if self._group_rect(i, c).adjusted(-8, -8, 8, 8).contains(pos):
                 return "select", i
         return None
 
@@ -194,12 +246,16 @@ class KaryoPreview(QWidget):
         k = self.karyotype
         if self._drag is None or k is None:
             hit = self._hit(event.position())
+            hover = hit[1] if hit and hit[0] == "centromere" else -1
+            if hover != self._hover:
+                self._hover = hover
+                self.update()
             self.setCursor(Qt.CursorShape.SizeVerCursor if hit and hit[0] != "select" else Qt.CursorShape.ArrowCursor)
             return
         kind, i = self._drag
         c = k.chromosomes[i]
-        r = self._geometry(i, c)
-        f = max(0.0, min(1.0, (event.position().y() - r.top()) / max(r.height(), 1.0)))
+        g = self._group_rect(i, c)
+        f = max(0.0, min(1.0, (event.position().y() - g.top()) / max(g.height(), 1.0)))
         if kind == "centromere":
             c.centromere_index = round(max(5.0, min(95.0, f * 100.0)), 1)
         elif 0 <= self.band_index < len(c.bands):
@@ -213,6 +269,11 @@ class KaryoPreview(QWidget):
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
         self._drag = None
+
+    def leaveEvent(self, event) -> None:  # noqa: N802
+        if self._hover != -1:
+            self._hover = -1
+            self.update()
 
 
 class KaryotypeDialog(QDialog):
@@ -251,7 +312,17 @@ class KaryotypeDialog(QDialog):
         f = self._formula.font()
         f.setBold(True)
         self._formula.setFont(f)
-        self._hom_names = QLabel(self)
+        self._hom_names = NoWheelComboBox(self)
+        self._hom_names.setToolTip("How the homologues of one chromosome are named, for example 1a, 1b or 1.1, 1.2")
+        for key, (text, _stored) in kt.HOMOLOGUE_STYLES.items():
+            self._hom_names.addItem(text, key)
+        self._hom_names.addItem(OWN_LIST, "custom")
+        self._hom_names.activated.connect(self._on_hom_names)
+        self._hom_names.setFixedWidth(100)
+        self._basic_timer = QTimer(self)
+        self._basic_timer.setSingleShot(True)
+        self._basic_timer.setInterval(500)
+        self._basic_timer.timeout.connect(self._on_basic)
         self._unit = NoWheelComboBox(self)
         for text, value in UNITS:
             self._unit.addItem(text, value)
@@ -259,6 +330,7 @@ class KaryotypeDialog(QDialog):
         self._name.setFixedWidth(130)
         self._species.setFixedWidth(140)
         self._basic.setFixedWidth(64)
+        self._unit.setFixedWidth(170)
         self._ploidy.setFixedWidth(70)
         head = QHBoxLayout()
         head.setSpacing(8)
@@ -268,19 +340,20 @@ class KaryotypeDialog(QDialog):
             head.addSpacing(6)
         head.addWidget(self._formula)
         head.addSpacing(6)
+        head.addWidget(QLabel("Homologues", self))
         head.addWidget(self._hom_names)
-        head.addStretch(1)
+        head.addSpacing(6)
         head.addWidget(QLabel("Species", self))
         head.addWidget(self._species)
-        head.addSpacing(6)
-        head.addWidget(QLabel("Length unit", self))
-        head.addWidget(self._unit)
+        head.addStretch(1)
         head.addWidget(make_help_button(self, "Karyotype", HELP))
 
         # ---- table side
         add_btn = QPushButton("+ Add chromosome", self)
-        imp_btn = QPushButton("Import measurements (KaryoScope TSV)", self)
-        asm_btn = QPushButton("Take lengths from assembly", self)
+        imp_btn = QPushButton("Import measurements (TSV)…", self)
+        imp_btn.setToolTip("Lengths and centromere indices from a table, for example a KaryoScope TSV")
+        asm_btn = QPushButton("Lengths from assembly…", self)
+        asm_btn.setToolTip("Lengths in Mb from a sizes file, .fai, BED, GFF or FASTA")
         add_btn.clicked.connect(self._add_chromosome)
         imp_btn.clicked.connect(self._import_measurements)
         asm_btn.clicked.connect(self._take_from_assembly)
@@ -291,6 +364,8 @@ class KaryotypeDialog(QDialog):
         tools_top.addWidget(asm_btn)
         tools_top.addStretch(1)
         order_row = QHBoxLayout()
+        order_row.addWidget(QLabel("Length unit", self))
+        order_row.addWidget(self._unit)
         order_row.addStretch(1)
         order_row.addWidget(QLabel("Order", self))
         tools.addLayout(tools_top)
@@ -327,11 +402,29 @@ class KaryotypeDialog(QDialog):
         self._preview.karyotype = self._k
         self._preview.selected.connect(self._on_preview_selected)
         self._preview.edited.connect(self._on_preview_edited)
+        self._show = NoWheelComboBox(self)
+        self._show.addItem("One per type", False)
+        self._show.addItem("Homologue groups", True)
+        self._show.setToolTip("Homologue groups draw every copy: bivalents, trivalents … up to hexavalents")
+        self._show.activated.connect(self._on_show)
         ph = QHBoxLayout()
         ph.addWidget(QLabel("<b>Preview</b>", self), 1)
-        hint = QLabel("drag a centromere or a band edge", self)
-        hint.setStyleSheet("color: palette(dark); font-size: 12px;")
-        ph.addWidget(hint)
+        ph.addWidget(QLabel("Show", self))
+        ph.addWidget(self._show)
+        hint = QLabel("Drag the centromere handle or a band edge.", self)
+        hint.setStyleSheet("color: gray;")
+        self._chrom_title = QLabel(self)
+        self._len_edit = QLineEdit(self)
+        self._p_edit = QLineEdit(self)
+        self._q_edit = QLineEdit(self)
+        for e in (self._len_edit, self._p_edit, self._q_edit):
+            e.setFixedWidth(80)
+            e.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self._len_edit.editingFinished.connect(self._on_len_side)
+        self._p_edit.editingFinished.connect(self._on_arms)
+        self._q_edit.editingFinished.connect(self._on_arms)
+        self._arm_info = QLabel(self)
+        self._arm_info.setStyleSheet("color: gray;")
         self._band_title = QLabel(self)
         self._band_list = NoWheelComboBox(self)
         self._band_list.activated.connect(self._on_band_chosen)
@@ -350,6 +443,22 @@ class KaryotypeDialog(QDialog):
         add_band.clicked.connect(self._add_band)
         del_band.clicked.connect(self._remove_band)
         form = QVBoxLayout()
+        form.addWidget(hint)
+        form.addSpacing(4)
+        form.addWidget(self._chrom_title)
+        for text, w in (("Length", self._len_edit), ("Short arm p", self._p_edit), ("Long arm q", self._q_edit)):
+            r = QHBoxLayout()
+            lab = QLabel(text, self)
+            lab.setFixedWidth(70)
+            r.addWidget(lab)
+            r.addWidget(w)
+            if w is self._q_edit:
+                r.addSpacing(8)
+                r.addWidget(self._arm_info, 1)
+            else:
+                r.addStretch(1)
+            form.addLayout(r)
+        form.addSpacing(6)
         form.addWidget(self._band_title)
         for text, w in (("Band", self._band_list), ("Kind", self._kind)):
             r = QHBoxLayout()
@@ -403,6 +512,7 @@ class KaryotypeDialog(QDialog):
 
         self._name.textChanged.connect(self._on_name)
         self._species.editTextChanged.connect(lambda t: setattr(self._k, "species", t.strip()))
+        self._basic.valueChanged.connect(lambda _v: self._basic_timer.start())
         self._basic.editingFinished.connect(self._on_basic)
         self._ploidy.activated.connect(self._on_ploidy)
         self._unit.activated.connect(self._on_unit)
@@ -422,8 +532,16 @@ class KaryotypeDialog(QDialog):
     def _sync_head(self) -> None:
         k = self._k
         self._formula.setText(k.formula)
-        letters = ", ".join(k.homologue_letters[: max(1, k.ploidy)])
-        self._hom_names.setText(f"Homologues named {letters}")
+        style = k.homologue_style
+        i = self._hom_names.findData(style)
+        if style == "custom":
+            text = ", ".join(k.homologue_suffixes())
+            self._hom_names.setItemText(i, text if len(text) <= 24 else text[:23] + "…")
+        else:
+            self._hom_names.setItemText(self._hom_names.findData("custom"), OWN_LIST)
+        self._hom_names.setCurrentIndex(i)
+        example = ", ".join(k.homologue_labels(k.chromosomes[0])) if k.chromosomes else ""
+        self._hom_names.setToolTip(f"Homologues are named {example}" if example else "")
         self._footer.setText(f"Saved as {kt.karyotype_path(self._folder, k.name).name} in the folder; used by Signals, Idiogram and Figure.")
         header = self._table.horizontalHeaderItem(2)
         if header is not None:
@@ -433,7 +551,30 @@ class KaryotypeDialog(QDialog):
         self._k.name = text.strip()
         self._sync_head()
 
+    def _on_hom_names(self, index: int) -> None:
+        key = self._hom_names.itemData(index)
+        if key == "custom":
+            current = ", ".join(self._k.homologue_suffixes())
+            text, ok = QInputDialog.getText(self, "Homologue names",
+                                            "Names added to the chromosome name, separated by commas\n"
+                                            "(for example: a, b, c or -I, -II, -III):", text=current)
+            names = [t.strip() for t in text.split(",") if t.strip()] if ok else []
+            if len(names) != len(set(names)):
+                QMessageBox.information(self, "Homologue names", "Every homologue needs its own name.")
+                names = []
+            if names:
+                self._k.homologue_letters = ",".join(names) + ("," if len(names) == 1 else "")
+        else:
+            self._k.homologue_letters = kt.HOMOLOGUE_STYLES[key][1]
+        self._sync_head()
+        self._preview.update()
+
+    def _on_show(self, index: int) -> None:
+        self._preview.groups = bool(self._show.itemData(index))
+        self._preview.update()
+
     def _on_basic(self) -> None:
+        self._basic_timer.stop()
         n = self._basic.value()
         k = self._k
         if n == k.basic_number and n == len(k.chromosomes):
@@ -455,6 +596,7 @@ class KaryotypeDialog(QDialog):
         self._k.ploidy = int(self._ploidy.itemData(index))
         self._fill_table()
         self._sync_head()
+        self._preview.update()
 
     def _on_unit(self, index: int) -> None:
         self._k.unit = str(self._unit.itemData(index))
@@ -517,7 +659,51 @@ class KaryotypeDialog(QDialog):
         c = self._k.chromosomes[r]
         self._table.item(r, 4).setText(c.type)
         self._table.item(r, 7).setText(kt.band_summary(c))
+        self._sync_arms()
         self._preview.update()
+
+    def _sync_arms(self) -> None:
+        c = self._current()
+        on = c is not None
+        for w in (self._len_edit, self._p_edit, self._q_edit):
+            w.setEnabled(on)
+        if c is None:
+            self._chrom_title.setText("<b>No chromosome selected</b>")
+            for w in (self._len_edit, self._p_edit, self._q_edit):
+                w.clear()
+            self._arm_info.clear()
+            return
+        unit = self._k.unit
+        self._chrom_title.setText(f"<b>Chromosome {c.name}</b>")
+        p, q = c.arms
+        self._len_edit.setText(f"{c.length:g}")
+        self._p_edit.setText(f"{round(p, 4):g}")
+        self._q_edit.setText(f"{round(q, 4):g}")
+        self._arm_info.setText(f"{unit}, CI {c.centromere_index:g}, {c.type or '–'}" if c.length else unit)
+
+    def _on_len_side(self) -> None:
+        c = self._current()
+        v = self._num(self._len_edit.text())
+        if c is None or v is None or v < 0:
+            self._sync_arms()
+            return
+        c.length = v
+        self._table.cellWidget(self._row, 2).setText(f"{v:g}")
+        self._refresh_row(self._row)
+
+    def _on_arms(self) -> None:
+        c = self._current()
+        p, q = self._num(self._p_edit.text()), self._num(self._q_edit.text())
+        if c is None or p is None or q is None or p < 0 or q < 0 or p + q <= 0:
+            self._sync_arms()
+            return
+        if abs(p - c.arms[0]) < 1e-9 and abs(q - c.arms[1]) < 1e-9:
+            return
+        c.set_arms(p, q)
+        self._table.cellWidget(self._row, 2).setText(f"{c.length:g}")
+        self._table.cellWidget(self._row, 3).setText(f"{c.centromere_index:g}")
+        self._refresh_row(self._row)
+        self._sync_bands(keep_index=True)
 
     def _on_name_edit(self, r: int, text: str) -> None:
         if self._busy or r >= len(self._k.chromosomes):
@@ -547,7 +733,7 @@ class KaryotypeDialog(QDialog):
             self._table.cellWidget(r, 2).setText(f"{self._k.chromosomes[r].length:g}")
             return
         self._k.chromosomes[r].length = v
-        self._preview.update()
+        self._refresh_row(r)
 
     def _on_ci_edit(self, r: int, text: str) -> None:
         if self._busy or r >= len(self._k.chromosomes):
@@ -572,6 +758,7 @@ class KaryotypeDialog(QDialog):
             return
         self._k.chromosomes[r].copies = None if n == self._k.ploidy else n
         self._sync_head()
+        self._preview.update()
 
     def _on_seq_edit(self, r: int, text: str) -> None:
         if not self._busy and r < len(self._k.chromosomes):
@@ -684,25 +871,18 @@ class KaryotypeDialog(QDialog):
         QMessageBox.information(self, "Import measurements", text)
 
     def _take_from_assembly(self) -> None:
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        try:
-            lengths = kt.folder_sequence_lengths(self._folder)
-        finally:
-            QApplication.restoreOverrideCursor()
-        if not lengths:
-            QMessageBox.information(self, "Assembly", "No FASTA file with sequences found in this folder.")
+        dialog = AssemblyLengthsDialog(self._folder, self._k, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-        self._seq_names = sorted(lengths)
-        linked = kt.guess_assembly_links(self._k, self._seq_names)
-        missing = kt.apply_assembly_lengths(self._k, lengths)
+        self._seq_names = dialog.sequence_names()
+        missing = kt.apply_sizes(self._k, dialog.links(), dialog.sizes())
         self._unit.setCurrentIndex(max(0, self._unit.findData("Mb")))
-        self._k.unit = "Mb"
         self._fill_table()
         self._sync_head()
-        text = f"{linked} new link(s) set; lengths are now in Mb."
+        self._sync_bands(keep_index=True)
         if missing:
-            text += "\nNo linked sequence for chromosome: " + ", ".join(missing) + "\nChoose the sequence in the Assembly column."
-        QMessageBox.information(self, "Assembly", text)
+            QMessageBox.information(self, "Lengths from assembly",
+                                    "No sequence chosen for chromosome " + ", ".join(missing) + ". Their lengths are unchanged.")
 
     # ------------------------------------------------------------------ bands
 
@@ -710,6 +890,7 @@ class KaryotypeDialog(QDialog):
         return self._k.chromosomes[self._row] if 0 <= self._row < len(self._k.chromosomes) else None
 
     def _sync_bands(self, keep_index: bool = False) -> None:
+        self._sync_arms()
         c = self._current()
         self._band_title.setText(f"<b>Band on selected chromosome ({c.name})</b>" if c else "<b>No chromosome selected</b>")
         if c is None:
@@ -828,3 +1009,199 @@ class KaryotypeDialog(QDialog):
         self._saved = k.name
         notify_changed(self._folder)
         self.accept()
+
+
+class _SizesReader(QObject):
+    """Reads sequence lengths on a worker thread (a genome FASTA takes a while)."""
+
+    progress = Signal(int)
+    done = Signal(dict, str)
+
+    def __init__(self, path: Path) -> None:
+        super().__init__()
+        self.path = path
+        self.stopped = False
+
+    def run(self) -> None:
+        try:
+            sizes = kt.read_sizes(self.path, self.progress.emit, lambda: self.stopped)
+            if sizes and kt.is_fasta(self.path) and not self.stopped:
+                side = kt.sizes_path_for(self.path)
+                if not side.exists() or side.stat().st_mtime < self.path.stat().st_mtime:
+                    try:
+                        kt.write_sizes(side, sizes)
+                    except OSError:
+                        pass
+            self.done.emit(sizes, "")
+        except Exception as exc:  # noqa: BLE001
+            self.done.emit({}, str(exc))
+
+
+class AssemblyLengthsDialog(QDialog):
+    """Pick a sizes file, index, BED, GFF or FASTA and match its sequences to the chromosomes."""
+
+    def __init__(self, folder: Path, karyotype: kt.Karyotype, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        from repeatviewer.widgets.path_browse import PathBrowseRow
+
+        self.setWindowTitle("Lengths from assembly")
+        self.setMinimumSize(620, 520)
+        self._folder = folder
+        self._k = karyotype
+        self._sizes: dict[str, int] = {}
+        self._thread: QThread | None = None
+        self._reader: _SizesReader | None = None
+        self._loaded: Path | None = None
+        sources = kt.sizes_sources(folder)
+        self._path = PathBrowseRow(self, initial=sources[0] if sources else None, browse_title="Lengths from assembly",
+                                   file_filter=kt.SIZES_FILTER, start_dir=str(folder),
+                                   placeholder="Sizes file, .fai, BED, GFF or FASTA", elide_middle=True)
+        self._path.path_changed.connect(self._load)
+        self._status = QLabel(self)
+        self._status.setStyleSheet("color: gray;")
+        self._bar = QProgressBar(self)
+        self._bar.setRange(0, 100)
+        self._bar.setTextVisible(False)
+        self._bar.setFixedHeight(6)
+        self._bar.hide()
+        self._table = QTableWidget(0, 3, self)
+        self._table.setHorizontalHeaderLabels(["Chromosome", "Sequence", "Length (Mb)"])
+        self._table.verticalHeader().setVisible(False)
+        self._table.verticalHeader().setDefaultSectionSize(30)
+        self._table.setShowGrid(False)
+        self._table.setAlternatingRowColors(True)
+        self._table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
+        hh = self._table.horizontalHeader()
+        hh.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        hh.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+
+        source = QHBoxLayout()
+        source.addWidget(QLabel("Source", self))
+        source.addWidget(self._path, 1)
+        source.addWidget(make_help_button(self, "Lengths from assembly", HELP_ASSEMBLY))
+        cancel = QPushButton("Cancel", self)
+        self._save = QPushButton("Save", self)
+        self._save.setDefault(True)
+        cancel.clicked.connect(self.reject)
+        self._save.clicked.connect(self.accept)
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        buttons.addWidget(cancel)
+        buttons.addWidget(self._save)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(20, 20, 20, 16)
+        root.setSpacing(10)
+        root.addLayout(source)
+        root.addWidget(self._status)
+        root.addWidget(self._bar)
+        root.addWidget(self._table, 1)
+        root.addLayout(buttons)
+        self._fill()
+        QTimer.singleShot(0, self._load)
+
+    # ---------------------------------------------------------------- reading
+
+    def _load(self) -> None:
+        path = self._path.path()
+        if path is not None and path == self._loaded:
+            return
+        self._loaded = path
+        self._stop()
+        self._sizes = {}
+        if not path or not Path(path).is_file():
+            self._status.setText("Choose a sizes file, .fai, BED, GFF or FASTA.")
+            self._fill()
+            return
+        path = Path(path)
+        self._status.setText(f"Reading {path.name}…")
+        self._bar.setValue(0)
+        self._bar.show()
+        self._save.setEnabled(False)
+        self._thread = QThread(self)
+        self._reader = _SizesReader(path)
+        self._reader.moveToThread(self._thread)
+        self._thread.started.connect(self._reader.run)
+        self._reader.progress.connect(self._bar.setValue, Qt.ConnectionType.QueuedConnection)
+        self._reader.done.connect(self._on_read, Qt.ConnectionType.QueuedConnection)
+        self._reader.done.connect(self._thread.quit)
+        self._thread.start()
+
+    def _on_read(self, sizes: dict, error: str) -> None:
+        self._bar.hide()
+        self._save.setEnabled(True)
+        path = Path(self._path.path())
+        if error or not sizes:
+            self._status.setText(f"Could not read lengths from {path.name}. {error}".strip())
+        else:
+            note = ""
+            if kt.is_fasta(path) and kt.sizes_path_for(path).exists():
+                note = f" Saved as {kt.sizes_path_for(path).name} beside it."
+            self._status.setText(f"{len(sizes)} sequences in {path.name}.{note}")
+        self._sizes = dict(sizes)
+        self._fill()
+
+    def _stop(self) -> None:
+        if self._reader is not None:
+            self._reader.stopped = True
+        if self._thread is not None:
+            self._thread.quit()
+            self._thread.wait(3000)
+        self._thread = None
+        self._reader = None
+
+    def done(self, result: int) -> None:  # noqa: D401
+        self._stop()
+        super().done(result)
+
+    # ---------------------------------------------------------------- matching
+
+    def _fill(self) -> None:
+        names = self.sequence_names()
+        links = kt.match_sequences(self._k, names)
+        self._table.setRowCount(len(self._k.chromosomes))
+        for r, c in enumerate(self._k.chromosomes):
+            item = QTableWidgetItem(c.name)
+            item.setFlags(Qt.ItemFlag.ItemIsEnabled)
+            self._table.setItem(r, 0, item)
+            box = NoWheelComboBox(self)
+            box.addItem("")
+            box.addItems(names)
+            box.setCurrentText(links.get(c.name, ""))
+            box.currentTextChanged.connect(lambda _t, r=r: self._show_length(r))
+            holder = QWidget(self)
+            lay = QHBoxLayout(holder)
+            lay.setContentsMargins(4, 2, 4, 2)
+            lay.addWidget(box)
+            self._table.setCellWidget(r, 1, holder)
+            length = QTableWidgetItem()
+            length.setFlags(Qt.ItemFlag.ItemIsEnabled)
+            length.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self._table.setItem(r, 2, length)
+            self._show_length(r)
+
+    def _box(self, r: int) -> NoWheelComboBox | None:
+        holder = self._table.cellWidget(r, 1)
+        return holder.findChild(NoWheelComboBox) if holder is not None else None
+
+    def _show_length(self, r: int) -> None:
+        box, item = self._box(r), self._table.item(r, 2)
+        if box is None or item is None:
+            return
+        bp = self._sizes.get(box.currentText())
+        item.setText(f"{bp / 1e6:.3f}" if bp else "")
+
+    # ---------------------------------------------------------------- results
+
+    def sizes(self) -> dict[str, int]:
+        return dict(self._sizes)
+
+    def sequence_names(self) -> list[str]:
+        return list(self._sizes)
+
+    def links(self) -> dict[str, str]:
+        out = {}
+        for r, c in enumerate(self._k.chromosomes):
+            box = self._box(r)
+            if box is not None and box.currentText():
+                out[c.name] = box.currentText()
+        return out
