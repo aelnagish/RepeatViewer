@@ -761,3 +761,49 @@ def test_nearest_branch_wins(qapp, tmp_path):
     a, b = mid("A"), mid("B")
     assert canvas.node_at(a + QPoint(0, 3 if b.y() > a.y() else -3)) == nodes["A"]
     assert canvas.node_at(b + QPoint(0, -3 if b.y() > a.y() else 3)) == nodes["B"]
+
+
+def test_find_tab_selects_hits_and_steps(qapp, tree_file):
+    from repeatviewer.widgets.tree_view import TreePanel
+
+    panel = TreePanel(tree_file)
+    panel._find_query.setText("d, e")
+    panel.find_all()
+    assert panel._selected == ("D", "E")
+    panel._find_query.setText("a b")
+    panel.find_step(1)
+    assert panel._selected == ("A",)
+    panel.find_step(1)
+    assert panel._selected == ("B",)
+    panel.find_step(1)
+    assert panel._selected == ("A",)
+    panel.find_step(-1)
+    assert panel._selected == ("B",)
+
+
+def test_find_hit_inside_collapsed_clade_selects_the_clade(qapp, tree_file):
+    from repeatviewer.widgets.tree_view import TreePanel
+
+    panel = TreePanel(tree_file)
+    panel._find_query.setText("D")
+    panel.find_step(1)
+    key = panel._selected
+    assert key == ("D",)
+    panel.toggle_collapse(("D", "E"))
+    panel._selected = None
+    panel.find_step(1)
+    assert panel._selected == ("D", "E")
+
+
+def test_rail_has_display_and_find_tabs(qapp, tree_file):
+    from repeatviewer.widgets.tree_display_rail import TreeDisplayRail
+    from repeatviewer.widgets.tree_view import TreePanel
+
+    panel = TreePanel(tree_file)
+    rail = panel._rail
+    rail.show_tab(TreeDisplayRail.TAB_FIND)
+    assert rail.current_tab() == TreeDisplayRail.TAB_FIND and not rail.is_panel_collapsed()
+    rail._on_tab_clicked(TreeDisplayRail.TAB_FIND)
+    assert rail.is_panel_collapsed()
+    rail._on_tab_clicked(TreeDisplayRail.TAB_DISPLAY)
+    assert rail.current_tab() == TreeDisplayRail.TAB_DISPLAY and not rail.is_panel_collapsed()

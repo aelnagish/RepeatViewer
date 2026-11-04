@@ -79,6 +79,7 @@ from PySide6.QtWidgets import (
     QGraphicsView,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMenu,
     QMessageBox,
     QPushButton,
@@ -89,6 +90,7 @@ from PySide6.QtWidgets import (
 )
 
 from repeatviewer.backends import tree_edit as te
+from repeatviewer.backends import tree_find as tf
 from repeatviewer.backends import tree_layout as tl
 from repeatviewer.backends import tree_traits as tt
 from repeatviewer.widgets.combo_boxes import NoWheelComboBox
@@ -102,7 +104,11 @@ from repeatviewer.widgets.preview_controls import (
     apply_annotation_zoom_slider_style,
     make_overview_zoom_button,
 )
-from repeatviewer.widgets.sequence_annotation_rail import _h_divider
+from repeatviewer.widgets.sequence_annotation_rail import (
+    _h_divider,
+    _page_title_with_rule,
+    _section_label,
+)
 from repeatviewer.widgets.spin_boxes import NoWheelDoubleSpinBox, NoWheelSlider, NoWheelSpinBox
 from repeatviewer.widgets.tree_display_rail import TreeDisplayRail
 
@@ -192,6 +198,17 @@ EDIT_HELP = (
     "change the tree: the file is never overwritten, use <b>Save → Tree</b>."
 )
 
+
+FIND_HELP = (
+    "<b>Find</b> tips by name or by the values in the trait table (chromosome, array, "
+    "lineage, any column you added).<br>"
+    "Type one or several words (separated by spaces or commas): a tip matches when it "
+    "contains <b>any</b> of them.<br>"
+    "<b>Find next / previous</b> select one tip at a time and scroll to it; a tip inside a "
+    "collapsed clade selects that clade.<br>"
+    "<b>Find all</b> selects every match, so Edit, right-click and Save work on them "
+    "(for example Extract sequences)."
+)
 
 TRAITS_HELP = (
     "<b>Colour tips by</b> a column of the trait table next to the tree "
@@ -1152,6 +1169,19 @@ class TreeCanvas(QGraphicsView):
         n = len(box)
         return min(_point_segment_distance(pos, box[k], box[(k + 1) % n]) for k in range(n))
 
+    def show_node(self, index: int) -> None:
+        """Scroll so the tip, label or collapsed clade ``index`` is in view."""
+        best = None
+        for item in self.scene().items():
+            if item.data(ROLE_NODE) != index or isinstance(item, _BranchItem):
+                continue
+            if isinstance(item, QGraphicsSimpleTextItem):
+                best = item
+                break
+            best = best or item
+        if best is not None:
+            self.ensureVisible(best.sceneBoundingRect(), 80, 80)
+
     def tip_nodes_in_view_rect(self, view_rect: QRect) -> list[int]:
         """Display indices of tip labels / trait dots intersecting ``view_rect``."""
         if view_rect.isEmpty():
@@ -1640,7 +1670,11 @@ class TreePanel(QWidget):
         efl.addLayout(edit_row)
 
         # MSA-style right rail: Window surface + Display tab + section dividers.
-        self._rail = TreeDisplayRail(panel, self, footer=edit_footer)
+        self._find_hits: list[str] = []
+        self._find_index = -1
+        self._find_signature: tuple | None = None
+        self._rail = TreeDisplayRail(panel, self, footer=edit_footer,
+                                     find_page=self._build_find_page())
         self._options_panel = self._rail.options_scroll()
 
         self._canvas = TreeCanvas(self)
@@ -1808,6 +1842,131 @@ class TreePanel(QWidget):
         finally:
             self._block = was
 
+    # ------------------------------------------------------------ find
+    def _build_find_page(self) -> QWidget:
+        page = QWidget(self)
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+        title, _rule = _page_title_with_rule("Find", page)
+        layout.addWidget(title)
+        self._find_query = QLineEdit(page)
+        self._find_query.setPlaceholderText("Tip name or trait value…")
+        self._find_query.setClearButtonEnabled(True)
+        self._find_query.returnPressed.connect(lambda: self.find_step(1))
+        form = QFormLayout()
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setHorizontalSpacing(8)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        find_row = QHBoxLayout()
+        find_row.setContentsMargins(0, 0, 0, 0)
+        find_row.setSpacing(6)
+        find_row.addWidget(self._find_query, 1)
+        find_row.addWidget(make_help_button(page, "Find in the tree", FIND_HELP), 0)
+        form.addRow("Find:", find_row)
+        layout.addLayout(form)
+        layout.addWidget(_section_label("Search in", page))
+        self._find_names_check = QCheckBox("Tip names", page)
+        self._find_names_check.setChecked(True)
+        self._find_traits_check = QCheckBox("Trait values", page)
+        self._find_traits_check.setChecked(True)
+        self._find_case_check = QCheckBox("Case sensitive", page)
+        for box in (self._find_names_check, self._find_traits_check, self._find_case_check):
+            layout.addWidget(box)
+        self._find_prev_btn = QPushButton("Find previous", page)
+        self._find_next_btn = QPushButton("Find next", page)
+        self._find_all_btn = QPushButton("Find all", page)
+        self._find_prev_btn.clicked.connect(lambda: self.find_step(-1))
+        self._find_next_btn.clicked.connect(lambda: self.find_step(1))
+        self._find_all_btn.clicked.connect(self.find_all)
+        nav = QHBoxLayout()
+        nav.setContentsMargins(0, 0, 0, 0)
+        nav.setSpacing(6)
+        nav.addWidget(self._find_prev_btn, 1)
+        nav.addWidget(self._find_next_btn, 1)
+        layout.addLayout(nav)
+        layout.addWidget(self._find_all_btn)
+        layout.addStretch(1)
+        return page
+
+    def focus_find(self) -> None:
+        """Edit > Find: open the Find tab and put the cursor in the search box."""
+        self._rail.show_tab(TreeDisplayRail.TAB_FIND)
+        self._find_query.setFocus()
+        self._find_query.selectAll()
+
+    def _find_order(self) -> list[tuple[str, int]]:
+        """(tip name, display node that shows it) from top to bottom of the drawing;
+        tips inside a collapsed clade point at the clade."""
+        d = self._display
+        if d is None:
+            return []
+        out: list[tuple[str, int]] = []
+        stack = [0]
+        while stack:
+            i = stack.pop()
+            node = d.model.nodes[i]
+            if i in d.info:
+                out.extend((name, i) for name in d.keys[i])
+            elif node.is_tip:
+                out.append((node.name, i))
+            else:
+                stack.extend(reversed(node.children))
+        return out
+
+    def _compute_find(self) -> tuple[list[str], dict[str, int]]:
+        order = self._find_order()
+        table = self._traits.rows if self._traits is not None else None
+        hits = tf.find_tips(
+            [name for name, _i in order], self._find_query.text(), traits=table,
+            in_names=self._find_names_check.isChecked(),
+            in_traits=self._find_traits_check.isChecked(),
+            case_sensitive=self._find_case_check.isChecked())
+        return hits, dict(order)
+
+    def _find_state(self) -> tuple:
+        return (self._find_query.text(), self._find_names_check.isChecked(),
+                self._find_traits_check.isChecked(), self._find_case_check.isChecked(),
+                id(self._model))
+
+    def find_step(self, direction: int) -> None:
+        """Select the next (+1) or previous (-1) match and scroll to it."""
+        if self._display is None:
+            return
+        signature = self._find_state()
+        if signature != self._find_signature:
+            self._find_signature = signature
+            self._find_index = -1
+        hits, where = self._compute_find()
+        self._find_hits = hits
+        if not hits:
+            self._update_status("Find: no match" if self._find_query.text().strip() else "")
+            return
+        self._find_index = tf.step_index(self._find_index, len(hits), direction)
+        tip = hits[self._find_index]
+        node = where[tip]
+        d = self._display
+        self._selected = d.keys[node] if node in d.info else (tip,)
+        self._redraw(refit=False)
+        self._canvas.show_node(node)
+        note = f"Find: {self._find_index + 1} of {len(hits)}"
+        if node in d.info:
+            note += " (inside a collapsed clade)"
+        self._update_status(note)
+
+    def find_all(self) -> None:
+        """Select every match."""
+        if self._display is None:
+            return
+        self._find_signature = self._find_state()
+        hits, _where = self._compute_find()
+        self._find_hits = hits
+        self._find_index = -1
+        self._selected = tuple(sorted(hits)) if hits else None
+        self._redraw(refit=False)
+        self._update_status(f"Find: {len(hits)} selected" if hits else "Find: no match")
+
+    # ------------------------------------------------------------ state
     def _show_options_panel(self, on: bool, *, save: bool = True) -> None:
         """Show or collapse the Display rail (keeps the vertical Display tab)."""
         self._rail.set_panel_collapsed(not bool(on), persist=save)

@@ -6492,7 +6492,20 @@ class MainWindow(NcbiDownloadActionsMixin, PrimerActionsMixin, QMainWindow):
         if typed and self._browser_has_focus():
             self._focus_browser_filter()
             return
+        tree = self._active_tree_panel()
+        if tree is not None:
+            tree.focus_find()
+            return
         self._open_find_dialog()
+
+    def _active_tree_panel(self):
+        """The Tree view when it is what the Preview tab shows, else None."""
+        tabs = self._preview_tabs
+        page = tabs.currentWidget() if tabs is not None else None
+        active = getattr(page, "is_tree_preview_active", None)
+        if callable(active) and active():
+            return page.tree_panel()
+        return None
 
     def _find_in_file_from_panel(self, path: Path) -> None:
         """Files right-click → Find in this document…: show the FASTA, then Find."""
@@ -6551,6 +6564,13 @@ class MainWindow(NcbiDownloadActionsMixin, PrimerActionsMixin, QMainWindow):
         self._find_dialog.focus_query()
 
     def _find_from_menu(self, direction: int) -> None:
+        tree = self._active_tree_panel()
+        if tree is not None:
+            if tree._find_query.text().strip():
+                tree.find_step(direction)
+            else:
+                tree.focus_find()
+            return
         if self._find_dialog is None or not self._find_dialog.query_text():
             self._open_find_dialog()
             return
