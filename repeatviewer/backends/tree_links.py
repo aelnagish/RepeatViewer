@@ -53,8 +53,28 @@ class SequenceSource:
     note: str = ""         # shown in the window title when not the tree's alignment
 
 
+_MANUAL: dict[Path, Path] = {}
+
+
+def set_manual_sequences(tree_path: Path, fasta: Path | None) -> None:
+    """Remember a FASTA the user chose for a tree (None: back to the automatic search)."""
+    key = Path(tree_path)
+    if fasta is None:
+        _MANUAL.pop(key, None)
+    else:
+        _MANUAL[key] = Path(fasta)
+
+
+def manual_sequences(tree_path: Path) -> Path | None:
+    path = _MANUAL.get(Path(tree_path))
+    return path if path is not None and path.is_file() else None
+
+
 def sequences_for_tree(tree_path: Path) -> SequenceSource | None:
     tree_path = Path(tree_path)
+    chosen = manual_sequences(tree_path)
+    if chosen is not None:
+        return SequenceSource(chosen, True, "file chosen by you")
     folder = tree_path.parent
     rb = run_base(tree_path)
     if rb is not None:

@@ -23,7 +23,11 @@ import math
 from dataclasses import dataclass, field
 from pathlib import Path
 
-TREE_SUFFIXES = frozenset({".treefile", ".nwk", ".newick", ".tre", ".tree"})
+TREE_SUFFIXES = frozenset({".treefile", ".nwk", ".newick", ".tre", ".tree", ".contree"})
+
+# RAxML names its trees ``RAxML_<kind>.<run name>``, so the suffix is the run name.
+RAXML_TREE_PREFIXES = ("raxml_besttree.", "raxml_bipartitions.", "raxml_result.",
+                       "raxml_mltree.", "raxml_bipartitionsbranchlabels.")
 
 LAYOUT_RECTANGULAR = "rectangular"
 LAYOUT_CIRCULAR = "circular"
@@ -47,7 +51,8 @@ class TreeReadError(ValueError):
 
 
 def is_tree_file(path: Path | str) -> bool:
-    return Path(path).suffix.lower() in TREE_SUFFIXES
+    p = Path(path)
+    return p.suffix.lower() in TREE_SUFFIXES or p.name.lower().startswith(RAXML_TREE_PREFIXES)
 
 
 # --------------------------------------------------------------------------
@@ -74,6 +79,7 @@ class TreeModel:
     nodes: list[Node]      # preorder; nodes[0] is the root
     has_lengths: bool      # False when the file has no branch lengths
     has_support: bool
+    notes: list[str] = field(default_factory=list)   # things worth telling the user at load
 
     @property
     def root(self) -> Node:
@@ -106,6 +112,13 @@ def _format_support(value: float) -> str:
     return f"{value:.3g}"
 
 
+def _unquote(name: str) -> str:
+    """NEXUS keeps the quotes of 'Homo sapiens' on the name; Newick parsing drops them."""
+    if len(name) >= 2 and name[0] == "'" and name[-1] == "'":
+        return name[1:-1].replace("''", "'")
+    return name
+
+
 def model_from_phylo(tree) -> TreeModel:
     """Convert a Bio.Phylo tree into a :class:`TreeModel` (preorder)."""
     nodes: list[Node] = []
@@ -130,6 +143,8 @@ def model_from_phylo(tree) -> TreeModel:
                 support, name = name, ""
         if support:
             has_support = True
+        if is_tip:
+            name = _unquote(name)
         nodes.append(Node(index=index, parent=parent, name=name,
                           length=float(length) if length is not None else 0.0,
                           support=support))
@@ -147,7 +162,7 @@ def read_tree_text(text: str) -> TreeModel:
     """Parse the first tree in Newick or NEXUS text."""
     from Bio import Phylo
 
-    stripped = text.strip()
+    stripped = text.lstrip("\ufeff").strip()
     if not stripped:
         raise TreeReadError("The file is empty.")
     fmt = "nexus" if stripped[:6].upper() == "#NEXUS" else "newick"
@@ -160,11 +175,24 @@ def read_tree_text(text: str) -> TreeModel:
     model = model_from_phylo(trees[0])
     if model.n_tips < 2:
         raise TreeReadError("The tree has fewer than two tips.")
+    if len(trees) > 1:
+        model.notes.append(f"The file holds {len(trees)} trees; showing the first")
+    seen: set[str] = set()
+    repeated: list[str] = []
+    for node in model.nodes:
+        if node.is_tip:
+            if node.name in seen and node.name not in repeated:
+                repeated.append(node.name)
+            seen.add(node.name)
+    if repeated:
+        shown = ", ".join(repeated[:3]) + (" …" if len(repeated) > 3 else "")
+        model.notes.append(f"{len(repeated)} tip name{'s' if len(repeated) != 1 else ''} "
+                           f"used more than once ({shown})")
     return model
 
 
 def read_tree_file(path: Path | str) -> TreeModel:
-    return read_tree_text(Path(path).read_text(encoding="utf-8", errors="replace"))
+    return read_tree_text(Path(path).read_text(encoding="utf-8-sig", errors="replace"))
 
 
 # --------------------------------------------------------------------------

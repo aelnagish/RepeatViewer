@@ -370,9 +370,11 @@ class AttachImageDialog(QDialog):
         source: Path | None = None,
         image: CytoImage | None = None,
         targets: list[ImageTarget] | None = None,
+        allow_no_targets: bool = False,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
+        self._allow_no_targets = bool(allow_no_targets)
         self._folder = Path(folder).expanduser().resolve()
         self._source = source
         self._image = image
@@ -524,7 +526,7 @@ class AttachImageDialog(QDialog):
 
     def _save(self) -> None:
         targets = self._probes.targets()
-        if not targets:
+        if not targets and not self._allow_no_targets:
             QMessageBox.warning(self, "Attach image", "Pick at least one sequence for this image.")
             return
         metadata = self.metadata()
@@ -576,8 +578,8 @@ def attach_images(
     return saved
 
 
-def edit_image(parent: QWidget | None, folder: Path, image: CytoImage) -> bool:
-    dialog = AttachImageDialog(folder, image=image, parent=parent)
+def edit_image(parent: QWidget | None, folder: Path, image: CytoImage, *, allow_no_targets: bool = False) -> bool:
+    dialog = AttachImageDialog(folder, image=image, allow_no_targets=allow_no_targets, parent=parent)
     return dialog.exec() == QDialog.DialogCode.Accepted
 
 

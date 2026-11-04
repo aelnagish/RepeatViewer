@@ -468,6 +468,7 @@ from repeatviewer.views.settings_dialog import (
     load_root_folders,
     save_workspace,
 )
+from repeatviewer.cytogenetics_actions import CytogeneticsActionsMixin
 from repeatviewer.ncbi_download_actions import NcbiDownloadActionsMixin
 from repeatviewer.primer_actions import PrimerActionsMixin
 from repeatviewer.views.toolbar_dialog import (
@@ -592,6 +593,7 @@ _TOOLBAR_TOOLTIPS = {
     "tree": "Phylogenetic tree from the selected FASTA (MAFFT + IQ-TREE / FastME / FastTree)",
     "map_reference": "Map the selected sequences or reads to a reference (minimap2 / HISAT2)",
     "primers": "Primers and Probes: Design, Map, Database",
+    "cytogenetics": "Cytogenetics: images, channels, signals, idiograms and figures",
     "blast": "BLAST selected FASTA against the project genome using default parameters",
     "hmmer": "HMMER (pyhmmer) search of selected FASTA against a project HMM database",
     "te_genome_map": "Genome density plot using default parameters",
@@ -2307,7 +2309,9 @@ class _ToolbarActionButton(QToolButton):
         super().mouseReleaseEvent(event)
 
 
-class MainWindow(NcbiDownloadActionsMixin, PrimerActionsMixin, QMainWindow):
+class MainWindow(
+    CytogeneticsActionsMixin, NcbiDownloadActionsMixin, PrimerActionsMixin, QMainWindow
+):
     """Browser panel with folders, files, and preview."""
 
     def __init__(self) -> None:
@@ -5987,6 +5991,7 @@ class MainWindow(NcbiDownloadActionsMixin, PrimerActionsMixin, QMainWindow):
         self._populate_tree_menu(tools_menu.addMenu("T&ree"))
         self._populate_map_menu(tools_menu.addMenu("&Mapping"))
         self._populate_primers_menu(tools_menu.addMenu("&Primers and Probes"))
+        self._populate_cytogenetics_menu(tools_menu.addMenu("&Cytogenetics"))
         self._populate_extend_menu(tools_menu.addMenu("MSA &Extend"))
         self._populate_tsd_search_menu(tools_menu.addMenu("TSD &search"))
         self._populate_teaid_menu(tools_menu.addMenu("&TE-Aid"))
@@ -6503,7 +6508,20 @@ class MainWindow(NcbiDownloadActionsMixin, PrimerActionsMixin, QMainWindow):
         if typed and self._browser_has_focus():
             self._focus_browser_filter()
             return
+        tree = self._active_tree_panel()
+        if tree is not None:
+            tree.focus_find()
+            return
         self._open_find_dialog()
+
+    def _active_tree_panel(self):
+        """The Tree view when it is what the Preview tab shows, else None."""
+        tabs = self._preview_tabs
+        page = tabs.currentWidget() if tabs is not None else None
+        active = getattr(page, "is_tree_preview_active", None)
+        if callable(active) and active():
+            return page.tree_panel()
+        return None
 
     def _find_in_file_from_panel(self, path: Path) -> None:
         """Files right-click → Find in this document…: show the FASTA, then Find."""
@@ -6562,6 +6580,13 @@ class MainWindow(NcbiDownloadActionsMixin, PrimerActionsMixin, QMainWindow):
         self._find_dialog.focus_query()
 
     def _find_from_menu(self, direction: int) -> None:
+        tree = self._active_tree_panel()
+        if tree is not None:
+            if tree._find_query.text().strip():
+                tree.find_step(direction)
+            else:
+                tree.focus_find()
+            return
         if self._find_dialog is None or not self._find_dialog.query_text():
             self._open_find_dialog()
             return
@@ -7545,6 +7570,13 @@ class MainWindow(NcbiDownloadActionsMixin, PrimerActionsMixin, QMainWindow):
                 ),
                 show_default_action=False,
                 right_click_slot=self._quick_primer_design_right_click,
+            )
+        elif tool_id == "cytogenetics":
+            self._add_toolbar_action_button(
+                bar,
+                "Cytogenetics",
+                lambda: self._open_cytogenetics_workspace(),
+                tooltip="Open the Cytogenetics workspace of the current folder.",
             )
         elif tool_id == "ncbi_download":
             self._add_toolbar_action_button(

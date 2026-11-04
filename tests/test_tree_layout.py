@@ -152,3 +152,41 @@ def test_orient_rotates_and_mirrors():
     flipped = tl.orient(rect, 45, mirror=True)                         # angle ignored
     assert flipped.mirrored and flipped.xy[a] == (-rect.xy[a][0], rect.xy[a][1])
     assert tl.orient(rect) is rect
+
+
+def test_other_programs_tree_names_are_trees():
+    from pathlib import Path
+    from repeatviewer.backends.tree_layout import is_tree_file
+
+    for name in ("x.contree", "RAxML_bestTree.run1", "RAxML_bipartitions.run1",
+                 "RAxML_result.run1", "a.treefile"):
+        assert is_tree_file(Path(name)), name
+    assert not is_tree_file(Path("RAxML_info.run1"))
+    assert not is_tree_file(Path("notes.txt"))
+
+
+def test_bom_and_crlf_do_not_leak_into_labels(tmp_path):
+    from repeatviewer.backends.tree_layout import read_tree_file
+
+    path = tmp_path / "t.nwk"
+    path.write_bytes(b"\xef\xbb\xbf(A:0.1,B:0.2,(C:0.3,D:0.4)95:0.05);\r\n")
+    model = read_tree_file(path)
+    assert [n.support for n in model.nodes if n.children and n.support] == ["95"]
+
+
+def test_nexus_quotes_removed_from_tip_names():
+    from repeatviewer.backends.tree_layout import read_tree_text
+
+    text = ("#NEXUS\nbegin trees;\ntranslate 1 'Homo sapiens', 2 Pan, 3 'it''s';\n"
+            "tree T = ((1:1,2:1):1,3:2);\nend;\n")
+    names = sorted(n.name for n in read_tree_text(text).nodes if n.is_tip)
+    assert names == ["Homo sapiens", "Pan", "it's"]
+
+
+def test_multi_tree_and_duplicate_tips_are_reported():
+    from repeatviewer.backends.tree_layout import read_tree_text
+
+    notes = read_tree_text("(A:1,A:1,B:1);\n(A:1,B:1);\n").notes
+    assert any("2 trees" in n for n in notes)
+    assert any("more than once" in n for n in notes)
+    assert read_tree_text("(A:1,B:1);").notes == []

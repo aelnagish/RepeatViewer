@@ -26,6 +26,7 @@ _MODULE_WIDTH = 260
 _COLLAPSED_RAIL_WIDTH = _RAIL_TAB_WIDTH
 _SETTINGS_GROUP = "tree_display_rail"
 _SETTINGS_COLLAPSED_KEY = "panel_collapsed"
+_SETTINGS_TAB_KEY = "active_tab"
 _LEGACY_OPTIONS_VISIBLE = "tree_view/options_panel"
 # Same divider colour as SequenceMapPanel ↔ Annotation rail.
 _RAIL_DIVIDER = QColor("#9a9a9a")
@@ -46,6 +47,10 @@ class TreeDisplayRail(QWidget):
     """Vertical Display pill + options panel (MSA Annotation-rail chrome)."""
 
     panelCollapsedChanged = Signal(bool)
+    tabChanged = Signal(int)
+
+    TAB_DISPLAY = 0
+    TAB_FIND = 1
 
     def __init__(
         self,
@@ -53,12 +58,14 @@ class TreeDisplayRail(QWidget):
         parent: QWidget | None = None,
         *,
         footer: QWidget | None = None,
+        find_page: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self.setObjectName("treeDisplayRail")
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
         self._module_width = _MODULE_WIDTH
         self._panel_collapsed = False
+        self._active_tab = self.TAB_DISPLAY
         self._updating_tabs = False
         self.setFixedWidth(self._expanded_rail_width())
         _fill_window_surface(self)
@@ -106,6 +113,11 @@ class TreeDisplayRail(QWidget):
         _fill_window_surface(self._stack)
         page.setFixedWidth(self._module_width)
         self._stack.addWidget(page)
+        if find_page is not None:
+            find_page.setParent(self._stack)
+            _fill_window_surface(find_page)
+            find_page.setFixedWidth(self._module_width)
+            self._stack.addWidget(find_page)
 
         # Divider between module column and vertical Display tab.
         self._tab_divider = QFrame(self)
@@ -123,14 +135,19 @@ class TreeDisplayRail(QWidget):
 
         self._tab_group = QButtonGroup(self)
         self._tab_group.setExclusive(False)
-        self._display_btn = _RotatedTabButton("Display", self._tab_strip)
-        self._display_btn.setToolTip(
-            "Display — layout, labels, and colours (click again to hide)"
-        )
-        self._tab_group.addButton(self._display_btn, 0)
-        tab_layout.addWidget(self._display_btn, 0, Qt.AlignmentFlag.AlignHCenter)
+        self._tab_buttons: list[_RotatedTabButton] = []
+        tabs = [("Display", "Display — layout, labels, and colours (click again to hide)")]
+        if find_page is not None:
+            tabs.append(("Find", "Find — tips by name or trait value (click again to hide)"))
+        for index, (label, tip) in enumerate(tabs):
+            btn = _RotatedTabButton(label, self._tab_strip)
+            btn.setToolTip(tip)
+            self._tab_group.addButton(btn, index)
+            tab_layout.addWidget(btn, 0, Qt.AlignmentFlag.AlignHCenter)
+            self._tab_buttons.append(btn)
+            btn.clicked.connect(lambda _c=False, i=index: self._on_tab_clicked(i))
+        self._display_btn = self._tab_buttons[0]
         tab_layout.addStretch(1)
-        self._display_btn.clicked.connect(lambda _c=False: self._on_tab_clicked())
 
         # Outer left edge of the rail (canvas | rail), same as MSA map divider.
         self._canvas_divider = QFrame(self)
@@ -186,21 +203,38 @@ class TreeDisplayRail(QWidget):
         if persist:
             self._save_collapsed()
 
+    def current_tab(self) -> int:
+        return self._active_tab
+
+    def show_tab(self, index: int, *, persist: bool = True) -> None:
+        """Show the Display (0) or Find (1) page and open the rail if it was hidden."""
+        index = max(0, min(int(index), self._stack.count() - 1))
+        self._active_tab = index
+        self._stack.setCurrentIndex(index)
+        if self._panel_collapsed:
+            self.set_panel_collapsed(False, persist=persist)
+        else:
+            self._sync_tab_checked(True)
+            if persist:
+                self._save_collapsed()
+        self.tabChanged.emit(index)
+
     def _sync_tab_checked(self, checked: bool) -> None:
         self._updating_tabs = True
         try:
-            self._display_btn.setChecked(checked)
-            self._display_btn.update()
+            for i, btn in enumerate(self._tab_buttons):
+                btn.setChecked(bool(checked) and i == self._active_tab)
+                btn.update()
         finally:
             self._updating_tabs = False
 
-    def _on_tab_clicked(self) -> None:
+    def _on_tab_clicked(self, index: int = 0) -> None:
         if self._updating_tabs:
             return
-        if not self._panel_collapsed:
+        if not self._panel_collapsed and index == self._active_tab:
             self.set_panel_collapsed(True)
             return
-        self.set_panel_collapsed(False)
+        self.show_tab(index)
 
     def _settings(self) -> QSettings:
         s = QSettings()
@@ -217,14 +251,22 @@ class TreeDisplayRail(QWidget):
                 visible = str(legacy).lower() in ("1", "true", "yes")
                 raw = not visible
             collapsed = str(raw).lower() in ("1", "true", "yes")
+            try:
+                tab = int(settings.value(_SETTINGS_TAB_KEY, 0))
+            except (TypeError, ValueError):
+                tab = 0
         finally:
             settings.endGroup()
+        self._active_tab = tab if 0 <= tab < self._stack.count() else 0
+        self._stack.setCurrentIndex(self._active_tab)
         self.set_panel_collapsed(collapsed, persist=False)
+        self._sync_tab_checked(not collapsed)
 
     def _save_collapsed(self) -> None:
         settings = self._settings()
         try:
             settings.setValue(_SETTINGS_COLLAPSED_KEY, bool(self._panel_collapsed))
+            settings.setValue(_SETTINGS_TAB_KEY, int(self._active_tab))
         finally:
             settings.endGroup()
         QSettings().setValue("tree_view/options_panel", not self._panel_collapsed)
