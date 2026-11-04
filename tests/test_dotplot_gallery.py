@@ -210,6 +210,30 @@ def test_gallery_line_width_updates_thumbs(qapp: QApplication) -> None:
     gallery.close()
 
 
+def test_gallery_set_selected_sequence_highlights_thumb(qapp: QApplication) -> None:
+    seqs = {f"s{i}": "ACGTACGTACGTACGT" for i in range(6)}
+
+    def loader(sid: str) -> str:
+        return seqs[sid]
+
+    gallery = DotplotGallery()
+    gallery.set_sequences(
+        list(seqs),
+        sequence_loader=loader,
+        word_size=4,
+        include_reverse=False,
+        page_size=20,
+    )
+    gallery.set_selected_sequence("s3")
+    assert gallery.selected_sequence() == "s3"
+    selected = [t for t in gallery._thumbs if t.is_selected()]
+    assert len(selected) == 1
+    assert selected[0].sequence_id() == "s3"
+    gallery.set_selected_sequence("s1")
+    assert [t.sequence_id() for t in gallery._thumbs if t.is_selected()] == ["s1"]
+    gallery.close()
+
+
 def test_gallery_page_survives_set_record_choices_resync(
     qapp: QApplication, tmp_path: Path
 ) -> None:

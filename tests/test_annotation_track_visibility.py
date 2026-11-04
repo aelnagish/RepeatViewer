@@ -102,6 +102,8 @@ def test_rail_nested_kind_checks(qapp: QApplication) -> None:
     assert "Reading the plot" not in tip
     assert rail.sync_split_views.text() == "Sync left and right view"
     assert rail.sync_split_views.isHidden()
+    assert not hasattr(rail, "zoom_left_boundary_btn")
+    assert not hasattr(rail, "zoom_right_boundary_btn")
     rail.set_overview_display_mode(True)
     rail.set_msa_display_mode(True)
     rail.set_split_sync_available(True)

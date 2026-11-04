@@ -77,21 +77,13 @@ class DotplotThumb(QFrame):
         self._result: DotplotResult | None = None
         self._error = ""
         self._busy = False
+        self._selected = False
         self.setObjectName("DotplotThumb")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         # Fixed square plot area — Plot size must change both X and Y.
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.setFrameShape(QFrame.Shape.StyledPanel)
-        self.setStyleSheet(
-            "QFrame#DotplotThumb {"
-            "  background: palette(base);"
-            "  border: 1px solid palette(mid);"
-            "  border-radius: 4px;"
-            "}"
-            "QFrame#DotplotThumb:hover {"
-            "  border: 1px solid palette(highlight);"
-            "}"
-        )
+        self._apply_selection_style()
         self.setToolTip(self._sequence_id)
         self._apply_size()
 
@@ -100,6 +92,37 @@ class DotplotThumb(QFrame):
 
     def index(self) -> int:
         return int(self._index)
+
+    def set_selected(self, selected: bool) -> None:
+        flag = bool(selected)
+        if flag == self._selected:
+            return
+        self._selected = flag
+        self._apply_selection_style()
+
+    def is_selected(self) -> bool:
+        return bool(self._selected)
+
+    def _apply_selection_style(self) -> None:
+        if self._selected:
+            self.setStyleSheet(
+                "QFrame#DotplotThumb {"
+                "  background: palette(base);"
+                "  border: 2px solid palette(highlight);"
+                "  border-radius: 4px;"
+                "}"
+            )
+        else:
+            self.setStyleSheet(
+                "QFrame#DotplotThumb {"
+                "  background: palette(base);"
+                "  border: 1px solid palette(mid);"
+                "  border-radius: 4px;"
+                "}"
+                "QFrame#DotplotThumb:hover {"
+                "  border: 1px solid palette(highlight);"
+                "}"
+            )
 
     def set_plot_size(self, plot_size: int) -> None:
         size = max(_MIN_THUMB_SIZE, min(_MAX_THUMB_SIZE, int(plot_size)))
@@ -253,6 +276,7 @@ class DotplotGallery(QWidget):
         self._thumb_size = _DEFAULT_THUMB_SIZE
         self._line_width_step = _DEFAULT_LINE_WIDTH_STEP
         self._thumbs: list[DotplotThumb] = []
+        self._selected_id = ""
         self._cache: dict[tuple, DotplotResult | str] = {}
         self._pending: list[str] = []
         self._word = 15
@@ -415,6 +439,7 @@ class DotplotGallery(QWidget):
             self._page = idx // self._page_size
         self._rebuild_page()
         if focus:
+            self.set_selected_sequence(focus)
             QTimer.singleShot(0, lambda: self.ensure_sequence_visible(focus))
         elif scroll_y > 0:
 
@@ -484,10 +509,27 @@ class DotplotGallery(QWidget):
             return
         self._scroll.ensureWidgetVisible(thumb, 12, 12)
 
+    def set_selected_sequence(self, sequence_id: str | None) -> None:
+        """Highlight the thumb for ``sequence_id`` (Split Overview↔Dotplot sync)."""
+        sid = str(sequence_id or "").strip()
+        if sid == self._selected_id:
+            for thumb in self._thumbs:
+                thumb.set_selected(thumb.sequence_id() == sid)
+            return
+        self._selected_id = sid
+        for thumb in self._thumbs:
+            thumb.set_selected(bool(sid) and thumb.sequence_id() == sid)
+        if sid:
+            self.ensure_sequence_visible(sid)
+
+    def selected_sequence(self) -> str:
+        return self._selected_id
+
     def clear(self) -> None:
         self._timer.stop()
         self._pending = []
         self._ids = []
+        self._selected_id = ""
         self._cache.clear()
         self._clear_thumbs()
         self._page_label.setText("")
@@ -556,6 +598,8 @@ class DotplotGallery(QWidget):
                 line_width_step=self._line_width_step,
                 parent=self._host,
             )
+            if self._selected_id and sid == self._selected_id:
+                thumb.set_selected(True)
             thumb.clicked.connect(self.thumbClicked.emit)
             cached = self._cache.get(self._cache_key(sid))
             prior = prior_results.get(sid)

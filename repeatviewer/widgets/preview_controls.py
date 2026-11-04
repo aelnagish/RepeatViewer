@@ -309,9 +309,15 @@ def _make_font_size_spin(
     return spin
 
 
-def _make_preview_actions_button(*, tooltip: str) -> QToolButton:
-    """Bordered Actions menu control matching the preview zoom spinbox."""
-    btn = QToolButton()
+def _make_preview_actions_button(
+    *, tooltip: str, parent: QWidget | None = None
+) -> QToolButton:
+    """Bordered Actions menu control matching the preview zoom spinbox.
+
+    Always pass ``parent`` when possible — a parentless shown QToolButton
+    becomes a tiny floating window on macOS.
+    """
+    btn = QToolButton(parent)
     btn.setObjectName("PreviewActionsButton")
     btn.setText("Actions")
     btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
@@ -600,6 +606,7 @@ class PreviewZoomBar(QWidget):
 
         self._actions_btn = _make_preview_actions_button(
             tooltip="Preview actions",
+            parent=self,
         )
         self._actions_menu = QMenu(self._actions_btn)
         self._reset_scale_action = QAction("Reset scale", self._actions_menu)
@@ -627,8 +634,11 @@ class PreviewZoomBar(QWidget):
         self._duplicate_action.triggered.connect(self.duplicate_window_requested.emit)
         self._actions_menu.addAction(self._duplicate_action)
         self._split_action = QAction("Split window", self._actions_menu)
+        self._split_action.setCheckable(True)
         self._split_action.setToolTip(
-            "Open a floating Preview with two side-by-side panes of this file."
+            "Show this file in two side-by-side panes inside Preview. "
+            "Right-click Text / Overview / Dotplot to open that tab in the "
+            "other pane. Choose again to close the split."
         )
         self._split_action.triggered.connect(self.split_window_requested.emit)
         self._actions_menu.addAction(self._split_action)
@@ -652,6 +662,14 @@ class PreviewZoomBar(QWidget):
         """Show or hide the Actions button (off in duplicated Preview windows)."""
         self._actions_visible = bool(visible)
         self._actions_btn.setVisible(self._actions_visible)
+
+    def set_split_checked(self, checked: bool) -> None:
+        action = getattr(self, "_split_action", None)
+        if action is None:
+            return
+        action.blockSignals(True)
+        action.setChecked(bool(checked))
+        action.blockSignals(False)
 
     def set_chrome_mode(self, mode: str) -> None:
         """Configure title-bar chrome for the active preview kind.
@@ -1048,6 +1066,7 @@ class AnnotationZoomBar(QWidget):
 
         self._actions_btn = _make_preview_actions_button(
             tooltip="Annotation actions",
+            parent=self,
         )
         self._actions_menu = QMenu(self._actions_btn)
         self._default_tab_action = _add_default_fasta_tab_menu(self._actions_menu)
@@ -1061,14 +1080,20 @@ class AnnotationZoomBar(QWidget):
         self._duplicate_action.triggered.connect(self.duplicate_window_requested.emit)
         self._actions_menu.addAction(self._duplicate_action)
         self._split_action = QAction("Split window", self._actions_menu)
+        self._split_action.setCheckable(True)
         self._split_action.setToolTip(
-            "Open a floating Preview with two side-by-side panes of this file."
+            "Show this file in two side-by-side panes inside Preview. "
+            "Right-click Text / Overview / Dotplot to open that tab in the "
+            "other pane. Choose again to close the split."
         )
         self._split_action.triggered.connect(self.split_window_requested.emit)
         self._actions_menu.addAction(self._split_action)
         self._actions_btn.setMenu(self._actions_menu)
         layout.addWidget(self._actions_btn, 0, Qt.AlignmentFlag.AlignVCenter)
         self._actions_visible = True
+        # Split panes: keep Actions on the Overview strip (title-bar Actions
+        # still work; this mirrors Split window next to Fit/Cons).
+        self._force_actions_in_overview = False
 
         self._block = False
         self._overview_mode = False
@@ -1094,7 +1119,26 @@ class AnnotationZoomBar(QWidget):
     def set_actions_visible(self, visible: bool) -> None:
         """Show or hide the Actions button (off in duplicated Preview windows)."""
         self._actions_visible = bool(visible)
-        self._actions_btn.setVisible(self._actions_visible and not self._overview_mode)
+        self._sync_actions_btn_visibility()
+
+    def set_force_actions_in_overview(self, enabled: bool) -> None:
+        """Keep Actions on the Overview strip (Split window panes)."""
+        self._force_actions_in_overview = bool(enabled)
+        self._sync_actions_btn_visibility()
+
+    def _sync_actions_btn_visibility(self) -> None:
+        show = bool(self._actions_visible) and (
+            not self._overview_mode or bool(self._force_actions_in_overview)
+        )
+        self._actions_btn.setVisible(show)
+
+    def set_split_checked(self, checked: bool) -> None:
+        action = getattr(self, "_split_action", None)
+        if action is None:
+            return
+        action.blockSignals(True)
+        action.setChecked(bool(checked))
+        action.blockSignals(False)
 
     def set_msa_mode(self, enabled: bool) -> None:
         """Show alignment-only actions only for a genuine aligned MSA."""
@@ -1145,8 +1189,8 @@ class AnnotationZoomBar(QWidget):
                 self._sequence_count_label, False
             )
         # Title-bar PreviewZoomBar owns Actions (aligned with "Preview"), matching
-        # single-seq Annotation. Hiding here avoids a second Actions clipped by the rail.
-        self._actions_btn.setVisible(self._actions_visible and not self._overview_mode)
+        # single-seq Annotation. Split panes force Actions onto this strip too.
+        self._sync_actions_btn_visibility()
         if self._overview_mode:
             # Match AnnotationMapToolbar chrome identity for theme / sizing.
             self.setObjectName("AnnotationMapToolbar")
@@ -1592,6 +1636,9 @@ class FastaTabStrip(QWidget):
     """Text / Overview / Dotplot / Cytogenetics switcher for the preview header."""
 
     tab_changed = Signal(int)
+    # Open this tab index in the left or right split pane (``"left"`` / ``"right"``).
+    openInPanelRequested = Signal(int, str)
+    closeSplitRequested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1604,6 +1651,7 @@ class FastaTabStrip(QWidget):
         self._group = QButtonGroup(self)
         self._group.setExclusive(True)
         self._buttons: list[QPushButton] = []
+        self._split_active = False
         for index, label in enumerate(("Text", "Overview", "Dotplot (Self)", "Cytogenetics")):
             btn = QPushButton(label)
             btn.setObjectName("FastaPreviewTab")
@@ -1619,11 +1667,39 @@ class FastaTabStrip(QWidget):
             text_width = QFontMetrics(selected_font).horizontalAdvance(label)
             btn.setMinimumWidth(text_width + 24)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            btn.customContextMenuRequested.connect(
+                lambda pos, idx=index, b=btn: self._show_tab_context_menu(b, pos, idx)
+            )
             self._group.addButton(btn, index)
             layout.addWidget(btn)
             self._buttons.append(btn)
         self._buttons[0].setChecked(True)
         self._group.idClicked.connect(self.tab_changed.emit)
+
+    def set_split_active(self, active: bool) -> None:
+        """Show Close split in the tab context menu when the Preview is split."""
+        self._split_active = bool(active)
+
+    def _show_tab_context_menu(
+        self, button: QPushButton, pos: QPoint, tab_index: int
+    ) -> None:
+        if not button.isVisible():
+            return
+        menu = QMenu(button)
+        open_right = menu.addAction("Open in right panel")
+        open_left = menu.addAction("Open in left panel")
+        close_split = None
+        if self._split_active:
+            menu.addSeparator()
+            close_split = menu.addAction("Close split")
+        chosen = menu.exec(button.mapToGlobal(pos))
+        if chosen is open_right:
+            self.openInPanelRequested.emit(int(tab_index), "right")
+        elif chosen is open_left:
+            self.openInPanelRequested.emit(int(tab_index), "left")
+        elif close_split is not None and chosen is close_split:
+            self.closeSplitRequested.emit()
 
     def set_current_index(self, index: int) -> None:
         if 0 <= index < len(self._buttons):
@@ -1651,6 +1727,8 @@ class PreviewHeaderBar(QWidget):
     """FASTA Text / Overview tabs; controls sit below the divider."""
 
     fasta_tab_changed = Signal(int)
+    openInPanelRequested = Signal(int, str)
+    closeSplitRequested = Signal()
 
     def __init__(
         self,
@@ -1678,6 +1756,8 @@ class PreviewHeaderBar(QWidget):
         self._fasta_tabs = FastaTabStrip(tabs_host)
         self._fasta_tabs.hide()
         self._fasta_tabs.tab_changed.connect(self.fasta_tab_changed.emit)
+        self._fasta_tabs.openInPanelRequested.connect(self.openInPanelRequested.emit)
+        self._fasta_tabs.closeSplitRequested.connect(self.closeSplitRequested.emit)
         tabs_row.addWidget(self._fasta_tabs)
         tabs_row.addStretch(1)
         outer.addWidget(tabs_host)
@@ -1761,6 +1841,9 @@ class PreviewHeaderBar(QWidget):
     def set_fasta_tabs_visible(self, visible: bool) -> None:
         self._fasta_tabs.setVisible(visible)
         self._update_bar_visibility()
+
+    def set_split_active(self, active: bool) -> None:
+        self._fasta_tabs.set_split_active(active)
 
     def sync_fasta_tab(self, index: int) -> None:
         self._fasta_tabs.set_current_index(index)

@@ -10156,6 +10156,10 @@ class SequenceMapPanel(QWidget):
         features = list(data.features)
         features.append(feat)
         self._map.set_features(features)
+        # Show the new type under Display → Displayed annotations (e.g. LTR).
+        kind = str(feat.feature_type or "").strip()
+        if kind:
+            self._reveal_annotation_kinds_after_run((kind,))
         self.statusMessage.emit("Feature added. Click Save to write changes to disk.")
 
     def _push_feature_undo_snapshot(self) -> None:

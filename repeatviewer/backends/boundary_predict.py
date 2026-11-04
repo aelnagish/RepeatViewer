@@ -66,6 +66,83 @@ class BoundaryPrediction:
     notes: list[str] = field(default_factory=list)
 
 
+# TEtrimmer / RepeatViewer sidecar: ``{msa_stem}.boundaries_RV.json``.
+_BOUNDARIES_SUFFIX = ".boundaries_RV.json"
+_BOUNDARIES_FORMAT_VERSION = 1
+
+
+def boundaries_sidecar_path(fasta_path: Path | str) -> Path:
+    """Hidden guides next to the MSA: ``{stem}.boundaries_RV.json``."""
+    path = Path(fasta_path).expanduser().resolve()
+    return path.parent / f"{path.stem}{_BOUNDARIES_SUFFIX}"
+
+
+def is_boundaries_sidecar(path: Path | str) -> bool:
+    return Path(path).name.endswith(_BOUNDARIES_SUFFIX)
+
+
+def _parse_span(value) -> tuple[int, int] | None:
+    if not isinstance(value, dict):
+        return None
+    try:
+        start = int(value["start"])
+        end = int(value["end"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    return start, end
+
+
+def load_boundary_prediction_json(
+    fasta_path: Path | str,
+    *,
+    msa_width: int | None = None,
+) -> BoundaryPrediction | None:
+    """Load TEtrimmer method boundaries beside ``fasta_path``, or ``None``.
+
+    When ``msa_width`` is set, reject sidecars whose ``msa_width`` disagrees.
+    """
+    import json
+
+    path = boundaries_sidecar_path(fasta_path)
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    stored_width = payload.get("msa_width")
+    if msa_width is not None and stored_width is not None:
+        try:
+            if int(stored_width) != int(msa_width):
+                return None
+        except (TypeError, ValueError):
+            return None
+    term = payload.get("terminal_repeat")
+    term_span = _parse_span(term)
+    term_type = None
+    if isinstance(term, dict) and term_span is not None:
+        raw_type = term.get("type")
+        term_type = str(raw_type) if raw_type else None
+    hits = payload.get("full_length_hits")
+    try:
+        full_hits = int(hits) if hits is not None else 0
+    except (TypeError, ValueError):
+        full_hits = 0
+    evaluation = payload.get("evaluation")
+    return BoundaryPrediction(
+        msa_identity=_parse_span(payload.get("msa_identity")),
+        blast_coverage=_parse_span(payload.get("blast_coverage")),
+        terminal_repeat=term_span,
+        terminal_repeat_type=term_type,
+        final=_parse_span(payload.get("final")),
+        evaluation=str(evaluation) if evaluation else None,
+        full_length_hits=full_hits,
+        notes=["Loaded from TEtrimmer boundaries_RV.json"],
+    )
+
+
 #####################################################################################################
 # Code block: alignment helpers (TEtrimmer reads/writes FASTA between steps; keep rows in memory)
 #####################################################################################################
@@ -521,6 +598,8 @@ def check_terminal_repeat(con_seq: str, work_dir: Path, *, use_system_blast=Fals
         & (df.iloc[:, 2] != df.iloc[:, 4])
         & (df.iloc[:, 3] < df.iloc[:, 4])
         & (df.iloc[:, 3] > df.iloc[:, 1])
+        # Left LTR [qstart,qend] and right LTR [sstart,send] must not overlap.
+        & (df.iloc[:, 3] > df.iloc[:, 2])
     ].copy()
     if not df_LTR.empty:
         hit = _select(df_LTR, df_LTR.iloc[:, 4] - df_LTR.iloc[:, 1], LTR_adj)
@@ -535,6 +614,8 @@ def check_terminal_repeat(con_seq: str, work_dir: Path, *, use_system_blast=Fals
         & (df.iloc[:, 2] != df.iloc[:, 4])
         & (df.iloc[:, 3] > df.iloc[:, 4])
         & (df.iloc[:, 4] > df.iloc[:, 1])
+        # Left TIR must end before the right (inverted) copy starts.
+        & (df.iloc[:, 4] > df.iloc[:, 2])
     ].copy()
     if not df_TIR.empty:
         hit = _select(df_TIR, df_TIR.iloc[:, 3] - df_TIR.iloc[:, 1], TIR_adj)
@@ -643,16 +724,6 @@ def predict_boundaries(
             left_rep, right_rep = tir
             result.terminal_repeat_type = "TIR"
         if left_rep is not None and right_rep is not None:
-            beyond_left = _clip_con(left_rep - 100, left_rep, con_08).count("N")
-            beyond_right = _clip_con(right_rep, right_rep + 100, con_08).count("N")
-            # Still conserved beyond the repeats: not a TE boundary.
-            if beyond_left < 30 or beyond_right < 30:
-                result.notes.append(
-                    f"{result.terminal_repeat_type} found but the MSA stays conserved beyond it."
-                )
-                left_rep = right_rep = None
-                result.terminal_repeat_type = None
-        if left_rep is not None:
             result.terminal_repeat = to_raw((left_rep, right_rep))
 
         poly_a = None
