@@ -54,6 +54,11 @@ class ProbeSource:
     match: str = ""  # text a feature name or type must contain ("" = the probe name)
 
 
+PAPER_DEFAULTS = {"outlines": True, "formula": True, "types": True, "table": True, "scale": True,
+                  "font": "Arial", "size": 8.0}
+PAPER_WIDTH_PT = 510.0  # 180 mm, a two-column journal figure
+
+
 @dataclass
 class IdiogramSettings:
     karyotype: str = ""
@@ -69,6 +74,10 @@ class IdiogramSettings:
     homologues: bool = False
     drag: bool = True
     flips: dict[str, bool] = field(default_factory=dict)
+    compare_with: str = ""  # second karyotype of the "Two karyotypes" view
+    link_probes: bool = True
+    paper: dict = field(default_factory=lambda: dict(PAPER_DEFAULTS))
+    figure_style: str = "compare"  # how the idiogram is drawn in a figure: "compare" or "paper"
 
     def source(self, probe: str) -> ProbeSource:
         return self.sources.setdefault(probe, ProbeSource())
@@ -82,7 +91,7 @@ class IdiogramSettings:
     def from_dict(cls, raw) -> "IdiogramSettings":
         raw = raw if isinstance(raw, dict) else {}
         s = cls()
-        for key in ("karyotype", "genome", "order", "lengths"):
+        for key in ("karyotype", "genome", "order", "lengths", "compare_with", "figure_style"):
             if isinstance(raw.get(key), str):
                 setattr(s, key, raw[key])
         for key in ("min_share", "min_array_kb", "tolerance"):
@@ -90,7 +99,9 @@ class IdiogramSettings:
                 setattr(s, key, float(raw.get(key, getattr(s, key))))
             except (TypeError, ValueError):
                 pass
-        for key in ("homologues", "drag"):
+        if isinstance(raw.get("paper"), dict):
+            s.paper.update({k: v for k, v in raw["paper"].items() if k in PAPER_DEFAULTS})
+        for key in ("homologues", "drag", "link_probes"):
             if key in raw:
                 setattr(s, key, bool(raw[key]))
         s.hidden_probes = [str(x) for x in raw.get("hidden_probes") or []]
@@ -592,6 +603,7 @@ class IdiogramView:
     probes: list[str]  # shown probes
     lengths: dict[str, int]
     genome: Path | None
+    pooled: list[FishBand] = field(default_factory=list)  # signals over all homologues (paper style)
 
 
 def all_probes(folder: Path, fish: FishData | None) -> list[str]:
@@ -647,5 +659,84 @@ def compute_view(folder: Path, settings: IdiogramSettings | None = None, cache: 
                 hits[probe] = {}
     silico = collect_silico(k, lengths, hits, min_array_kb=settings.min_array_kb, flips=settings.flips)
     rows = build_rows(k, settings, fish, silico, lengths)
+    pooled = fish if not settings.homologues else collect_fish(folder, k)
     return IdiogramView(k, settings, fish, rows, relative_heights(rows, settings.lengths),
-                        probe_colours(folder, every), probes, lengths, genome)
+                        probe_colours(folder, every), probes, lengths, genome,
+                        visible_bands(pooled, set(settings.hidden_probes), settings.min_share))
+
+
+# ---------------------------------------------------------------------------
+# Paper style and two karyotypes
+# ---------------------------------------------------------------------------
+
+POSITION_SHORT = {"terminal": "ter", "subterminal": "subter", "interstitial": "int", "pericentromeric": "peri",
+                  "centromeric": "cen"}
+
+
+def nice_scale(longest: float) -> float:
+    """A round scale bar length near a third of the longest chromosome (1, 2, 5, 10, 20 …)."""
+    if longest <= 0:
+        return 0.0
+    target = longest / 3.0
+    step = 10 ** int(f"{target:e}".split("e")[1])
+    for m in (1, 2, 5, 10):
+        if m * step >= target * 0.7:
+            return float(m * step)
+    return float(10 * step)
+
+
+def band_text(band: FishBand) -> str:
+    """'45S rDNA q ter (21/21)'."""
+    where = POSITION_SHORT.get(band.position, band.position)
+    arm = f"{band.arm} " if band.arm in ("p", "q") else ""
+    return f"{band.probe} {arm}{where} ({band.label})".replace("  ", " ")
+
+
+def paper_table(karyotype: Karyotype, bands: list[FishBand]) -> list[list[str]]:
+    """Rows Chr, Length, CI, Type, Signals for chromosomes with a signal or a band."""
+    rows = []
+    for c in karyotype.chromosomes:
+        texts = [band_text(b) for b in bands if b.chromosome == c.name]
+        for b in c.bands:
+            mid = (b.start + b.end) / 2
+            arm = "p" if mid < c.centromere_fraction else "q"
+            probe = b.kind[len("FISH "):] if b.kind.startswith("FISH ") else ""
+            name = probe or {"Secondary constriction (NOR)": "NOR", "DAPI+ heterochromatin": "DAPI+",
+                             "CMA+ band": "CMA+"}.get(b.kind, b.kind)
+            texts.append(f"{name} {arm}")
+        if texts:
+            length = f"{c.length:g} {karyotype.unit}" if c.length else ""
+            rows.append([c.name, length, f"{c.centromere_index:.0f}" if c.length else "", c.type, ", ".join(texts)])
+    return rows
+
+
+@dataclass
+class PairLink:
+    probe: str
+    index: int  # chromosome position in the top karyotype
+    top: float  # fraction on the top chromosome
+    bottom: float
+    bottom_index: int = -1  # chromosome position in the bottom karyotype
+
+
+def pair_compare(top: Karyotype, top_bands: list[FishBand], bottom: Karyotype,
+                 bottom_bands: list[FishBand]) -> tuple[list[PairLink], list[tuple[int, FishBand]], list[tuple[int, FishBand]]]:
+    """Link the same probe on the same chromosome (by name, else by position). Returns links and the unmatched bands."""
+    bottom_index = {c.name: i for i, c in enumerate(bottom.chromosomes)}
+    links: list[PairLink] = []
+    only_top: list[tuple[int, FishBand]] = []
+    used: set[int] = set()
+    for i, c in enumerate(top.chromosomes):
+        j = bottom_index.get(c.name, i if i < len(bottom.chromosomes) else -1)
+        other = bottom.chromosomes[j].name if j >= 0 else None
+        for b in (x for x in top_bands if x.chromosome == c.name):
+            match = next((n for n, x in enumerate(bottom_bands)
+                          if n not in used and x.chromosome == other and x.probe == b.probe), None)
+            if match is None:
+                only_top.append((i, b))
+            else:
+                used.add(match)
+                links.append(PairLink(b.probe, i, b.fraction, bottom_bands[match].fraction, j))
+    names = {c.name: i for i, c in enumerate(bottom.chromosomes)}
+    only_bottom = [(names.get(b.chromosome, 0), b) for n, b in enumerate(bottom_bands) if n not in used]
+    return links, only_top, only_bottom

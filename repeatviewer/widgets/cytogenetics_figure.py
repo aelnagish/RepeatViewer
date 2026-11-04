@@ -204,6 +204,18 @@ class FigurePainter:
             p.setPen(QColor("#5A5D63"))
             p.drawText(r, Qt.AlignmentFlag.AlignCenter, "No idiogram yet (make a karyotype and mark signals)")
             return
+        if view.settings.figure_style == "paper":
+            from repeatviewer.widgets.cytogenetics_idiogram import paint_paper, paper_height
+
+            w = idg.PAPER_WIDTH_PT
+            h = paper_height(view.karyotype, len(idg.paper_table(view.karyotype, view.pooled)), view.settings.paper)
+            scale = min(r.width() / w, r.height() / h)
+            p.save()
+            p.translate(r.left() + (r.width() - w * scale) / 2, r.top() + (r.height() - h * scale) / 2)
+            p.scale(scale, scale)
+            paint_paper(p, w, h, view.karyotype, view.pooled, view.colours, view.settings.paper)
+            p.restore()
+            return
         canvas = self._idiogram_canvas()
         logical_h = IDIOGRAM_LOGICAL_W * r.height() / max(r.width(), 1.0)
         canvas.resize(int(IDIOGRAM_LOGICAL_W), int(max(logical_h, 200)))

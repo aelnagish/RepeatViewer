@@ -386,6 +386,281 @@ class IdiogramCanvas(QWidget):
         p.end()
 
 
+def _font(p: QPainter, family: str, size: float, *, bold: bool = False, italic: bool = False) -> QFont:
+    """A font whose size is ``size`` painter units (1 unit = 1 pt in the paper drawing) on any device."""
+    f = QFont(family)
+    dpi = p.device().logicalDpiY() if p.device() is not None else 72
+    f.setPointSizeF(max(1.0, size * 72.0 / max(dpi, 1)))
+    f.setBold(bold)
+    f.setItalic(italic)
+    return f
+
+
+def _bar_path(r: QRectF) -> QPainterPath:
+    path = QPainterPath()
+    path.addRoundedRect(r, r.width() / 2, r.width() / 2)
+    return path
+
+
+def _draw_chromosome(p: QPainter, r: QRectF, chrom: kt.KaryoChromosome, bands: list[tuple[float, str, bool]],
+                     colours: dict[str, str], *, outline: QColor, line: float) -> None:
+    """One chromosome: white bar, karyotype bands, FISH signals (fraction, probe, centromeric) and the centromere."""
+    path = _bar_path(r)
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QColor("#FFFFFF"))
+    p.drawPath(path)
+    p.save()
+    p.setClipPath(path)
+    for b in chrom.bands:
+        rect = QRectF(r.left(), r.top() + b.start * r.height(), r.width(), max(1.5, (b.end - b.start) * r.height()))
+        probe = kt.manual_probe(b.kind)
+        if probe:
+            p.setBrush(QColor(colours.get(probe, "#8A8D93")))
+        elif b.kind.startswith("Secondary"):
+            p.setBrush(QBrush(outline, Qt.BrushStyle.BDiagPattern))
+        else:
+            p.setBrush(QColor(b.color or BAND_COLOURS.get(b.kind, "#8A8D93")))
+        p.drawRect(rect)
+    for f, probe, cen in bands:
+        h = r.width() * (0.6 if cen else 0.45)
+        y = r.top() + f * r.height()
+        p.setBrush(QColor(colours.get(probe, "#8A8D93")))
+        p.drawRect(QRectF(r.left(), y - h / 2, r.width(), h))
+    p.restore()
+    p.setPen(QPen(outline, line))
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    p.drawPath(path)
+    cy = r.top() + chrom.centromere_fraction * r.height()
+    ch = max(3.0, r.width() * 0.28)
+    p.setBrush(QColor("#FFFFFF"))
+    p.drawRoundedRect(QRectF(r.left() - r.width() * 0.2, cy - ch / 2, r.width() * 1.4, ch), ch / 2, ch / 2)
+
+
+def _fish_by_chrom(bands: list[idg.FishBand]) -> dict[str, list[tuple[float, str, bool]]]:
+    out: dict[str, list] = {}
+    for b in bands:
+        out.setdefault(b.chromosome, []).append((b.fraction, b.probe, b.arm == "cen"))
+    return out
+
+
+def paper_height(k: kt.Karyotype, table_rows: int, opts: dict) -> float:
+    lh = float(opts.get("size", 8.0)) * 1.6
+    h = 20 + (lh * 1.6 if opts.get("formula") else 0) + 200 + lh * 2.6 + lh * 1.8
+    if opts.get("table") and table_rows:
+        h += (table_rows + 1) * lh + 10
+    return h
+
+
+def paint_paper(p: QPainter, w: float, h: float, k: kt.Karyotype | None, bands: list[idg.FishBand],
+                colours: dict[str, str], opts: dict) -> None:
+    """The idiogram as a journal figure, in points: black and white chromosomes, coloured signals, legend, table."""
+    p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    p.fillRect(QRectF(0, 0, w, h), QColor("#FFFFFF"))
+    if k is None or not k.chromosomes:
+        return
+    family, size = str(opts.get("font") or "Arial"), float(opts.get("size") or 8.0)
+    lh = size * 1.6
+    black = QColor("#000000") if opts.get("outlines", True) else QColor("#6C6F75")
+    line = max(0.6, size * 0.12)
+    x0, y = 16.0, 16.0
+    if opts.get("formula", True):
+        parts = [("Idiogram of ", True, False)]
+        if k.species:
+            parts.append((k.species, True, True))
+        else:
+            parts.append((k.name, True, False))
+        base = f"   {k.formula}   (x = {k.basic_number})"
+        parts.append((base, False, False))
+        x = x0
+        for text, bold, italic in parts:
+            p.setFont(_font(p, family, size * 1.15, bold=bold, italic=italic))
+            p.setPen(QColor("#000000"))
+            p.drawText(QPointF(x, y + size * 1.15), text)
+            x += p.fontMetrics().horizontalAdvance(text)
+        y += lh * 1.6
+    area = 200.0
+    n = len(k.chromosomes)
+    right = 56.0 if opts.get("scale", True) else 16.0
+    slot = (w - x0 - right) / n
+    bar_w = max(6.0, min(22.0, slot * 0.32))
+    longest = max((c.length for c in k.chromosomes), default=0.0)
+    fish = _fish_by_chrom(bands)
+    bottom = y + area
+    for i, c in enumerate(k.chromosomes):
+        hh = area * (c.length / longest) if longest > 0 and c.length > 0 else area * 0.6
+        cx = x0 + slot * (i + 0.5)
+        r = QRectF(cx - bar_w / 2, bottom - hh, bar_w, hh)
+        _draw_chromosome(p, r, c, fish.get(c.name, []), colours, outline=black, line=line)
+        p.setPen(QColor("#000000"))
+        p.setFont(_font(p, family, size * 1.15, bold=True))
+        p.drawText(QRectF(cx - slot / 2, bottom + 4, slot, lh), Qt.AlignmentFlag.AlignCenter, c.name)
+        if opts.get("types", True) and c.type:
+            p.setFont(_font(p, family, size * 0.9))
+            p.setPen(QColor("#45484D"))
+            p.drawText(QRectF(cx - slot / 2, bottom + 4 + lh, slot, lh), Qt.AlignmentFlag.AlignCenter, c.type)
+    if opts.get("scale", True) and longest > 0:
+        value = idg.nice_scale(longest)
+        bar_h = area * value / longest
+        sx = w - right + 14
+        p.setPen(QPen(QColor("#000000"), line * 1.5))
+        p.drawLine(QPointF(sx, bottom), QPointF(sx, bottom - bar_h))
+        p.setFont(_font(p, family, size))
+        p.drawText(QPointF(sx + 5, bottom - bar_h / 2 + size / 3), f"{value:g} {k.unit}")
+    y = bottom + lh * 2.6
+    # legend
+    probes = list(dict.fromkeys([b.probe for b in bands] + [kt.manual_probe(b.kind) for c in k.chromosomes
+                                                             for b in c.bands if kt.manual_probe(b.kind)]))
+    kinds = list(dict.fromkeys(b.kind for c in k.chromosomes for b in c.bands if not kt.manual_probe(b.kind)))
+    x = x0
+    p.setFont(_font(p, family, size))
+    for label, brush in [(pr, QBrush(QColor(colours.get(pr, "#8A8D93")))) for pr in probes] + [
+            ({"Secondary constriction (NOR)": "NOR", "DAPI+ heterochromatin": "DAPI+", "CMA+ band": "CMA+"}.get(kd, kd),
+             QBrush(black, Qt.BrushStyle.BDiagPattern) if kd.startswith("Secondary")
+             else QBrush(QColor(BAND_COLOURS.get(kd, "#8A8D93")))) for kd in kinds]:
+        sw = QRectF(x, y, size * 1.4, size)
+        p.setPen(QPen(black, line * 0.6) if brush.style() != Qt.BrushStyle.SolidPattern else Qt.PenStyle.NoPen)
+        p.setBrush(brush)
+        p.drawRect(sw)
+        p.setPen(QColor("#000000"))
+        p.drawText(QPointF(x + size * 1.9, y + size * 0.85), label)
+        x += size * 1.9 + p.fontMetrics().horizontalAdvance(label) + size * 2
+    y += lh * 1.8
+    # table of positions
+    rows = idg.paper_table(k, bands) if opts.get("table", True) else []
+    if rows:
+        p.setPen(QPen(QColor("#000000"), line))
+        p.drawLine(QPointF(x0, y - lh * 0.3), QPointF(w - 16, y - lh * 0.3))
+        widths = [size * 5, size * 7.5, size * 4.5, size * 5]
+        heads = ["Chr", "Length", "CI", "Type", "Signals (seen)"]
+        for n_row, cells in enumerate([heads] + rows):
+            p.setFont(_font(p, family, size * 0.95, bold=n_row == 0))
+            x = x0
+            for col, text in enumerate(cells):
+                width = widths[col] if col < len(widths) else w - 16 - x
+                elided = p.fontMetrics().elidedText(text, Qt.TextElideMode.ElideRight, int(width))
+                p.drawText(QRectF(x, y, width, lh), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, elided)
+                x += width
+            y += lh
+
+
+def paint_pair(p: QPainter, w: float, h: float, top: tuple[kt.Karyotype, list[idg.FishBand]] | None,
+               bottom: tuple[kt.Karyotype, list[idg.FishBand]] | None, colours: dict[str, str], link: bool,
+               font: QFont) -> None:
+    """Two karyotypes, one above the other; dashed lines join the same probe on the same chromosome."""
+    p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    p.fillRect(QRectF(0, 0, w, h), QColor("#FFFFFF"))
+    if top is None or bottom is None:
+        p.setPen(QColor("#5A5D63"))
+        p.setFont(font)
+        p.drawText(QRectF(0, 0, w, h), Qt.AlignmentFlag.AlignCenter,
+                   "Choose two karyotypes (Top and Bottom) to compare. Make a second one under Layout > Edit karyotype.")
+        return
+    (tk, tb), (bk, bb) = top, bottom
+    n = max(len(tk.chromosomes), len(bk.chromosomes), 1)
+    left = 150.0
+    slot = (w - left - 20) / n
+    bar_w = max(8.0, min(24.0, slot * 0.3))
+    half = (h - 40) / 2
+    area = half - 46
+    longest = max([c.length for c in tk.chromosomes + bk.chromosomes] or [0.0])
+    grey = QColor("#6C6F75")
+    rects: dict[tuple[int, int], QRectF] = {}
+    bold = QFont(font)
+    bold.setBold(True)
+    small = QFont(font)
+    small.setPointSizeF(max(7.0, font.pointSizeF() - 1))
+    for row, (k, bands) in enumerate(((tk, tb), (bk, bb))):
+        base = 20 + row * (half + 20) + area
+        label = QFont(bold)
+        label.setItalic(bool(k.species))
+        p.setFont(label)
+        p.setPen(QColor("#1C1C1E"))
+        p.drawText(QRectF(8, base - area, left - 16, 40), Qt.AlignmentFlag.AlignLeft | Qt.TextFlag.TextWordWrap,
+                   k.species or k.name)
+        p.setFont(small)
+        p.setPen(QColor("#6E6E73"))
+        p.drawText(QRectF(8, base - area + 40, left - 16, 18), Qt.AlignmentFlag.AlignLeft, k.formula)
+        fish = _fish_by_chrom(bands)
+        for i, c in enumerate(k.chromosomes):
+            hh = area * (c.length / longest) if longest > 0 and c.length > 0 else area * 0.6
+            cx = left + slot * (i + 0.5)
+            r = QRectF(cx - bar_w / 2, base - hh, bar_w, hh)
+            rects[(row, i)] = r
+            _draw_chromosome(p, r, c, fish.get(c.name, []), colours, outline=grey, line=1.4)
+            p.setFont(bold)
+            p.setPen(QColor("#1C1C1E"))
+            p.drawText(QRectF(cx - slot / 2, base + 4, slot, 18), Qt.AlignmentFlag.AlignCenter, c.name)
+    links, only_top, only_bottom = idg.pair_compare(tk, tb, bk, bb)
+    if link:
+        for ln in links:
+            a, b = rects.get((0, ln.index)), rects.get((1, ln.bottom_index))
+            if a is None or b is None:
+                continue
+            y1 = a.top() + ln.top * a.height()
+            y2 = b.top() + ln.bottom * b.height()
+            path = QPainterPath(QPointF(a.right() + 4, y1))
+            mid = (a.bottom() + b.top()) / 2
+            path.cubicTo(QPointF(a.right() + 14, mid), QPointF(b.right() + 14, mid), QPointF(b.right() + 4, y2))
+            p.setPen(QPen(QColor(colours.get(ln.probe, "#8A8D93")), 1.5, Qt.PenStyle.DashLine))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawPath(path)
+    p.setFont(small)
+    for row, items, k in ((0, only_top, tk), (1, only_bottom, bk)):
+        for i, band in items:
+            r = rects.get((row, i))
+            if r is None:
+                continue
+            y = r.top() + band.fraction * r.height()
+            colour = QColor(colours.get(band.probe, "#8A8D93")).darker(150)
+            p.setPen(colour)
+            p.drawText(QPointF(r.right() + 8, y + 4), f"{band.probe} only in {k.species or k.name}")
+
+
+class PaperCanvas(QWidget):
+    """Screen preview of the paper drawing, scaled to the width."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.karyotype: kt.Karyotype | None = None
+        self.bands: list[idg.FishBand] = []
+        self.colours: dict[str, str] = {}
+        self.opts: dict = dict(idg.PAPER_DEFAULTS)
+        self.setMinimumSize(300, 300)
+
+    def logical_size(self) -> tuple[float, float]:
+        rows = len(idg.paper_table(self.karyotype, self.bands)) if self.karyotype else 0
+        return idg.PAPER_WIDTH_PT, paper_height(self.karyotype, rows, self.opts) if self.karyotype else 300.0
+
+    def paint_into(self, p: QPainter) -> None:
+        w, h = self.logical_size()
+        paint_paper(p, w, h, self.karyotype, self.bands, self.colours, self.opts)
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        p = QPainter(self)
+        p.fillRect(self.rect(), self.palette().color(self.palette().ColorRole.Window))
+        w, h = self.logical_size()
+        scale = min((self.width() - 32) / w, (self.height() - 32) / h)
+        ox, oy = (self.width() - w * scale) / 2, 16
+        p.fillRect(QRectF(ox + 2, oy + 3, w * scale, h * scale), QColor(0, 0, 0, 30))
+        p.translate(ox, oy)
+        p.scale(scale, scale)
+        self.paint_into(p)
+
+
+class PairCanvas(QWidget):
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.top = None
+        self.bottom = None
+        self.colours: dict[str, str] = {}
+        self.link = True
+        self.setMinimumSize(300, 420)
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        p = QPainter(self)
+        paint_pair(p, self.width(), self.height(), self.top, self.bottom, self.colours, self.link, self.font())
+
+
 class IdiogramEditCanvas(KaryoPreview):
     """Edit view: the karyotype drawn large; drag length, centromere and band edges, paint bands, place signals."""
 
@@ -644,7 +919,7 @@ class IdiogramTab(QWidget):
         modes = QHBoxLayout()
         modes.setSpacing(4)
         group = QButtonGroup(self)
-        for key, text in (("compare", "Compare"), ("edit", "Edit")):
+        for key, text in (("compare", "Compare"), ("edit", "Edit"), ("pair", "Two karyotypes"), ("paper", "Paper")):
             b = QPushButton(text, self)
             b.setCheckable(True)
             b.setChecked(key == "compare")
@@ -675,6 +950,27 @@ class IdiogramTab(QWidget):
         tools.addWidget(self._kind)
         self._tools_host.hide()
         modes.addWidget(self._tools_host)
+        self._pair_host = QWidget(self)
+        pair = QHBoxLayout(self._pair_host)
+        pair.setContentsMargins(0, 0, 0, 0)
+        pair.setSpacing(6)
+        self._top_box = NoWheelComboBox(self._pair_host)
+        self._bottom_box = NoWheelComboBox(self._pair_host)
+        for text, box in (("Top", self._top_box), ("Bottom", self._bottom_box)):
+            box.setMinimumWidth(190)
+            box.activated.connect(self._on_pair_choice)
+            pair.addWidget(QLabel(text, self._pair_host))
+            pair.addWidget(box)
+            pair.addSpacing(6)
+        self._link = QCheckBox("Link the same probe", self._pair_host)
+        self._link.toggled.connect(self._on_pair_choice)
+        pair.addWidget(self._link)
+        self._pair_host.hide()
+        modes.addWidget(self._pair_host)
+        self._pair = PairCanvas(frame)
+        self._paper = PaperCanvas(frame)
+        self._stack.addWidget(self._pair)
+        self._stack.addWidget(self._paper)
 
         self._note_fish = _section_label("")
         self._note_asm = _section_label("")
@@ -813,7 +1109,7 @@ class IdiogramTab(QWidget):
         save.setMenu(menu)
         fig = QPushButton("Add to figure", self)
         fig.setToolTip("Add this idiogram as a panel of the current figure")
-        fig.clicked.connect(self.figureRequested)
+        fig.clicked.connect(lambda: self._add_to_figure("compare"))
         bottom = QHBoxLayout()
         bottom.addWidget(save)
         bottom.addWidget(fig)
@@ -829,6 +1125,7 @@ class IdiogramTab(QWidget):
         self._side_stack = QStackedWidget(self)
         self._side_stack.addWidget(aside)
         self._side_stack.addWidget(self._build_edit_side())
+        self._side_stack.addWidget(self._build_paper_side())
         self._side_stack.setFixedWidth(SIDE_W)
 
         root = QHBoxLayout(self)
@@ -958,6 +1255,8 @@ class IdiogramTab(QWidget):
         self._edit.update()
         self._fill_kinds()
         self._sync_edit_side()
+        self._refresh_pair()
+        self._refresh_paper()
         head, species = idg.title_text(k, probes)
         self._title.setText(f"{head} <i>{species}</i> karyotype")
         self._fill_legend(probes, colours)
@@ -1314,12 +1613,16 @@ class IdiogramTab(QWidget):
         for key, b in self._mode_btns.items():
             b.setChecked(key == mode)
         edit = mode == "edit"
-        self._stack.setCurrentIndex(1 if edit else 0)
-        self._side_stack.setCurrentIndex(1 if edit else 0)
+        self._stack.setCurrentIndex({"compare": 0, "edit": 1, "pair": 2, "paper": 3}[mode])
+        self._side_stack.setCurrentIndex({"edit": 1, "paper": 2}.get(mode, 0))
+        self._side_stack.setVisible(mode != "pair")
         self._tools_host.setVisible(edit)
+        self._pair_host.setVisible(mode == "pair")
         for w in (self._note_fish, self._note_asm, self._note_warn):
-            w.setVisible(not edit)
+            w.setVisible(mode == "compare")
         self._sync_edit_side()
+        self._refresh_pair()
+        self._refresh_paper()
 
     def _set_tool(self, tool: str) -> None:
         self._edit.tool = tool
@@ -1587,3 +1890,202 @@ class IdiogramTab(QWidget):
         finally:
             QApplication.restoreOverrideCursor()
         self.openRequested.emit(out)
+
+    # ------------------------------------------------------------------ Two karyotypes
+
+    def _pooled(self, k: kt.Karyotype) -> list[idg.FishBand]:
+        s = self._settings
+        return idg.visible_bands(idg.collect_fish(self._folder, k), set(s.hidden_probes), s.min_share)
+
+    def _refresh_pair(self) -> None:
+        if self._mode != "pair" or self._folder is None:
+            return
+        s = self._settings
+        names = [k.name for k in self._karyotypes]
+        top = self._karyotype
+        bottom = next((k for k in self._karyotypes if k.name == s.compare_with and k is not top), None) \
+            or next((k for k in self._karyotypes if k is not top), None)
+        for box, chosen in ((self._top_box, top), (self._bottom_box, bottom)):
+            box.blockSignals(True)
+            box.clear()
+            for k in self._karyotypes:
+                box.addItem(f"{k.species or k.name} ({k.formula})", k.name)
+            box.setCurrentIndex(names.index(chosen.name) if chosen is not None else -1)
+            box.blockSignals(False)
+        self._link.blockSignals(True)
+        self._link.setChecked(s.link_probes)
+        self._link.blockSignals(False)
+        self._pair.colours = self._edit.probe_colours
+        self._pair.link = s.link_probes
+        if top is not None and bottom is not None:
+            self._pair.top = (top, self._pooled(top))
+            self._pair.bottom = (bottom, self._pooled(bottom))
+        else:
+            self._pair.top = self._pair.bottom = None
+        self._pair.update()
+
+    def _on_pair_choice(self, *_args) -> None:
+        s = self._settings
+        top = str(self._top_box.currentData() or "")
+        bottom = str(self._bottom_box.currentData() or "")
+        s.link_probes = self._link.isChecked()
+        s.compare_with = bottom
+        if top and top != s.karyotype:
+            s.karyotype = top
+            self._karyotype = next((k for k in self._karyotypes if k.name == top), self._karyotype)
+            self._store(controls=True)
+        else:
+            self._store()
+        self._refresh_pair()
+
+    # ------------------------------------------------------------------ Paper
+
+    def _build_paper_side(self) -> QWidget:
+        from PySide6.QtWidgets import QFontComboBox
+
+        body = QWidget(self)
+        body.setObjectName("cytoAside")
+        side = QVBoxLayout(body)
+        side.setContentsMargins(16, 16, 16, 16)
+        side.setSpacing(10)
+        title = QLabel("Paper style", body)
+        f = title.font()
+        f.setBold(True)
+        title.setFont(f)
+        side.addWidget(title)
+        self._paper_boxes: dict[str, QCheckBox] = {}
+        for key, text in (("outlines", "Black outlines, white chromosomes"), ("formula", "Formula line"),
+                          ("types", "Type under each chromosome"), ("table", "Table of positions"),
+                          ("scale", "Scale bar")):
+            box = QCheckBox(text, body)
+            box.toggled.connect(self._on_paper_option)
+            self._paper_boxes[key] = box
+            side.addWidget(box)
+        self._paper_font = QFontComboBox(body)
+        self._paper_font.currentFontChanged.connect(self._on_paper_option)
+        self._paper_size = QDoubleSpinBox(body)
+        self._paper_size.setRange(5, 14)
+        self._paper_size.setDecimals(1)
+        self._paper_size.setSingleStep(0.5)
+        self._paper_size.setSuffix(" pt")
+        self._paper_size.valueChanged.connect(self._on_paper_option)
+        for text, w in (("Font", self._paper_font), ("Size", self._paper_size)):
+            r = QHBoxLayout()
+            lab = QLabel(text, body)
+            lab.setFixedWidth(50)
+            r.addWidget(lab)
+            r.addWidget(w, 1)
+            side.addLayout(r)
+        side.addSpacing(6)
+        save = QPushButton("Save SVG · PDF · TIFF", body)
+        menu = QMenu(save)
+        menu.addAction("Vector (SVG)…", lambda: self._save_paper("svg"))
+        menu.addAction("PDF…", lambda: self._save_paper("pdf"))
+        menu.addAction("TIFF, 600 dpi…", lambda: self._save_paper("tif"))
+        save.setMenu(menu)
+        fig = QPushButton("Add to figure", body)
+        fig.setToolTip("Add the paper style idiogram as a panel of the current figure")
+        fig.clicked.connect(lambda: self._add_to_figure("paper"))
+        for b in (save, fig):
+            r = QHBoxLayout()
+            r.addWidget(b)
+            r.addStretch(1)
+            side.addLayout(r)
+        note = QLabel("The figure is 180 mm wide (two journal columns); font sizes are the printed sizes.", body)
+        note.setWordWrap(True)
+        note.setStyleSheet("color: gray;")
+        side.addWidget(note)
+        side.addStretch(1)
+        return body
+
+    def _sync_paper_side(self) -> None:
+        opts = self._settings.paper
+        for key, box in self._paper_boxes.items():
+            box.blockSignals(True)
+            box.setChecked(bool(opts.get(key, True)))
+            box.blockSignals(False)
+        self._paper_font.blockSignals(True)
+        self._paper_font.setCurrentFont(QFont(str(opts.get("font") or "Arial")))
+        self._paper_font.blockSignals(False)
+        self._paper_size.blockSignals(True)
+        self._paper_size.setValue(float(opts.get("size") or 8.0))
+        self._paper_size.blockSignals(False)
+
+    def _refresh_paper(self) -> None:
+        if self._mode != "paper" or self._folder is None:
+            return
+        self._sync_paper_side()
+        k = self._karyotype
+        self._paper.karyotype = k
+        self._paper.bands = self._pooled(k) if k is not None else []
+        self._paper.colours = self._edit.probe_colours
+        self._paper.opts = self._settings.paper
+        self._paper.update()
+
+    def _on_paper_option(self, *_args) -> None:
+        opts = self._settings.paper
+        for key, box in self._paper_boxes.items():
+            opts[key] = box.isChecked()
+        opts["font"] = self._paper_font.currentFont().family()
+        opts["size"] = float(self._paper_size.value())
+        if self._folder is not None:
+            idg.save_settings(self._folder, self._settings)
+        self._paper.opts = opts
+        self._paper.update()
+
+    def _save_paper(self, kind: str) -> None:
+        from PySide6.QtCore import QMarginsF, QSizeF
+        from PySide6.QtGui import QPageLayout, QPageSize, QPdfWriter
+
+        filters = {"svg": "SVG (*.svg)", "pdf": "PDF (*.pdf)", "tif": "TIFF (*.tif *.tiff)"}
+        path, _ = QFileDialog.getSaveFileName(self, "Save idiogram", self._default_name(f"_paper.{kind}"), filters[kind])
+        if not path:
+            return
+        w, h = self._paper.logical_size()
+        try:
+            if kind == "svg":
+                from PySide6.QtSvg import QSvgGenerator
+
+                gen = QSvgGenerator()
+                gen.setFileName(path)
+                gen.setResolution(72)
+                gen.setSize(QSize(int(w), int(h)))
+                gen.setViewBox(QRectF(0, 0, w, h))
+                gen.setTitle("Idiogram")
+                p = QPainter(gen)
+                self._paper.paint_into(p)
+                p.end()
+            elif kind == "pdf":
+                writer = QPdfWriter(path)
+                writer.setResolution(1200)
+                writer.setPageLayout(QPageLayout(QPageSize(QSizeF(w, h), QPageSize.Unit.Point),
+                                                 QPageLayout.Orientation.Portrait, QMarginsF(0, 0, 0, 0)))
+                p = QPainter(writer)
+                p.scale(1200 / 72, 1200 / 72)
+                self._paper.paint_into(p)
+                p.end()
+            else:
+                dpi = 600
+                image = QImage(int(w * dpi / 72), int(h * dpi / 72), QImage.Format.Format_RGB32)
+                image.setDotsPerMeterX(int(dpi / 0.0254))
+                image.setDotsPerMeterY(int(dpi / 0.0254))
+                image.fill(QColor("#FFFFFF"))
+                p = QPainter(image)
+                p.scale(dpi / 72, dpi / 72)
+                self._paper.paint_into(p)
+                p.end()
+                from PySide6.QtGui import QImageWriter
+
+                writer = QImageWriter(path, b"tiff")
+                writer.setCompression(1)  # LZW, lossless
+                if not writer.write(image):
+                    raise OSError(f"Could not write {path}: {writer.errorString()}")
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "Save", str(exc))
+            return
+
+    def _add_to_figure(self, style: str) -> None:
+        self._settings.figure_style = style
+        if self._folder is not None:
+            idg.save_settings(self._folder, self._settings)
+        self.figureRequested.emit()
