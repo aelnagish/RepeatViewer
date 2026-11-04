@@ -21,6 +21,12 @@ from ..cyto_images import store_dir
 SUFFIX = ".karyotype.json"
 ORDERS = ("listed", "length", "ci")
 BAND_KINDS = ("Secondary constriction (NOR)", "DAPI+ heterochromatin", "CMA+ band")
+SIGNAL_KIND_PREFIX = "FISH "  # a signal placed by hand on the idiogram: kind "FISH <probe>"
+
+
+def manual_probe(kind: str) -> str:
+    """Probe of a signal placed by hand ('FISH CroSat2' -> 'CroSat2'), else ''."""
+    return kind[len(SIGNAL_KIND_PREFIX):] if kind.startswith(SIGNAL_KIND_PREFIX) else ""
 # How the homologues of one chromosome are named: style -> (menu text, stored suffixes)
 HOMOLOGUE_STYLES = {
     "letters": ("a, b, c …", "abcdefghijkl"),
@@ -55,6 +61,7 @@ class Band:
     kind: str
     start: float  # fraction of the chromosome from the p telomere (0) to the q telomere (1)
     end: float
+    color: str = ""  # own colour; empty = the colour of the kind
 
     def __post_init__(self) -> None:
         self.start = max(0.0, min(1.0, float(self.start)))
@@ -188,7 +195,7 @@ class Karyotype:
             bands = []
             for b in item.get("bands") or []:
                 try:
-                    bands.append(Band(str(b.get("kind", "")), float(b["start"]), float(b["end"])))
+                    bands.append(Band(str(b.get("kind", "")), float(b["start"]), float(b["end"]), str(b.get("color") or "")))
                 except (KeyError, TypeError, ValueError, AttributeError):
                     continue
             copies = item.get("copies")

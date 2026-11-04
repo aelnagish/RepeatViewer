@@ -164,3 +164,19 @@ def test_compute_view(tmp_path):
     assert view.genome is None and view.rows[0].status == idg.STATUS_UNLINKED
     empty = idg.compute_view(tmp_path)
     assert empty.karyotype is None and empty.rows == []
+
+
+def test_extract_region_and_array_span(tmp_path):
+    from repeatviewer.backends.cytogenetics import idiogram as idg2
+
+    genome = tmp_path / "g.fa"
+    genome.write_text(">Chr1 x\nACGTACGTAC\nGGGGGTTTTT\n>Chr2\nAAAA\n")
+    out = idg2.region_output_path(genome, "Chr1", 8, 14)
+    assert out.name == "g.fa_Chr1_8-14.fa"
+    idg2.extract_region(genome, "Chr1", 8, 14, out)
+    assert out.read_text() == ">Chr1:8-14\nTACGGGG\n"
+    arr = idg2.SilicoArray("1", "p", 0.1, 0.3, 100, 2)
+    assert idg2.array_span_bp(arr, 1000, False) == (101, 300)
+    assert idg2.array_span_bp(arr, 1000, True) == (701, 900)
+    assert idg2.sequence_lengths(genome) == {"Chr1": 20, "Chr2": 4}
+    assert (tmp_path / "g.fa_sizes.txt").exists()

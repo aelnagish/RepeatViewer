@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -309,9 +310,62 @@ def resolve_genome(folder: Path, genome: str) -> Path | None:
 
 
 def sequence_lengths(genome: Path) -> dict[str, int]:
-    from ..sequence_features import fasta_record_lengths
+    """Lengths from a .fai or sizes file beside the genome when there is one, else read once and saved as a sizes file."""
+    from .karyotype import _newer, read_sizes, sizes_path_for, write_sizes
 
-    return {str(k): int(v) for k, v in fasta_record_lengths(genome).items()}
+    side = sizes_path_for(genome)
+    fresh = _newer(side, genome) or _newer(Path(str(genome) + ".fai"), genome)
+    sizes = read_sizes(genome)
+    if not fresh and sizes:
+        try:
+            write_sizes(side, sizes)
+        except OSError:
+            pass
+    return sizes
+
+
+def array_span_bp(array: "SilicoArray", length: int, flipped: bool) -> tuple[int, int]:
+    """Start and end (1-based, inclusive) of an array on the assembly sequence, undoing a flip."""
+    a, b = array.start, array.end
+    if flipped:
+        a, b = 1.0 - b, 1.0 - a
+    return max(1, int(round(a * length)) + 1), max(1, int(round(b * length)))
+
+
+def region_output_path(genome: Path, seq: str, start: int, end: int) -> Path:
+    """'genome.fa' -> 'genome.fa_Chr2_191400001-193000000.fa' (full input name kept)."""
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", seq)
+    return Path(genome).with_name(f"{Path(genome).name}_{safe}_{start}-{end}.fa")
+
+
+def extract_region(genome: Path, seq: str, start: int, end: int, out: Path) -> Path:
+    """Write bases ``start``..``end`` (1-based, inclusive) of one sequence as FASTA, reading the genome line by line."""
+    parts: list[str] = []
+    pos, inside = 0, False
+    with open(genome, "r", encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            if line.startswith(">"):
+                if inside:
+                    break
+                inside = line[1:].split(None, 1)[0] == seq if line[1:].strip() else False
+                pos = 0
+                continue
+            if not inside:
+                continue
+            text = line.strip()
+            lo, hi = pos + 1, pos + len(text)
+            pos = hi
+            if hi < start:
+                continue
+            parts.append(text[max(0, start - lo): end - lo + 1])
+            if hi >= end:
+                break
+    bases = "".join(parts)
+    if not bases:
+        raise ValueError(f"{seq}:{start}-{end} not found in {Path(genome).name}.")
+    body = "\n".join(bases[i:i + 60] for i in range(0, len(bases), 60))
+    Path(out).write_text(f">{seq}:{start}-{end}\n{body}\n", encoding="utf-8")
+    return Path(out)
 
 
 def _matches(text: str, needle: str) -> bool:

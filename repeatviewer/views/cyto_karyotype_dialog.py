@@ -143,6 +143,9 @@ class KaryoPreview(QWidget):
         top = self.height() - bottom - h
         return [QRectF(x0 + j * (w + gap), top, w, h) for j in range(copies)]
 
+    def band_colour(self, band: kt.Band) -> QColor:
+        return QColor(band.color or BAND_COLOURS.get(band.kind, "#8A8D93"))
+
     def _group_rect(self, i: int, chrom: kt.KaryoChromosome) -> QRectF:
         bars = self._bars(i, chrom)
         return QRectF(bars[0].topLeft(), bars[-1].bottomRight())
@@ -176,10 +179,16 @@ class KaryoPreview(QWidget):
                     if b.kind.startswith("Secondary"):
                         brush = QBrush(QColor("#8A8D93"), Qt.BrushStyle.BDiagPattern)
                     else:
-                        brush = QBrush(QColor(BAND_COLOURS.get(b.kind, "#8A8D93")))
+                        brush = QBrush(self.band_colour(b))
                     p.setPen(Qt.PenStyle.NoPen)
                     p.setBrush(brush)
-                    p.drawRect(rect)
+                    if kt.manual_probe(b.kind):
+                        cy_b = (rect.top() + rect.bottom()) / 2
+                        p.setPen(QPen(self.band_colour(b), 3))
+                        p.setBrush(QColor("#FFFFFF"))
+                        p.drawEllipse(QPointF(r.center().x(), cy_b), 6, 6)
+                    else:
+                        p.drawRect(rect)
                 p.setPen(QPen(QColor("#6C6F75"), 1.5))
                 p.setBrush(Qt.BrushStyle.NoBrush)
                 p.drawRoundedRect(r, radius, radius)

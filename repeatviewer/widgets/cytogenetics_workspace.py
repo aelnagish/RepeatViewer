@@ -157,6 +157,8 @@ class CytogeneticsWorkspace(QWidget):
         self._pages["Signals"].karyotypesChanged.connect(self.refresh)
         self._pages["Idiogram"].karyotypesChanged.connect(self.refresh)
         self._pages["Idiogram"].figureRequested.connect(self.add_idiogram_to_figure)
+        self._pages["Idiogram"].openSignalRequested.connect(self.open_signal)
+        self._pages["Idiogram"].openRequested.connect(self.openRequested)
         self._pages["Library"].figureRequested.connect(self.add_to_figure)
         self._pages["Figure"].crumbChanged.connect(self._on_figure_crumb)
 
@@ -282,6 +284,11 @@ class CytogeneticsWorkspace(QWidget):
         """Show one image in the Signals tab."""
         self.show_tab("Signals")
         self._pages["Signals"].show_image(image_id)
+
+    def open_signal(self, image_id: str, signal_id: str) -> None:
+        """Show one image in the Signals tab with one signal selected."""
+        self.open_signals(image_id)
+        self._pages["Signals"].select_signal(signal_id)
 
     def add_to_figure(self, image_id: str) -> None:
         """Add the channels and the merge of one cell to the current figure."""

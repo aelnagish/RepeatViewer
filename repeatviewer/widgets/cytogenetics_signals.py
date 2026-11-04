@@ -660,6 +660,12 @@ class SignalsTab(QWidget):
 
     # ------------------------------------------------------------------ side panel
 
+    def select_signal(self, signal_id: str) -> None:
+        """Select a signal of the shown image (from the Idiogram)."""
+        s = self._session
+        if s is not None and signal_id and s.signal(signal_id) is not None:
+            self._select(("signal", signal_id))
+
     def _select(self, hit: tuple[str, str] | None) -> None:
         self._selected = hit
         self._canvas.selected = hit
