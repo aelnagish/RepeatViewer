@@ -187,7 +187,7 @@ def _preview_kind(path: Path) -> str:
         return "contig"
     if suffix in _DOTPLOT_PREVIEW_SUFFIXES:
         return "dotplot"
-    if suffix in _TREE_PREVIEW_SUFFIXES:
+    if _is_tree_path(path):
         return "tree"
     if suffix in _HTML_PREVIEW_SUFFIXES:
         return "html"
@@ -273,7 +273,7 @@ def _write_text_file(path: Path, text: str) -> None:
 # Alignment files shown as a dotplot rather than a table of numbers.
 _DOTPLOT_PREVIEW_SUFFIXES = frozenset({".paf", ".1aln"})
 # Newick trees (.treefile, .nwk, .newick, .tre, .tree) open in the Tree tab.
-from repeatviewer.backends.tree_layout import TREE_SUFFIXES as _TREE_PREVIEW_SUFFIXES  # noqa: E402
+from repeatviewer.backends.tree_layout import is_tree_file as _is_tree_path  # noqa: E402
 # Map to Reference results (.rvmap) open in the contig view.
 _CONTIG_PREVIEW_SUFFIX = ".rvmap"
 
@@ -283,7 +283,7 @@ def is_previewable_file(path: Path) -> bool:
     resolved = path.expanduser()
     suffix = resolved.suffix.lower()
     name = resolved.name.lower()
-    if suffix in _DOTPLOT_PREVIEW_SUFFIXES or suffix in _TREE_PREVIEW_SUFFIXES:
+    if suffix in _DOTPLOT_PREVIEW_SUFFIXES or _is_tree_path(resolved):
         return True
     if suffix == _CONTIG_PREVIEW_SUFFIX:
         return True
@@ -308,7 +308,7 @@ def preview_path_priority(path: Path) -> int:
         if "divergence" in name or "genome_map" in name:
             return 0
         return 1
-    if suffix in _DOTPLOT_PREVIEW_SUFFIXES or suffix in _TREE_PREVIEW_SUFFIXES:
+    if suffix in _DOTPLOT_PREVIEW_SUFFIXES or _is_tree_path(path):
         return 2
     if suffix == _CONTIG_PREVIEW_SUFFIX:
         return 2
@@ -2374,7 +2374,7 @@ class FilePreviewPage(QWidget):
         if suffix in _DOTPLOT_PREVIEW_SUFFIXES:
             self._show_alignment_dotplot(path)
             return
-        if suffix in _TREE_PREVIEW_SUFFIXES:
+        if _is_tree_path(path):
             self._show_tree(path)
             return
         if suffix == _CONTIG_PREVIEW_SUFFIX:

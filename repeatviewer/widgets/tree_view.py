@@ -93,6 +93,7 @@ from repeatviewer.backends import tree_edit as te
 from repeatviewer.backends import tree_find as tf
 from repeatviewer.backends import tree_layout as tl
 from repeatviewer.backends import tree_traits as tt
+
 from repeatviewer.widgets.combo_boxes import NoWheelComboBox
 from repeatviewer.widgets.help_button import make_help_button
 from repeatviewer.widgets.preview_controls import (
@@ -193,6 +194,9 @@ EDIT_HELP = (
     "alignment in a Preview tab with that sequence selected; right-click a clade → "
     "Show clade in alignment selects all of its sequences. There, right-click → "
     "Extract Sequence or Copy Sequence.<br>"
+    "<b>Use These Sequences…</b> (right-click a tip) picks the FASTA by hand when none is "
+    "found next to the tree, for example a tree made by another program. Tip names are "
+    "matched to the first word of each FASTA header.<br>"
     "Undo: Cmd+Z / Ctrl+Z. Redo: Cmd+Shift+Z / Ctrl+Shift+Z.<br>"
     "Colours and collapsed clades are remembered for this tree. Rerooting and swapping "
     "change the tree: the file is never overwritten, use <b>Save → Tree</b>."
@@ -2144,8 +2148,68 @@ class TreePanel(QWidget):
         if not self._model.has_support and self._opts.branch_labels == BRANCH_LABELS_SUPPORT:
             self._opts = replace(self._opts, branch_labels=BRANCH_LABELS_NONE)
         self._apply_options_to_controls()
+        self._restore_manual_sequences()
         self._redraw(refit=True)
+        if self._model.notes:
+            self._update_status("; ".join(self._model.notes))
         return True
+
+    def _manual_key(self) -> str:
+        import hashlib
+
+        return "tree_view/sequences/" + hashlib.sha1(str(self._path).encode("utf-8")).hexdigest()
+
+    def _restore_manual_sequences(self) -> None:
+        from repeatviewer.backends import tree_links
+
+        if self._path is None:
+            return
+        saved = str(QSettings().value(self._manual_key(), "") or "")
+        if saved and Path(saved).is_file():
+            tree_links.set_manual_sequences(self._path, Path(saved))
+
+    def _has_manual_sequences(self) -> bool:
+        from repeatviewer.backends import tree_links
+
+        return self._path is not None and tree_links.manual_sequences(self._path) is not None
+
+    def choose_sequences(self) -> bool:
+        """Let the user pick the FASTA that holds this tree's sequences."""
+        from repeatviewer.backends import tree_links
+
+        if self._path is None:
+            return False
+        start = tree_links.manual_sequences(self._path) or self._path.parent
+        chosen, _ = QFileDialog.getOpenFileName(
+            self, "Use these sequences", str(start),
+            "FASTA (*.fa *.fasta *.fas *.fna *.faa *.aln *.afa);;All files (*)")
+        if not chosen:
+            return False
+        try:
+            aln = tree_links.read_alignment(Path(chosen), aligned=False)
+        except OSError as exc:
+            QMessageBox.warning(self, "Use these sequences", f"Could not read {Path(chosen).name}:\n{exc}")
+            return False
+        tips = [n.name for n in self._file_model.nodes if n.is_tip] if self._file_model else []
+        found = sum(1 for t in tips if aln.row_of(t) is not None)
+        if tips and found == 0:
+            QMessageBox.warning(
+                self, "Use these sequences",
+                f"None of the {len(tips)} tip names was found in {Path(chosen).name}. "
+                "Tip names are matched to the first word of each FASTA header.")
+            return False
+        tree_links.set_manual_sequences(self._path, Path(chosen))
+        QSettings().setValue(self._manual_key(), chosen)
+        self._update_status(f"Sequences: {Path(chosen).name} ({found} of {len(tips)} tips found)")
+        return True
+
+    def reset_sequences(self) -> None:
+        from repeatviewer.backends import tree_links
+
+        if self._path is not None:
+            tree_links.set_manual_sequences(self._path, None)
+            QSettings().remove(self._manual_key())
+            self._update_status("Sequences: automatic search")
 
     def _load_view_state(self) -> None:
         if self._path is None:
@@ -2363,10 +2427,16 @@ class TreePanel(QWidget):
         tips = [tips] if isinstance(tips, str) else list(tips)
         source = self._sequence_source()
         if source is None:
-            QMessageBox.information(
-                self, "Show in alignment",
-                "No alignment or FASTA was found for this tree. RepeatViewer looks for "
-                "the tree run's .aln.fa, or a FASTA with the tree's name next to it.")
+            box = QMessageBox(self)
+            box.setWindowTitle("Show in alignment")
+            box.setIcon(QMessageBox.Icon.Information)
+            box.setText("No alignment or FASTA was found for this tree. RepeatViewer looks for "
+                        "the tree run's .aln.fa, or a FASTA with the tree's name next to it.")
+            choose = box.addButton("Choose FASTA…", QMessageBox.ButtonRole.AcceptRole)
+            box.addButton(QMessageBox.StandardButton.Close)
+            box.exec()
+            if box.clickedButton() is choose and self.choose_sequences():
+                return self.show_in_alignment(tips)
             return False
         try:
             aln = tree_links.read_alignment(source.path, aligned=source.aligned)
@@ -2488,6 +2558,9 @@ class TreePanel(QWidget):
             menu.addSeparator()
             act = menu.addAction("Show in alignment", lambda: self.show_in_alignment(node.name))
             act.setEnabled(self._sequence_source() is not None)
+            menu.addAction("Use These Sequences…", self.choose_sequences)
+            if self._has_manual_sequences():
+                menu.addAction("Use Automatic Sequences", self.reset_sequences)
             menu.addAction("Copy name", lambda: QApplication.clipboard().setText(node.name))
             header = (self._traits.rows.get(node.name, {}).get("header", "")
                       if self._traits else "")
