@@ -24,13 +24,12 @@ from .model import POSITIONS, STRENGTHS, ChromosomeMark, ImageDetails, Signal, i
 
 ARM_LABELS = {"cen": "Centromere", "p": "p", "q": "q"}
 POSITION_CHOICES = POSITIONS
-TOOLS = (("select", "Select"), ("number", "Number chromosomes"), ("signal", "Add signal"), ("measure", "Measure"))
+TOOLS = (("number", "1  Number chromosomes"), ("signal", "2  Mark signals"))
 TOOL_HINTS = {
-    "select": "Click a chromosome or a signal to edit it",
-    "number": "Click chromosomes in order: 1a, 1b, 1c, 2a…",
-    "signal": "Click a signal; it is assigned to the nearest chromosome",
-    "measure": "Drag from telomere to telomere through the centromere",
+    "number": "Click a chromosome to name it {next}. Drag a name, a telomere or the centromere to move it. Right-click for more.",
+    "signal": "Click a spot to add a {probe} signal. Drag a signal to move it. Right-click for more.",
 }
+COUNTERSTAINS = ("dapi", "hoechst", "pi")
 HIT_RADIUS = 18.0  # image pixels
 
 
@@ -159,29 +158,148 @@ class SignalsSession:
             self.reclassify()
             self.dirty = True
 
+    # ---------------------------------------------------------------- images used for snapping
+
+    picture: np.ndarray | None = None  # RGB of a plain picture (set by the view, which can read any format)
+
+    def set_picture(self, rgb: np.ndarray | None) -> None:
+        self.picture = rgb
+
+    def _counterstain(self) -> np.ndarray | None:
+        """Grey image of the chromosomes: the DAPI-like channel, else the blue of a picture."""
+        if self.details.channels:
+            layers = channel_layers(self.folder, self.details, self.view.cache)
+            idx = next((i for i, c in enumerate(self.details.channels) if c.dye.lower() in COUNTERSTAINS), 0)
+            return ch.to_grey(layers[idx][0]).astype(np.float64)
+        if self.picture is not None and self.picture.ndim == 3:
+            rgb = self.picture[..., :3].astype(np.float64)
+            blue = rgb[..., 2]
+            return blue if blue.mean() > 0.6 * rgb.mean() else rgb.mean(axis=2)
+        return None
+
+    def estimate_axis(self, x: float, y: float, radius: int = 160):
+        """(telomere, centromere or None, telomere) of the chromosome under (x, y), from the counterstain.
+
+        The chromosome is the bright patch around the click; its long axis is its main direction and the
+        centromere the narrowest place between 15 and 85 % of its length. None when nothing bright is there.
+        """
+        grey = self._counterstain()
+        if grey is None:
+            return None
+        h, w = grey.shape
+        x0, x1 = max(0, int(x) - radius), min(w, int(x) + radius + 1)
+        y0, y1 = max(0, int(y) - radius), min(h, int(y) + radius + 1)
+        win = grey[y0:y1, x0:x1]
+        if win.size < 50:
+            return None
+        thr = _otsu(win)
+        mask = win > thr
+        cx, cy = int(x) - x0, int(y) - y0
+        if not (0 <= cy < mask.shape[0] and 0 <= cx < mask.shape[1]):
+            return None
+        if not mask[cy, cx]:
+            ys, xs = np.nonzero(mask[max(0, cy - 8):cy + 9, max(0, cx - 8):cx + 9])
+            if not len(xs):
+                return None
+            k = int(np.argmin((xs - min(cx, 8)) ** 2 + (ys - min(cy, 8)) ** 2))
+            cx, cy = max(0, cx - 8) + int(xs[k]), max(0, cy - 8) + int(ys[k])
+        comp = _component(mask, cy, cx)
+        if comp.shape[0] < 30:
+            return None
+        pts = comp[:, ::-1].astype(np.float64)  # (x, y)
+        mean = pts.mean(axis=0)
+        cov = np.cov((pts - mean).T)
+        vals, vecs = np.linalg.eigh(cov)
+        v = vecs[:, int(np.argmax(vals))]
+        t = (pts - mean) @ v
+        tmin, tmax = float(t.min()), float(t.max())
+        a = mean + v * tmin + np.array([x0, y0])
+        b = mean + v * tmax + np.array([x0, y0])
+        cen = None
+        if tmax - tmin > 12:
+            bins = 40
+            hist, _edges = np.histogram(t, bins=bins, range=(tmin, tmax))
+            smooth = np.convolve(hist, np.ones(3) / 3, mode="same")
+            lo, hi = int(bins * 0.15), int(bins * 0.85)
+            k = lo + int(np.argmin(smooth[lo:hi]))
+            if smooth[k] < 0.8 * float(np.median(smooth[lo:hi])):
+                tc = tmin + (k + 0.5) * (tmax - tmin) / bins
+                cen = mean + v * tc + np.array([x0, y0])
+        return (float(a[0]), float(a[1])), (None if cen is None else (float(cen[0]), float(cen[1]))), (float(b[0]), float(b[1]))
+
+    def auto_axis(self, mark_id: str) -> bool:
+        """Set telomeres and centromere of a numbered chromosome from the image. p is the shorter arm."""
+        mark = self.details.chromosome(mark_id)
+        if mark is None:
+            return False
+        found = self.estimate_axis(mark.x, mark.y)
+        if found is None:
+            return False
+        a, cen, b = found
+        if cen is None:
+            self.set_axis(mark_id, a, b)
+            return True
+        da = ((a[0] - cen[0]) ** 2 + (a[1] - cen[1]) ** 2) ** 0.5
+        db = ((b[0] - cen[0]) ** 2 + (b[1] - cen[1]) ** 2) ** 0.5
+        p_tel, q_tel = (a, b) if da <= db else (b, a)
+        mark.telomere_p, mark.telomere_q, mark.centromere = p_tel, q_tel, cen
+        self.reclassify()
+        self.dirty = True
+        return True
+
+    def set_point(self, mark_id: str, which: str, point: tuple[float, float]) -> None:
+        """Move one handle of a chromosome: "telomere_p", "telomere_q" or "centromere"."""
+        mark = self.details.chromosome(mark_id)
+        if mark is None or which not in ("telomere_p", "telomere_q", "centromere"):
+            return
+        setattr(mark, which, (float(point[0]), float(point[1])))
+        self.reclassify()
+        self.dirty = True
+
+    def swap_arms(self, mark_id: str) -> None:
+        mark = self.details.chromosome(mark_id)
+        if mark is not None and mark.telomere_p is not None and mark.telomere_q is not None:
+            mark.telomere_p, mark.telomere_q = mark.telomere_q, mark.telomere_p
+            self.reclassify()
+            self.dirty = True
+
     # ---------------------------------------------------------------- signals
 
     def probes(self) -> list[tuple[str, str]]:
-        """(probe, dye) of the channels that have a probe, for the Probe menu."""
+        """(probe, dye) for the Probe menu: the channels' probes first, then the other probes of the lists."""
         out = []
         for c in self.details.channels:
             if c.probe and (c.probe, c.dye) not in out:
                 out.append((c.probe, c.dye))
+        known = {p for p, _d in out}
+        for e in load_lists(self.folder).get("probes", []):
+            name = str(e.get("name") or "")
+            if name and name not in known:
+                out.append((name, str(e.get("dye") or "")))
+                known.add(name)
         return out
 
     def probe_colour(self, probe: str) -> str:
-        lists = load_lists(self.folder)
         for c in self.details.channels:
             if c.probe == probe:
                 return c.display.color
-        return dye_color(lists, "") if probe else "#ffffff"
+        lists = load_lists(self.folder)
+        e = next((e for e in lists.get("probes", []) if e.get("name") == probe), None)
+        dye = str((e or {}).get("dye") or "")
+        return dye_color(lists, dye, "#ffffff") if dye else "#ffffff"
 
     def refine_position(self, probe: str, x: float, y: float, radius: float = 14.0) -> tuple[float, float]:
         """Move a click to the centre of the bright spot of the probe's channel nearby."""
         channel_index = next((i for i, c in enumerate(self.details.channels) if c.probe == probe), None)
-        if channel_index is None:
+        if channel_index is not None:
+            array = ch.to_grey(channel_layers(self.folder, self.details, self.view.cache)[channel_index][0]).astype(np.float64)
+        elif self.picture is not None and self.picture.ndim == 3:
+            colour = np.array(ch.hex_to_rgb(self.probe_colour(probe)))
+            colour = colour / (np.linalg.norm(colour) or 1.0)
+            rgb = self.picture[..., :3].astype(np.float64)
+            array = rgb @ colour - 0.5 * (rgb.sum(axis=2) - rgb @ colour)
+        else:
             return float(x), float(y)
-        array = ch.to_grey(channel_layers(self.folder, self.details, self.view.cache)[channel_index][0]).astype(np.float64)
         h, w = array.shape
         r = int(radius)
         x0, x1 = max(0, int(x) - r), min(w, int(x) + r + 1)
@@ -327,3 +445,44 @@ def _short_cell_name(image: CytoImage, number: int) -> str:
 
     m = re.search(r"(\d+)\D*$", image.original_name or "")
     return m.group(1).zfill(2) if m else str(number).zfill(2)
+
+
+def _otsu(values: np.ndarray) -> float:
+    data = values.astype(np.float64).ravel()
+    lo, hi = float(data.min()), float(data.max())
+    if hi <= lo:
+        return hi
+    hist, edges = np.histogram(data, bins=256, range=(lo, hi))
+    centers = (edges[:-1] + edges[1:]) / 2
+    w0 = np.cumsum(hist)
+    w1 = w0[-1] - w0
+    m0 = np.cumsum(hist * centers)
+    mean0 = m0 / np.maximum(w0, 1)
+    mean1 = (m0[-1] - m0) / np.maximum(w1, 1)
+    between = w0 * w1 * (mean0 - mean1) ** 2
+    return float(centers[int(np.argmax(between))])
+
+
+def _component(mask: np.ndarray, row: int, col: int) -> np.ndarray:
+    """(row, col) of the 4-connected patch of True around one pixel."""
+    try:
+        from scipy import ndimage
+
+        labels, _n = ndimage.label(mask)
+        lab = labels[row, col]
+        return np.argwhere(labels == lab) if lab else np.zeros((0, 2), dtype=int)
+    except ImportError:
+        pass
+    seen = np.zeros(mask.shape, dtype=bool)
+    stack = [(row, col)]
+    seen[row, col] = True
+    out = []
+    h, w = mask.shape
+    while stack:
+        r, c = stack.pop()
+        out.append((r, c))
+        for rr, cc in ((r + 1, c), (r - 1, c), (r, c + 1), (r, c - 1)):
+            if 0 <= rr < h and 0 <= cc < w and mask[rr, cc] and not seen[rr, cc]:
+                seen[rr, cc] = True
+                stack.append((rr, cc))
+    return np.array(out, dtype=int)

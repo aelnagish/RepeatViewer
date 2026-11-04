@@ -59,6 +59,7 @@ from repeatviewer.backends.cyto_images import (
     DYE_CHOICES,
     IMAGE_SUFFIXES,
     METADATA_FIELDS,
+    METADATA_KEYS,
     STAGE_CHOICES,
     TECHNIQUE_CHOICES,
     CytoImage,
@@ -380,109 +381,151 @@ class AttachImageDialog(QDialog):
         self._image = image
         self._result: CytoImage | None = None
         editing = image is not None
-        self.setWindowTitle("Edit cytogenetic image" if editing else "Attach cytogenetic image")
-        self.setMinimumSize(900, 620)
+        self.setWindowTitle("Image details" if editing else "Add cytogenetic image")
+        self.setMinimumSize(880, 600)
 
-        # Left: preview
+        # Left: the picture, at its own proportions, with its file name
         preview_path = image_file_path(self._folder, image) if editing else source
         preview = QLabel(self)
         preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        preview.setMinimumSize(300, 300)
+        preview.setFixedWidth(320)
+        preview.setMinimumHeight(320)
         preview.setObjectName("CytoImagePreview")
-        preview.setStyleSheet("#CytoImagePreview { background: #1e1e1e; border-radius: 4px; }")
-        pix = thumbnail(Path(preview_path), 600) if preview_path else QPixmap()
+        preview.setStyleSheet("#CytoImagePreview { background: #111214; border-radius: 6px; color: #bbbbbb; }")
+        pix = thumbnail(Path(preview_path), 640) if preview_path else QPixmap()
         if pix.isNull():
-            preview.setText("Preview not available")
-            preview.setStyleSheet(preview.styleSheet() + " #CytoImagePreview { color: #bbb; }")
+            preview.setText("No preview")
         else:
-            preview.setPixmap(pix.scaled(380, 460, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
-        name = QLabel((image.original_name if editing else Path(source).name) if (editing or source) else "", self)
+            preview.setPixmap(pix.scaled(320, 420, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+            preview.setFixedHeight(min(420, max(200, int(320 * pix.height() / max(1, pix.width())))))
+        file_name = (image.original_name if editing else Path(source).name) if (editing or source) else ""
+        name = QLabel(self)
         name.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        name.setStyleSheet("color: palette(mid);")
-        left = QWidget(self)
-        left_v = QVBoxLayout(left)
-        left_v.setContentsMargins(0, 0, 0, 0)
-        left_v.addWidget(preview, 1)
+        name.setStyleSheet("color: gray;")
+        name.setText(name.fontMetrics().elidedText(file_name, Qt.TextElideMode.ElideMiddle, 310))
+        name.setToolTip(file_name)
+        left_v = QVBoxLayout()
+        left_v.setSpacing(6)
+        left_v.addWidget(preview)
         left_v.addWidget(name)
+        left_v.addStretch(1)
 
-        # Right: probes + optional metadata
+        # Right: probes, then the details in two groups; every field the same width
         self._probes = _ProbeTable(self._folder, self)
         for target in (image.targets if editing else targets or []):
             self._probes.add_target(target)
         if self._probes.rowCount() == 0:
             self._probes.add_target(None)
-        add_btn = QPushButton("Add probe", self)
-        add_btn.setToolTip("Multicolour image: link another sequence or annotation shown in it")
+        self._probes.verticalHeader().setVisible(False)
+        self._probes.verticalHeader().setDefaultSectionSize(30)
+        self._probes.setMinimumHeight(30 * 3 + 30)
+        self._probes.setMaximumHeight(30 * 5 + 30)
+        add_btn = QPushButton("+", self)
+        add_btn.setFixedWidth(32)
+        add_btn.setToolTip("Add a probe (a multicolour image shows several)")
         add_btn.clicked.connect(lambda: self._probes.add_target(None))
-        remove_btn = QPushButton("Remove probe", self)
+        remove_btn = QPushButton("−", self)
+        remove_btn.setFixedWidth(32)
+        remove_btn.setToolTip("Remove the selected probe")
         remove_btn.clicked.connect(self._probes.remove_selected)
         probe_buttons = QHBoxLayout()
+        probe_buttons.setSpacing(4)
         probe_buttons.addWidget(add_btn)
         probe_buttons.addWidget(remove_btn)
         probe_buttons.addStretch()
 
         existing = dict(image.metadata) if editing else {}
         defaults = {} if editing else self._defaults()
+        labels = dict(METADATA_FIELDS)
         self._fields: dict[str, QWidget] = {}
-        form = QFormLayout()
-        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
-        for key, label in METADATA_FIELDS:
+
+        def form() -> QFormLayout:
+            f = QFormLayout()
+            f.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            f.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+            f.setRowWrapPolicy(QFormLayout.RowWrapPolicy.DontWrapRows)
+            f.setHorizontalSpacing(12)
+            f.setVerticalSpacing(8)
+            return f
+
+        def field(key: str) -> QWidget:
             value = existing.get(key, defaults.get(key, ""))
             if key in {"technique", "counterstain", "stage"}:
                 widget = QComboBox(self)
                 widget.setEditable(True)
-                choices = {
-                    "technique": TECHNIQUE_CHOICES,
-                    "counterstain": COUNTERSTAIN_CHOICES,
-                    "stage": STAGE_CHOICES,
-                }[key]
+                choices = {"technique": TECHNIQUE_CHOICES, "counterstain": COUNTERSTAIN_CHOICES, "stage": STAGE_CHOICES}[key]
                 widget.addItem("")
                 widget.addItems(list(choices))
                 widget.setCurrentText(value)
             elif key == "notes":
                 widget = QPlainTextEdit(self)
                 widget.setPlainText(value)
-                widget.setFixedHeight(56)
+                widget.setFixedHeight(64)
             else:
                 widget = QLineEdit(self)
                 widget.setText(value)
                 if key == "date":
                     widget.setPlaceholderText("YYYY-MM-DD")
                 elif key == "chromosomes":
-                    widget.setPlaceholderText("e.g. 1, 3, 5 (subtelomeric)")
+                    widget.setPlaceholderText("for example 1, 3, 5 (subtelomeric)")
+            widget.setMinimumWidth(260)
             self._fields[key] = widget
-            form.addRow(f"{label}:", widget)
+            return widget
 
-        hint = QLabel("Everything except the image is optional.", self)
-        hint.setStyleSheet("color: palette(mid);")
+        sample = form()
+        for key in ("species", "accession", "stage", "chromosomes"):
+            sample.addRow(labels[key], field(key))
+        method = form()
+        for key in ("technique", "counterstain", "microscope", "experimenter", "date"):
+            method.addRow(labels[key], field(key))
+        notes = form()
+        notes.addRow(labels["notes"], field("notes"))
+        # make the three label columns the same width so the fields line up
+        width = max(self.fontMetrics().horizontalAdvance(labels[k]) for k in METADATA_KEYS) + 4
+        for f in (sample, method, notes):
+            for row in range(f.rowCount()):
+                item = f.itemAt(row, QFormLayout.ItemRole.LabelRole)
+                if item is not None and item.widget() is not None:
+                    item.widget().setFixedWidth(width)
+                    item.widget().setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
-        right = QWidget(self)
-        right_v = QVBoxLayout(right)
-        right_v.setContentsMargins(0, 0, 0, 0)
-        probes_label = QLabel("<b>Probes in this image</b>", self)
-        right_v.addWidget(probes_label)
+        def heading(text: str) -> QLabel:
+            label = QLabel(text, self)
+            font = label.font()
+            font.setBold(True)
+            label.setFont(font)
+            return label
+
+        right_v = QVBoxLayout()
+        right_v.setSpacing(8)
+        right_v.addWidget(heading("Probes in this image"))
         right_v.addWidget(self._probes)
         right_v.addLayout(probe_buttons)
-        details_label = QLabel("<b>Details</b>", self)
-        right_v.addSpacing(6)
-        right_v.addWidget(details_label)
-        form_host = QWidget(self)
-        form_host.setLayout(form)
+        right_v.addSpacing(10)
+        right_v.addWidget(heading("Sample"))
+        right_v.addLayout(sample)
+        right_v.addSpacing(10)
+        right_v.addWidget(heading("Method"))
+        right_v.addLayout(method)
+        right_v.addSpacing(10)
+        right_v.addLayout(notes)
+        right_v.addStretch(1)
+        right = QWidget(self)
+        right.setLayout(right_v)
         scroll = QScrollArea(self)
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setWidget(form_host)
-        right_v.addWidget(scroll, 1)
-        right_v.addWidget(hint)
+        scroll.setWidget(right)
 
-        splitter = QSplitter(Qt.Orientation.Horizontal, self)
-        splitter.addWidget(left)
-        splitter.addWidget(right)
-        splitter.setStretchFactor(0, 2)
-        splitter.setStretchFactor(1, 3)
+        body = QHBoxLayout()
+        body.setSpacing(24)
+        body.addLayout(left_v)
+        body.addWidget(scroll, 1)
 
+        hint = QLabel("Only the image is needed; everything else can be filled in later.", self)
+        hint.setStyleSheet("color: gray;")
         buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel,
+            QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Save,
             parent=self,
         )
         save_btn = buttons.button(QDialogButtonBox.StandardButton.Save)
@@ -490,10 +533,15 @@ class AttachImageDialog(QDialog):
         save_btn.setAutoDefault(True)
         buttons.accepted.connect(self._save)
         buttons.rejected.connect(self.reject)
+        bottom = QHBoxLayout()
+        bottom.addWidget(hint, 1)
+        bottom.addWidget(buttons)
 
         layout = QVBoxLayout(self)
-        layout.addWidget(splitter, 1)
-        layout.addWidget(buttons)
+        layout.setContentsMargins(20, 20, 20, 16)
+        layout.setSpacing(16)
+        layout.addLayout(body, 1)
+        layout.addLayout(bottom)
         save_btn.setFocus()
 
     def _defaults(self) -> dict[str, str]:
@@ -852,13 +900,28 @@ def open_images(parent: QWidget | None, folder: Path, images: list[CytoImage], *
     picker.show()
 
 
+def _in_workspace(parent: QWidget | None, fasta_path: Path, images: list[CytoImage]) -> bool:
+    """Show the images in the Cytogenetics workspace (Library filtered to the sequence; one image opens directly)."""
+    window = parent.window() if parent is not None else None
+    opener = getattr(window, "_open_cytogenetics_workspace", None)
+    if opener is None or not images:
+        return False
+    opener(tab="Library", sequence=fasta_path, image_id=images[0].id if len(images) == 1 else "")
+    return True
+
+
 def open_images_for_sequence(parent: QWidget | None, fasta_path: Path) -> None:
     fasta_path = Path(fasta_path).expanduser().resolve()
-    open_images(parent, fasta_path.parent, images_for_sequence(fasta_path), title=fasta_path.name)
+    images = images_for_sequence(fasta_path)
+    if _in_workspace(parent, fasta_path, images):
+        return
+    open_images(parent, fasta_path.parent, images, title=fasta_path.name)
 
 
 def open_images_for_feature(parent: QWidget | None, fasta_path: Path, name: str, start: int, end: int) -> None:
     fasta_path = Path(fasta_path).expanduser().resolve()
+    if _in_workspace(parent, fasta_path, images_for_feature(fasta_path, name, start, end)):
+        return
     open_images(
         parent,
         fasta_path.parent,

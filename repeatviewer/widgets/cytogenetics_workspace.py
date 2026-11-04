@@ -130,6 +130,8 @@ class CytogeneticsWorkspace(QWidget):
         self._import_btn.clicked.connect(lambda: self._pages["Library"].start_import())
 
         self._import_btn.hide()  # Import lives in the Library count row now
+        self._title.hide()  # no top row: these labels must not paint over the tabs
+        self._crumb.hide()
         self._side_btn.hide()
 
         self._tabs = QTabWidget(self)

@@ -14,9 +14,12 @@ CYTO_TITLE = "Cytogenetics"
 class CytogeneticsActionsMixin:
     """Tools > Cytogenetics for ``MainWindow``."""
 
-    def _open_cytogenetics_workspace(self, *, tab: str = "", sequence: Path | None = None) -> None:
-        """Open the workspace of the current folder in the Preview area."""
-        folder = getattr(self, "_current_folder", None)
+    def _open_cytogenetics_workspace(self, *, tab: str = "", sequence: Path | None = None, image_id: str = ""):
+        """Open the workspace in the Preview area: the sequence's folder, else the current folder.
+
+        Returns the workspace panel (or None). With ``image_id`` that image opens in the Image tab.
+        """
+        folder = Path(sequence).expanduser().resolve().parent if sequence is not None else getattr(self, "_current_folder", None)
         if not folder or not Path(folder).is_dir():
             QMessageBox.information(
                 self, CYTO_TITLE, "Select a folder in the Folders panel first."
@@ -36,6 +39,9 @@ class CytogeneticsActionsMixin:
             panel.set_sequence_filter(Path(sequence).name)
         if tab:
             panel.show_tab(tab)
+        if image_id:
+            panel.open_image(image_id)
+        return panel
 
     def _cytogenetics_library_action(self, method: str) -> None:
         self._open_cytogenetics_workspace(tab="Library")
