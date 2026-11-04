@@ -211,6 +211,74 @@ def test_open_additional_tab_restores_split_on_new_tab(
     tabs.close()
 
 
+def test_msa_split_layout_remembered_for_next_msa(
+    qapp: QApplication, tmp_path: Path, monkeypatch
+) -> None:
+    """Overview|Dotplot split on an MSA is restored when opening another MSA."""
+    from PySide6.QtCore import QSettings
+    from PySide6.QtTest import QTest
+
+    from repeatviewer.widgets import preview_zoom as pz
+
+    conf = tmp_path / "settings.ini"
+    monkeypatch.setattr(
+        pz,
+        "QSettings",
+        lambda *a, **k: QSettings(str(conf), QSettings.Format.IniFormat),
+    )
+
+    a = tmp_path / "a.fa"
+    a.write_text(
+        ">s1\nACGTACGTACGTACGT\n>s2\nTTTTAAAACCCCGGGG\n", encoding="utf-8"
+    )
+    b = tmp_path / "b.fa"
+    b.write_text(
+        ">t1\nGGGGCCCCAAAATTTT\n>t2\nACGTACGTACGTACGT\n", encoding="utf-8"
+    )
+
+    host = QWidget()
+    layout = QVBoxLayout(host)
+    tabs = PreviewTabWidget()
+    layout.addWidget(tabs, stretch=1)
+    host.resize(1000, 600)
+    host.show()
+    QTest.qWait(50)
+
+    assert tabs.open_file(a, replace=False) is True
+    assert tabs.open_split_with_tabs(1, 2) is True
+    QTest.qWait(400)
+    assert tabs.is_split_active()
+
+    # Simulate leaving the dock without turning Split off (preference stays on).
+    # Directly close chrome without clearing the remembered MSA layout.
+    tabs._close_inline_split(clear_preference=False)
+    QTest.qWait(100)
+    assert not tabs.is_split_active()
+
+    assert tabs.open_file(b, replace=True) is True
+    QTest.qWait(500)
+    assert tabs.is_split_active()
+    split = tabs._inline_split
+    assert isinstance(split, PreviewSplitWindow)
+    assert split.current_path() == b.resolve()
+    assert split._left.current_fasta_tab() == 1
+    assert split._right.current_fasta_tab() == 2
+
+    # Turning Split off clears auto-restore for the next MSA.
+    tabs._close_inline_split(clear_preference=True)
+    QTest.qWait(100)
+    c = tmp_path / "c.fa"
+    c.write_text(
+        ">u1\nAAAACCCCGGGGTTTT\n>u2\nACGTACGTACGTACGT\n", encoding="utf-8"
+    )
+    assert tabs.open_file(c, replace=True) is True
+    QTest.qWait(200)
+    assert not tabs.is_split_active()
+
+    host.close()
+    tabs.close()
+
+
 def test_open_split_with_tabs_overview_and_dotplot(
     qapp: QApplication, tmp_path: Path
 ) -> None:

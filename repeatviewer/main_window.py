@@ -4973,6 +4973,17 @@ class MainWindow(NcbiDownloadActionsMixin, PrimerActionsMixin, QMainWindow):
         self._present_te_viz_dialog(dialog, _accepted)
 
     def _start_tree_job(self, files: list[Path], options) -> None:
+        from repeatviewer.backends import tree_builder as tb
+        from repeatviewer.job_options import TREE_ENGINE_FASTME, TREE_ENGINE_FASTTREE
+
+        # Pre-check FastME / FastTree like HISAT2: remind with the rich install
+        # dialog instead of a native warning after the job fails.
+        engine = getattr(options, "engine", None)
+        if engine in (TREE_ENGINE_FASTME, TREE_ENGINE_FASTTREE) and not tb.engine_available(
+            engine
+        ):
+            tb.show_tree_engine_not_configured_dialog(engine, self)
+            return
         title = (f"Tree ({files[0].name})" if len(files) == 1
                  else f"Tree ({len(files)} files combined)")
         worker = TreeWorker(files, options, cancel=self._job_cancel)

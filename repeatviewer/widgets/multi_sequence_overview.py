@@ -86,6 +86,7 @@ from repeatviewer.backends.msa_coordinates import (
 )
 from repeatviewer.backends.sequence_features import (
     SequenceFeature,
+    expand_terminal_pair_indices,
     feature_display_pack_key,
     is_aligned_fasta,
     load_aligned_fasta_rows,
@@ -3478,13 +3479,43 @@ class _BarsCanvas(QWidget):
             return None
         return left, right
 
+    def _row_features_flat(self, row: int) -> list[SequenceFeature]:
+        """Packed annotation features for ``row`` in flat-index order."""
+        if not (0 <= row < len(self._record_ids)):
+            return []
+        rid = self._record_ids[row]
+        out: list[SequenceFeature] = []
+        for track in self._tracks.get(rid) or []:
+            out.extend(track)
+        return out
+
+    def _with_terminal_pair_feats(
+        self, feats: set[tuple[int, int]]
+    ) -> set[tuple[int, int]]:
+        """Include LTR5↔LTR3 / TIR5↔TIR3 / TSD5↔TSD3 partners on the same row."""
+        if not feats:
+            return set()
+        by_row: dict[int, set[int]] = {}
+        for row, flat_i in feats:
+            by_row.setdefault(int(row), set()).add(int(flat_i))
+        out: set[tuple[int, int]] = set()
+        for row, selected in by_row.items():
+            features = self._row_features_flat(row)
+            expanded = expand_terminal_pair_indices(features, selected)
+            out.update((row, flat_i) for flat_i in expanded)
+        return out
+
     def _set_feature_selection(
         self,
         feats: set[tuple[int, int]],
         *,
         set_columns: bool = False,
+        expand_pairs: bool = True,
     ) -> None:
-        self._selected_feats = set(feats)
+        chosen = set(feats)
+        if expand_pairs:
+            chosen = self._with_terminal_pair_feats(chosen)
+        self._selected_feats = chosen
         self._reset_edge_expand_phase()
         if set_columns:
             span = self.selected_feature_column_span()
@@ -3772,20 +3803,23 @@ class _BarsCanvas(QWidget):
                     self.regionDragPreview.emit((start_i, end_i, rows))
                     self.setFocus(Qt.FocusReason.MouseFocusReason)
             elif press_feat is not None:
-                # Click a feature → select it and its columns (incl. point features).
+                # Click a feature → select it (+ LTR/TIR/TSD partner) and columns.
                 mods = event.modifiers()
+                pair_group = self._with_terminal_pair_feats({press_feat})
                 if mods & (
                     Qt.KeyboardModifier.ControlModifier
                     | Qt.KeyboardModifier.MetaModifier
                 ):
                     feats = set(self._selected_feats)
                     if press_feat in feats:
-                        feats.discard(press_feat)
+                        feats -= pair_group
                     else:
-                        feats.add(press_feat)
-                    self._set_feature_selection(feats, set_columns=True)
+                        feats |= pair_group
+                    self._set_feature_selection(
+                        feats, set_columns=True, expand_pairs=False
+                    )
                 else:
-                    self._set_feature_selection({press_feat}, set_columns=True)
+                    self._set_feature_selection(pair_group, set_columns=True)
                 self.setFocus(Qt.FocusReason.MouseFocusReason)
             else:
                 # Plain click on residues/bars clears column, feature, and

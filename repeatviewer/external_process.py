@@ -69,6 +69,50 @@ def command_text(command: Sequence[object]) -> str:
     return shlex.join(str(part) for part in command)
 
 
+def command_text_multiline(command: Sequence[object]) -> str:
+    """Shell-readable command with one option (flag + value) per line.
+
+    Continuation lines are indented and end with ``\\`` (except the last), so
+    the process window stays readable for long IQ-TREE / BLAST / MAFFT lines::
+
+        /path/to/iqtree3 \\
+          -s 'aln.fa' \\
+          -m K2P+G4 \\
+          --fast
+    """
+    parts = [str(part) for part in command]
+    if not parts:
+        return ""
+    quoted = [shlex.quote(part) for part in parts]
+    # Group argv: executable; then each -flag [value] or bare positional.
+    groups: list[list[str]] = [[quoted[0]]]
+    i = 1
+    while i < len(parts):
+        if parts[i].startswith("-"):
+            group = [quoted[i]]
+            i += 1
+            if i < len(parts) and not parts[i].startswith("-"):
+                group.append(quoted[i])
+                i += 1
+            groups.append(group)
+        else:
+            groups.append([quoted[i]])
+            i += 1
+    lines: list[str] = []
+    last = len(groups) - 1
+    for gi, group in enumerate(groups):
+        body = " ".join(group)
+        prefix = "" if gi == 0 else "  "
+        suffix = " \\" if gi < last else ""
+        lines.append(f"{prefix}{body}{suffix}")
+    return "\n".join(lines)
+
+
+# Section headers the process monitor renders in bold.
+PROCESS_LOG_COMMAND_HEADER = "Command:"
+PROCESS_LOG_OUTPUT_HEADER = "—— program output ——"
+
+
 def log_command(
     tool: str,
     command: Sequence[object],
@@ -86,14 +130,15 @@ def log_command(
         cmd,
     )
     if _process_log_sink.get() is not None:
-        emit_process_log("Command:")
-        emit_process_log(cmd)
+        emit_process_log(PROCESS_LOG_COMMAND_HEADER)
+        for line in command_text_multiline(command).splitlines():
+            emit_process_log(line)
         if cwd is not None:
             emit_process_log(f"Working directory: {cwd}")
         if input_text:
             emit_process_log(f"Inputs: {input_text}")
         emit_process_log("")
-        emit_process_log("—— program output ——")
+        emit_process_log(PROCESS_LOG_OUTPUT_HEADER)
 
 
 def log_process_output(

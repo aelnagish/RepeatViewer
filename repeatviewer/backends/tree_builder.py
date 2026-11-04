@@ -33,6 +33,7 @@ import re
 import shutil
 import statistics
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -161,6 +162,144 @@ def engine_status_executable(engine: str, *, system_path_only: bool = False) -> 
     return bundled_engine_executable(engine)
 
 
+def engine_available(engine: str, *, system_path_only: bool = False) -> bool:
+    """True when the tree engine executable resolves (bundled, conda, or PATH)."""
+    return engine_executable(engine, system_path_only=system_path_only) is not None
+
+
+# FastME / FastTree are not bundled (HISAT2 / FastGA style): install via conda
+# into the Settings External-tools env, then they appear under Options → Executables.
+FASTME_SUPPORTED_VERSION = "2.1"
+FASTME_RECOMMENDED_VERSION = "2.1.6.1"
+FASTTREE_SUPPORTED_VERSION = "2.1"
+FASTTREE_RECOMMENDED_VERSION = "2.1.11"
+_TREE_EXTERNAL_RECOMMENDED_ENV = "rv_env"
+
+_TREE_EXTERNAL_META = {
+    TREE_ENGINE_FASTME: {
+        "name": "FastME",
+        "supported": FASTME_SUPPORTED_VERSION,
+        "pkg": f"fastme={FASTME_RECOMMENDED_VERSION}",
+    },
+    TREE_ENGINE_FASTTREE: {
+        "name": "FastTree",
+        "supported": FASTTREE_SUPPORTED_VERSION,
+        "pkg": f"fasttree={FASTTREE_RECOMMENDED_VERSION}",
+    },
+}
+
+
+def _tree_external_conda_install_block(pkg: str, *, rich: bool) -> str:
+    env_name = _TREE_EXTERNAL_RECOMMENDED_ENV
+    install_cmd = (
+        f"conda install -n {env_name} -c conda-forge -c bioconda {pkg}"
+    )
+    create_cmd = (
+        f"conda create -n {env_name} -c conda-forge -c bioconda {pkg}"
+    )
+    if rich:
+        return (
+            "Open a Terminal window.<br><br>"
+            "Install with conda into RepeatViewer:<br>"
+            f"<b>If</b> Conda environment <code>{env_name}</code> exists:<br>"
+            f"<code>{install_cmd}</code><br>"
+            "<b>else:</b><br>"
+            f"<code>{create_cmd}</code>"
+        )
+    return (
+        "Open a Terminal window.\n\n"
+        "Install with conda into RepeatViewer:\n"
+        f"If Conda environment {env_name} exists:\n"
+        f"  {install_cmd}\n"
+        "else:\n"
+        f"  {create_cmd}"
+    )
+
+
+def tree_external_configuration_message(engine: str, *, rich: bool = True) -> str:
+    """How to install and point RepeatViewer at FastME or FastTree (HISAT2 style)."""
+    meta = _TREE_EXTERNAL_META.get(engine)
+    if meta is None:
+        return engine_install_hint(engine)
+    name = meta["name"]
+    pkg = meta["pkg"]
+    version = (
+        f"<b>Supported version: {name} {meta['supported']} or newer</b>"
+        if rich
+        else f"Supported version: {name} {meta['supported']} or newer"
+    )
+    install = _tree_external_conda_install_block(pkg, rich=rich)
+    env_name = _TREE_EXTERNAL_RECOMMENDED_ENV
+    if sys.platform == "win32":
+        if rich:
+            return (
+                f"{name} is not bundled with RepeatViewer and is not configured "
+                "yet.<br><br>"
+                f"{version}<br><br>"
+                f"On Windows, {name} typically runs inside WSL2 (not as a native "
+                "Windows binary).<br><br>"
+                "1. Install WSL2 if needed (PowerShell as Administrator):"
+                "<br><code>wsl --install</code><br><br>"
+                f"2. Inside your WSL Linux distro:<br>{install}<br><br>"
+                "3. <b>Then</b>, in RepeatViewer:<br>"
+                "File → Setting → External tools (conda / WSL2) → enter "
+                f"<code>{env_name}</code> (or the Linux path to that env), "
+                f"then click Test to confirm {name} resolves."
+            )
+        return (
+            f"{name} is not bundled with RepeatViewer and is not configured yet.\n\n"
+            f"{version}\n\n"
+            f"On Windows, {name} typically runs inside WSL2 (not as a native "
+            "Windows binary).\n\n"
+            "1. Install WSL2 if needed (PowerShell as Administrator):\n"
+            "   wsl --install\n\n"
+            f"2. Inside your WSL Linux distro:\n{install}\n\n"
+            "3. Then, in RepeatViewer:\n"
+            "   File → Setting → External tools (conda / WSL2) → enter "
+            f"{env_name} (or the Linux path to that env), then Test."
+        )
+    if rich:
+        return (
+            f"{name} is not bundled with RepeatViewer and is not configured "
+            "yet.<br><br>"
+            f"{version}<br><br>"
+            f"{install}<br><br>"
+            "<b>Then</b>, in RepeatViewer:<br>"
+            "File → Setting → External tools (conda) → enter "
+            f"<code>{env_name}</code> (or the path to that env), "
+            f"then click Test to confirm {name} resolves."
+        )
+    return (
+        f"{name} is not bundled with RepeatViewer and is not configured yet.\n\n"
+        f"{version}\n\n"
+        f"{install}\n\n"
+        "Then, in RepeatViewer:\n"
+        "  File → Setting → External tools (conda) → enter "
+        f"{env_name} (or the path to that env), then Test."
+    )
+
+
+def show_tree_engine_not_configured_dialog(engine: str, parent=None) -> None:
+    """Remind the user how to install FastME / FastTree when missing (HISAT2 style)."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QMessageBox
+
+    meta = _TREE_EXTERNAL_META.get(engine)
+    name = meta["name"] if meta else engine
+    box = QMessageBox(parent)
+    box.setWindowTitle(f"{name} not configured")
+    box.setIcon(QMessageBox.Icon.Information)
+    box.setTextFormat(Qt.TextFormat.RichText)
+    box.setText(
+        "<div style='font-weight:400'>"
+        f"{tree_external_configuration_message(engine, rich=True)}"
+        "</div>"
+    )
+    box.setStandardButtons(QMessageBox.StandardButton.Ok)
+    box.setOption(QMessageBox.Option.DontUseNativeDialog, True)
+    box.exec()
+
+
 def engine_install_hint(engine: str) -> str:
     from repeatviewer.backends.tree_portable_tools import (
         ENGINE_IQTREE,
@@ -181,12 +320,13 @@ def engine_install_hint(engine: str) -> str:
             "\"Use IQ-TREE from the system PATH or defined Conda environment\" and install "
             "iqtree yourself (e.g. conda install -c bioconda iqtree)."
         )
+    if engine in _TREE_EXTERNAL_META:
+        return tree_external_configuration_message(engine, rich=False)
     pkg = _CONDA_PACKAGE.get(engine, engine)
     return (
         f"Install it into the conda env set in File → Setting → External tools:\n"
         f"  conda install -c bioconda {pkg}\n"
-        f"or put it on your system PATH and tick "
-        f"\"Use … from the system PATH or defined Conda environment\"."
+        f"or put it on your system PATH."
     )
 
 
@@ -1200,7 +1340,8 @@ def _infer(exe, opts, safe_aln, aln_pairs, dna, safe_outgroup, work, commands, s
             cmd = [exe, "-s", str(safe_aln), "-m", run_model, "--seed", str(opts.seed + i),
                    "--prefix", str(prefix), "-redo"]
             cmd += iqtree_thread_args(opts.threads)
-            if getattr(opts, "iqtree_fast", False):
+            # IQ-TREE: "Ultrafast bootstrap does not work with -fast".
+            if getattr(opts, "iqtree_fast", False) and not opts.ufboot:
                 cmd.append("--fast")
             if opts.ufboot:
                 cmd += ["-B", str(max(1000, opts.ufboot))]

@@ -6,7 +6,61 @@ import subprocess
 import pytest
 from pathlib import Path
 
-from repeatviewer.external_process import log_command, log_process_output, run_logged_process
+from repeatviewer.external_process import (
+    command_text,
+    command_text_multiline,
+    log_command,
+    log_process_output,
+    process_log_sink,
+    run_logged_process,
+)
+
+
+def test_command_text_multiline_groups_flag_and_value() -> None:
+    text = command_text_multiline(
+        [
+            "/opt/iqtree3",
+            "-s",
+            "/tmp/aln.fa",
+            "-m",
+            "K2P+G4",
+            "--seed",
+            "12345",
+            "-redo",
+            "--fast",
+        ]
+    )
+    assert text == (
+        "/opt/iqtree3 \\\n"
+        "  -s /tmp/aln.fa \\\n"
+        "  -m K2P+G4 \\\n"
+        "  --seed 12345 \\\n"
+        "  -redo \\\n"
+        "  --fast"
+    )
+    # Single-line form stays available for logger / error messages.
+    assert " -m K2P+G4 " in command_text(
+        ["/opt/iqtree3", "-s", "/tmp/aln.fa", "-m", "K2P+G4", "--fast"]
+    )
+
+
+def test_log_command_emits_multiline_command_to_process_sink() -> None:
+    lines: list[str] = []
+    with process_log_sink(lines.append):
+        log_command(
+            "iqtree",
+            ["iqtree3", "-m", "K2P+G4", "--fast"],
+            cwd="/tmp/work",
+            inputs=["/tmp/aln.fa"],
+        )
+    assert lines[0] == "Command:"
+    assert lines[1] == "iqtree3 \\"
+    assert lines[2] == "  -m K2P+G4 \\"
+    assert lines[3] == "  --fast"
+    assert lines[4] == "Working directory: /tmp/work"
+    assert lines[5] == "Inputs: /tmp/aln.fa"
+    assert lines[6] == ""
+    assert lines[7] == "—— program output ——"
 
 
 def test_command_and_terminal_output_are_logged(caplog, tmp_path: Path) -> None:

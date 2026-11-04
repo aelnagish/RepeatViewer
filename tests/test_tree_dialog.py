@@ -3,6 +3,7 @@ Settings sections on every engine tab (BLAST / Mapping / Repeat Quantify layout)
 
 from __future__ import annotations
 
+import pytest
 from PySide6.QtCore import QElapsedTimer
 from PySide6.QtWidgets import QPushButton, QRadioButton, QToolButton
 
@@ -17,6 +18,15 @@ from repeatviewer.job_options import (
     TREE_ROOT_OUTGROUP,
     TreeOptions,
 )
+
+
+@pytest.fixture(autouse=True)
+def _silence_external_engine_reminder(monkeypatch):
+    """FastME / FastTree tab open schedules an install reminder; keep tests non-interactive."""
+    monkeypatch.setattr(
+        "repeatviewer.views.tree_dialog.TreeParamsDialog._remind_external_engine_if_needed",
+        lambda self: None,
+    )
 
 
 def _dialog(qapp, tmp_path, **kw):
@@ -44,7 +54,8 @@ def _shown(dlg, widget) -> bool:
 
 
 def _normalised(opts: TreeOptions) -> TreeOptions:
-    """What the window writes back: MAFFT is chosen automatically, per-program PATH boxes."""
+    """What the window writes back: MAFFT is chosen automatically, PATH boxes for
+    bundled tools only (FastME / FastTree are external-only like HISAT2)."""
     from dataclasses import replace
 
     from repeatviewer.backends import tree_builder as tb
@@ -59,8 +70,8 @@ def _normalised(opts: TreeOptions) -> TreeOptions:
                        TREE_ENGINE_IQTREE, TREE_ENGINE_FASTME, TREE_ENGINE_FASTTREE
                    ) else TREE_ENGINE_IQTREE,
                    use_system_iqtree=opts.use_system_iqtree or legacy,
-                   use_system_fastme=opts.use_system_fastme or legacy,
-                   use_system_fasttree=opts.use_system_fasttree or legacy,
+                   use_system_fastme=False,
+                   use_system_fasttree=False,
                    use_system_path=False)
 
 
@@ -102,10 +113,11 @@ def test_buttons_and_tabs(qapp, tmp_path):
     assert _shown(dlg, dlg._advanced_settings_btn)
     assert not _shown(dlg, dlg._iq_advanced_panel)
     assert dlg._show_process_window is not None
-    assert set(dlg._system_boxes) == {"iqtree", "fastme", "fasttree", "mafft"}
+    assert set(dlg._system_boxes) == {"iqtree", "mafft"}
     assert set(dlg._found) == {"iqtree", "fastme", "fasttree", "mafft"}
     assert not hasattr(dlg, "_download_btn")
     assert not hasattr(dlg, "_seq_mode")
+    assert not hasattr(dlg, "_quick_btn")
     dlg._tabs.setCurrentIndex(dlg._options_index)
     assert not _shown(dlg, dlg._advanced_settings_btn)
     dlg._tabs.setCurrentIndex(1)  # FastME: no Advanced panel
@@ -115,6 +127,29 @@ def test_buttons_and_tabs(qapp, tmp_path):
     dlg._advanced_settings_btn.setChecked(True)
     assert _shown(dlg, dlg._iq_advanced_panel)
     assert dlg._advanced_settings_btn.text() == "Advanced Settings ▾"
+
+
+def test_iqtree_fast_disabled_with_ufboot(qapp, tmp_path):
+    """IQ-TREE rejects --fast with UFBoot; the checkbox must be untickable then."""
+    dlg = _dialog(qapp, tmp_path)
+    dlg._tabs.setCurrentIndex(dlg._tab_index[TREE_ENGINE_IQTREE])
+    # Default support includes UFBoot → Fast search greyed out.
+    assert dlg._iq_ufboot_replicates() > 0
+    assert not dlg._iqtree_fast.isEnabled()
+    assert not dlg._iqtree_fast.isChecked()
+    assert _shown(dlg, dlg._iqtree_fast)
+    # Advanced panel holds searches / seed / bnni — not Fast search.
+    assert not dlg._iq_advanced_panel.isAncestorOf(dlg._iqtree_fast)
+    # No UFBoot → Fast search available.
+    dlg._support_iq.setCurrentIndex(dlg._support_iq.findData("0,0"))
+    assert dlg._iqtree_fast.isEnabled()
+    dlg._iqtree_fast.setChecked(True)
+    assert dlg.options().iqtree_fast is True
+    # Turning UFBoot back on clears and disables Fast search.
+    dlg._support_iq.setCurrentIndex(dlg._support_iq.findData("0,1000"))
+    assert not dlg._iqtree_fast.isEnabled()
+    assert not dlg._iqtree_fast.isChecked()
+    assert dlg.options().iqtree_fast is False
 
 
 def test_tree_dialog_reopens_last_tab(qapp, tmp_path):
@@ -182,8 +217,10 @@ def test_each_tab_shows_only_its_engine_rows(qapp, tmp_path):
     assert not _shown(dlg, dlg._model) and not _shown(dlg, dlg._mask)
     dlg._tabs.setCurrentIndex(dlg._tab_index["fasttree"])
     assert _shown(dlg, dlg._support_ft) and not _shown(dlg, dlg._support_iq)
-    for w in (dlg._runs, dlg._seed, dlg._bnni, dlg._iqtree_fast):
+    assert not _shown(dlg, dlg._iqtree_fast)
+    for w in (dlg._runs, dlg._seed, dlg._bnni):
         assert dlg._iq_advanced_panel.isAncestorOf(w)
+    assert not dlg._iq_advanced_panel.isAncestorOf(dlg._iqtree_fast)
 
 
 def test_define_inputs(qapp, tmp_path):
@@ -242,14 +279,15 @@ def test_right_click_engine_radios(qapp, tmp_path):
 
 def test_per_tool_system_path_boxes(qapp, tmp_path):
     dlg = _dialog(qapp, tmp_path)
-    dlg._system_boxes["fastme"].setChecked(True)
     dlg._system_boxes["mafft"].setChecked(True)
     o = dlg.options()
+    # FastME / FastTree have no PATH checkbox (external-only like HISAT2).
     assert (o.use_system_iqtree, o.use_system_fastme, o.use_system_fasttree,
-            o.use_system_mafft) == (False, True, False, True)
+            o.use_system_mafft) == (False, False, False, True)
     legacy = _dialog(qapp, tmp_path, initial=TreeOptions(use_system_path=True))
     o = legacy.options()
-    assert o.use_system_iqtree and o.use_system_fastme and o.use_system_fasttree
+    assert o.use_system_iqtree
+    assert not o.use_system_fastme and not o.use_system_fasttree
     assert not o.use_system_mafft and not o.use_system_path
 
 
@@ -267,11 +305,14 @@ def test_support_choices_write_the_replicates(qapp, tmp_path):
     o = dlg.options()
     assert (o.alrt, o.ufboot, o.bnni) == (0, 1000, True)
     dlg._bnni.setChecked(False)
+    # UFBoot is on → Fast search cannot be ticked (and is not saved).
     dlg._iqtree_fast.setChecked(True)
     o = dlg.options()
-    assert o.bnni is False and o.iqtree_fast is True
+    assert o.bnni is False and o.iqtree_fast is False
     dlg._support_iq.setCurrentIndex(dlg._support_iq.findData("0,0"))
     assert (dlg.options().alrt, dlg.options().ufboot) == (0, 0)
+    dlg._iqtree_fast.setChecked(True)
+    assert dlg.options().iqtree_fast is True
     dlg._support_fme.setCurrentIndex(dlg._support_fme.findData(1000))
     assert dlg.options().distance_bootstrap == 1000
 
@@ -317,8 +358,8 @@ def test_question_mark_help(qapp, tmp_path):
     assert not [lab for lab in dlg.findChildren(QLabel) if lab.text() == "ⓘ"]
     helps = [b for b in dlg.findChildren(QToolButton) if b.text() == "?"]
     # Inputs; Alignment, Monomers, Skip fragments; Root, Threads;
-    # IQ-TREE Settings: Branch support, Model, Methylation check;
-    # IQ-TREE Advanced: Searches, Random seed, bnni, fast;
+    # IQ-TREE Settings: Branch support, Model, Methylation check, Fast search;
+    # IQ-TREE Advanced: Searches, Random seed, bnni;
     # FastME and FastTree: support
     assert len(helps) == 15
     joined = " ".join(b.toolTip() for b in helps)
@@ -363,7 +404,11 @@ def test_options_tab_executable_status(qapp, tmp_path):
     dlg._update_found()
     # Unchecked PATH boxes hide the status line.
     assert dlg._found["iqtree"].isHidden()
-    assert dlg._found["fastme"].isHidden()
+    # FastME / FastTree always show a named status (HISAT2 style).
+    assert not dlg._found["fastme"].isHidden()
+    assert "FastME" in dlg._found["fastme"].text()
+    assert "not configured" in dlg._found["fastme"].text() or "/" in dlg._found["fastme"].text()
+    assert "FastTree" in dlg._found["fasttree"].text()
     dlg._system_boxes["iqtree"].setChecked(True)
     dlg._update_found()
     status = dlg._found["iqtree"].text()
@@ -371,3 +416,23 @@ def test_options_tab_executable_status(qapp, tmp_path):
     assert status.startswith("/") or "built-in" in status
     assert "IQ-TREE" in dlg._system_boxes["iqtree"].toolTip()
     assert "bundled" in dlg._system_boxes["iqtree"].toolTip().lower() or "3.1.4" in dlg._system_boxes["iqtree"].toolTip()
+
+
+def test_fastme_fasttree_configuration_message_matches_hisat2_style():
+    from repeatviewer.backends import tree_builder as tb
+
+    for engine, name, pkg in (
+        (TREE_ENGINE_FASTME, "FastME", f"fastme={tb.FASTME_RECOMMENDED_VERSION}"),
+        (TREE_ENGINE_FASTTREE, "FastTree", f"fasttree={tb.FASTTREE_RECOMMENDED_VERSION}"),
+    ):
+        rich = tb.tree_external_configuration_message(engine, rich=True)
+        plain = tb.tree_external_configuration_message(engine, rich=False)
+        assert "not bundled with RepeatViewer" in rich
+        assert name in rich and pkg in rich
+        assert "rv_env" in rich
+        assert "<b>Then</b>, in RepeatViewer:" in rich
+        assert "External tools" in rich
+        assert "not bundled with RepeatViewer" in plain
+        assert pkg in plain
+        hint = tb.engine_install_hint(engine)
+        assert "not bundled" in hint.lower() and "rv_env" in hint

@@ -35,5 +35,9 @@ def test_worker_emits_command_lines_on_log_line(qapp: QApplication) -> None:
 
     assert finished == ["ok"]
     assert "Command:" in lines
-    assert any("blastn -query q.fa -db genome" in line for line in lines)
+    # One option per line with shell-style ``\\`` continuations.
+    assert "blastn \\" in lines
+    assert "  -query q.fa \\" in lines
+    assert "  -db genome" in lines
+    assert "—— program output ——" in lines
     assert "stdout sample" in lines
