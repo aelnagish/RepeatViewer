@@ -389,22 +389,62 @@ def _pixel_scale(layout: tl.Layout, n_tips: int, row_h: float,
     return s, s
 
 
+def display_leaves(display: Display) -> list[int]:
+    """Display nodes drawn as a leaf (a tip or a collapsed clade), top to bottom."""
+    nodes = display.model.nodes
+    out: list[int] = []
+    stack = [0]
+    while stack:
+        i = stack.pop()
+        node = nodes[i]
+        if node.is_tip or i in display.info:
+            out.append(i)
+        else:
+            stack.extend(reversed(node.children))
+    return out
+
+
 def selection_branch_nodes(
     display: Display, selected: tuple[str, ...] | None
 ) -> frozenset[int]:
     """Display nodes whose branch should be blue for ``selected`` tips.
 
-    For a multi-tip selection this is the spanning subtree: every branch on a
-    path between selected tips, including the LCA connector — not only the tip
-    stubs (so internal segments between selected tips are highlighted too).
+    Tips that sit next to each other in the drawing form one group, drawn as the
+    spanning subtree (every branch on a path between them, including the LCA
+    connector). Groups separated by unselected tips are drawn on their own, so
+    two distant picks do not light up the branches between them.
     """
     if not selected:
         return frozenset()
     sel = set(selected)
-    n_sel = len(sel)
     keys = display.keys
+    runs: list[list[int]] = []
+    current: list[int] = []
+    for i in display_leaves(display):
+        if any(tip in sel for tip in keys[i]):
+            current.append(i)
+        elif current:
+            runs.append(current)
+            current = []
+    if current:
+        runs.append(current)
+    out: set[int] = set()
+    for run in runs:
+        out |= _run_branch_nodes(display, run, sel)
+    return frozenset(out)
+
+
+def _run_branch_nodes(display: Display, run: list[int], sel: set[str]) -> set[int]:
     nodes = display.model.nodes
-    counts = [sum(1 for tip in keys[i] if tip in sel) for i in range(len(nodes))]
+    keys = display.keys
+    run_sel = {tip for i in run for tip in keys[i] if tip in sel}
+    n_sel = len(run_sel)
+    counts = [0] * len(nodes)
+    for i in run:
+        counts[i] = sum(1 for tip in keys[i] if tip in run_sel)
+    for node in reversed(nodes):
+        if node.children:
+            counts[node.index] = sum(counts[c] for c in node.children)
     out: set[int] = set()
     for i, node in enumerate(nodes):
         under = counts[i]
@@ -416,11 +456,11 @@ def selection_branch_nodes(
             continue
         # under == n_sel: highlight only the LCA (no child holds every selected tip).
         if node.is_tip:
-            if node.name in sel:
+            if node.name in run_sel or i in display.info:
                 out.add(i)
         elif node.children and all(counts[c] < n_sel for c in node.children):
             out.add(i)
-    return frozenset(out)
+    return out
 
 
 def shorten(text: str, max_chars: int, keep_end: bool = True) -> str:
@@ -1109,7 +1149,8 @@ def _point_segment_distance(p: QPointF, a: QPointF, b: QPointF) -> float:
 
 
 class TreeCanvas(QGraphicsView):
-    """Shift+scroll to zoom, scroll to pan, left-drag to select tips, middle/Alt-drag to pan.
+    """Shift+scroll to zoom, scroll to pan, left-drag to select tips (Cmd/Ctrl adds to the
+    selection), middle/Alt-drag to pan.
 
     Clicking a branch, tip or collapsed clade reports its display node index."""
 
@@ -1118,6 +1159,8 @@ class TreeCanvas(QGraphicsView):
     nodeDoubleClicked = Signal(int)           # -1 = empty space
     zoomChanged = Signal()                    # after wheel / zoom_by / fit
     rubberBandNodes = Signal(object)          # list[int] tip/collapsed indices in the band
+    nodeToggled = Signal(int)                 # Cmd/Ctrl+click: add or remove from the selection
+    rubberBandAdd = Signal(object)            # Cmd/Ctrl+drag: add the band's tips
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1318,15 +1361,23 @@ class TreeCanvas(QGraphicsView):
             event.accept()
             return
         if event.button() == Qt.MouseButton.LeftButton:
+            additive = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
             if self._rubber is not None and self._rubber.isVisible():
                 rect = self._rubber.geometry()
                 self._clear_rubber()
-                self.rubberBandNodes.emit(self.tip_nodes_in_view_rect(rect))
+                nodes = self.tip_nodes_in_view_rect(rect)
+                if additive:
+                    self.rubberBandAdd.emit(nodes)
+                else:
+                    self.rubberBandNodes.emit(nodes)
             elif (
                 self._press is not None
                 and (pos - self._press).manhattanLength() < 4
             ):
-                self.nodeClicked.emit(self.node_at(pos))
+                if additive:
+                    self.nodeToggled.emit(self.node_at(pos))
+                else:
+                    self.nodeClicked.emit(self.node_at(pos))
             self._press = None
             self._clear_rubber()
             event.accept()
@@ -1688,6 +1739,8 @@ class TreePanel(QWidget):
         self._canvas.nodeContextMenu.connect(self._on_context_menu)
         self._canvas.nodeDoubleClicked.connect(self._on_node_double_clicked)
         self._canvas.rubberBandNodes.connect(self._on_rubber_band_nodes)
+        self._canvas.nodeToggled.connect(self._on_node_toggled)
+        self._canvas.rubberBandAdd.connect(self._on_rubber_band_add)
         self._canvas.zoomChanged.connect(self._sync_zoom_slider_from_canvas)
 
         # Toolbar only over the tree column — Display rail is full height (MSA-like).
@@ -2232,12 +2285,12 @@ class TreePanel(QWidget):
         self._selected = None if key == self._selected else key
         self._redraw(refit=False)
 
-    def _on_rubber_band_nodes(self, indices) -> None:
-        """Left-drag rectangle: select every tip (or collapsed clade) whose label is hit."""
+    def _band_names(self, indices) -> set[str]:
+        """Tip names (a collapsed clade counts all its tips) for display indices."""
         d = self._display
-        if d is None:
-            return
         names: set[str] = set()
+        if d is None:
+            return names
         for raw in indices or ():
             try:
                 i = int(raw)
@@ -2248,7 +2301,36 @@ class TreePanel(QWidget):
             node = d.model.nodes[i]
             if node.is_tip or i in d.info:
                 names.update(d.keys[i])
+        return names
+
+    def _on_rubber_band_nodes(self, indices) -> None:
+        """Left-drag rectangle: select every tip (or collapsed clade) whose label is hit."""
+        if self._display is None:
+            return
+        names = self._band_names(indices)
         self._selected = tuple(sorted(names)) if names else None
+        self._redraw(refit=False)
+
+    def _on_rubber_band_add(self, indices) -> None:
+        """Cmd/Ctrl + drag: add the tips in the rectangle to the selection."""
+        names = self._band_names(indices)
+        if not names:
+            return
+        self._selected = tuple(sorted(set(self._selected or ()) | names))
+        self._redraw(refit=False)
+
+    def _on_node_toggled(self, index: int) -> None:
+        """Cmd/Ctrl + click: add the tip, branch or collapsed clade to the selection,
+        or take it out when all its tips are already selected."""
+        key = self._key_for(index)
+        if not key:
+            return
+        current = set(self._selected or ())
+        if all(name in current for name in key):
+            current -= set(key)
+        else:
+            current |= set(key)
+        self._selected = tuple(sorted(current)) if current else None
         self._redraw(refit=False)
 
     def _tip_at(self, index: int) -> str | None:
@@ -2446,7 +2528,7 @@ class TreePanel(QWidget):
             title.setEnabled(False)
             self._add_clade_actions(menu, self._selected)
         else:
-            hint = menu.addAction("Click a branch, or drag over tip names")
+            hint = menu.addAction("Click a branch, or drag over tip names (Cmd/Ctrl adds)")
             hint.setEnabled(False)
         menu.addSeparator()
         self._add_tree_actions(menu)
