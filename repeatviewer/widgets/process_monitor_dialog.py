@@ -70,6 +70,31 @@ def _positive_type_parts(
     ]
 
 
+def _append_typed_count_block(
+    lines: list[str],
+    *,
+    header: str,
+    ordered: Sequence[str],
+    counts: Mapping[str, int],
+    include_zeros: bool = False,
+) -> None:
+    """Append ``header`` then one indented ``type count`` line per kind."""
+    lines.append(header)
+    for key in ordered:
+        value = int(counts.get(key, 0) or 0)
+        if value <= 0 and not include_zeros:
+            continue
+        lines.append(f"  {key} {value}")
+    # Types present in counts but not in preferred order.
+    for key in sorted(counts):
+        if key in ordered:
+            continue
+        value = int(counts.get(key, 0) or 0)
+        if value <= 0:
+            continue
+        lines.append(f"  {key} {value}")
+
+
 def format_annotation_run_summary(
     *,
     n_sequences: int,
@@ -81,14 +106,18 @@ def format_annotation_run_summary(
 ) -> list[str]:
     """Plain-language end-of-job lines for Feature / Similarity annotation.
 
-    When ``found_by_type`` is set (Feature detection), report total found plus
-    how many already match existing annotations vs newly found, with per-type
-    breakdowns for overlap and new::
+    When ``found_by_type`` is set (Feature detection), report totals with each
+    feature kind on its own line::
 
         Finished annotating 15 sequences.
-        Found 49 features (ORF 49): 49 overlap existing (ORF 49), 0 new.
+        Found 49 features:
+          ORF 49
+        49 overlap existing:
+          ORF 49
+        0 new.
 
-    Otherwise keep the legacy “new features” wording (Similarity / Transfer).
+    Otherwise keep the legacy “new features” wording (Similarity / Transfer),
+    also one kind per line when multiple types are present.
     """
     n_sequences = max(0, int(n_sequences))
     lines: list[str] = []
@@ -130,34 +159,37 @@ def format_annotation_run_summary(
             lines.append("Found no features.")
             return lines
 
-        parts = [f"{key} {display.get(key, 0)}" for key in ordered]
-        if len(preferred) <= 1:
-            parts = [p for p in parts if not p.endswith(" 0")] or parts
         feat_word = "feature" if total_found == 1 else "features"
-        type_bit = f" ({', '.join(parts)})" if parts else ""
         if total_found <= 0:
-            lines.append(f"Found no features{type_bit}.")
+            lines.append("Found no features.")
             return lines
 
-        overlap_parts = _positive_type_parts(ordered, overlap)
-        new_parts = _positive_type_parts(ordered, new_counts)
-        # Include types that only appear in overlap/new (not in preferred zeros).
-        for key in sorted(set(overlap) | set(new_counts)):
-            if key in ordered:
-                continue
-            if overlap.get(key, 0) > 0:
-                overlap_parts.append(f"{key} {overlap[key]}")
-            if new_counts.get(key, 0) > 0:
-                new_parts.append(f"{key} {new_counts[key]}")
-        overlap_bit = (
-            f" ({', '.join(overlap_parts)})" if overlap_parts and total_overlap > 0 else ""
+        _append_typed_count_block(
+            lines,
+            header=f"Found {total_found} {feat_word}:",
+            ordered=ordered,
+            counts=display,
         )
-        new_bit = f" ({', '.join(new_parts)})" if new_parts and total_new_n > 0 else ""
-        lines.append(
-            f"Found {total_found} {feat_word}{type_bit}: "
-            f"{total_overlap} overlap existing{overlap_bit}, "
-            f"{total_new_n} new{new_bit}."
-        )
+
+        if total_overlap > 0:
+            _append_typed_count_block(
+                lines,
+                header=f"{total_overlap} overlap existing:",
+                ordered=ordered,
+                counts=overlap,
+            )
+        else:
+            lines.append("0 overlap existing.")
+
+        if total_new_n > 0:
+            _append_typed_count_block(
+                lines,
+                header=f"{total_new_n} new:",
+                ordered=ordered,
+                counts=new_counts,
+            )
+        else:
+            lines.append("0 new.")
         return lines
 
     counts = new_counts
@@ -169,31 +201,23 @@ def format_annotation_run_summary(
     preferred = [str(t).strip() for t in (preferred_types or ()) if str(t).strip()]
     ordered = _ordered_type_keys(preferred_types=preferred, counts=counts)
 
-    if total <= 0 and not ordered:
+    if total <= 0:
         lines.append("Found no new features.")
         return lines
-    if total <= 0:
-        zero_parts = [f"{key} 0" for key in ordered]
-        if zero_parts:
-            lines.append(
-                "Found no new features"
-                + (f" ({', '.join(zero_parts)})." if len(zero_parts) > 1 else ".")
-            )
-        else:
-            lines.append("Found no new features.")
-        return lines
-
-    parts = [f"{key} {counts.get(key, 0)}" for key in ordered if counts.get(key, 0) > 0]
-    if len(preferred) > 1:
-        parts = [f"{key} {counts.get(key, 0)}" for key in ordered]
 
     feat_word = "feature" if total == 1 else "features"
-    if not parts:
+    include_zeros = len(preferred) > 1
+    parts_keys = ordered if include_zeros else [k for k in ordered if counts.get(k, 0) > 0]
+    if not parts_keys:
         lines.append(f"Found {total} new {feat_word}.")
-    elif len(parts) == 1 and counts.get(ordered[0], 0) == total:
-        lines.append(f"Found {total} new {feat_word} ({parts[0]}).")
     else:
-        lines.append(f"Found {total} new {feat_word} ({', '.join(parts)}).")
+        _append_typed_count_block(
+            lines,
+            header=f"Found {total} new {feat_word}:",
+            ordered=parts_keys,
+            counts=counts,
+            include_zeros=include_zeros,
+        )
     return lines
 
 
@@ -377,7 +401,7 @@ class ProcessMonitorDialog(QDialog):
 
     @staticmethod
     def _is_section_heading(line: str) -> bool:
-        """Bold Command: / program output (and related section labels)."""
+        """Bold Command: / program output / end-of-job finding summary."""
         if line in (PROCESS_LOG_COMMAND_HEADER, PROCESS_LOG_OUTPUT_HEADER):
             return True
         if line.startswith("Working directory:"):
@@ -387,6 +411,21 @@ class ProcessMonitorDialog(QDialog):
         if line.startswith("Output:"):
             return True
         if line in ("— finished —",) or line.startswith("— failed:"):
+            return True
+        # Final feature finding block (headers + per-kind rows).
+        if line.startswith("Found "):
+            return True
+        if line.startswith("Finished annotating") or line == "Finished annotation.":
+            return True
+        if " overlap existing" in line or line.endswith(" new:") or line in (
+            "0 overlap existing.",
+            "0 new.",
+            "Found no features.",
+            "Found no new features.",
+        ):
+            return True
+        if line.startswith("  ") and line.strip():
+            # Indented ``LTR 322`` style rows under the finding headers.
             return True
         return False
 

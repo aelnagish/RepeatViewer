@@ -1147,11 +1147,12 @@ def run_on_sequence(
         from repeatviewer.tool_output_paths import kept_input_name
 
         tsd_opts = tsd_search_options or TsdSearchOptions()
-        if tsd_opts.left_boundary <= 0 or tsd_opts.right_boundary <= 0:
-            raise RuntimeError(
-                "Set left and right MSA boundary columns before running TSD search."
-            )
-        if tsd_opts.left_boundary >= tsd_opts.right_boundary:
+        # 0 / 0 = search the whole MSA (TEtrimmer-style filter + clustering).
+        if (
+            tsd_opts.left_boundary > 0
+            and tsd_opts.right_boundary > 0
+            and tsd_opts.left_boundary >= tsd_opts.right_boundary
+        ):
             raise RuntimeError("Left boundary must be less than the right boundary.")
 
         out_file = out_dir / f"{kept_input_name(seq_path)}.tsd_search.txt"

@@ -632,6 +632,9 @@ from repeatviewer.job_options import (
     GappyColumnOptions,
     MsaCleanOptions,
     TeaAidOptions,
+    TSD_BOUNDARY_REPEATVIEWER,
+    TSD_BOUNDARY_SOURCES,
+    TSD_BOUNDARY_USER,
     TsdSearchOptions,
     normalize_blast_evalue,
     normalize_flexidot_output_format,
@@ -6582,67 +6585,57 @@ class TsdSearchParamsDialog(QDialog):
         self.setWindowTitle(title)
         opts = initial or TsdSearchOptions()
         self._include_clustering = bool(include_clustering)
+        self._saved_left = max(0, int(opts.left_boundary))
+        self._saved_right = max(0, int(opts.right_boundary))
 
-        self._left = QSpinBox()
-        self._left.setRange(0, 10_000_000)
-        self._left.setValue(opts.left_boundary)
-        self._left.setToolTip(
-            "Putative left TE boundary as a 1-based MSA column (0 = auto)."
+        self._boundary_source = QComboBox()
+        self._boundary_source.addItem("RepeatViewer", TSD_BOUNDARY_REPEATVIEWER)
+        self._boundary_source.addItem("User define", TSD_BOUNDARY_USER)
+        source = (
+            opts.boundary_source
+            if opts.boundary_source in TSD_BOUNDARY_SOURCES
+            else TSD_BOUNDARY_REPEATVIEWER
         )
-
-        self._right = QSpinBox()
-        self._right.setRange(0, 10_000_000)
-        self._right.setValue(opts.right_boundary)
-        self._right.setToolTip(
-            "Putative right TE boundary as a 1-based MSA column (0 = auto)."
+        idx = self._boundary_source.findData(source)
+        self._boundary_source.setCurrentIndex(max(0, idx))
+        self._boundary_source.setToolTip(
+            "RepeatViewer: *.boundaries_RV.json. "
+            "User define: popup at run time to drag the MSA."
         )
 
         self._radius = QSpinBox()
-        self._radius.setRange(1, 10_000)
-        self._radius.setValue(opts.nt_radius)
-        self._radius.setSuffix(" nt")
+        self._radius.setRange(1, 10_000_000)
+        self._radius.setValue(max(1, int(opts.nt_radius)))
         self._radius.setToolTip(
-            "Search region (nucleotides) around each provided boundary."
+            "MSA columns to search on both sides of each TE edge "
+            "(gaps count as positions)."
         )
 
         self._min_len = QSpinBox()
         self._min_len.setRange(2, 200)
         self._min_len.setValue(opts.min_tsd_length)
-        self._min_len.setSuffix(" nt")
         self._min_len.setToolTip("Minimum TSD motif length.")
 
         self._max_len = QSpinBox()
         self._max_len.setRange(2, 200)
         self._max_len.setValue(opts.max_tsd_length)
-        self._max_len.setSuffix(" nt")
         self._max_len.setToolTip("Maximum TSD motif length.")
 
         self._min_dist = QSpinBox()
         self._min_dist.setRange(0, 10_000_000)
         self._min_dist.setValue(opts.min_distance)
-        self._min_dist.setSuffix(" nt")
         self._min_dist.setToolTip(
             "Minimum distance between the left and right TSD copies "
-            "(TE body length). 0 = no minimum."
+            "(TE body length). Default 200 bp. 0 = no minimum."
         )
-
-        self._max_dist = QSpinBox()
-        self._max_dist.setRange(0, 10_000_000)
-        self._max_dist.setValue(opts.max_distance)
-        self._max_dist.setSuffix(" nt")
-        self._max_dist.setToolTip(
-            "Maximum distance between the left and right TSD copies. "
-            "0 = no maximum."
-        )
+        self._saved_max_distance = max(0, int(opts.max_distance))
 
         form = QFormLayout()
-        form.addRow("Left boundary (MSA column):", self._left)
-        form.addRow("Right boundary (MSA column):", self._right)
-        form.addRow("Search region around boundary:", self._radius)
-        form.addRow("Min TSD length:", self._min_len)
-        form.addRow("Max TSD length:", self._max_len)
-        form.addRow("Min distance between TSDs:", self._min_dist)
-        form.addRow("Max distance between TSDs:", self._max_dist)
+        form.addRow("Boundary definition:", self._boundary_source)
+        form.addRow("Search range around boundary (bp):", self._radius)
+        form.addRow("Min TSD length (bp):", self._min_len)
+        form.addRow("Max TSD length (bp):", self._max_len)
+        form.addRow("Min distance between TSDs (bp):", self._min_dist)
 
         if self._include_clustering:
             self._max_sim = QDoubleSpinBox()
@@ -6651,7 +6644,9 @@ class TsdSearchParamsDialog(QDialog):
             self._max_sim.setSingleStep(0.05)
             self._max_sim.setValue(opts.max_sim_threshold)
             self._max_sim.setToolTip(
-                "Clustering: discard TSD groups that are too similar to each other."
+                "Discard a TSD location when average motif similarity across "
+                "copies exceeds this value (Jaccard on 2-mers). True genomic "
+                "TSDs differ between insertions; identical flanks are rejected."
             )
 
             self._nt_threshold = QDoubleSpinBox()
@@ -6692,30 +6687,245 @@ class TsdSearchParamsDialog(QDialog):
     def options(self) -> TsdSearchOptions:
         min_len = int(self._min_len.value())
         max_len = max(min_len, int(self._max_len.value()))
+        defaults = TsdSearchOptions()
+        source = self._boundary_source.currentData()
+        if source not in TSD_BOUNDARY_SOURCES:
+            source = TSD_BOUNDARY_REPEATVIEWER
         return TsdSearchOptions(
-            left_boundary=self._left.value(),
-            right_boundary=self._right.value(),
-            nt_radius=self._radius.value(),
+            left_boundary=self._saved_left,
+            right_boundary=self._saved_right,
+            nt_radius=int(self._radius.value()),
             min_tsd_length=min_len,
             max_tsd_length=max_len,
             min_distance=self._min_dist.value(),
-            max_distance=self._max_dist.value(),
+            max_distance=self._saved_max_distance,
             max_sim_threshold=(
                 self._max_sim.value()
                 if self._max_sim is not None
-                else TsdSearchOptions().max_sim_threshold
+                else defaults.max_sim_threshold
             ),
             nt_threshold=(
                 self._nt_threshold.value()
                 if self._nt_threshold is not None
-                else TsdSearchOptions().nt_threshold
+                else defaults.nt_threshold
             ),
             cluster_eps=(
                 self._cluster_eps.value()
                 if self._cluster_eps is not None
-                else TsdSearchOptions().cluster_eps
+                else defaults.cluster_eps
             ),
+            boundary_source=str(source),
         )
+
+
+class TsdBoundaryDialog(QDialog):
+    """User-define left/right TE edges before a TSD scan.
+
+    Drag a column range on the Overview MSA to fill Start / End. Prefills from
+    RepeatViewer boundaries when available.
+    """
+
+    def __init__(
+        self,
+        *,
+        left_boundary: int = 0,
+        right_boundary: int = 0,
+        nt_radius: int = 100,
+        aln_len: int = 1,
+        parent=None,
+        title: str = "TSD search boundaries",
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        # Must stay non-modal and use show()+event-loop (not exec()) so the
+        # Overview MSA can receive drag events while this dialog is open.
+        # Never use WindowStaysOnTopHint (covers other apps); raise_ on MSA drag.
+        self.setModal(False)
+        self.setWindowModality(Qt.WindowModality.NonModal)
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, False)
+        self._aln_len = max(1, int(aln_len))
+        self._updating = False
+
+        hint = QLabel("Drag a column range on the MSA to set Start and End", self)
+        hint.setWordWrap(True)
+
+        self._left = QSpinBox(self)
+        self._left.setRange(0, self._aln_len)
+        self._left.setSpecialValueText("unset")
+        self._left.setValue(max(0, min(self._aln_len, int(left_boundary))))
+        self._left.setToolTip("1-based left TE edge (0 = unset / whole MSA).")
+
+        self._right = QSpinBox(self)
+        self._right.setRange(0, self._aln_len)
+        self._right.setSpecialValueText("unset")
+        self._right.setValue(max(0, min(self._aln_len, int(right_boundary))))
+        self._right.setToolTip("1-based right TE edge (0 = unset / whole MSA).")
+
+        self._radius = QSpinBox(self)
+        self._radius.setRange(1, 10_000_000)
+        self._radius.setValue(max(1, int(nt_radius)))
+        self._radius.setToolTip(
+            "MSA columns to search on both sides of each TE edge "
+            "(gaps count as positions)."
+        )
+
+        form = QFormLayout()
+        form.addRow("Start (left boundary):", self._left)
+        form.addRow("End (right boundary):", self._right)
+        form.addRow("Search range around boundary (bp):", self._radius)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
+            self,
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(hint)
+        layout.addLayout(form)
+        layout.addWidget(buttons)
+        self.resize(420, 200)
+
+    def set_from_msa_selection(self, start: int, end: int) -> None:
+        """Fill Start/End from a 1-based inclusive MSA column selection."""
+        if self._updating:
+            return
+        a = max(1, min(self._aln_len, int(start)))
+        b = max(1, min(self._aln_len, int(end)))
+        if b < a:
+            a, b = b, a
+        self._updating = True
+        try:
+            self._left.setValue(a)
+            self._right.setValue(b)
+        finally:
+            self._updating = False
+        # Keep this dialog in front of RepeatViewer while the user drags the MSA
+        # (not above other applications).
+        self.raise_()
+
+    def left_boundary(self) -> int:
+        return int(self._left.value())
+
+    def right_boundary(self) -> int:
+        return int(self._right.value())
+
+    def nt_radius(self) -> int:
+        return int(self._radius.value())
+
+    def apply_to_options(self, opts: TsdSearchOptions) -> TsdSearchOptions:
+        """Return ``opts`` with confirmed boundaries / radius."""
+        from dataclasses import replace
+
+        return replace(
+            opts,
+            left_boundary=self.left_boundary(),
+            right_boundary=self.right_boundary(),
+            nt_radius=self.nt_radius(),
+        )
+
+
+def _auto_resolve_tsd_boundaries(
+    opts: TsdSearchOptions,
+    *,
+    file_path: Path | str,
+    aln_len: int,
+    reference_extent_1based: tuple[int, int] | None = None,
+    reference_sequence: str | None = None,
+) -> TsdSearchOptions:
+    """Fill left/right from RepeatViewer / reference without a dialog."""
+    from dataclasses import replace
+
+    from repeatviewer.backends.tsd_search import (
+        boundaries_from_sidecar_1based,
+        preferred_tsd_boundaries_1based,
+    )
+
+    aln_len = max(1, int(aln_len))
+    left, right = preferred_tsd_boundaries_1based(
+        file_path,
+        aln_len,
+        boundary_source=opts.boundary_source,
+        saved_left=opts.left_boundary,
+        saved_right=opts.right_boundary,
+        reference_extent_1based=reference_extent_1based,
+        reference_sequence=reference_sequence,
+    )
+    if left <= 0 and right <= 0:
+        rv = boundaries_from_sidecar_1based(file_path, aln_len)
+        if rv is not None:
+            left, right = rv
+    return replace(opts, left_boundary=left, right_boundary=right)
+
+
+def prompt_tsd_boundaries(
+    *,
+    opts: TsdSearchOptions,
+    file_path: Path | str,
+    aln_len: int,
+    parent: QWidget | None = None,
+    reference_extent_1based: tuple[int, int] | None = None,
+    reference_sequence: str | None = None,
+    on_dialog_ready=None,
+) -> TsdSearchOptions | None:
+    """Resolve TE edges for a TSD run.
+
+    RepeatViewer / Reference: resolve silently.
+    User define: show a non-modal dialog (MSA drag fills Start/End). Cancel →
+    ``None``. Prefills from ``*.boundaries_RV.json`` when available.
+    """
+    from PySide6.QtCore import QEventLoop
+
+    from repeatviewer.backends.tsd_search import boundaries_from_sidecar_1based
+
+    if opts.boundary_source != TSD_BOUNDARY_USER:
+        return _auto_resolve_tsd_boundaries(
+            opts,
+            file_path=file_path,
+            aln_len=aln_len,
+            reference_extent_1based=reference_extent_1based,
+            reference_sequence=reference_sequence,
+        )
+
+    aln_len = max(1, int(aln_len))
+    left, right = 0, 0
+    rv = boundaries_from_sidecar_1based(file_path, aln_len)
+    if rv is not None:
+        left, right = rv
+    elif opts.left_boundary > 0 or opts.right_boundary > 0:
+        left, right = opts.left_boundary, opts.right_boundary
+
+    dialog = TsdBoundaryDialog(
+        left_boundary=left,
+        right_boundary=right,
+        nt_radius=opts.nt_radius,
+        aln_len=aln_len,
+        parent=parent,
+    )
+    dialog.setModal(False)
+    dialog.setWindowModality(Qt.WindowModality.NonModal)
+    dialog.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, False)
+    if callable(on_dialog_ready):
+        on_dialog_ready(dialog)
+
+    # QDialog.exec() forces modality even when setModal(False). Use show() +
+    # a local event loop so the MSA stays interactive for drag-to-fill.
+    loop = QEventLoop(dialog)
+    finished_code = {"value": int(QDialog.DialogCode.Rejected)}
+
+    def _on_finished(code: int) -> None:
+        finished_code["value"] = int(code)
+        loop.quit()
+
+    dialog.finished.connect(_on_finished)
+    dialog.show()
+    dialog.raise_()
+    dialog.activateWindow()
+    loop.exec()
+    if finished_code["value"] != int(QDialog.DialogCode.Accepted):
+        return None
+    return dialog.apply_to_options(opts)
 
 
 _KEEP_CURRENT = object()
@@ -10074,13 +10284,9 @@ class TeAnnotationDialog(QDialog):
         auto_box = QGroupBox("Feature detection settings", self)
         auto_box_layout = QVBoxLayout(auto_box)
         auto_box_layout.addWidget(self._auto_settings_panel)
+        # Sequence Annotation: RepeatViewer boundaries only (no User-define popup).
         self._tsd_settings_panel = self._TsdSearchSettingsPanel(
-            auto_box,
-            note=(
-                "TSD runs on MSA files (≥2 sequences). Sequence Annotation writes "
-                "features to the annotation JSON for Overview display. Tools → "
-                "TSD search also writes a clustered text report."
-            ),
+            auto_box, allow_user_boundary=False
         )
         auto_box_layout.addWidget(self._tsd_settings_panel)
         auto_box_layout.addWidget(self._auto_settings_panel.pbs_section_widget())
@@ -10662,7 +10868,9 @@ class TeAnnotationDialog(QDialog):
         new_sim = SimilarityAnnotationSettingsPanel(
             SimilarityAnnotationSettings(), parent_sim, include_run_controls=False
         )
-        new_tsd = TsdSearchSettingsPanel(parent_auto, initial=TsdSearchOptions())
+        new_tsd = TsdSearchSettingsPanel(
+            parent_auto, initial=TsdSearchOptions(), allow_user_boundary=False
+        )
         new_pbs = new_auto.pbs_section_widget()
         if parent_auto is not None:
             layout = parent_auto.layout()

@@ -13121,7 +13121,118 @@ class MainWindow(NcbiDownloadActionsMixin, PrimerActionsMixin, QMainWindow):
         self._run_extend()
 
     def _run_tsd_search(self) -> None:
-        self._apply_function("tsd_search", tsd_search_options=self._tsd_search_options)
+        opts = self._prompt_tsd_boundaries_before_run(self._tsd_search_options)
+        if opts is None:
+            return
+        self._tsd_search_options = opts
+        save_tsd_search_options(opts)
+        self._apply_function("tsd_search", tsd_search_options=opts)
+
+    def _prompt_tsd_boundaries_before_run(self, opts: TsdSearchOptions):
+        """Prefill TE edges from settings source / RV sidecar, then confirm."""
+        from Bio import AlignIO
+
+        from repeatviewer.views.tool_dialogs import prompt_tsd_boundaries
+
+        selected = [
+            p for p in self._selected_files() if p.suffix.lower() in _FASTA_SUFFIXES
+        ]
+        if not selected:
+            # Fall through to _apply_function's own "no files" handling after a
+            # generic boundary confirm when possible.
+            return opts
+        fasta = selected[0]
+        try:
+            alignment = AlignIO.read(str(fasta), "fasta")
+            aln_len = len(alignment[0]) if alignment else 1
+            ref_seq = str(alignment[0].seq) if alignment else None
+        except Exception:
+            aln_len = 1
+            ref_seq = None
+
+        ref_extent = None
+        overview = self._overview_panel_for_path(fasta)
+        if overview is not None:
+            bars = getattr(overview, "_bars", None)
+            extent0 = None
+            if bars is not None and hasattr(bars, "msa_standard_extent_columns"):
+                extent0 = bars.msa_standard_extent_columns()
+            if extent0 is not None:
+                ref_extent = (int(extent0[0]) + 1, int(extent0[1]) + 1)
+            if bars is not None and hasattr(bars, "max_length"):
+                aln_len = max(1, int(bars.max_length()))
+
+        def _wire(dialog) -> None:
+            if overview is None:
+                return
+            bars = getattr(overview, "_bars", None)
+            if bars is None or not hasattr(bars, "regionSelectionChanged"):
+                return
+
+            def _apply_span(start: object, end: object) -> None:
+                try:
+                    dialog.set_from_msa_selection(int(start), int(end))
+                except (TypeError, ValueError):
+                    return
+
+            def _on_region(region: object) -> None:
+                if not isinstance(region, tuple) or len(region) != 2:
+                    return
+                _apply_span(region[0], region[1])
+
+            def _on_preview(payload: object) -> None:
+                if not isinstance(payload, tuple) or len(payload) < 2:
+                    return
+                _apply_span(payload[0], payload[1])
+
+            bars.regionSelectionChanged.connect(_on_region)
+            if hasattr(bars, "regionDragPreview"):
+                bars.regionDragPreview.connect(_on_preview)
+            current = bars.region_selection() if hasattr(bars, "region_selection") else None
+            if current is not None:
+                _apply_span(current[0], current[1])
+
+            def _cleanup() -> None:
+                for signal, slot in (
+                    (bars.regionSelectionChanged, _on_region),
+                    (getattr(bars, "regionDragPreview", None), _on_preview),
+                ):
+                    if signal is None:
+                        continue
+                    try:
+                        signal.disconnect(slot)
+                    except (RuntimeError, TypeError):
+                        pass
+
+            dialog.finished.connect(_cleanup)
+
+        return prompt_tsd_boundaries(
+            opts=opts,
+            file_path=fasta,
+            aln_len=aln_len,
+            parent=self,
+            reference_extent_1based=ref_extent,
+            reference_sequence=ref_seq,
+            on_dialog_ready=_wire,
+        )
+
+    def _overview_panel_for_path(self, path: Path):
+        """Return an open Overview panel showing ``path``, if any."""
+        from repeatviewer.widgets.multi_sequence_overview import (
+            MultiSequenceOverviewPanel,
+        )
+
+        want = path.expanduser().resolve()
+        for panel in self.findChildren(MultiSequenceOverviewPanel):
+            panel_path = getattr(panel, "_path", None)
+            if panel_path is None:
+                continue
+            try:
+                if Path(panel_path).expanduser().resolve() == want:
+                    return panel
+            except OSError:
+                continue
+        return None
 
     def _run_teaid(self) -> None:
         self._apply_function("teaid", teaid_options=self._teaid_options)
@@ -13201,11 +13312,12 @@ class MainWindow(NcbiDownloadActionsMixin, PrimerActionsMixin, QMainWindow):
         if run_after:
             self._run_tsd_search()
         else:
+            src = self._tsd_search_options.boundary_source
             self._set_status_message(
                 "TSD search defaults: "
-                f"left {self._tsd_search_options.left_boundary}, "
-                f"right {self._tsd_search_options.right_boundary}, "
-                f"radius {self._tsd_search_options.nt_radius} nt",
+                f"min length {self._tsd_search_options.min_tsd_length} bp, "
+                f"search ±{self._tsd_search_options.nt_radius} bp, "
+                f"boundaries={src}",
                 5000,
             )
 
@@ -16193,17 +16305,12 @@ class MainWindow(NcbiDownloadActionsMixin, PrimerActionsMixin, QMainWindow):
                 return
         if func_name == "tsd_search":
             tsd_opts = job_kwargs.get("tsd_search_options") or self._tsd_search_options
-            if tsd_opts.left_boundary <= 0 or tsd_opts.right_boundary <= 0:
-                dialog = TsdSearchParamsDialog(
-                    initial=tsd_opts,
-                    title="TSD search parameters",
-                    parent=self,
-                )
-                if not dialog.exec():
-                    return
-                tsd_opts = dialog.options()
-                job_kwargs["tsd_search_options"] = tsd_opts
-            if tsd_opts.left_boundary >= tsd_opts.right_boundary:
+            # 0 / 0 = search the whole MSA with TEtrimmer-style filtering.
+            if (
+                tsd_opts.left_boundary > 0
+                and tsd_opts.right_boundary > 0
+                and tsd_opts.left_boundary >= tsd_opts.right_boundary
+            ):
                 QMessageBox.warning(
                     self,
                     "TSD search",

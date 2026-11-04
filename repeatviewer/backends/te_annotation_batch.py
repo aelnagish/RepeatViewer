@@ -43,7 +43,10 @@ from repeatviewer.backends.sequence_features import (
     save_annotations_multi,
 )
 from repeatviewer.backends.thread_budget import load_batch_workers
-from repeatviewer.backends.tsd_search import detect_tsd_features_by_id
+from repeatviewer.backends.tsd_search import (
+    detect_tsd_features_by_id,
+    tsd_cluster_report_path,
+)
 from repeatviewer.job_options import TsdSearchOptions, load_tsd_search_options
 from repeatviewer.backends.similarity_annotation import (
     SimilarityAnnotationSettings,
@@ -83,6 +86,7 @@ class TeAnnotationBatchResult:
     lengths_by_id: dict[str, int]
     json_path: Path | None = None
     gff_path: Path | None = None
+    tsd_report_path: Path | None = None
     # Sequences that failed detection but did not abort the batch: (id, reason).
     skipped_sequences: tuple[tuple[str, str], ...] = ()
     # Features newly present after this run (not in the pre-job baseline).
@@ -103,6 +107,8 @@ class TeAnnotationBatchResult:
             paths.append(self.json_path.resolve())
         if self.gff_path is not None:
             paths.append(self.gff_path.resolve())
+        if self.tsd_report_path is not None:
+            paths.append(self.tsd_report_path.resolve())
         return paths
 
     def skipped_reminder_parts(
@@ -396,16 +402,53 @@ def run_te_annotation_on_fasta(
                 {k: v for k, v in dict(new or {}).items() if str(k).strip()}
             )
 
-    def _apply_msa_tsd() -> None:
-        """Scan TSD on each MSA row and merge features (no cluster step)."""
+    tsd_report_holder: list[Path] = []
+
+    def _apply_msa_tsd(*, drive_progress: bool = False) -> None:
+        """Scan TSD on the MSA, annotate top cluster, write clustered text report.
+
+        When ``drive_progress`` is True (TSD-only Feature detection), report
+        per-row scan progress against ``len(annotate_ids)`` so the Overview bar
+        advances. Otherwise emit detail-only chatter (TSD runs first; other
+        detectors then own the sequence-level progress channel).
+        """
         if AutoAnnotationMode.TSD not in options.auto_modes:
             return
         if len(all_record_ids) < 2:
             return
         check_cancelled(cancel)
-        if progress is not None:
-            progress(-1, len(annotate_ids), f"{resolved.name}: TSD scan")
+        expected_total = max(1, len(annotate_ids))
+
+        def _tsd_progress(done: int, total: int, label: str) -> None:
+            if progress is None:
+                return
+            if drive_progress:
+                # Map scan rows onto the Overview's expected N (annotate_ids).
+                mapped = (
+                    int(round(done * expected_total / max(1, total)))
+                    if total > 0
+                    else 0
+                )
+                mapped = max(0, min(expected_total, mapped))
+                progress(mapped, expected_total, f"TSD {label}")
+            else:
+                progress(
+                    -1,
+                    expected_total,
+                    f"{resolved.name}: TSD {done}/{total} {label}",
+                )
+
+        if progress is not None and not drive_progress:
+            # Mixed Feature detection: TSD runs before per-sequence detectors.
+            progress(
+                -1,
+                expected_total,
+                f"{resolved.name}: TSD scan (before other detectors)",
+            )
         tsd_opts = tsd_search_options or load_tsd_search_options()
+        # Always write the clustered text report beside the MSA (same as
+        # Tools → TSD search), including Feature detection Preview.
+        report_path = tsd_cluster_report_path(resolved)
         tsd_by_id = detect_tsd_features_by_id(
             resolved,
             record_ids=all_record_ids,
@@ -416,7 +459,14 @@ def run_te_annotation_on_fasta(
             k_max=tsd_opts.max_tsd_length,
             min_distance=tsd_opts.min_distance,
             max_distance=tsd_opts.max_distance,
+            max_sim_threshold=tsd_opts.max_sim_threshold,
+            nt_threshold=tsd_opts.nt_threshold,
+            cluster_eps=tsd_opts.cluster_eps,
+            cluster_report_path=report_path,
+            progress=_tsd_progress,
         )
+        if report_path.is_file():
+            tsd_report_holder.append(report_path.resolve())
         for rid in annotate_ids:
             existing = list(features_by_id.get(rid) or [])
             track = _target_track_for_auto_rerun(
@@ -457,15 +507,21 @@ def run_te_annotation_on_fasta(
         mode != AutoAnnotationMode.TSD for mode in options.auto_modes
     )
 
-    # TSD-only on a multi-sequence MSA: skip per-row temp FASTA split.
-    if not needs_per_sequence and len(all_record_ids) >= 2:
+    # MSA-wide TSD first when selected (needs full alignment; other detectors
+    # then run per sequence and keep these TSD features as base).
+    tsd_selected = AutoAnnotationMode.TSD in options.auto_modes and len(all_record_ids) >= 2
+    if tsd_selected and not needs_per_sequence:
+        n = max(1, len(annotate_ids))
         if progress is not None:
-            progress(0, 1, resolved.name)
-        _apply_msa_tsd()
+            progress(0, n, f"{resolved.name}: TSD scan")
+        _apply_msa_tsd(drive_progress=True)
         if progress is not None:
-            progress(1, 1, resolved.name)
+            progress(n, n, resolved.name)
+    elif tsd_selected:
+        _apply_msa_tsd(drive_progress=False)
+
     # Single-sequence path: annotate the file directly (no temp split).
-    elif len(all_record_ids) == 1 and len(annotate_ids) == 1:
+    if needs_per_sequence and len(all_record_ids) == 1 and len(annotate_ids) == 1:
         rid = annotate_ids[0]
         if progress is not None:
             progress(0, 1, resolved.name)
@@ -476,7 +532,7 @@ def run_te_annotation_on_fasta(
                 auto_cfg=auto_cfg,
                 sim_cfg=sim_cfg,
                 use_blast=use_blast,
-                base_features=tuple(existing_by_id.get(rid) or []),
+                base_features=tuple(features_by_id.get(rid) or []),
                 cancel=cancel,
                 progress=_detail_progress,
                 label=resolved.name,
@@ -494,8 +550,7 @@ def run_te_annotation_on_fasta(
             skipped.append((rid, str(exc) or exc.__class__.__name__))
         if progress is not None:
             progress(1, 1, resolved.name)
-        _apply_msa_tsd()
-    else:
+    elif needs_per_sequence:
         records = list(SeqIO.parse(str(resolved), "fasta"))
         if len(records) != len(all_record_ids):
             # Uniquified ids vs raw headers: zip by index.
@@ -605,7 +660,6 @@ def run_te_annotation_on_fasta(
                                 total,
                                 f"{resolved.name}: sequence {done}/{total} ({rid})",
                             )
-        _apply_msa_tsd()
 
     def _feature_signature(feat: SequenceFeature) -> tuple:
         return (
@@ -685,6 +739,7 @@ def run_te_annotation_on_fasta(
         lengths_by_id=lengths,
         json_path=json_path,
         gff_path=gff_path,
+        tsd_report_path=tsd_report_holder[0] if tsd_report_holder else None,
         skipped_sequences=tuple(skipped),
         identified_count=identified_count,
         identified_by_type=dict(identified_by_type),

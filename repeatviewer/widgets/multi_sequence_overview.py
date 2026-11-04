@@ -7192,6 +7192,69 @@ class MultiSequenceOverviewPanel(QWidget):
             if 0 <= row < len(self._record_ids)
         ]
 
+    def _prompt_tsd_boundaries_for_run(self):
+        """Prefill TE edges (RV / reference / user) and confirm via dialog + MSA drag."""
+        from repeatviewer.job_options import load_tsd_search_options, save_tsd_search_options
+        from repeatviewer.views.tool_dialogs import prompt_tsd_boundaries
+
+        opts = load_tsd_search_options()
+        aln_len = max(1, int(self._bars.max_length()))
+        ref_extent = None
+        extent0 = self._bars.msa_standard_extent_columns()
+        if extent0 is not None:
+            ref_extent = (int(extent0[0]) + 1, int(extent0[1]) + 1)
+
+        def _wire(dialog) -> None:
+            bars = self._bars
+
+            def _apply_span(start: object, end: object) -> None:
+                try:
+                    dialog.set_from_msa_selection(int(start), int(end))
+                except (TypeError, ValueError):
+                    return
+
+            def _on_region(region: object) -> None:
+                if not isinstance(region, tuple) or len(region) != 2:
+                    return
+                _apply_span(region[0], region[1])
+
+            def _on_preview(payload: object) -> None:
+                # Live drag: (start, end, rows) or None.
+                if not isinstance(payload, tuple) or len(payload) < 2:
+                    return
+                _apply_span(payload[0], payload[1])
+
+            bars.regionSelectionChanged.connect(_on_region)
+            bars.regionDragPreview.connect(_on_preview)
+            current = bars.region_selection()
+            if current is not None:
+                _apply_span(current[0], current[1])
+
+            def _cleanup() -> None:
+                for signal, slot in (
+                    (bars.regionSelectionChanged, _on_region),
+                    (bars.regionDragPreview, _on_preview),
+                ):
+                    try:
+                        signal.disconnect(slot)
+                    except (RuntimeError, TypeError):
+                        pass
+
+            dialog.finished.connect(_cleanup)
+
+        updated = prompt_tsd_boundaries(
+            opts=opts,
+            file_path=self._path,
+            aln_len=aln_len,
+            parent=self.window(),
+            reference_extent_1based=ref_extent,
+            on_dialog_ready=_wire,
+        )
+        if updated is None:
+            return None
+        save_tsd_search_options(updated)
+        return updated
+
     def _on_auto_run_clicked(self) -> None:
         if self._annotation_running():
             if self._ann_job_kind == "auto":
@@ -7213,12 +7276,18 @@ class MultiSequenceOverviewPanel(QWidget):
                 "No sequences are loaded in this MSA.",
             )
             return
+        tsd_opts = None
+        if AutoAnnotationMode.TSD in modes:
+            tsd_opts = self._prompt_tsd_boundaries_for_run()
+            if tsd_opts is None:
+                return
         self._start_batch_annotation(
             TeAnnotationOptions(auto_modes=tuple(modes)),
             kind="auto",
             title="Feature detection",
             total_steps=max(1, len(target_ids)),
             record_ids=target_ids,
+            tsd_search_options=tsd_opts,
         )
 
     def _on_similarity_run_clicked(self) -> None:
@@ -7305,6 +7374,7 @@ class MultiSequenceOverviewPanel(QWidget):
         title: str,
         total_steps: int,
         record_ids: list[str] | None = None,
+        tsd_search_options=None,
     ) -> None:
         if self._annotation_running():
             return
@@ -7359,6 +7429,7 @@ class MultiSequenceOverviewPanel(QWidget):
         sim_cfg = self._similarity_ann_settings
         cancel = self._ann_cancel
         job_ids = list(target_ids)
+        tsd_opts = tsd_search_options
 
         # Snapshot current (possibly unsaved) features so the worker does not
         # discard Preview edits by reloading only the on-disk JSON.
@@ -7388,6 +7459,7 @@ class MultiSequenceOverviewPanel(QWidget):
                 record_ids=job_ids,
                 persist=False,
                 base_features_by_id=base_features,
+                tsd_search_options=tsd_opts,
             )
 
         worker = Worker(_job, progress=True)

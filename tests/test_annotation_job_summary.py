@@ -65,7 +65,10 @@ def test_format_summary_plain_sentences_and_per_type() -> None:
         preferred_types=("LTR", "TIR", "PBS"),
     )
     assert lines[0] == "Finished annotating 15 sequences."
-    assert lines[1] == "Found 20 new features (LTR 5, TIR 0, PBS 15)."
+    assert lines[1] == "Found 20 new features:"
+    assert "  LTR 5" in lines
+    assert "  TIR 0" in lines
+    assert "  PBS 15" in lines
 
 
 def test_format_summary_found_overlap_and_new() -> None:
@@ -79,7 +82,11 @@ def test_format_summary_found_overlap_and_new() -> None:
     )
     assert lines == [
         "Finished annotating 15 sequences.",
-        "Found 49 features (ORF 49, PBS 0): 49 overlap existing (ORF 49), 0 new.",
+        "Found 49 features:",
+        "  ORF 49",
+        "49 overlap existing:",
+        "  ORF 49",
+        "0 new.",
     ]
 
 
@@ -92,10 +99,17 @@ def test_format_summary_mixed_new_and_overlap() -> None:
         counts_by_type={"ORF": 3, "PBS": 3},
         total_new=6,
     )
-    assert lines[1] == (
-        "Found 13 features (ORF 10, PBS 3): "
-        "7 overlap existing (ORF 7), 6 new (ORF 3, PBS 3)."
-    )
+    assert lines == [
+        "Finished annotating 1 sequence.",
+        "Found 13 features:",
+        "  ORF 10",
+        "  PBS 3",
+        "7 overlap existing:",
+        "  ORF 7",
+        "6 new:",
+        "  ORF 3",
+        "  PBS 3",
+    ]
 
 
 def test_format_summary_overlap_breakdown_by_kind() -> None:
@@ -117,11 +131,15 @@ def test_format_summary_overlap_breakdown_by_kind() -> None:
         },
         total_new=423,
     )
-    assert lines[1] == (
-        "Found 455 features (LTR 40, TIR 130, tandem repeat 233, ORF 52): "
-        "32 overlap existing (LTR 8, ORF 24), "
-        "423 new (LTR 32, TIR 130, tandem repeat 233, ORF 28)."
-    )
+    assert lines[0] == "Finished annotating 15 sequences."
+    assert lines[1] == "Found 455 features:"
+    assert "  LTR 40" in lines
+    assert "  tandem repeat 233" in lines
+    assert "32 overlap existing:" in lines
+    assert "  LTR 8" in lines
+    assert "  ORF 24" in lines
+    assert "423 new:" in lines
+    assert "  TIR 130" in lines
 
 
 def test_format_summary_zero_features() -> None:
@@ -145,7 +163,8 @@ def test_format_summary_single_type() -> None:
     )
     assert lines == [
         "Finished annotating 1 sequence.",
-        "Found 1 new feature (PBS 1).",
+        "Found 1 new feature:",
+        "  PBS 1",
     ]
 
 
@@ -158,7 +177,10 @@ def test_auto_annotation_summary_includes_count() -> None:
     lines = annotation_job_summary_lines(result)
     assert "Detected 3 ORF(s) with orfipy." in lines
     assert "Finished annotating 1 sequence." in lines
-    assert "Found 3 features (ORF 3): 0 overlap existing, 3 new (ORF 3)." in lines
+    assert "Found 3 features:" in lines
+    assert "  ORF 3" in lines
+    assert "0 overlap existing." in lines
+    assert "3 new:" in lines
 
 
 def test_multi_auto_counts_only_selected_modes() -> None:
@@ -181,10 +203,11 @@ def test_multi_auto_counts_only_selected_modes() -> None:
     )
     lines = annotation_job_summary_lines(result)
     assert "Finished annotating 1 sequence." in lines
-    assert (
-        "Found 3 features (ORF 2, LTR 1): "
-        "2 overlap existing (ORF 2), 1 new (LTR 1)."
-    ) in lines
+    assert "Found 3 features:" in lines
+    assert "  ORF 2" in lines
+    assert "  LTR 1" in lines
+    assert "2 overlap existing:" in lines
+    assert "1 new:" in lines
 
 
 def test_similarity_sums_hit_counts() -> None:
@@ -196,7 +219,8 @@ def test_similarity_sums_hit_counts() -> None:
         ),
     )
     lines = annotation_job_summary_lines(result)
-    assert "Found 6 new features (similarity hit 6)." in lines
+    assert "Found 6 new features:" in lines
+    assert "  similarity hit 6" in lines
 
 
 def test_transfer_counts_placed_features() -> None:
@@ -208,7 +232,8 @@ def test_transfer_counts_placed_features() -> None:
     # Message is streamed live during transfer; summary is the count only.
     assert lines == [
         "Finished annotating 1 sequence.",
-        "Found 2 new features (transferred 2).",
+        "Found 2 new features:",
+        "  transferred 2",
     ]
 
 
@@ -220,7 +245,8 @@ def test_transfer_tuple_payload() -> None:
         None,
     )
     lines = annotation_job_summary_lines(result)
-    assert "Found 1 new feature (transferred 1)." in lines
+    assert "Found 1 new feature:" in lines
+    assert "  transferred 1" in lines
 
 
 def test_batch_summary_already_streamed() -> None:

@@ -170,6 +170,9 @@ from repeatviewer.job_options import (
     configure_report_evalue_spinbox,
     load_tsd_search_options,
     save_tsd_search_options,
+    TSD_BOUNDARY_REPEATVIEWER,
+    TSD_BOUNDARY_SOURCES,
+    TSD_BOUNDARY_USER,
     TsdSearchOptions,
 )
 from repeatviewer.backends.orf_detect import orfipy_available
@@ -6576,11 +6579,11 @@ class AutoAnnotationSettingsPanel(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
 
-        layout.addWidget(self._section_title("LTR"))
+        layout.addWidget(self._section_title("LTR (long terminal repeat)"))
         layout.addLayout(self._terminal_repeat_form(settings.ltr or TerminalRepeatSettings(), "LTR"))
         layout.addWidget(_settings_separator())
 
-        layout.addWidget(self._section_title("TIR"))
+        layout.addWidget(self._section_title("TIR (terminal inverted repeat)"))
         layout.addLayout(
             self._terminal_repeat_form(
                 settings.tir
@@ -6601,20 +6604,26 @@ class AutoAnnotationSettingsPanel(QWidget):
 
         layout.addWidget(self._section_title("ORF (orfipy)"))
         layout.addLayout(self._orf_form(settings.orf or OrfSettings()))
-        # PBS section is built here but inserted after TSD by the host dialog /
-        # Sequence Annotation Advanced panel (see ``pbs_section_widget``).
+        # PBS / Others are built here but inserted after TSD by the host dialog
+        # (see ``pbs_section_widget`` / ``others_section_widget``).
         self._pbs_section = QWidget(self)
         pbs_layout = QVBoxLayout(self._pbs_section)
         pbs_layout.setContentsMargins(0, 0, 0, 0)
         pbs_layout.setSpacing(8)
         pbs_layout.addWidget(_settings_separator())
-        pbs_layout.addWidget(self._section_title("PBS"))
+        pbs_layout.addWidget(self._section_title("PBS (primer binding site)"))
         pbs_layout.addLayout(self._pbs_form(settings.pbs or PbsSettings()))
+        self._others_section: QWidget | None
         if self._include_run_controls:
-            layout.addWidget(_settings_separator())
-            layout.addWidget(self._section_title("Others"))
-            layout.addLayout(self._others_form(settings))
+            self._others_section = QWidget(self)
+            others_layout = QVBoxLayout(self._others_section)
+            others_layout.setContentsMargins(0, 0, 0, 0)
+            others_layout.setSpacing(8)
+            others_layout.addWidget(_settings_separator())
+            others_layout.addWidget(self._section_title("Others"))
+            others_layout.addLayout(self._others_form(settings))
         else:
+            self._others_section = None
             self._num_threads = None
             self._show_process_window = None
             self._close_process_window = None
@@ -6628,6 +6637,10 @@ class AutoAnnotationSettingsPanel(QWidget):
     def pbs_section_widget(self) -> QWidget:
         """PBS parameters; place after the TSD panel in host layouts."""
         return self._pbs_section
+
+    def others_section_widget(self) -> QWidget | None:
+        """Others (threads / process window); place after PBS when present."""
+        return self._others_section
 
     def _section_title(self, text: str) -> QLabel:
         title = QLabel(text)
@@ -7240,7 +7253,7 @@ class AutoAnnotationSettingsPanel(QWidget):
 
 
 class TsdSearchSettingsPanel(QWidget):
-    """Boundaries / length / distance for Feature detection and Sequence Annotation."""
+    """TSD boundaries, search radius, length / distance."""
 
     def __init__(
         self,
@@ -7248,105 +7261,154 @@ class TsdSearchSettingsPanel(QWidget):
         *,
         initial: TsdSearchOptions | None = None,
         note: str | None = None,
+        allow_user_boundary: bool = True,
     ) -> None:
-        from PySide6.QtWidgets import QGroupBox
-
         super().__init__(parent)
+        del note  # gray help blurb removed; kept for call-site compatibility
         opts = initial or load_tsd_search_options()
-        box = QGroupBox("TSD (target site duplication)", self)
-        form = QFormLayout(box)
+        self._allow_user_boundary = bool(allow_user_boundary)
+
+        title = QLabel("TSD (target site duplication)", self)
+        font = title.font()
+        font.setBold(True)
+        title.setFont(font)
+
+        form = QFormLayout()
         form.setLabelAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(4)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
 
-        self._tsd_left = QSpinBox(box)
-        self._tsd_left.setRange(0, 10_000_000)
-        self._tsd_left.setValue(opts.left_boundary)
-        self._tsd_left.setFixedWidth(_SETTINGS_FIELD_WIDTH)
-        self._tsd_left.setToolTip(
-            "Putative left TE boundary (MSA column; 0 = auto)."
+        def _label(text: str) -> QLabel:
+            lab = QLabel(text, self)
+            lab.setFixedWidth(_SETTINGS_LABEL_WIDTH)
+            lab.setAlignment(
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+            )
+            return lab
+
+        def _sized(spin: QSpinBox) -> QSpinBox:
+            spin.setFixedWidth(_SETTINGS_FIELD_WIDTH)
+            spin.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+            return spin
+
+        self._boundary_source = NoWheelComboBox(self)
+        self._boundary_source.addItem("RepeatViewer", TSD_BOUNDARY_REPEATVIEWER)
+        if self._allow_user_boundary:
+            self._boundary_source.addItem("User define", TSD_BOUNDARY_USER)
+        source = (
+            opts.boundary_source
+            if opts.boundary_source in TSD_BOUNDARY_SOURCES
+            else TSD_BOUNDARY_REPEATVIEWER
         )
-        form.addRow("Left boundary:", self._tsd_left)
-
-        self._tsd_right = QSpinBox(box)
-        self._tsd_right.setRange(0, 10_000_000)
-        self._tsd_right.setValue(opts.right_boundary)
-        self._tsd_right.setFixedWidth(_SETTINGS_FIELD_WIDTH)
-        self._tsd_right.setToolTip(
-            "Putative right TE boundary (MSA column; 0 = auto)."
+        if not self._allow_user_boundary:
+            source = TSD_BOUNDARY_REPEATVIEWER
+        idx = self._boundary_source.findData(source)
+        self._boundary_source.setCurrentIndex(max(0, idx))
+        self._boundary_source.setFixedWidth(max(_SETTINGS_FIELD_WIDTH, 160))
+        help_boundary = (
+            "RepeatViewer: *.boundaries_RV.json."
+            if not self._allow_user_boundary
+            else (
+                "RepeatViewer: *.boundaries_RV.json. "
+                "User define: popup at run time to drag the MSA."
+            )
         )
-        form.addRow("Right boundary:", self._tsd_right)
+        form.addRow(
+            _label("Boundary definition:"),
+            field_with_help(
+                self._boundary_source,
+                "Boundary definition",
+                help_boundary,
+                parent=self,
+            ),
+        )
 
-        self._tsd_radius = QSpinBox(box)
-        self._tsd_radius.setRange(1, 10_000)
-        self._tsd_radius.setValue(opts.nt_radius)
-        self._tsd_radius.setSuffix(" nt")
-        self._tsd_radius.setFixedWidth(_SETTINGS_FIELD_WIDTH)
-        self._tsd_radius.setToolTip("Search region around each boundary.")
-        form.addRow("Search region:", self._tsd_radius)
+        self._tsd_radius = QSpinBox(self)
+        self._tsd_radius.setRange(1, 10_000_000)
+        self._tsd_radius.setValue(max(1, int(opts.nt_radius)))
+        form.addRow(
+            _label("Search range around boundary (bp):"),
+            field_with_help(
+                _sized(self._tsd_radius),
+                "Search range around boundary",
+                "MSA columns to search on both sides of each TE edge "
+                "(left and right of the left boundary, and left and right "
+                "of the right boundary; gaps count as positions).",
+                parent=self,
+            ),
+        )
 
-        self._tsd_min_len = QSpinBox(box)
+        self._tsd_min_len = QSpinBox(self)
         self._tsd_min_len.setRange(2, 200)
         self._tsd_min_len.setValue(opts.min_tsd_length)
-        self._tsd_min_len.setSuffix(" nt")
-        self._tsd_min_len.setFixedWidth(_SETTINGS_FIELD_WIDTH)
-        form.addRow("Min TSD length:", self._tsd_min_len)
+        form.addRow(
+            _label("Min TSD length (bp):"),
+            field_with_help(
+                _sized(self._tsd_min_len),
+                "Min TSD length",
+                "Minimum duplicated motif length.",
+                parent=self,
+            ),
+        )
 
-        self._tsd_max_len = QSpinBox(box)
+        self._tsd_max_len = QSpinBox(self)
         self._tsd_max_len.setRange(2, 200)
         self._tsd_max_len.setValue(opts.max_tsd_length)
-        self._tsd_max_len.setSuffix(" nt")
-        self._tsd_max_len.setFixedWidth(_SETTINGS_FIELD_WIDTH)
-        form.addRow("Max TSD length:", self._tsd_max_len)
+        form.addRow(
+            _label("Max TSD length (bp):"),
+            field_with_help(
+                _sized(self._tsd_max_len),
+                "Max TSD length",
+                "Maximum duplicated motif length.",
+                parent=self,
+            ),
+        )
 
-        self._tsd_min_dist = QSpinBox(box)
+        self._tsd_min_dist = QSpinBox(self)
         self._tsd_min_dist.setRange(0, 10_000_000)
         self._tsd_min_dist.setValue(opts.min_distance)
-        self._tsd_min_dist.setSuffix(" nt")
-        self._tsd_min_dist.setFixedWidth(_SETTINGS_FIELD_WIDTH)
-        self._tsd_min_dist.setToolTip(
-            "Minimum distance between left and right TSD copies. 0 = no minimum."
+        form.addRow(
+            _label("Min distance between TSDs (bp):"),
+            field_with_help(
+                _sized(self._tsd_min_dist),
+                "Min distance between TSDs",
+                "Minimum TE span between the left and right TSD copies. "
+                "Default 200 bp. 0 = no minimum.",
+                parent=self,
+            ),
         )
-        form.addRow("Min distance between TSDs:", self._tsd_min_dist)
-
-        self._tsd_max_dist = QSpinBox(box)
-        self._tsd_max_dist.setRange(0, 10_000_000)
-        self._tsd_max_dist.setValue(opts.max_distance)
-        self._tsd_max_dist.setSuffix(" nt")
-        self._tsd_max_dist.setFixedWidth(_SETTINGS_FIELD_WIDTH)
-        self._tsd_max_dist.setToolTip(
-            "Maximum distance between left and right TSD copies. 0 = no maximum."
-        )
-        form.addRow("Max distance between TSDs:", self._tsd_max_dist)
-
-        note_text = note or (
-            "TSD runs on MSA files (≥2 sequences). Features are written to the "
-            "annotation JSON and shown on the Overview tracks. Tools → TSD search "
-            "also writes a clustered text report."
-        )
-        note_label = QLabel(note_text, box)
-        note_label.setWordWrap(True)
-        form.addRow(note_label)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(box)
+        layout.setSpacing(8)
+        layout.addWidget(_settings_separator())
+        layout.addWidget(title)
+        layout.addLayout(form)
 
     def options(self) -> TsdSearchOptions:
         min_len = int(self._tsd_min_len.value())
         max_len = max(min_len, int(self._tsd_max_len.value()))
         prev = load_tsd_search_options()
+        source = self._boundary_source.currentData()
+        if not self._allow_user_boundary:
+            source = TSD_BOUNDARY_REPEATVIEWER
+        elif source not in TSD_BOUNDARY_SOURCES:
+            source = TSD_BOUNDARY_REPEATVIEWER
         return TsdSearchOptions(
-            left_boundary=self._tsd_left.value(),
-            right_boundary=self._tsd_right.value(),
-            nt_radius=self._tsd_radius.value(),
+            left_boundary=prev.left_boundary,
+            right_boundary=prev.right_boundary,
+            nt_radius=int(self._tsd_radius.value()),
             min_tsd_length=min_len,
             max_tsd_length=max_len,
             min_distance=self._tsd_min_dist.value(),
-            max_distance=self._tsd_max_dist.value(),
+            max_distance=prev.max_distance,
             max_sim_threshold=prev.max_sim_threshold,
             nt_threshold=prev.nt_threshold,
             cluster_eps=prev.cluster_eps,
+            boundary_source=str(source),
         )
 
 
@@ -7370,6 +7432,9 @@ class AutoAnnotationSettingsDialog(QDialog):
         body_layout.addWidget(self._panel)
         body_layout.addWidget(self._tsd_panel)
         body_layout.addWidget(self._panel.pbs_section_widget())
+        others = self._panel.others_section_widget()
+        if others is not None:
+            body_layout.addWidget(others)
         scroll = QScrollArea(self)
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)

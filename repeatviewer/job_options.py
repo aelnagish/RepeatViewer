@@ -244,21 +244,32 @@ DEFAULT_TSD_RIGHT_BOUNDARY = 0
 DEFAULT_TSD_NT_RADIUS = 100
 DEFAULT_TSD_MIN_LENGTH = 4
 DEFAULT_TSD_MAX_LENGTH = 20
-DEFAULT_TSD_MIN_DISTANCE = 0  # nucleotides between left/right TSD copies
+DEFAULT_TSD_MIN_DISTANCE = 200  # MSA columns between left/right TSD copies
 DEFAULT_TSD_MAX_DISTANCE = 0  # 0 = no upper limit on TE span between flanks
 DEFAULT_TSD_MAX_SIM_THRESHOLD = 0.3
 DEFAULT_TSD_NT_THRESHOLD = 0.95
 DEFAULT_TSD_CLUSTER_EPS = 1.0
 
+# How left/right TE edges are chosen for a TSD run.
+TSD_BOUNDARY_REPEATVIEWER = "repeatviewer"  # *.boundaries_RV.json
+TSD_BOUNDARY_REFERENCE = "reference"  # legacy (migrated to RepeatViewer)
+TSD_BOUNDARY_USER = "user"  # run-time dialog + MSA drag
+DEFAULT_TSD_BOUNDARY_SOURCE = TSD_BOUNDARY_REPEATVIEWER
+TSD_BOUNDARY_SOURCES = (
+    TSD_BOUNDARY_REPEATVIEWER,
+    TSD_BOUNDARY_USER,
+)
+
 
 @dataclass
 class TsdSearchOptions:
-    """TSD search boundaries, length limits, and clustering filters.
+    """TSD boundaries, search radius, length / distance, and clustering filters.
 
-    Boundaries and ``nt_radius`` are MSA-oriented: putative left/right TE body
-    edges and the nucleotide search window around each edge. ``min_tsd_length`` /
-    ``max_tsd_length`` bound the duplicated motif; ``min_distance`` /
-    ``max_distance`` bound the TE span between the two flanks (0 max = unlimited).
+    ``left_boundary`` / ``right_boundary`` are 1-based inclusive MSA columns for
+    the TE body edges (0 = unset). ``nt_radius`` is MSA columns to search
+    outside each edge on both sides (gaps count as positions).
+    ``boundary_source`` is RepeatViewer sidecar or user-define dialog.
+    Hits are filtered / clustered like TEtrimmer.
     """
 
     left_boundary: int = DEFAULT_TSD_LEFT_BOUNDARY
@@ -271,6 +282,7 @@ class TsdSearchOptions:
     max_sim_threshold: float = DEFAULT_TSD_MAX_SIM_THRESHOLD
     nt_threshold: float = DEFAULT_TSD_NT_THRESHOLD
     cluster_eps: float = DEFAULT_TSD_CLUSTER_EPS
+    boundary_source: str = DEFAULT_TSD_BOUNDARY_SOURCE
 
 
 DEFAULT_ALIGN_THREADS = 5
@@ -1430,9 +1442,12 @@ def load_tsd_search_options() -> TsdSearchOptions:
     v = _load_settings_group("tsd_search")
     min_len = max(2, int(v.get("min_tsd_length", DEFAULT_TSD_MIN_LENGTH)))
     max_len = max(min_len, int(v.get("max_tsd_length", DEFAULT_TSD_MAX_LENGTH)))
+    source = str(v.get("boundary_source", DEFAULT_TSD_BOUNDARY_SOURCE) or "").strip()
+    if source == TSD_BOUNDARY_REFERENCE or source not in TSD_BOUNDARY_SOURCES:
+        source = DEFAULT_TSD_BOUNDARY_SOURCE
     return TsdSearchOptions(
-        left_boundary=int(v.get("left_boundary", DEFAULT_TSD_LEFT_BOUNDARY)),
-        right_boundary=int(v.get("right_boundary", DEFAULT_TSD_RIGHT_BOUNDARY)),
+        left_boundary=max(0, int(v.get("left_boundary", DEFAULT_TSD_LEFT_BOUNDARY))),
+        right_boundary=max(0, int(v.get("right_boundary", DEFAULT_TSD_RIGHT_BOUNDARY))),
         nt_radius=max(1, int(v.get("nt_radius", DEFAULT_TSD_NT_RADIUS))),
         min_tsd_length=min_len,
         max_tsd_length=max_len,
@@ -1443,10 +1458,14 @@ def load_tsd_search_options() -> TsdSearchOptions:
         ),
         nt_threshold=float(v.get("nt_threshold", DEFAULT_TSD_NT_THRESHOLD)),
         cluster_eps=float(v.get("cluster_eps", DEFAULT_TSD_CLUSTER_EPS)),
+        boundary_source=source,
     )
 
 
 def save_tsd_search_options(opts: TsdSearchOptions) -> None:
+    source = opts.boundary_source
+    if source not in TSD_BOUNDARY_SOURCES:
+        source = DEFAULT_TSD_BOUNDARY_SOURCE
     _save_settings_group(
         "tsd_search",
         {
@@ -1460,6 +1479,7 @@ def save_tsd_search_options(opts: TsdSearchOptions) -> None:
             "max_sim_threshold": opts.max_sim_threshold,
             "nt_threshold": opts.nt_threshold,
             "cluster_eps": opts.cluster_eps,
+            "boundary_source": source,
         },
     )
 
