@@ -357,3 +357,56 @@ def guess_assembly_links(karyotype: Karyotype, seq_names: list[str]) -> int:
             chrom.assembly_seq = by_number[key]
             n += 1
     return n
+
+
+# ---------------------------------------------------------------------------
+# Bands in arm notation ("q 0.92" = 92 % of the way from the centromere to the q telomere)
+# ---------------------------------------------------------------------------
+
+
+def fraction_to_arm_text(fraction: float, centromere_fraction: float) -> str:
+    c = max(0.0, min(1.0, centromere_fraction))
+    f = max(0.0, min(1.0, fraction))
+    if f <= c:
+        return f"p {((c - f) / c if c > 0 else 0.0):.2f}"
+    return f"q {((f - c) / (1.0 - c) if c < 1 else 0.0):.2f}"
+
+
+def arm_text_to_fraction(text: str, centromere_fraction: float) -> float | None:
+    """Inverse of ``fraction_to_arm_text``. Returns None when the text cannot be read."""
+    m = re.match(r"^\s*([pPqQ])\s*([0-9]*\.?[0-9]+)\s*$", str(text).replace(",", "."))
+    if not m:
+        return None
+    arm, rel = m.group(1).lower(), max(0.0, min(1.0, float(m.group(2))))
+    c = max(0.0, min(1.0, centromere_fraction))
+    return c - rel * c if arm == "p" else c + rel * (1.0 - c)
+
+
+def band_summary(chrom: KaryoChromosome) -> str:
+    if not chrom.bands:
+        return "none"
+    names = {"Secondary constriction (NOR)": "NOR", "DAPI+ heterochromatin": "DAPI+", "CMA+ band": "CMA+"}
+    out = []
+    for b in chrom.bands:
+        mid = (b.start + b.end) / 2
+        arm = "p" if mid < chrom.centromere_fraction else "q"
+        out.append(f"{names.get(b.kind, b.kind)} ({arm})")
+    return ", ".join(out)
+
+
+FASTA_SUFFIXES = (".fa", ".fasta", ".fna", ".fas")
+
+
+def folder_sequence_lengths(folder: Path) -> dict[str, int]:
+    """Record name -> length (bp) for the FASTA files directly in ``folder``."""
+    from ..sequence_features import fasta_record_lengths
+
+    lengths: dict[str, int] = {}
+    for path in sorted(Path(folder).expanduser().iterdir()):
+        if path.is_file() and path.suffix.lower() in FASTA_SUFFIXES:
+            try:
+                for name, n in fasta_record_lengths(path).items():
+                    lengths.setdefault(name, int(n))
+            except (OSError, ValueError):
+                continue
+    return lengths

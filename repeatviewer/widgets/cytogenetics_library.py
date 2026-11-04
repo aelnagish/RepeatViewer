@@ -17,7 +17,6 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QScrollArea,
-    QSizePolicy,
     QSlider,
     QSplitter,
     QVBoxLayout,
@@ -32,7 +31,7 @@ from repeatviewer.widgets.help_button import make_help_button
 
 _SETTINGS = "cytogenetics_workspace"
 THUMB_MIN, THUMB_MAX, THUMB_DEFAULT = 90, 240, 150
-FILTER_W, DETAILS_W = 220, 290
+FILTER_W, DETAILS_W = 240, 310
 
 HELP_TEXT = (
     "<b>Library</b><br>"
@@ -84,7 +83,13 @@ class _ImportWorker(QThread):
             self.finishedWith.emit(exc)
 
 
+CARD_BG, CARD_LINE, CARD_SEL_BG, CARD_SEL_LINE = "#FFFFFF", "#E0E0E4", "#E3EBF8", "#1F4E9A"
+TEXT, MUTED = "#1C1C1E", "#5A5D63"
+
+
 class _Thumb(QFrame):
+    """White card: dark picture, name, channel dots and marked status (as in the mockup)."""
+
     clicked = Signal(str)
     doubleClicked = Signal(str)
 
@@ -92,16 +97,16 @@ class _Thumb(QFrame):
         super().__init__(parent)
         from repeatviewer.widgets.cyto_images_ui import thumbnail
 
+        self.setObjectName("cytoThumb")
         self.image_id = item.image.id
-        self.setFrameShape(QFrame.Shape.NoFrame)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(6, 6, 6, 6)
-        lay.setSpacing(3)
+        lay.setSpacing(4)
         pic = QLabel(self)
         pic.setFixedSize(side, side)
         pic.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        pic.setStyleSheet("background:#000; color:#aaa; border-radius:4px;")
+        pic.setStyleSheet("background:#06070A; color:#aaa; border-radius:4px;")
         pix = thumbnail(ci.image_file_path(folder, item.image), side)
         if pix.isNull():
             pic.setText("file missing")
@@ -110,23 +115,30 @@ class _Thumb(QFrame):
         lay.addWidget(pic)
         name = QLabel(self)
         name.setFixedWidth(side)
+        name.setStyleSheet(f"color:{TEXT}; font-size:12px;")
         name.setText(name.fontMetrics().elidedText(item.title, Qt.TextElideMode.ElideMiddle, side))
         lay.addWidget(name)
-        bits = []
-        if item.channels:
-            bits.append(f"{item.channels} ch")
-        bits.append("marked" if item.marked else "not marked")
-        sub = QLabel(" · ".join(bits), self)
-        sub.setStyleSheet("color:palette(dark); font-size:11px;")
-        lay.addWidget(sub)
+        status = QHBoxLayout()
+        status.setSpacing(4)
+        status.setContentsMargins(0, 0, 0, 0)
+        for colour in item.channel_colours[:6]:
+            dot = QLabel(self)
+            dot.setFixedSize(8, 8)
+            dot.setStyleSheet(f"background:{colour}; border-radius:4px;")
+            status.addWidget(dot)
+        text = QLabel(("marked" if item.marked else "not marked"), self)
+        text.setStyleSheet(f"color:{MUTED}; font-size:11px; margin-left:4px;")
+        status.addWidget(text)
+        status.addStretch(1)
+        lay.addLayout(status)
         self.setToolTip("\n".join(f"{k}: {v}" for k, v in lb.details_rows(item)[:8]) or item.title)
         self.set_selected(False)
 
     def set_selected(self, on: bool) -> None:
-        self.setStyleSheet(
-            "_Thumb { background: palette(highlight); border-radius: 8px; }" if on
-            else "_Thumb { background: transparent; border-radius: 8px; }"
-        )
+        if on:
+            self.setStyleSheet(f"#cytoThumb {{ background:{CARD_SEL_BG}; border:2px solid {CARD_SEL_LINE}; border-radius:8px; }}")
+        else:
+            self.setStyleSheet(f"#cytoThumb {{ background:{CARD_BG}; border:1px solid {CARD_LINE}; border-radius:8px; }}")
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
@@ -143,7 +155,10 @@ class LibraryTab(QWidget):
     """Library: thumbnails grouped by slide, filters on the left, details on the right."""
 
     name = "Library"
-    imageOpened = Signal(str)  # image id (double-click)
+    imageOpened = Signal(str)  # image id (double-click, Open)
+    signalsRequested = Signal(str)  # image id (Mark signals)
+    imageSelected = Signal(str)  # image id (single click)
+    import_running = Signal(bool)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -155,14 +170,12 @@ class LibraryTab(QWidget):
         self._worker: _ImportWorker | None = None
         self._cols_for: list[tuple[QGridLayout, list[_Thumb]]] = []
 
-        # ---- top bar
-        self._import_btn = QPushButton("Import slide session", self)
+        # ---- top bar (count, Add image, Group by, Size)
         self._add_btn = QPushButton("Add image", self)
-        self._lists_btn = QPushButton("Edit lists", self)
-        self._import_btn.clicked.connect(self.start_import)
         self._add_btn.clicked.connect(self.add_image)
-        self._lists_btn.clicked.connect(self.edit_lists)
         self._count = QLabel(self)
+        self._count_sub = QLabel(self)
+        self._count_sub.setStyleSheet("color: palette(dark);")
         self._group = NoWheelComboBox(self)
         self._group.addItems(lb.GROUP_BYS)
         self._group.setCurrentText(_read("library_group", "Slide"))
@@ -175,13 +188,13 @@ class LibraryTab(QWidget):
             self._size.setValue(THUMB_DEFAULT)
         self._size.setFixedWidth(110)
         self._size.sliderReleased.connect(self._render)
-        self._size.valueChanged.connect(lambda v: (_write("library_thumb", int(v)), None) and None)
+        self._size.valueChanged.connect(lambda v: _write("library_thumb", int(v)))
         top = QHBoxLayout()
-        top.setContentsMargins(10, 8, 10, 4)
-        for w in (self._import_btn, self._add_btn, self._lists_btn):
-            top.addWidget(w)
-        top.addStretch(1)
+        top.setContentsMargins(14, 10, 14, 6)
         top.addWidget(self._count)
+        top.addWidget(self._count_sub)
+        top.addStretch(1)
+        top.addWidget(self._add_btn)
         top.addWidget(QLabel("Group by", self))
         top.addWidget(self._group)
         top.addWidget(QLabel("Size", self))
@@ -316,22 +329,54 @@ class LibraryTab(QWidget):
             w = self._filter_lay.takeAt(0).widget()
             if w is not None:
                 w.deleteLater()
+        colours = lb.probe_colours(self._items)
         for facet, title in (("probe", "Probe"), ("species", "Species"), ("stage", "Cell stage"), ("signals", "Signals")):
             counts = lb.facet_counts(self._items, self._flt, facet)
             if not counts:
                 continue
-            head = QLabel(f"<b>{title}</b>", self._filter_body)
+            head = QLabel(title, self._filter_body)
+            font = head.font()
+            font.setBold(True)
+            head.setFont(font)
+            head.setContentsMargins(0, 8, 0, 0)
             self._filter_lay.addWidget(head)
             chosen: set[str] = getattr(self._flt, facet)
             for value, n in counts:
-                box = QCheckBox(f"{value}  ({n})", self._filter_body)
+                row = QWidget(self._filter_body)
+                rl = QHBoxLayout(row)
+                rl.setContentsMargins(0, 0, 0, 0)
+                rl.setSpacing(6)
+                box = QCheckBox(row)
                 box.setChecked(value in chosen)
                 box.toggled.connect(lambda on, f=facet, v=value: self._toggle(f, v, on))
-                self._filter_lay.addWidget(box)
+                rl.addWidget(box)
+                if facet == "probe" and colours.get(value):
+                    dot = QLabel(row)
+                    dot.setFixedSize(10, 10)
+                    dot.setStyleSheet(f"background:{colours[value]}; border-radius:5px;")
+                    rl.addWidget(dot)
+                label = QLabel(value, row)
+                if facet == "species":
+                    f2 = label.font()
+                    f2.setItalic(True)
+                    label.setFont(f2)
+                label.mousePressEvent = lambda _e, b=box: b.toggle()  # type: ignore[method-assign]
+                rl.addWidget(label, 1)
+                num = QLabel(str(n), row)
+                num.setStyleSheet("color: palette(dark);")
+                rl.addWidget(num)
+                self._filter_lay.addWidget(row)
         if not self._flt.is_empty():
             clear = QPushButton("Clear filters", self._filter_body)
             clear.clicked.connect(self._clear_filters)
             self._filter_lay.addWidget(clear)
+        lists = QPushButton("Edit lists (probes, species, stages, dyes)", self._filter_body)
+        lists.setFlat(True)
+        lists.setCursor(Qt.CursorShape.PointingHandCursor)
+        lists.setStyleSheet("QPushButton { color:#1F4E9A; text-align:left; border:none; padding:10px 0 0 0; } "
+                            "QPushButton:hover { text-decoration: underline; }")
+        lists.clicked.connect(self.edit_lists)
+        self._filter_lay.addWidget(lists)
 
     def _toggle(self, facet: str, value: str, on: bool) -> None:
         chosen: set[str] = getattr(self._flt, facet)
@@ -365,7 +410,10 @@ class LibraryTab(QWidget):
         self._clear_grid()
         items = self._visible_items()
         total = len(self._items)
-        self._count.setText(f"{len(items)} of {total} images" if len(items) != total else f"{total} image{'s' if total != 1 else ''}")
+        word = "image" if len(items) == 1 else "images"
+        self._count.setText(f"<b>{len(items)} of {total} {word}</b>" if len(items) != total else f"<b>{total} {word}</b>")
+        slides = {i.slide.id for i in items if i.slide}
+        self._count_sub.setText(f"in {len(slides)} slide{'s' if len(slides) != 1 else ''}" if slides else "")
         if self._folder is None or not items:
             msg = ("No images yet. Use Import slide session for channel TIFFs, or Add image for a finished picture."
                    if not total else "No image matches the filters.")
@@ -433,6 +481,7 @@ class LibraryTab(QWidget):
         if image_id in self._thumbs:
             self._thumbs[image_id].set_selected(True)
         self._show_details(self._item(image_id))
+        self.imageSelected.emit(image_id)
 
     def _on_double_clicked(self, image_id: str) -> None:
         self._on_clicked(image_id)
@@ -451,41 +500,89 @@ class LibraryTab(QWidget):
             self._details_lay.addWidget(hint)
             self._details_lay.addStretch(1)
             return
-        side = DETAILS_W - 36
+        side = DETAILS_W - 28
         pic = QLabel(self._details_body)
-        pic.setFixedSize(side, int(side * 0.75))
+        pic.setFixedSize(side, 210)
         pic.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        pic.setStyleSheet("background:#000; color:#aaa; border-radius:4px;")
+        pic.setStyleSheet("background:#06070A; color:#aaa; border-radius:6px;")
         pix = thumbnail(ci.image_file_path(self._folder, item.image), side)
         if pix.isNull():
             pic.setText("file missing")
         else:
             pic.setPixmap(pix.scaled(pic.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
         self._details_lay.addWidget(pic)
-        title = QLabel(f"<b>{item.title}</b>", self._details_body)
+        cell = f"{item.slide.name} · {item.title}" if item.slide else item.title
+        title = QLabel(f"<b>{cell}</b>", self._details_body)
+        title.setStyleSheet("font-size: 14px;")
         title.setWordWrap(True)
         title.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self._details_lay.addWidget(title)
+
+        names = {"Cell stage": "Stage", "Date": "Captured"}
+        wanted = ("Species", "Accession", "Technique", "Counterstain", "Cell stage", "Channels", "Pixel size", "Date", "Notes")
         grid = QGridLayout()
         grid.setColumnStretch(1, 1)
-        grid.setVerticalSpacing(4)
-        for r, (k, v) in enumerate(lb.details_rows(item)):
-            key = QLabel(k, self._details_body)
-            key.setStyleSheet("color:palette(dark);")
+        grid.setColumnMinimumWidth(0, 84)
+        grid.setVerticalSpacing(5)
+        shown = [(k, v) for k, v in lb.details_rows(item) if k in wanted]
+        for r, (k, v) in enumerate(shown):
+            key = QLabel(names.get(k, k), self._details_body)
+            key.setStyleSheet("color: palette(dark);")
             key.setAlignment(Qt.AlignmentFlag.AlignTop)
             val = QLabel(v, self._details_body)
             val.setWordWrap(True)
             val.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            if k == "Species":
+                f = val.font()
+                f.setItalic(True)
+                val.setFont(f)
             grid.addWidget(key, r, 0)
             grid.addWidget(val, r, 1)
         self._details_lay.addLayout(grid)
+
+        if item.probe_info:
+            head = QLabel("<b>Probes</b>", self._details_body)
+            self._details_lay.addWidget(head)
+            for probe, dye, colour, sequence in item.probe_info:
+                row = QHBoxLayout()
+                row.setSpacing(8)
+                dot = QLabel(self._details_body)
+                dot.setFixedSize(10, 10)
+                dot.setStyleSheet(f"background:{colour or '#999999'}; border-radius:5px;")
+                row.addWidget(dot)
+                row.addWidget(QLabel(f"{probe} · {dye}" if dye else probe, self._details_body), 1)
+                if sequence:
+                    link = QLabel(f"<a href='#'>{sequence}</a>", self._details_body)
+                    link.setToolTip("Sequence this probe comes from")
+                    row.addWidget(link)
+                self._details_lay.addLayout(row)
+        self._details_lay.addWidget(QLabel("<b>Signals</b>", self._details_body))
+        sig = QLabel(lb.signals_text(item), self._details_body)
+        sig.setWordWrap(True)
+        sig.setStyleSheet("color: palette(dark);")
+        self._details_lay.addWidget(sig)
+
+        self._details_lay.addStretch(1)
         row = QHBoxLayout()
-        for text, slot in (("Open", self._open_selected), ("Edit", self._edit_selected), ("Remove", self._remove_selected)):
-            b = QPushButton(text, self._details_body)
-            b.clicked.connect(slot)
+        open_btn = QPushButton("Open", self._details_body)
+        open_btn.clicked.connect(self._open_selected)
+        mark_btn = QPushButton("Mark signals", self._details_body)
+        mark_btn.clicked.connect(lambda: self.signalsRequested.emit(self._selected))
+        fig_btn = QPushButton("Add to figure", self._details_body)
+        fig_btn.setEnabled(False)
+        fig_btn.setToolTip("The Figure tab comes in a later step")
+        for b in (open_btn, mark_btn, fig_btn):
             row.addWidget(b)
         self._details_lay.addLayout(row)
-        self._details_lay.addStretch(1)
+        row2 = QHBoxLayout()
+        for text, slot in (("Edit details", self._edit_selected), ("Remove", self._remove_selected)):
+            b = QPushButton(text, self._details_body)
+            b.setFlat(True)
+            b.setStyleSheet("QPushButton { color:#1F4E9A; border:none; } QPushButton:hover { text-decoration: underline; }")
+            b.clicked.connect(slot)
+            row2.addWidget(b)
+        row2.addStretch(1)
+        self._details_lay.addLayout(row2)
 
     # ------------------------------------------------------------------ image actions
 
@@ -550,7 +647,7 @@ class LibraryTab(QWidget):
         self._worker = _ImportWorker(dialog.request(), self)
         self._worker.progressed.connect(self._on_progress)
         self._worker.finishedWith.connect(self._on_import_done)
-        self._import_btn.setEnabled(False)
+        self.import_running.emit(True)
         self._progress.setRange(0, 0)
         self._progress_label.setText("Importing slide session…")
         self._progress_row.show()
@@ -572,7 +669,7 @@ class LibraryTab(QWidget):
             worker.wait()
             worker.deleteLater()
         self._progress_row.hide()
-        self._import_btn.setEnabled(True)
+        self.import_running.emit(False)
         if isinstance(result, Exception):
             QMessageBox.critical(self, "Import slide session", f"The import failed:\n{result}")
             return

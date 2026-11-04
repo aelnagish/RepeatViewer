@@ -186,11 +186,21 @@ class ImageSession:
     # ---------------------------------------------------------------- saving
 
     def save(self) -> None:
-        """Write log, record and merged preview. Raw TIFFs stay untouched."""
+        """Write log, record and merged preview. Raw TIFFs stay untouched.
+
+        Only the display part of the stored record is replaced, so marks and
+        signals saved by the Signals tab in the meantime survive.
+        """
         refresh_log(self.details)
-        set_image_details(self.image, self.details)
-        self.image.extra["scale_bar"] = {"show": self.scale_show, "length_um": self.scale_length_um}
-        update_image(self.folder, self.image)
+        fresh = next((i for i in load_images(self.folder) if i.id == self.image.id), self.image)
+        stored = image_details(fresh)
+        stored.channels = self.details.channels
+        stored.pixel_size_um = self.details.pixel_size_um
+        stored.adjustment_log = self.details.adjustment_log
+        set_image_details(fresh, stored)
+        fresh.extra["scale_bar"] = {"show": self.scale_show, "length_um": self.scale_length_um}
+        update_image(self.folder, fresh)
+        self.image = fresh
         if self.is_multichannel:
             render_preview(self.folder, self.image, cache=self.cache)
 

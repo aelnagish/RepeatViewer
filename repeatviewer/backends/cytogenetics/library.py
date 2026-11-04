@@ -25,6 +25,10 @@ class LibraryItem:
     stage: str
     marked: bool
     channels: int
+    channel_colours: list[str] = field(default_factory=list)
+    probe_info: list[tuple[str, str, str, str]] = field(default_factory=list)  # probe, dye, colour, sequence
+    n_marks: int = 0
+    n_signals: int = 0
 
     @property
     def title(self) -> str:
@@ -62,6 +66,14 @@ def build_items(folder: Path) -> list[LibraryItem]:
             if p and p not in probes:
                 probes.append(p)
         slide = slides.get(details.slide_id)
+        sequences = {t.probe_label: t.sequence for t in image.targets if t.probe_label and t.sequence}
+        info: list[tuple[str, str, str, str]] = []
+        for c in details.channels:
+            if c.probe and all(c.probe != row[0] for row in info):
+                info.append((c.probe, c.dye, c.display.color, sequences.get(c.probe, "")))
+        for probe in probes:
+            if all(probe != row[0] for row in info):
+                info.append((probe, "", "", sequences.get(probe, "")))
         items.append(LibraryItem(
             image=image,
             slide=slide,
@@ -70,6 +82,10 @@ def build_items(folder: Path) -> list[LibraryItem]:
             stage=image.metadata.get("stage", ""),
             marked=bool(details.signals),
             channels=len(details.channels),
+            channel_colours=[c.display.color for c in details.channels],
+            probe_info=info,
+            n_marks=len(details.chromosomes),
+            n_signals=len(details.signals),
         ))
     return items
 
@@ -215,3 +231,19 @@ def details_rows(item: LibraryItem) -> list[tuple[str, str]]:
         ("Notes", meta.get("notes", "")),
     ]
     return [(k, v) for k, v in rows if str(v).strip()]
+
+
+def probe_colours(items: list[LibraryItem]) -> dict[str, str]:
+    """Probe -> colour of the channel it was seen in (for the dots in the filters)."""
+    out: dict[str, str] = {}
+    for item in items:
+        for probe, _dye, colour, _seq in item.probe_info:
+            if colour and probe not in out:
+                out[probe] = colour
+    return out
+
+
+def signals_text(item: LibraryItem) -> str:
+    if not item.n_marks and not item.n_signals:
+        return "Not marked yet"
+    return f"{item.n_marks} chromosomes numbered, {item.n_signals} signals marked"

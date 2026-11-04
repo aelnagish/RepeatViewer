@@ -25,10 +25,8 @@ from PySide6.QtWidgets import (
 )
 
 from repeatviewer.backends import cyto_images as ci
-from repeatviewer.backends.cytogenetics import channels as ch
 from repeatviewer.backends.cytogenetics import image_session as isn
 from repeatviewer.backends.cytogenetics.lists import load_lists
-from repeatviewer.backends.cytogenetics.model import image_details
 from repeatviewer.widgets.combo_boxes import NoWheelComboBox
 from repeatviewer.widgets.help_button import make_help_button
 from repeatviewer.widgets.sequence_annotation_rail import _CollapsibleSection
@@ -65,13 +63,20 @@ def _write(key: str, value) -> None:
         pass
 
 
+def _cell_name(image: ci.CytoImage, number: int) -> str:
+    import re
+
+    m = re.search(r"(\d+)\D*$", image.original_name or "")
+    return m.group(1).zfill(2) if m else str(number).zfill(2)
+
+
 def rgb_to_qimage(rgb: np.ndarray) -> QImage:
     rgb = np.ascontiguousarray(rgb, dtype=np.uint8)
     h, w = rgb.shape[:2]
     return QImage(rgb.data, w, h, 3 * w, QImage.Format.Format_RGB888).copy()
 
 
-class _Canvas(QWidget):
+class ImageCanvas(QWidget):
     """Zoom and pan view with an optional scale bar."""
 
     zoomChanged = Signal(float)
@@ -151,23 +156,41 @@ class _Canvas(QWidget):
             self.set_zoom(self._zoom * (1.18 ** steps), event.position())
         event.accept()
 
-    def mousePressEvent(self, event) -> None:  # noqa: N802
-        if event.button() == Qt.MouseButton.LeftButton:
-            self._drag = event.position()
-            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+    def image_point(self, pos: QPointF) -> QPointF:
+        """Screen position -> image pixel."""
+        origin = self._origin()
+        return QPointF((pos.x() - origin.x()) / self._zoom, (pos.y() - origin.y()) / self._zoom)
 
-    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+    def screen_point(self, x: float, y: float) -> QPointF:
+        origin = self._origin()
+        return QPointF(origin.x() + x * self._zoom, origin.y() + y * self._zoom)
+
+    def start_pan(self, pos: QPointF) -> None:
+        self._drag = pos
+        self.setCursor(Qt.CursorShape.ClosedHandCursor)
+
+    def move_pan(self, pos: QPointF) -> None:
         if self._drag is not None and self._image is not None:
-            delta = event.position() - self._drag
-            self._drag = event.position()
+            delta = pos - self._drag
+            self._drag = pos
             origin = self._origin()
             self._fit = False
             self._off = QPointF(origin.x() + delta.x(), origin.y() + delta.y())
             self.update()
 
-    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+    def end_pan(self) -> None:
         self._drag = None
         self.unsetCursor()
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.start_pan(event.position())
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        self.move_pan(event.position())
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        self.end_pan()
 
     def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802
         self.fit()
@@ -205,6 +228,9 @@ class _Canvas(QWidget):
                 p.drawText(rect, Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignBottom, label)
 
 
+_Canvas = ImageCanvas  # old name
+
+
 def _slider(lo: int, hi: int, value: int) -> QSlider:
     s = QSlider(Qt.Orientation.Horizontal)
     s.setRange(lo, hi)
@@ -238,16 +264,13 @@ class _ChannelCard(QFrame):
         self._dye.setEditable(True)
         self._dye.addItems(dyes)
         self._dye.setCurrentText(c.dye)
-        self._dye.setFixedWidth(80)
+        self._dye.setFixedWidth(84)
         self._dye.setToolTip("Dye of this channel")
         self._dye.lineEdit().editingFinished.connect(self._on_dye)
-        self._probe = NoWheelComboBox(self)
-        self._probe.setEditable(True)
-        self._probe.addItems([""] + probes)
-        self._probe.setCurrentText(c.probe)
-        self._probe.setToolTip("Probe detected in this channel")
-        self._probe.lineEdit().setPlaceholderText("probe")
-        self._probe.lineEdit().editingFinished.connect(self._on_probe)
+        name = QLabel(self)
+        name.setStyleSheet("color: palette(dark); font-size: 11px;")
+        name.setToolTip(c.original_name or c.file)
+        name.setText(name.fontMetrics().elidedText(c.original_name or Path(c.file).name, Qt.TextElideMode.ElideMiddle, 110))
         self._colour = QPushButton(self)
         self._colour.setFixedSize(24, 24)
         self._colour.setToolTip("Channel colour")
@@ -259,27 +282,31 @@ class _ChannelCard(QFrame):
         remove.clicked.connect(lambda: self.removeRequested.emit(self._i))
         top.addWidget(self._show)
         top.addWidget(self._dye)
-        top.addWidget(self._probe, 1)
+        top.addWidget(name, 1)
         top.addWidget(self._colour)
         top.addWidget(remove)
         lay.addLayout(top)
 
-        name = QLabel(c.original_name or Path(c.file).name, self)
-        name.setStyleSheet("color: palette(dark); font-size: 11px;")
-        name.setToolTip(c.original_name or c.file)
-        lay.addWidget(name)
+        self._probe = NoWheelComboBox(self)
+        self._probe.setEditable(True)
+        self._probe.addItems([""] + probes)
+        self._probe.setCurrentText(c.probe)
+        self._probe.setToolTip("Probe detected in this channel")
+        self._probe.lineEdit().setPlaceholderText("probe in this channel")
+        self._probe.lineEdit().editingFinished.connect(self._on_probe)
+        lay.addWidget(self._probe)
 
         lo, hi = session.level_range(index)
         self._low = _slider(int(lo), int(hi), int(c.display.low))
         self._high = _slider(int(lo), int(hi), int(c.display.high or hi))
         self._gamma = _slider(5, 20, int(round(c.display.gamma * 10)))
-        self._low_val, self._high_val, self._gamma_val = QLabel(self), QLabel(self), QLabel(self)
-        for text, slider, value in (("Black", self._low, self._low_val), ("White", self._high, self._high_val),
+        self._levels_val, self._low_val, self._gamma_val = QLabel(self), QLabel(self), QLabel(self)
+        for text, slider, value in (("Levels", self._high, self._levels_val), ("Black", self._low, self._low_val),
                                     ("Gamma", self._gamma, self._gamma_val)):
             row = QHBoxLayout()
             label = QLabel(text, self)
-            label.setFixedWidth(44)
-            value.setFixedWidth(46)
+            label.setFixedWidth(46)
+            value.setFixedWidth(78 if text == "Levels" else 46)
             value.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             row.addWidget(label)
             row.addWidget(slider, 1)
@@ -305,7 +332,7 @@ class _ChannelCard(QFrame):
 
     def _sync_labels(self) -> None:
         self._low_val.setText(f"{self._low.value()}")
-        self._high_val.setText(f"{self._high.value()}")
+        self._levels_val.setText(f"{self._low.value()} to {self._high.value()}")
         self._gamma_val.setText(f"{self._gamma.value() / 10:.1f}")
 
     def _on_visible(self, on: bool) -> None:
@@ -359,9 +386,10 @@ class ImageTab(QWidget):
         self._saving = False
         self._neighbours = (0, 0, "", "")
         self._image_w = 0
+        self._pending = ""
 
         # toolbar
-        self._canvas = _Canvas(self)
+        self._canvas = ImageCanvas(self)
         self._canvas.zoomChanged.connect(self._on_zoom)
         out_btn, in_btn, fit_btn, one_btn = (QPushButton(t, self) for t in ("−", "+", "Fit", "100 %"))
         out_btn.clicked.connect(lambda: self._canvas.set_zoom(self._canvas.zoom() / 1.25))
@@ -411,7 +439,7 @@ class ImageTab(QWidget):
         self._chan_section.add_widget(self._chan_host)
         row = QHBoxLayout()
         self._add_btn = QPushButton("+ Add channel (TIFF)", self)
-        self._auto_btn = QPushButton("Auto levels", self)
+        self._auto_btn = QPushButton("Auto levels (0.1 % saturated)", self)
         self._add_btn.clicked.connect(self._add_channel)
         self._auto_btn.clicked.connect(self._auto_all)
         row.addWidget(self._add_btn)
@@ -490,6 +518,22 @@ class ImageTab(QWidget):
             elif not self._save_timer.isActive():
                 self.show_image(current.id, keep_view=True)
 
+    def follow(self, image_id: str) -> None:
+        """Another tab moved to this cell: show it now if visible, else when this tab is shown."""
+        if not image_id or image_id == self.image_id():
+            self._pending = ""
+            return
+        if self.isVisible():
+            self.show_image(image_id)
+        else:
+            self._pending = image_id
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        pending, self._pending = self._pending, ""
+        if pending and pending != self.image_id():
+            self.show_image(pending)
+
     def image_id(self) -> str:
         return self._session.image.id if self._session else ""
 
@@ -563,7 +607,7 @@ class ImageTab(QWidget):
         self._scale_section.setEnabled(s.is_multichannel)
         self._sync_log()
         pos, total, prev_id, next_id = self._neighbours
-        self._nav.setText(f"{s.image.original_name or s.image.id} · {pos} of {total}" if total else "")
+        self._nav.setText(f"cell {_cell_name(s.image, pos)} of {total}" if total else "")
         self._prev.setEnabled(bool(prev_id))
         self._next.setEnabled(bool(next_id))
 

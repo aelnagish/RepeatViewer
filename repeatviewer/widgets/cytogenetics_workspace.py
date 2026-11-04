@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QHBoxLayout,
     QLabel,
+    QPushButton,
     QScrollArea,
     QSizePolicy,
     QSplitter,
@@ -26,6 +27,7 @@ from PySide6.QtWidgets import (
 from repeatviewer.backends.cytogenetics import workspace as ws
 from repeatviewer.widgets.cytogenetics_image import ImageTab
 from repeatviewer.widgets.cytogenetics_library import LibraryTab
+from repeatviewer.widgets.cytogenetics_signals import SignalsTab
 
 _SETTINGS = "cytogenetics_workspace"
 SIDE_W = 270
@@ -99,6 +101,7 @@ class CytogeneticsWorkspace(QWidget):
         self._path: Path | None = None
         self._folder: Path | None = None
         self._sequence_filter = ""
+        self._current_image = ""
 
         self._title = QLabel(self)
         self._title.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -113,9 +116,21 @@ class CytogeneticsWorkspace(QWidget):
         self._side_btn.toggled.connect(self._on_side_toggled)
         self._help = make_help_button(self, "Cytogenetics", HELP_TEXT)
 
+        self._crumb = QLabel(self)
+        self._crumb.setStyleSheet("color: palette(dark);")
+        self._crumb.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self._import_btn = QPushButton("Import slide session", self)
+        self._import_btn.setStyleSheet(
+            "QPushButton { background:#1F4E9A; color:#FFFFFF; border:1px solid #1F4E9A; border-radius:6px; padding:5px 12px; }"
+            "QPushButton:hover { background:#163A75; }"
+        )
+        self._import_btn.clicked.connect(lambda: self._pages["Library"].start_import())
+
         header = QHBoxLayout()
         header.setContentsMargins(10, 6, 10, 2)
-        header.addWidget(self._title, 1)
+        header.addWidget(self._title)
+        header.addWidget(self._crumb, 1)
+        header.addWidget(self._import_btn)
         header.addWidget(self._side_btn)
         header.addWidget(self._help)
 
@@ -123,12 +138,18 @@ class CytogeneticsWorkspace(QWidget):
         self._tabs.setDocumentMode(True)
         self._pages: dict[str, QWidget] = {}
         for name in ws.TAB_NAMES:
-            page = {"Library": LibraryTab, "Image": ImageTab}.get(name, None)
+            page = {"Library": LibraryTab, "Image": ImageTab, "Signals": SignalsTab}.get(name, None)
             page = page(self) if page else _TabPage(name, self)
             self._pages[name] = page
             self._tabs.addTab(page, name)
         self._tabs.currentChanged.connect(self._on_tab_changed)
         self._pages["Library"].imageOpened.connect(self.open_image)
+        self._pages["Library"].signalsRequested.connect(self.open_signals)
+        self._pages["Library"].imageSelected.connect(self._on_image_shown)
+        self._pages["Image"].imageChanged.connect(lambda i: self._on_image_shown(i, "Image"))
+        self._pages["Signals"].imageChanged.connect(lambda i: self._on_image_shown(i, "Signals"))
+        self._pages["Signals"].idiogramRequested.connect(lambda: self.show_tab("Idiogram"))
+        self._pages["Signals"].karyotypesChanged.connect(self.refresh)
 
         self._data_form = QFormLayout()
         self._side = self._build_side()
@@ -152,6 +173,7 @@ class CytogeneticsWorkspace(QWidget):
         self._side_btn.setChecked(_read("side_panel", True, bool))
         self._on_side_toggled(self._side_btn.isChecked())
         self._tabs.setCurrentIndex(self._tabs.indexOf(self._pages[ws.normalize_tab(_read("tab", ""))]))
+        self._import_btn.setVisible(self.tab_name() == "Library")
         cyto_notifier().changed.connect(self._on_store_changed)
         if path is not None:
             self.load(path)
@@ -206,8 +228,9 @@ class CytogeneticsWorkspace(QWidget):
         """Open the workspace of the folder that ``path`` (a ``.rvcyto`` marker) belongs to."""
         self._path = Path(path)
         self._folder = ws.workspace_folder(self._path)
-        self._title.setText(f"Cytogenetics: {self._folder.name}")
+        self._title.setText("Cytogenetics")
         self._title.setToolTip(str(self._folder))
+        self._crumb.setText(ws.breadcrumb(self._folder, self._current_image))
         self.refresh()
 
     def refresh(self) -> None:
@@ -248,10 +271,25 @@ class CytogeneticsWorkspace(QWidget):
         self.show_tab("Image")
         self._pages["Image"].show_image(image_id)
 
+    def open_signals(self, image_id: str) -> None:
+        """Show one image in the Signals tab."""
+        self.show_tab("Signals")
+        self._pages["Signals"].show_image(image_id)
+
+    def _on_image_shown(self, image_id: str, source: str = "Library") -> None:
+        """Keep the header and the other image tabs on the same cell."""
+        self._current_image = image_id
+        if self._folder is not None:
+            self._crumb.setText(ws.breadcrumb(self._folder, image_id))
+        for name in ("Image", "Signals"):
+            if name != source:
+                self._pages[name].follow(image_id)
+
     def library(self) -> LibraryTab:
         return self._pages["Library"]
 
     def _on_tab_changed(self, index: int) -> None:
         name = self.tab_name()
         _write("tab", name)
+        self._import_btn.setVisible(name == "Library")
         self.tabChanged.emit(name)

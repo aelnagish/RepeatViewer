@@ -138,3 +138,13 @@ def test_details_rows(tmp_path):
     assert rows["Slide"] == "Slide 12" and rows["Channels"] == "channel (CroSat2) · channel (45S)"
     assert rows["Signals"] == "2 on 0 chromosomes" and rows["Sequences"] == "CroSat2.fasta"
     assert "Pixel size" not in rows and "Notes" not in rows
+
+
+def test_probe_info_and_texts(tmp_path):
+    items = _folder(tmp_path)
+    first = items[0]
+    assert [row[0] for row in first.probe_info] == ["CroSat2", "45S"]
+    assert first.probe_info[0][3] == "CroSat2.fasta"
+    assert lb.signals_text(first) == "0 chromosomes numbered, 2 signals marked"
+    assert lb.signals_text(items[3]) == "Not marked yet"
+    assert lb.probe_colours(items) == {"CroSat2": "#ffffff", "45S": "#ffffff", "CroSat1": "#ffffff"}

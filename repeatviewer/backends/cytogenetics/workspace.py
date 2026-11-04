@@ -84,3 +84,22 @@ def normalize_tab(name: str) -> str:
     """A valid tab name (case-insensitive); the first tab when unknown."""
     wanted = str(name or "").strip().lower()
     return next((t for t in TAB_NAMES if t.lower() == wanted), TAB_NAMES[0])
+
+
+def breadcrumb(folder: Path, image_id: str = "") -> str:
+    """"saffron_FISH › Slide 12 › cell 03" for the workspace header."""
+    import re
+
+    folder = Path(folder).expanduser().resolve()
+    parts = [folder.name]
+    if image_id:
+        image = next((i for i in load_images(folder) if i.id == image_id), None)
+        if image is not None:
+            slide_id = image_details(image).slide_id
+            slide = next((s for s in load_slides(folder) if s.id == slide_id), None)
+            if slide is not None:
+                parts.append(slide.name)
+            name = image.original_name or image.id
+            m = re.search(r"(\d+)\D*$", name)
+            parts.append(f"cell {m.group(1).zfill(2)}" if m else name)
+    return " › ".join(parts)
