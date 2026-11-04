@@ -276,3 +276,92 @@ def dye_for_filename(name: str, lists: Lists) -> tuple[str, int]:
 def dye_color(lists: Lists, dye: str, fallback: str = "#ffffff") -> str:
     e = entry(lists, "dyes", dye)
     return str(e.get("color") or fallback) if e else fallback
+
+
+# ---------------------------------------------------------------------------
+# Editing session (Edit lists window): changes are kept until Save
+# ---------------------------------------------------------------------------
+
+import copy
+
+
+class ListsEditor:
+    """Working copy of the lists. Renames and merges are applied to the images on ``apply``."""
+
+    def __init__(self, folder: Path, lists: Lists | None = None) -> None:
+        self.folder = Path(folder)
+        self.lists: Lists = copy.deepcopy(lists if lists is not None else load_lists(folder))
+        self.usage = usage_counts(folder)
+        self._ops: list[tuple] = []  # ("rename", key, old, new) / ("merge", key, [names], into)
+
+    def names(self, key: str) -> list[str]:
+        return names(self.lists, key)
+
+    def used_by(self, key: str, name: str) -> int:
+        return self.usage.get(key, {}).get(name, 0)
+
+    def _exists(self, key: str, name: str, ignore: str = "") -> bool:
+        return any(str(e["name"]).lower() == name.lower() and e["name"] != ignore for e in self.lists.get(key, []))
+
+    def add(self, key: str, name: str, **values) -> dict:
+        name = str(name).strip()
+        if not name:
+            raise ValueError("The name is empty.")
+        if self._exists(key, name):
+            raise ValueError(f"{name} is already in the list.")
+        return add_entry(self.lists, key, name, **values)
+
+    def rename(self, key: str, old: str, new: str) -> None:
+        new = str(new).strip()
+        if not new:
+            raise ValueError("The name is empty.")
+        if new == old:
+            return
+        if self._exists(key, new, ignore=old):
+            raise ValueError(f"{new} is already in the list. Use Merge to combine entries.")
+        entry(self.lists, key, old)["name"] = new
+        self.usage.setdefault(key, {})[new] = self.usage.get(key, {}).pop(old, 0)
+        self._ops.append(("rename", key, old, new))
+
+    def set_value(self, key: str, name: str, field_name: str, value: str) -> None:
+        e = entry(self.lists, key, name)
+        if e is None:
+            raise KeyError(name)
+        if value in (None, ""):
+            e.pop(field_name, None)
+        else:
+            e[field_name] = value
+
+    def merge(self, key: str, merged: list[str], into: str) -> None:
+        merged = [m for m in merged if m != into]
+        if not merged:
+            return
+        total = self.used_by(key, into) + sum(self.used_by(key, m) for m in merged)
+        self.lists[key] = [e for e in self.lists.get(key, []) if e.get("name") not in merged]
+        if entry(self.lists, key, into) is None:
+            add_entry(self.lists, key, into)
+        usage = self.usage.setdefault(key, {})
+        for m in merged:
+            usage.pop(m, None)
+        usage[into] = total
+        self._ops.append(("merge", key, merged, into))
+
+    def can_remove(self, key: str, name: str) -> bool:
+        return self.used_by(key, name) == 0
+
+    def remove(self, key: str, name: str) -> None:
+        if not self.can_remove(key, name):
+            raise ValueError(f"{name} is used by {self.used_by(key, name)} image(s). Merge it into another entry instead.")
+        self.lists[key] = [e for e in self.lists.get(key, []) if e.get("name") != name]
+
+    def apply(self) -> int:
+        """Update the images for every rename and merge, then save the lists. Returns images changed."""
+        changed = 0
+        for op in self._ops:
+            if op[0] == "rename":
+                changed += _replace_in_images(self.folder, op[1], {op[2]: op[3]})
+            else:
+                changed += _replace_in_images(self.folder, op[1], {m: op[3] for m in op[2]})
+        save_lists(self.folder, self.lists)
+        self._ops.clear()
+        return changed

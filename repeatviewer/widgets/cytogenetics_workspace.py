@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 )
 
 from repeatviewer.backends.cytogenetics import workspace as ws
+from repeatviewer.widgets.cytogenetics_library import LibraryTab
 
 _SETTINGS = "cytogenetics_workspace"
 SIDE_W = 270
@@ -119,9 +120,9 @@ class CytogeneticsWorkspace(QWidget):
 
         self._tabs = QTabWidget(self)
         self._tabs.setDocumentMode(True)
-        self._pages: dict[str, _TabPage] = {}
+        self._pages: dict[str, QWidget] = {}
         for name in ws.TAB_NAMES:
-            page = _TabPage(name, self)
+            page = LibraryTab(self) if name == "Library" else _TabPage(name, self)
             self._pages[name] = page
             self._tabs.addTab(page, name)
         self._tabs.currentChanged.connect(self._on_tab_changed)
@@ -222,7 +223,7 @@ class CytogeneticsWorkspace(QWidget):
 
     def tab_name(self) -> str:
         page = self._tabs.currentWidget()
-        return page.name if isinstance(page, _TabPage) else ws.TAB_NAMES[0]
+        return getattr(page, "name", ws.TAB_NAMES[0])
 
     def show_tab(self, name: str) -> None:
         self._tabs.setCurrentWidget(self._pages[ws.normalize_tab(name)])
@@ -233,7 +234,11 @@ class CytogeneticsWorkspace(QWidget):
 
     def set_sequence_filter(self, fasta_name: str) -> None:
         self._sequence_filter = str(fasta_name or "")
+        self._pages["Library"].set_sequence(self._sequence_filter)
         self.refresh()
+
+    def library(self) -> LibraryTab:
+        return self._pages["Library"]
 
     def _on_tab_changed(self, index: int) -> None:
         name = self.tab_name()

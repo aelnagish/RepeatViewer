@@ -159,3 +159,81 @@ def import_cells(
     if created:
         save_images(folder, list(load_images(folder)) + created)
     return created, errors
+
+
+# ---------------------------------------------------------------------------
+# One slide session = one request (the Import dialog builds it)
+# ---------------------------------------------------------------------------
+
+from .lists import add_entry, ensure_used_values, entry, load_lists, save_lists  # noqa: E402
+from .model import add_slide, load_slides, save_slides  # noqa: E402
+
+SLIDE_FIELDS = ("date", "species", "accession", "technique", "counterstain")
+
+
+@dataclass
+class ImportRequest:
+    folder: Path                 # the data folder (where the store lives)
+    source: Path                 # folder with the microscope TIFFs
+    recursive: bool = False
+    slide_name: str = ""
+    slide_values: dict = field(default_factory=dict)   # SLIDE_FIELDS
+    stage: str = ""
+    probes_by_dye: dict = field(default_factory=dict)  # dye -> probe name
+    copy: bool = True
+    pixel_size_um: float | None = None
+
+
+def scan_tiffs(source: Path, recursive: bool = False) -> list[Path]:
+    source = Path(source).expanduser()
+    if not source.is_dir():
+        return []
+    walker = source.rglob("*") if recursive else source.iterdir()
+    return sorted((p for p in walker if p.is_file() and ch.is_tiff(p) and not p.name.startswith(".")),
+                  key=lambda p: natural_key(str(p)))
+
+
+def targets_for_probes(lists: Lists, probes_by_dye: dict) -> list[ImageTarget]:
+    """Sequence links for the probes that have a FASTA in the Probes list (keeps right-click on sequences working)."""
+    out = []
+    for dye, probe in probes_by_dye.items():
+        e = entry(lists, "probes", probe) if probe else None
+        seq = str((e or {}).get("sequence") or "").strip()
+        if seq:
+            out.append(ImageTarget(seq, probe=probe, dye=dye, color=dye_color(lists, dye, "")))
+    return out
+
+
+def run_request(req: ImportRequest, *, progress=None):
+    """Create the slide and its images. Returns (slide or None, new images, error lines).
+
+    The slide is dropped again when no image could be imported.
+    """
+    folder = Path(req.folder).expanduser().resolve()
+    lists = load_lists(folder)
+    files = scan_tiffs(req.source, req.recursive)
+    groups, unmatched = group_channel_files(files, lists)
+    errors = [f"{p.name}: no known dye in the file name" for p in unmatched if p.suffix.lower() in (".tif", ".tiff")]
+    if not groups:
+        return None, [], errors or ["No channel TIFFs found."]
+    values = {k: str(req.slide_values.get(k, "")).strip() for k in SLIDE_FIELDS}
+    slide = add_slide(folder, req.slide_name or Path(req.source).name, **values)
+    metadata = {k: v for k, v in values.items() if v}
+    if req.stage:
+        metadata["stage"] = req.stage
+    images, errs = import_cells(
+        folder, groups, lists=lists, slide_id=slide.id, metadata=metadata,
+        targets=targets_for_probes(lists, req.probes_by_dye), probes_by_dye=req.probes_by_dye,
+        copy=req.copy, pixel_size_um=req.pixel_size_um, progress=progress,
+    )
+    errors += errs
+    if not images:
+        save_slides(folder, [s for s in load_slides(folder) if s.id != slide.id])
+        return None, [], errors
+    lists = load_lists(folder)
+    for probe in req.probes_by_dye.values():
+        if probe:
+            add_entry(lists, "probes", probe)
+    if ensure_used_values(folder, lists) or req.probes_by_dye:
+        save_lists(folder, lists)
+    return slide, images, errors

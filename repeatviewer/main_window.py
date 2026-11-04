@@ -5980,7 +5980,7 @@ class MainWindow(
         self._populate_tree_menu(tools_menu.addMenu("T&ree"))
         self._populate_map_menu(tools_menu.addMenu("&Mapping"))
         self._populate_primers_menu(tools_menu.addMenu("&Primers and Probes"))
-        tools_menu.addAction("&Cytogenetics", lambda: self._open_cytogenetics_workspace())
+        self._populate_cytogenetics_menu(tools_menu.addMenu("&Cytogenetics"))
         self._populate_extend_menu(tools_menu.addMenu("MSA &Extend"))
         self._populate_tsd_search_menu(tools_menu.addMenu("TSD &search"))
         self._populate_teaid_menu(tools_menu.addMenu("&TE-Aid"))
