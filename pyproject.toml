@@ -32,6 +32,8 @@ dependencies = [
   "pyhmmer>=0.10",
   # Tools > Primers: Tm, hairpins, dimers and primer design (Primer3)
   "primer3-py>=2.0",
+  # Cytogenetics: 16-bit channel TIFFs and their pixel size
+  "tifffile>=2023.1",
 ]
 
 [project.optional-dependencies]

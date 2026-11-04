@@ -299,3 +299,20 @@ def test_deleting_sequences_asks_first_and_names_the_tree(qapp, tmp_path, monkey
     answer[0] = True
     overview._delete_selected_msa_rows(hard_delete=True)          # Delete
     assert aln.read_text().count(">") == 4
+
+
+def test_manual_sequences_win_over_search(tmp_path):
+    from repeatviewer.backends import tree_links as tl
+
+    tree = tmp_path / "RAxML_bestTree.run"
+    tree.write_text("(A:1,B:1);")
+    assert tl.sequences_for_tree(tree) is None
+    fasta = tmp_path / "other.fasta"
+    fasta.write_text(">A\nAC\n>B\nAG\n")
+    tl.set_manual_sequences(tree, fasta)
+    try:
+        src = tl.sequences_for_tree(tree)
+        assert src is not None and src.path == fasta
+    finally:
+        tl.set_manual_sequences(tree, None)
+    assert tl.sequences_for_tree(tree) is None

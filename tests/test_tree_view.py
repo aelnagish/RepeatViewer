@@ -761,3 +761,87 @@ def test_nearest_branch_wins(qapp, tmp_path):
     a, b = mid("A"), mid("B")
     assert canvas.node_at(a + QPoint(0, 3 if b.y() > a.y() else -3)) == nodes["A"]
     assert canvas.node_at(b + QPoint(0, -3 if b.y() > a.y() else 3)) == nodes["B"]
+
+
+def test_find_tab_selects_hits_and_steps(qapp, tree_file):
+    from repeatviewer.widgets.tree_view import TreePanel
+
+    panel = TreePanel(tree_file)
+    panel._find_query.setText("d, e")
+    panel.find_all()
+    assert panel._selected == ("D", "E")
+    panel._find_query.setText("a b")
+    panel.find_step(1)
+    assert panel._selected == ("A",)
+    panel.find_step(1)
+    assert panel._selected == ("B",)
+    panel.find_step(1)
+    assert panel._selected == ("A",)
+    panel.find_step(-1)
+    assert panel._selected == ("B",)
+
+
+def test_find_hit_inside_collapsed_clade_selects_the_clade(qapp, tree_file):
+    from repeatviewer.widgets.tree_view import TreePanel
+
+    panel = TreePanel(tree_file)
+    panel._find_query.setText("D")
+    panel.find_step(1)
+    key = panel._selected
+    assert key == ("D",)
+    panel.toggle_collapse(("D", "E"))
+    panel._selected = None
+    panel.find_step(1)
+    assert panel._selected == ("D", "E")
+
+
+def test_rail_has_display_and_find_tabs(qapp, tree_file):
+    from repeatviewer.widgets.tree_display_rail import TreeDisplayRail
+    from repeatviewer.widgets.tree_view import TreePanel
+
+    panel = TreePanel(tree_file)
+    rail = panel._rail
+    rail.show_tab(TreeDisplayRail.TAB_FIND)
+    assert rail.current_tab() == TreeDisplayRail.TAB_FIND and not rail.is_panel_collapsed()
+    rail._on_tab_clicked(TreeDisplayRail.TAB_FIND)
+    assert rail.is_panel_collapsed()
+    rail._on_tab_clicked(TreeDisplayRail.TAB_DISPLAY)
+    assert rail.current_tab() == TreeDisplayRail.TAB_DISPLAY and not rail.is_panel_collapsed()
+
+
+def _tip_index(panel, name):
+    d = panel.display()
+    return next(n.index for n in d.model.nodes if n.is_tip and n.name == name)
+
+
+def test_ctrl_click_adds_and_removes_tips(qapp, tree_file):
+    from repeatviewer.widgets.tree_view import TreePanel
+
+    panel = TreePanel(tree_file)
+    panel._on_node_toggled(_tip_index(panel, "A"))
+    panel._on_node_toggled(_tip_index(panel, "E"))
+    assert panel._selected == ("A", "E")
+    panel._on_node_toggled(_tip_index(panel, "A"))
+    assert panel._selected == ("E",)
+    panel._on_node_toggled(_tip_index(panel, "E"))
+    assert panel._selected is None
+
+
+def test_ctrl_drag_adds_to_the_selection(qapp, tree_file):
+    from repeatviewer.widgets.tree_view import TreePanel
+
+    panel = TreePanel(tree_file)
+    panel._on_node_toggled(_tip_index(panel, "F"))
+    panel._on_rubber_band_add([_tip_index(panel, "A"), _tip_index(panel, "B")])
+    assert panel._selected == ("A", "B", "F")
+
+
+def test_distant_picks_do_not_light_up_the_branches_between(qapp, tree_file):
+    from repeatviewer.widgets.tree_view import TreePanel, selection_branch_nodes
+
+    panel = TreePanel(tree_file)
+    d = panel.display()
+    lit = selection_branch_nodes(d, ("A", "F"))
+    assert {d.model.nodes[i].name for i in lit} == {"A", "F"}
+    near = selection_branch_nodes(d, ("A", "B"))
+    assert any(not d.model.nodes[i].is_tip for i in near)    # adjacent tips: spanning subtree

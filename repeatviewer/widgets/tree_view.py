@@ -79,6 +79,7 @@ from PySide6.QtWidgets import (
     QGraphicsView,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMenu,
     QMessageBox,
     QPushButton,
@@ -89,8 +90,10 @@ from PySide6.QtWidgets import (
 )
 
 from repeatviewer.backends import tree_edit as te
+from repeatviewer.backends import tree_find as tf
 from repeatviewer.backends import tree_layout as tl
 from repeatviewer.backends import tree_traits as tt
+
 from repeatviewer.widgets.combo_boxes import NoWheelComboBox
 from repeatviewer.widgets.help_button import make_help_button
 from repeatviewer.widgets.preview_controls import (
@@ -102,7 +105,11 @@ from repeatviewer.widgets.preview_controls import (
     apply_annotation_zoom_slider_style,
     make_overview_zoom_button,
 )
-from repeatviewer.widgets.sequence_annotation_rail import _h_divider
+from repeatviewer.widgets.sequence_annotation_rail import (
+    _h_divider,
+    _page_title_with_rule,
+    _section_label,
+)
 from repeatviewer.widgets.spin_boxes import NoWheelDoubleSpinBox, NoWheelSlider, NoWheelSpinBox
 from repeatviewer.widgets.tree_display_rail import TreeDisplayRail
 
@@ -187,11 +194,25 @@ EDIT_HELP = (
     "alignment in a Preview tab with that sequence selected; right-click a clade → "
     "Show clade in alignment selects all of its sequences. There, right-click → "
     "Extract Sequence or Copy Sequence.<br>"
+    "<b>Use These Sequences…</b> (right-click a tip) picks the FASTA by hand when none is "
+    "found next to the tree, for example a tree made by another program. Tip names are "
+    "matched to the first word of each FASTA header.<br>"
     "Undo: Cmd+Z / Ctrl+Z. Redo: Cmd+Shift+Z / Ctrl+Shift+Z.<br>"
     "Colours and collapsed clades are remembered for this tree. Rerooting and swapping "
     "change the tree: the file is never overwritten, use <b>Save → Tree</b>."
 )
 
+
+FIND_HELP = (
+    "<b>Find</b> tips by name or by the values in the trait table (chromosome, array, "
+    "lineage, any column you added).<br>"
+    "Type one or several words (separated by spaces or commas): a tip matches when it "
+    "contains <b>any</b> of them.<br>"
+    "<b>Find next / previous</b> select one tip at a time and scroll to it; a tip inside a "
+    "collapsed clade selects that clade.<br>"
+    "<b>Find all</b> selects every match, so Edit, right-click and Save work on them "
+    "(for example Extract sequences)."
+)
 
 TRAITS_HELP = (
     "<b>Colour tips by</b> a column of the trait table next to the tree "
@@ -372,22 +393,62 @@ def _pixel_scale(layout: tl.Layout, n_tips: int, row_h: float,
     return s, s
 
 
+def display_leaves(display: Display) -> list[int]:
+    """Display nodes drawn as a leaf (a tip or a collapsed clade), top to bottom."""
+    nodes = display.model.nodes
+    out: list[int] = []
+    stack = [0]
+    while stack:
+        i = stack.pop()
+        node = nodes[i]
+        if node.is_tip or i in display.info:
+            out.append(i)
+        else:
+            stack.extend(reversed(node.children))
+    return out
+
+
 def selection_branch_nodes(
     display: Display, selected: tuple[str, ...] | None
 ) -> frozenset[int]:
     """Display nodes whose branch should be blue for ``selected`` tips.
 
-    For a multi-tip selection this is the spanning subtree: every branch on a
-    path between selected tips, including the LCA connector — not only the tip
-    stubs (so internal segments between selected tips are highlighted too).
+    Tips that sit next to each other in the drawing form one group, drawn as the
+    spanning subtree (every branch on a path between them, including the LCA
+    connector). Groups separated by unselected tips are drawn on their own, so
+    two distant picks do not light up the branches between them.
     """
     if not selected:
         return frozenset()
     sel = set(selected)
-    n_sel = len(sel)
     keys = display.keys
+    runs: list[list[int]] = []
+    current: list[int] = []
+    for i in display_leaves(display):
+        if any(tip in sel for tip in keys[i]):
+            current.append(i)
+        elif current:
+            runs.append(current)
+            current = []
+    if current:
+        runs.append(current)
+    out: set[int] = set()
+    for run in runs:
+        out |= _run_branch_nodes(display, run, sel)
+    return frozenset(out)
+
+
+def _run_branch_nodes(display: Display, run: list[int], sel: set[str]) -> set[int]:
     nodes = display.model.nodes
-    counts = [sum(1 for tip in keys[i] if tip in sel) for i in range(len(nodes))]
+    keys = display.keys
+    run_sel = {tip for i in run for tip in keys[i] if tip in sel}
+    n_sel = len(run_sel)
+    counts = [0] * len(nodes)
+    for i in run:
+        counts[i] = sum(1 for tip in keys[i] if tip in run_sel)
+    for node in reversed(nodes):
+        if node.children:
+            counts[node.index] = sum(counts[c] for c in node.children)
     out: set[int] = set()
     for i, node in enumerate(nodes):
         under = counts[i]
@@ -399,11 +460,11 @@ def selection_branch_nodes(
             continue
         # under == n_sel: highlight only the LCA (no child holds every selected tip).
         if node.is_tip:
-            if node.name in sel:
+            if node.name in run_sel or i in display.info:
                 out.add(i)
         elif node.children and all(counts[c] < n_sel for c in node.children):
             out.add(i)
-    return frozenset(out)
+    return out
 
 
 def shorten(text: str, max_chars: int, keep_end: bool = True) -> str:
@@ -1092,7 +1153,8 @@ def _point_segment_distance(p: QPointF, a: QPointF, b: QPointF) -> float:
 
 
 class TreeCanvas(QGraphicsView):
-    """Shift+scroll to zoom, scroll to pan, left-drag to select tips, middle/Alt-drag to pan.
+    """Shift+scroll to zoom, scroll to pan, left-drag to select tips (Cmd/Ctrl adds to the
+    selection), middle/Alt-drag to pan.
 
     Clicking a branch, tip or collapsed clade reports its display node index."""
 
@@ -1101,6 +1163,8 @@ class TreeCanvas(QGraphicsView):
     nodeDoubleClicked = Signal(int)           # -1 = empty space
     zoomChanged = Signal()                    # after wheel / zoom_by / fit
     rubberBandNodes = Signal(object)          # list[int] tip/collapsed indices in the band
+    nodeToggled = Signal(int)                 # Cmd/Ctrl+click: add or remove from the selection
+    rubberBandAdd = Signal(object)            # Cmd/Ctrl+drag: add the band's tips
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1151,6 +1215,19 @@ class TreeCanvas(QGraphicsView):
             return 0.0
         n = len(box)
         return min(_point_segment_distance(pos, box[k], box[(k + 1) % n]) for k in range(n))
+
+    def show_node(self, index: int) -> None:
+        """Scroll so the tip, label or collapsed clade ``index`` is in view."""
+        best = None
+        for item in self.scene().items():
+            if item.data(ROLE_NODE) != index or isinstance(item, _BranchItem):
+                continue
+            if isinstance(item, QGraphicsSimpleTextItem):
+                best = item
+                break
+            best = best or item
+        if best is not None:
+            self.ensureVisible(best.sceneBoundingRect(), 80, 80)
 
     def tip_nodes_in_view_rect(self, view_rect: QRect) -> list[int]:
         """Display indices of tip labels / trait dots intersecting ``view_rect``."""
@@ -1288,15 +1365,23 @@ class TreeCanvas(QGraphicsView):
             event.accept()
             return
         if event.button() == Qt.MouseButton.LeftButton:
+            additive = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
             if self._rubber is not None and self._rubber.isVisible():
                 rect = self._rubber.geometry()
                 self._clear_rubber()
-                self.rubberBandNodes.emit(self.tip_nodes_in_view_rect(rect))
+                nodes = self.tip_nodes_in_view_rect(rect)
+                if additive:
+                    self.rubberBandAdd.emit(nodes)
+                else:
+                    self.rubberBandNodes.emit(nodes)
             elif (
                 self._press is not None
                 and (pos - self._press).manhattanLength() < 4
             ):
-                self.nodeClicked.emit(self.node_at(pos))
+                if additive:
+                    self.nodeToggled.emit(self.node_at(pos))
+                else:
+                    self.nodeClicked.emit(self.node_at(pos))
             self._press = None
             self._clear_rubber()
             event.accept()
@@ -1640,7 +1725,11 @@ class TreePanel(QWidget):
         efl.addLayout(edit_row)
 
         # MSA-style right rail: Window surface + Display tab + section dividers.
-        self._rail = TreeDisplayRail(panel, self, footer=edit_footer)
+        self._find_hits: list[str] = []
+        self._find_index = -1
+        self._find_signature: tuple | None = None
+        self._rail = TreeDisplayRail(panel, self, footer=edit_footer,
+                                     find_page=self._build_find_page())
         self._options_panel = self._rail.options_scroll()
 
         self._canvas = TreeCanvas(self)
@@ -1654,6 +1743,8 @@ class TreePanel(QWidget):
         self._canvas.nodeContextMenu.connect(self._on_context_menu)
         self._canvas.nodeDoubleClicked.connect(self._on_node_double_clicked)
         self._canvas.rubberBandNodes.connect(self._on_rubber_band_nodes)
+        self._canvas.nodeToggled.connect(self._on_node_toggled)
+        self._canvas.rubberBandAdd.connect(self._on_rubber_band_add)
         self._canvas.zoomChanged.connect(self._sync_zoom_slider_from_canvas)
 
         # Toolbar only over the tree column — Display rail is full height (MSA-like).
@@ -1808,6 +1899,131 @@ class TreePanel(QWidget):
         finally:
             self._block = was
 
+    # ------------------------------------------------------------ find
+    def _build_find_page(self) -> QWidget:
+        page = QWidget(self)
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+        title, _rule = _page_title_with_rule("Find", page)
+        layout.addWidget(title)
+        self._find_query = QLineEdit(page)
+        self._find_query.setPlaceholderText("Tip name or trait value…")
+        self._find_query.setClearButtonEnabled(True)
+        self._find_query.returnPressed.connect(lambda: self.find_step(1))
+        form = QFormLayout()
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setHorizontalSpacing(8)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        find_row = QHBoxLayout()
+        find_row.setContentsMargins(0, 0, 0, 0)
+        find_row.setSpacing(6)
+        find_row.addWidget(self._find_query, 1)
+        find_row.addWidget(make_help_button(page, "Find in the tree", FIND_HELP), 0)
+        form.addRow("Find:", find_row)
+        layout.addLayout(form)
+        layout.addWidget(_section_label("Search in", page))
+        self._find_names_check = QCheckBox("Tip names", page)
+        self._find_names_check.setChecked(True)
+        self._find_traits_check = QCheckBox("Trait values", page)
+        self._find_traits_check.setChecked(True)
+        self._find_case_check = QCheckBox("Case sensitive", page)
+        for box in (self._find_names_check, self._find_traits_check, self._find_case_check):
+            layout.addWidget(box)
+        self._find_prev_btn = QPushButton("Find previous", page)
+        self._find_next_btn = QPushButton("Find next", page)
+        self._find_all_btn = QPushButton("Find all", page)
+        self._find_prev_btn.clicked.connect(lambda: self.find_step(-1))
+        self._find_next_btn.clicked.connect(lambda: self.find_step(1))
+        self._find_all_btn.clicked.connect(self.find_all)
+        nav = QHBoxLayout()
+        nav.setContentsMargins(0, 0, 0, 0)
+        nav.setSpacing(6)
+        nav.addWidget(self._find_prev_btn, 1)
+        nav.addWidget(self._find_next_btn, 1)
+        layout.addLayout(nav)
+        layout.addWidget(self._find_all_btn)
+        layout.addStretch(1)
+        return page
+
+    def focus_find(self) -> None:
+        """Edit > Find: open the Find tab and put the cursor in the search box."""
+        self._rail.show_tab(TreeDisplayRail.TAB_FIND)
+        self._find_query.setFocus()
+        self._find_query.selectAll()
+
+    def _find_order(self) -> list[tuple[str, int]]:
+        """(tip name, display node that shows it) from top to bottom of the drawing;
+        tips inside a collapsed clade point at the clade."""
+        d = self._display
+        if d is None:
+            return []
+        out: list[tuple[str, int]] = []
+        stack = [0]
+        while stack:
+            i = stack.pop()
+            node = d.model.nodes[i]
+            if i in d.info:
+                out.extend((name, i) for name in d.keys[i])
+            elif node.is_tip:
+                out.append((node.name, i))
+            else:
+                stack.extend(reversed(node.children))
+        return out
+
+    def _compute_find(self) -> tuple[list[str], dict[str, int]]:
+        order = self._find_order()
+        table = self._traits.rows if self._traits is not None else None
+        hits = tf.find_tips(
+            [name for name, _i in order], self._find_query.text(), traits=table,
+            in_names=self._find_names_check.isChecked(),
+            in_traits=self._find_traits_check.isChecked(),
+            case_sensitive=self._find_case_check.isChecked())
+        return hits, dict(order)
+
+    def _find_state(self) -> tuple:
+        return (self._find_query.text(), self._find_names_check.isChecked(),
+                self._find_traits_check.isChecked(), self._find_case_check.isChecked(),
+                id(self._model))
+
+    def find_step(self, direction: int) -> None:
+        """Select the next (+1) or previous (-1) match and scroll to it."""
+        if self._display is None:
+            return
+        signature = self._find_state()
+        if signature != self._find_signature:
+            self._find_signature = signature
+            self._find_index = -1
+        hits, where = self._compute_find()
+        self._find_hits = hits
+        if not hits:
+            self._update_status("Find: no match" if self._find_query.text().strip() else "")
+            return
+        self._find_index = tf.step_index(self._find_index, len(hits), direction)
+        tip = hits[self._find_index]
+        node = where[tip]
+        d = self._display
+        self._selected = d.keys[node] if node in d.info else (tip,)
+        self._redraw(refit=False)
+        self._canvas.show_node(node)
+        note = f"Find: {self._find_index + 1} of {len(hits)}"
+        if node in d.info:
+            note += " (inside a collapsed clade)"
+        self._update_status(note)
+
+    def find_all(self) -> None:
+        """Select every match."""
+        if self._display is None:
+            return
+        self._find_signature = self._find_state()
+        hits, _where = self._compute_find()
+        self._find_hits = hits
+        self._find_index = -1
+        self._selected = tuple(sorted(hits)) if hits else None
+        self._redraw(refit=False)
+        self._update_status(f"Find: {len(hits)} selected" if hits else "Find: no match")
+
+    # ------------------------------------------------------------ state
     def _show_options_panel(self, on: bool, *, save: bool = True) -> None:
         """Show or collapse the Display rail (keeps the vertical Display tab)."""
         self._rail.set_panel_collapsed(not bool(on), persist=save)
@@ -1932,8 +2148,68 @@ class TreePanel(QWidget):
         if not self._model.has_support and self._opts.branch_labels == BRANCH_LABELS_SUPPORT:
             self._opts = replace(self._opts, branch_labels=BRANCH_LABELS_NONE)
         self._apply_options_to_controls()
+        self._restore_manual_sequences()
         self._redraw(refit=True)
+        if self._model.notes:
+            self._update_status("; ".join(self._model.notes))
         return True
+
+    def _manual_key(self) -> str:
+        import hashlib
+
+        return "tree_view/sequences/" + hashlib.sha1(str(self._path).encode("utf-8")).hexdigest()
+
+    def _restore_manual_sequences(self) -> None:
+        from repeatviewer.backends import tree_links
+
+        if self._path is None:
+            return
+        saved = str(QSettings().value(self._manual_key(), "") or "")
+        if saved and Path(saved).is_file():
+            tree_links.set_manual_sequences(self._path, Path(saved))
+
+    def _has_manual_sequences(self) -> bool:
+        from repeatviewer.backends import tree_links
+
+        return self._path is not None and tree_links.manual_sequences(self._path) is not None
+
+    def choose_sequences(self) -> bool:
+        """Let the user pick the FASTA that holds this tree's sequences."""
+        from repeatviewer.backends import tree_links
+
+        if self._path is None:
+            return False
+        start = tree_links.manual_sequences(self._path) or self._path.parent
+        chosen, _ = QFileDialog.getOpenFileName(
+            self, "Use these sequences", str(start),
+            "FASTA (*.fa *.fasta *.fas *.fna *.faa *.aln *.afa);;All files (*)")
+        if not chosen:
+            return False
+        try:
+            aln = tree_links.read_alignment(Path(chosen), aligned=False)
+        except OSError as exc:
+            QMessageBox.warning(self, "Use these sequences", f"Could not read {Path(chosen).name}:\n{exc}")
+            return False
+        tips = [n.name for n in self._file_model.nodes if n.is_tip] if self._file_model else []
+        found = sum(1 for t in tips if aln.row_of(t) is not None)
+        if tips and found == 0:
+            QMessageBox.warning(
+                self, "Use these sequences",
+                f"None of the {len(tips)} tip names was found in {Path(chosen).name}. "
+                "Tip names are matched to the first word of each FASTA header.")
+            return False
+        tree_links.set_manual_sequences(self._path, Path(chosen))
+        QSettings().setValue(self._manual_key(), chosen)
+        self._update_status(f"Sequences: {Path(chosen).name} ({found} of {len(tips)} tips found)")
+        return True
+
+    def reset_sequences(self) -> None:
+        from repeatviewer.backends import tree_links
+
+        if self._path is not None:
+            tree_links.set_manual_sequences(self._path, None)
+            QSettings().remove(self._manual_key())
+            self._update_status("Sequences: automatic search")
 
     def _load_view_state(self) -> None:
         if self._path is None:
@@ -2073,12 +2349,12 @@ class TreePanel(QWidget):
         self._selected = None if key == self._selected else key
         self._redraw(refit=False)
 
-    def _on_rubber_band_nodes(self, indices) -> None:
-        """Left-drag rectangle: select every tip (or collapsed clade) whose label is hit."""
+    def _band_names(self, indices) -> set[str]:
+        """Tip names (a collapsed clade counts all its tips) for display indices."""
         d = self._display
-        if d is None:
-            return
         names: set[str] = set()
+        if d is None:
+            return names
         for raw in indices or ():
             try:
                 i = int(raw)
@@ -2089,7 +2365,36 @@ class TreePanel(QWidget):
             node = d.model.nodes[i]
             if node.is_tip or i in d.info:
                 names.update(d.keys[i])
+        return names
+
+    def _on_rubber_band_nodes(self, indices) -> None:
+        """Left-drag rectangle: select every tip (or collapsed clade) whose label is hit."""
+        if self._display is None:
+            return
+        names = self._band_names(indices)
         self._selected = tuple(sorted(names)) if names else None
+        self._redraw(refit=False)
+
+    def _on_rubber_band_add(self, indices) -> None:
+        """Cmd/Ctrl + drag: add the tips in the rectangle to the selection."""
+        names = self._band_names(indices)
+        if not names:
+            return
+        self._selected = tuple(sorted(set(self._selected or ()) | names))
+        self._redraw(refit=False)
+
+    def _on_node_toggled(self, index: int) -> None:
+        """Cmd/Ctrl + click: add the tip, branch or collapsed clade to the selection,
+        or take it out when all its tips are already selected."""
+        key = self._key_for(index)
+        if not key:
+            return
+        current = set(self._selected or ())
+        if all(name in current for name in key):
+            current -= set(key)
+        else:
+            current |= set(key)
+        self._selected = tuple(sorted(current)) if current else None
         self._redraw(refit=False)
 
     def _tip_at(self, index: int) -> str | None:
@@ -2122,10 +2427,16 @@ class TreePanel(QWidget):
         tips = [tips] if isinstance(tips, str) else list(tips)
         source = self._sequence_source()
         if source is None:
-            QMessageBox.information(
-                self, "Show in alignment",
-                "No alignment or FASTA was found for this tree. RepeatViewer looks for "
-                "the tree run's .aln.fa, or a FASTA with the tree's name next to it.")
+            box = QMessageBox(self)
+            box.setWindowTitle("Show in alignment")
+            box.setIcon(QMessageBox.Icon.Information)
+            box.setText("No alignment or FASTA was found for this tree. RepeatViewer looks for "
+                        "the tree run's .aln.fa, or a FASTA with the tree's name next to it.")
+            choose = box.addButton("Choose FASTA…", QMessageBox.ButtonRole.AcceptRole)
+            box.addButton(QMessageBox.StandardButton.Close)
+            box.exec()
+            if box.clickedButton() is choose and self.choose_sequences():
+                return self.show_in_alignment(tips)
             return False
         try:
             aln = tree_links.read_alignment(source.path, aligned=source.aligned)
@@ -2247,6 +2558,9 @@ class TreePanel(QWidget):
             menu.addSeparator()
             act = menu.addAction("Show in alignment", lambda: self.show_in_alignment(node.name))
             act.setEnabled(self._sequence_source() is not None)
+            menu.addAction("Use These Sequences…", self.choose_sequences)
+            if self._has_manual_sequences():
+                menu.addAction("Use Automatic Sequences", self.reset_sequences)
             menu.addAction("Copy name", lambda: QApplication.clipboard().setText(node.name))
             header = (self._traits.rows.get(node.name, {}).get("header", "")
                       if self._traits else "")
@@ -2287,7 +2601,7 @@ class TreePanel(QWidget):
             title.setEnabled(False)
             self._add_clade_actions(menu, self._selected)
         else:
-            hint = menu.addAction("Click a branch, or drag over tip names")
+            hint = menu.addAction("Click a branch, or drag over tip names (Cmd/Ctrl adds)")
             hint.setEnabled(False)
         menu.addSeparator()
         self._add_tree_actions(menu)
