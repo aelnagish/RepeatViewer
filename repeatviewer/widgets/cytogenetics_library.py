@@ -491,12 +491,8 @@ class LibraryTab(QWidget):
 
     def _open_selected(self) -> None:
         item = self._item(self._selected)
-        if item is None or self._folder is None:
-            return
-        from repeatviewer.widgets.cyto_images_ui import open_images
-
-        open_images(self, self._folder, [item.image])
-        self.imageOpened.emit(item.image.id)
+        if item is not None:
+            self.imageOpened.emit(item.image.id)
 
     def _edit_selected(self) -> None:
         item = self._item(self._selected)

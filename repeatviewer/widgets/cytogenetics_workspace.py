@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 )
 
 from repeatviewer.backends.cytogenetics import workspace as ws
+from repeatviewer.widgets.cytogenetics_image import ImageTab
 from repeatviewer.widgets.cytogenetics_library import LibraryTab
 
 _SETTINGS = "cytogenetics_workspace"
@@ -122,10 +123,12 @@ class CytogeneticsWorkspace(QWidget):
         self._tabs.setDocumentMode(True)
         self._pages: dict[str, QWidget] = {}
         for name in ws.TAB_NAMES:
-            page = LibraryTab(self) if name == "Library" else _TabPage(name, self)
+            page = {"Library": LibraryTab, "Image": ImageTab}.get(name, None)
+            page = page(self) if page else _TabPage(name, self)
             self._pages[name] = page
             self._tabs.addTab(page, name)
         self._tabs.currentChanged.connect(self._on_tab_changed)
+        self._pages["Library"].imageOpened.connect(self.open_image)
 
         self._data_form = QFormLayout()
         self._side = self._build_side()
@@ -236,6 +239,14 @@ class CytogeneticsWorkspace(QWidget):
         self._sequence_filter = str(fasta_name or "")
         self._pages["Library"].set_sequence(self._sequence_filter)
         self.refresh()
+
+    def image_tab(self) -> ImageTab:
+        return self._pages["Image"]
+
+    def open_image(self, image_id: str) -> None:
+        """Show one image in the Image tab."""
+        self.show_tab("Image")
+        self._pages["Image"].show_image(image_id)
 
     def library(self) -> LibraryTab:
         return self._pages["Library"]
