@@ -193,7 +193,10 @@ class LibraryTab(QWidget):
             self._size.setValue(int(_read("library_thumb", str(THUMB_DEFAULT))))
         except ValueError:
             self._size.setValue(THUMB_DEFAULT)
-        self._size.setFixedWidth(170)
+        self._size.setFixedWidth(150)
+        from repeatviewer.widgets.cytogenetics_style import app_slider
+
+        app_slider(self._size)
         self._size.sliderReleased.connect(self._render)
         self._size.valueChanged.connect(lambda v: _write("library_thumb", int(v)))
         top = QHBoxLayout()
@@ -202,6 +205,10 @@ class LibraryTab(QWidget):
         top.addWidget(self._count)
         top.addWidget(self._count_sub)
         top.addStretch(1)
+        self._import_btn = QPushButton("Import slide session…", self)
+        self._import_btn.clicked.connect(self.start_import)
+        top.addWidget(self._import_btn)
+        top.addSpacing(10)
         top.addWidget(QLabel("Group by", self))
         top.addWidget(self._group)
         top.addSpacing(6)
@@ -379,6 +386,7 @@ class LibraryTab(QWidget):
                 rl.setContentsMargins(0, 0, 0, 0)
                 rl.setSpacing(6)
                 box = QCheckBox(row)
+                box.setStyleSheet("QCheckBox::indicator { width: 13px; height: 13px; }")
                 box.setChecked(value not in excluded)
                 box.toggled.connect(lambda on, f=facet, v=value: self._toggle(f, v, on))
                 rl.addWidget(box)
@@ -713,6 +721,7 @@ class LibraryTab(QWidget):
         self._worker.progressed.connect(self._on_progress)
         self._worker.finishedWith.connect(self._on_import_done)
         self.import_running.emit(True)
+        self._import_btn.setEnabled(False)
         self._progress.setRange(0, 0)
         self._progress_label.setText("Importing slide session…")
         self._progress_row.show()
@@ -735,6 +744,7 @@ class LibraryTab(QWidget):
             worker.deleteLater()
         self._progress_row.hide()
         self.import_running.emit(False)
+        self._import_btn.setEnabled(True)
         if isinstance(result, Exception):
             QMessageBox.critical(self, "Import slide session", f"The import failed:\n{result}")
             return

@@ -555,6 +555,9 @@ class FigureTab(QWidget):
         self._layout.activated.connect(self._on_page_setting)
         self._spacing = QSlider(Qt.Orientation.Horizontal, self)
         self._spacing.setRange(0, 10)
+        from repeatviewer.widgets.cytogenetics_style import app_slider
+
+        app_slider(self._spacing)
         self._spacing.sliderReleased.connect(self._on_page_setting)
         self._spacing.valueChanged.connect(lambda _v: None if self._spacing.isSliderDown() else self._on_page_setting())
         self._font = NoWheelComboBox(self)
@@ -659,7 +662,6 @@ class FigureTab(QWidget):
         side.addStretch(1)
 
         save = QPushButton("Save ▾", self)
-        save.setObjectName("cytoPrimary")
         save_menu = QMenu(save)
         save_menu.addAction("SVG…", lambda: self._export("svg"))
         save_menu.addAction("PDF…", lambda: self._export("pdf"))

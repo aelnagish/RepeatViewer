@@ -234,6 +234,9 @@ _Canvas = ImageCanvas  # old name
 
 def _slider(lo: int, hi: int, value: int) -> QSlider:
     s = QSlider(Qt.Orientation.Horizontal)
+    from repeatviewer.widgets.cytogenetics_style import app_slider
+
+    app_slider(s)
     s.setRange(lo, hi)
     s.setValue(max(lo, min(hi, value)))
     return s

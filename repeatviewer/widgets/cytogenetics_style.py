@@ -44,68 +44,24 @@ def _icon(name: str, svg: str) -> str:
 
 
 def workspace_css() -> str:
-    check = _icon("check.svg", _CHECK_SVG)
-    chevron = _icon("chevron.svg", _CHEVRON_SVG)
-    check_rule = f"image: url({check});" if check else ""
-    chevron_rule = f"image: url({chevron});" if chevron else ""
-    return f"""
-#cytoWorkspace {{ background: {BAND}; }}
-#cytoChrome {{ background: {CHROME}; border-bottom: 1px solid {LINE}; }}
-#cytoWorkspace QLabel {{ color: {INK}; background: transparent; }}
-#cytoAside {{ background: {ASIDE}; }}
-#cytoMain {{ background: #FFFFFF; }}
-#cytoPage {{ background: {PAGE_BG}; }}
-QLabel#cytoMuted {{ color: {MUTED}; }}
-QLabel#cytoCrumb {{ color: {MUTED}; }}
+    """Only backgrounds of the side columns and a few text colours: every control stays the app's native one."""
+    return """
+#cytoAside { background: palette(window); }
+#cytoMain { background: palette(base); }
+#cytoPage { background: #DADBDF; }
+QLabel#cytoMuted, QLabel#cytoCrumb { color: gray; }
+QPushButton#cytoLink { background: transparent; border: none; color: palette(link); padding: 0px; text-align: left; }
+QPushButton#cytoLink:hover { text-decoration: underline; }
+QScrollArea { border: none; background: transparent; }
+"""
 
-QTabWidget::pane {{ border: none; border-top: 1px solid {LINE}; top: -1px; }}
-QTabWidget::tab-bar {{ left: 12px; }}
-QTabBar {{ background: {BAND}; }}
-QTabBar::tab {{ padding: 8px 16px; margin-top: 6px; margin-right: 2px; color: {SOFT}; background: transparent;
-               border: 1px solid transparent; border-bottom: none;
-               border-top-left-radius: 6px; border-top-right-radius: 6px; }}
-QTabBar::tab:selected {{ background: #FFFFFF; color: {INK}; font-weight: 600; border-color: {LINE}; }}
-QTabBar::tab:hover:!selected {{ color: {INK}; }}
 
-QPushButton {{ background: #FFFFFF; color: {INK}; border: 1px solid {FIELD_LINE}; border-radius: 6px; padding: 5px 12px; }}
-QPushButton:hover {{ background: #F3F5F9; }}
-QPushButton:pressed {{ background: #E8EBF2; }}
-QPushButton:checked {{ background: {SELECTED}; border-color: {BLUE}; }}
-QPushButton:disabled {{ color: #A3A6AB; border-color: #DADADF; background: #FAFAFB; }}
-QPushButton::menu-indicator {{ width: 0px; }}
-QPushButton#cytoPrimary {{ background: {BLUE}; color: #FFFFFF; border: 1px solid {BLUE}; padding: 6px 14px; }}
-QPushButton#cytoPrimary:hover {{ background: {BLUE_HOVER}; border-color: {BLUE_HOVER}; }}
-QPushButton#cytoLink {{ background: transparent; border: none; color: {BLUE}; padding: 0px; text-align: left; }}
-QPushButton#cytoLink:hover {{ text-decoration: underline; }}
+def app_slider(slider) -> None:
+    """The app's one slider style (UI rule 12): blue track left of a round blue handle."""
+    from repeatviewer.widgets.preview_controls import apply_annotation_zoom_slider_style
 
-QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox, QTextEdit, QPlainTextEdit {{
-    background: #FFFFFF; color: {INK}; border: 1px solid {FIELD_LINE}; border-radius: 6px;
-    selection-background-color: {SELECTED}; selection-color: {INK}; }}
-QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {{ padding: 4px 8px; min-height: 18px; }}
-QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus, QTextEdit:focus {{ border-color: {BLUE}; }}
-QComboBox::drop-down {{ border: none; width: 22px; }}
-QComboBox::down-arrow {{ {chevron_rule} width: 10px; height: 10px; }}
-QComboBox QAbstractItemView {{ background: #FFFFFF; color: {INK}; border: 1px solid {LINE};
-    selection-background-color: {SELECTED}; selection-color: {INK}; outline: 0; }}
-
-QCheckBox {{ color: {INK}; spacing: 8px; background: transparent; }}
-QCheckBox::indicator {{ width: 15px; height: 15px; border: 1px solid {FIELD_LINE}; border-radius: 4px; background: #FFFFFF; }}
-QCheckBox::indicator:checked {{ background: {TICK}; border-color: {TICK}; {check_rule} }}
-QCheckBox::indicator:disabled {{ background: #F0F0F2; }}
-
-QSlider::groove:horizontal {{ height: 4px; background: {LINE}; border-radius: 2px; }}
-QSlider::sub-page:horizontal {{ background: {TICK}; border-radius: 2px; }}
-QSlider::handle:horizontal {{ background: {TICK}; width: 16px; height: 16px; margin: -6px 0; border-radius: 8px; }}
-
-QSplitter::handle {{ background: {LINE_LIGHT}; }}
-QScrollArea {{ border: none; background: transparent; }}
-
-QTableWidget {{ background: #FFFFFF; color: {INK}; gridline-color: {LINE_LIGHT}; border: 1px solid {LINE_LIGHT};
-               selection-background-color: {SELECTED}; selection-color: {INK}; }}
-QHeaderView::section {{ background: {ASIDE}; color: {SOFT}; border: none; border-bottom: 1px solid {LINE}; padding: 5px 6px; }}
-QProgressBar {{ border: 1px solid {LINE}; border-radius: 4px; background: #FFFFFF; height: 8px; text-align: center; }}
-QProgressBar::chunk {{ background: {TICK}; border-radius: 3px; }}
-""" + spin_css()
+    slider.setObjectName("annotationZoomSlider")
+    apply_annotation_zoom_slider_style(slider)
 
 
 def link_button(text: str, parent=None):
@@ -145,22 +101,3 @@ def clear_layout(layout) -> None:
             clear_layout(child)
             child.setParent(None)
             child.deleteLater()
-
-
-_CHEVRON_UP_SVG = ('<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8" viewBox="0 0 10 10">'
-                   '<path d="M2 6.5l3-3 3 3" fill="none" stroke="#45484D" stroke-width="1.5" '
-                   'stroke-linecap="round" stroke-linejoin="round"/></svg>')
-
-
-def spin_css() -> str:
-    up = _icon("chevron_up.svg", _CHEVRON_UP_SVG)
-    down = _icon("chevron.svg", _CHEVRON_SVG)
-    return f"""
-QAbstractSpinBox {{ padding-right: 20px; }}
-QAbstractSpinBox::up-button {{ subcontrol-origin: border; subcontrol-position: top right; width: 18px; border: none;
-    border-left: 1px solid #E0E0E4; border-top-right-radius: 6px; background: #FFFFFF; }}
-QAbstractSpinBox::down-button {{ subcontrol-origin: border; subcontrol-position: bottom right; width: 18px; border: none;
-    border-left: 1px solid #E0E0E4; border-bottom-right-radius: 6px; background: #FFFFFF; }}
-QAbstractSpinBox::up-arrow {{ {f"image: url({up});" if up else ""} width: 8px; height: 8px; }}
-QAbstractSpinBox::down-arrow {{ {f"image: url({down});" if down else ""} width: 8px; height: 8px; }}
-"""

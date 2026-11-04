@@ -389,7 +389,6 @@ class KaryotypeDialog(QDialog):
         cancel = QPushButton("Cancel", self)
         save = QPushButton("Save", self)
         save.setDefault(True)
-        save.setStyleSheet("QPushButton { background:#1F4E9A; color:#FFFFFF; border:1px solid #1F4E9A; border-radius:6px; padding:6px 16px; }")
         cancel.clicked.connect(self.reject)
         save.clicked.connect(self._save)
         foot = QHBoxLayout()
