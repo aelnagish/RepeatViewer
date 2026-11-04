@@ -158,10 +158,44 @@ UNKNOWN_COLOURS = ("#33ff33", "#ff3333", "#4d6bff", "#ffd400", "#ff33ff", "#33e5
 
 @dataclass
 class TiffInfo:
-    kind: str  # "grey", "rgb" (a merged colour picture) or "channels" (several planes)
-    count: int  # planes: 1 for grey, 3 for rgb, n for channels
+    kind: str  # "grey", "colour" (one channel saved in colour), "rgb" (a merged picture) or "channels"
+    count: int  # planes: 1 for grey and colour, 3 for rgb, n for channels
     names: list[str]
     colours: list[str]
+    width: int = 0
+    height: int = 0
+
+
+def colour_of(rgb: np.ndarray) -> str | None:
+    """The colour of an RGB picture that holds one channel (Photoshop or ImageJ save a channel tinted:
+    blue DAPI, green FITC, yellow, white ...). None when the planes differ: then it is a merge of channels."""
+    if rgb.ndim != 3 or rgb.shape[-1] < 3:
+        return None
+    planes = rgb[..., :3].astype(np.float32)
+    step = max(1, int(np.ceil(np.sqrt(planes.shape[0] * planes.shape[1] / 250_000))))
+    planes = planes[::step, ::step]
+    peaks = planes.reshape(-1, 3).max(axis=0)
+    top = float(peaks.max())
+    if top <= 0:
+        return "#ffffff"
+    intensity = planes.max(axis=-1)
+    full = float(np.iinfo(rgb.dtype).max) if rgb.dtype.kind in "ui" else top
+    for k in range(3):
+        expected = intensity * (peaks[k] / top)
+        if float(np.abs(planes[..., k] - expected).mean()) > 0.01 * full:
+            return None
+    r, g, b = (int(round(255 * p / top)) for p in peaks)
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+
+def _rgb_info(array: np.ndarray) -> TiffInfo:
+    h, w = array.shape[:2]
+    if array.ndim == 3 and array.shape[-1] >= 3:
+        colour = colour_of(array)
+        if colour is not None:
+            return TiffInfo("colour", 1, [""], [colour], w, h)
+        return TiffInfo("rgb", 3, ["red", "green", "blue"], ["#ff3333", "#33ff33", "#4d6bff"], w, h)
+    return TiffInfo("grey", 1, [""], ["#ffffff"], w, h)
 
 
 def _channel_axis(series) -> tuple[str, int] | None:
@@ -211,10 +245,7 @@ def inspect_tiff(path: Path) -> TiffInfo:
 
 
 def _inspect_other(path: Path) -> TiffInfo:
-    array = _as_rgb_or_grey(_read_other(path))
-    if array.ndim == 3:
-        return TiffInfo("rgb", 3, ["red", "green", "blue"], ["#ff3333", "#33ff33", "#4d6bff"])
-    return TiffInfo("grey", 1, [""], ["#ffffff"])
+    return _rgb_info(_as_rgb_or_grey(_read_other(path)))
 
 
 def _inspect_tiff(path: Path) -> TiffInfo:
@@ -228,10 +259,15 @@ def _inspect_tiff(path: Path) -> TiffInfo:
             colours = _imagej_luts(tif)
             colours = [colours[i] if i < len(colours) and colours[i] else UNKNOWN_COLOURS[i % len(UNKNOWN_COLOURS)]
                        for i in range(count)]
-            return TiffInfo("channels", count, _channel_names(tif, count), colours)
+            return TiffInfo("channels", count, _channel_names(tif, count), colours,
+                            int(getattr(page, "imagewidth", 0)), int(getattr(page, "imagelength", 0)))
+        w, h = int(getattr(page, "imagewidth", 0)), int(getattr(page, "imagelength", 0))
         if int(getattr(page, "samplesperpixel", 1)) >= 3:
-            return TiffInfo("rgb", 3, ["red", "green", "blue"], ["#ff3333", "#33ff33", "#4d6bff"])
-        return TiffInfo("grey", 1, [""], ["#ffffff"])
+            array = _as_rgb_or_grey(np.asarray(page.asarray()))
+            if array.ndim == 3 and array.shape[0] in (3, 4) and array.shape[-1] not in (3, 4):
+                array = np.moveaxis(array, 0, -1)
+            return _rgb_info(array)
+        return TiffInfo("grey", 1, [""], ["#ffffff"], w, h)
 
 
 def read_plane(path: Path, index: int = -1) -> ChannelData:

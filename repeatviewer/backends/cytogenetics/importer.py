@@ -65,18 +65,22 @@ def group_channel_files(paths: list[Path], lists: Lists) -> tuple[list[CellGroup
     return ordered, unmatched
 
 
-def plan_cells(paths: list[Path], lists: Lists) -> tuple[list[CellGroup], list[str]]:
-    """Every TIFF goes somewhere; nothing needs a dye name. Returns (cells, notes).
+def plan_cells(paths: list[Path], lists: Lists, *, merges: bool = False) -> tuple[list[CellGroup], list[str]]:
+    """Every picture goes somewhere; nothing needs a dye name. Returns (cells, notes).
 
     - A multichannel TIFF (ImageJ, OME, several pages) is one cell, split into its channels.
     - Files named with a dye word (s12_c03_DAPI.tif) are grouped by the rest of the name, as before.
     - Other files (1.tif, 2.tif …) are grouped by folder: one folder = one cell, one file = one channel,
-      named Channel 1, 2 … in the file order; dye and probe are set later in the Image tab.
-    - An RGB merge on its own becomes one cell with its red, green and blue planes as channels.
+      named Channel 1, 2 … in the file order. A channel saved in colour (blue, green, yellow …) keeps that colour.
+    - Channels of one cell must have the same size: files of another size in the same folder are another cell
+      (``cell1 (528×464)``).
+    - Merged colour pictures (all three planes different) are left out unless ``merges`` is set; then each is a
+      cell of its own with its red, green and blue planes. A merge alone in its folder is always taken.
     """
     notes: list[str] = []
     singles: list[Path] = []
     multi: list[CellGroup] = []
+    infos: dict[Path, ch.TiffInfo] = {}
     for path in sorted((Path(p) for p in paths), key=lambda p: natural_key(str(p))):
         if not ch.is_image(path):
             continue
@@ -85,6 +89,7 @@ def plan_cells(paths: list[Path], lists: Lists) -> tuple[list[CellGroup], list[s
         except Exception as exc:  # noqa: BLE001 - unreadable file: report, keep going
             notes.append(f"{path.name}: cannot be read ({exc})")
             continue
+        infos[path] = info
         if info.kind == "channels":
             group = CellGroup(key=path.stem)
             for i in range(info.count):
@@ -98,22 +103,52 @@ def plan_cells(paths: list[Path], lists: Lists) -> tuple[list[CellGroup], list[s
     by_folder: dict[Path, list[Path]] = {}
     for path in rest:
         by_folder.setdefault(path.parent, []).append(path)
+    skipped: list[str] = []
     for parent, files in by_folder.items():
         files.sort(key=lambda p: natural_key(p.name))
-        group = CellGroup(key=parent.name)
-        n = 0
-        for path in files:
-            try:
-                info = ch.inspect_tiff(path)
-            except Exception:  # noqa: BLE001 - reported above
-                continue
-            planes = range(3) if info.kind == "rgb" and len(files) == 1 else [-1]
-            for k in planes:
+        rgb = [p for p in files if infos[p].kind == "rgb"]
+        channels = [p for p in files if infos[p].kind != "rgb"]
+        if rgb and not channels and len(rgb) == 1:
+            merges_here, channels = rgb, []
+        elif merges:
+            merges_here = rgb
+        else:
+            merges_here = []
+            skipped += [p.name for p in rgb]
+        for path in merges_here:
+            info = infos[path]
+            group = CellGroup(key=parent.name if len(files) == 1 else f"{parent.name} {path.stem}")
+            for k in range(3):
                 group.files.append((path, "", k))
-                group.colours.append(info.colours[k] if k >= 0 else ch.UNKNOWN_COLOURS[n % len(ch.UNKNOWN_COLOURS)])
-                n += 1
-        if group.files:
+                group.colours.append(info.colours[k])
             multi.append(group)
+        by_size: dict[tuple[int, int], list[Path]] = {}
+        for path in channels:
+            by_size.setdefault((infos[path].width, infos[path].height), []).append(path)
+        main = max(by_size, key=lambda k: len(by_size[k])) if by_size else None
+        for size, members in sorted(by_size.items(), key=lambda kv: (kv[0] != main, kv[0])):
+            if size != main and len(members) == 1 and not merges:
+                skipped.append(members[0].name)  # one picture of another size: a figure or a crop, not a channel
+                continue
+            key = parent.name if size == main else f"{parent.name} ({size[0]}×{size[1]})"
+            group = CellGroup(key=key)
+            used = {infos[p].colours[0].lower() for p in members if infos[p].kind == "colour"}
+            spare = [c for c in ch.UNKNOWN_COLOURS if c.lower() not in used] or list(ch.UNKNOWN_COLOURS)
+            n = 0
+            for path in members:
+                info = infos[path]
+                if info.kind == "colour":
+                    colour = info.colours[0]
+                else:
+                    colour = spare[n % len(spare)]
+                    n += 1
+                group.files.append((path, "", -1))
+                group.colours.append(colour)
+            multi.append(group)
+    if skipped:
+        notes.append(f"{len(skipped)} merged or other picture{'s' if len(skipped) != 1 else ''} left out "
+                     f"({', '.join(skipped[:3])}{' …' if len(skipped) > 3 else ''}); "
+                     "tick Import merged and other pictures under Options to take them too")
     cells = named + multi
     # cells with the same name from different folders: add the folder to tell them apart
     seen: dict[str, int] = {}
@@ -257,6 +292,7 @@ class ImportRequest:
     probes_by_dye: dict = field(default_factory=dict)  # dye -> probe name
     copy: bool = True
     pixel_size_um: float | None = None
+    merges: bool = False  # also import merged colour pictures, each as its own cell
 
 
 def scan_tiffs(source: Path, recursive: bool = False) -> list[Path]:
@@ -287,7 +323,7 @@ def run_request(req: ImportRequest, *, progress=None):
     folder = Path(req.folder).expanduser().resolve()
     lists = load_lists(folder)
     files = scan_tiffs(req.source, req.recursive)
-    groups, errors = plan_cells(files, lists)
+    groups, errors = plan_cells(files, lists, merges=req.merges)
     if not groups:
         return None, [], errors or ["No picture files found (TIFF, JPG, PNG or BMP)."]
     values = {k: str(req.slide_values.get(k, "")).strip() for k in SLIDE_FIELDS}
