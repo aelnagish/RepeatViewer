@@ -146,6 +146,7 @@ from repeatviewer.backends.sequence_features import (
     SingleSequenceSummary,
     REPEATVIEWER_INTERNAL_SOURCE,
     annotation_visibility_key,
+    expand_terminal_pair_indices,
     features_gff_path,
     format_single_sequence_summary_parts,
     format_single_sequence_summary_text,
@@ -6079,8 +6080,16 @@ class SequenceMapWidget(QWidget):
         self._sync_position_spins(1, 1)
         self.statusMessage.emit("Selection cleared")
 
-    def set_selected_features(self, indices: set[int] | frozenset[int] | None) -> None:
-        self._selected_feature_indices = set(indices or [])
+    def set_selected_features(
+        self,
+        indices: set[int] | frozenset[int] | None,
+        *,
+        expand_pairs: bool = True,
+    ) -> None:
+        selected = set(indices or [])
+        if expand_pairs and self._data is not None:
+            selected = expand_terminal_pair_indices(self._data.features, selected)
+        self._selected_feature_indices = selected
         self._canvas.set_selected_features(self._selected_feature_indices)
         # Annot track may be showing a filtered list — map full → display indices.
         _display, _mapping, display_selected, _alphas = self._annotation_display_bundle()
@@ -6100,8 +6109,13 @@ class SequenceMapWidget(QWidget):
         else:
             selected = set()
         selected = self._map_annot_indices_to_full(selected)
+        if self._data is not None:
+            selected = expand_terminal_pair_indices(self._data.features, selected)
         self._selected_feature_indices = selected
         self._canvas.set_selected_features(selected)
+        _display, _mapping, display_selected, _alphas = self._annotation_display_bundle()
+        self._annot_track._selected_indices = set(display_selected)
+        self._annot_track.update()
         self._sync_overview()
         if len(selected) == 1:
             self._on_feature_clicked(next(iter(selected)))
@@ -6121,6 +6135,31 @@ class SequenceMapWidget(QWidget):
 
     def _on_feature_clicked(self, index: int) -> None:
         if self._data and 0 <= index < len(self._data.features):
+            selected = expand_terminal_pair_indices(
+                self._data.features, {index}
+            )
+            if len(selected) > 1:
+                starts = [
+                    self._data.features[i].start
+                    for i in selected
+                    if 0 <= i < len(self._data.features)
+                ]
+                ends = [
+                    self._data.features[i].end
+                    for i in selected
+                    if 0 <= i < len(self._data.features)
+                ]
+                if starts and ends:
+                    lo, hi = min(starts), max(ends)
+                    self._sync_position_spins(lo, hi)
+                    self._canvas.set_selection_range(lo, hi)
+                names = ", ".join(
+                    self._data.features[i].name
+                    for i in sorted(selected)
+                    if 0 <= i < len(self._data.features)
+                )
+                self.statusMessage.emit(f"Features: {names}")
+                return
             feat = self._data.features[index]
             self._sync_position_spins(feat.start, feat.end)
             self._canvas.set_selection_range(feat.start, feat.end)

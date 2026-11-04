@@ -59,9 +59,11 @@ from repeatviewer.widgets.preview_zoom import (
     PreviewZoomKind,
     load_default_fasta_preview_tab,
     load_preview_fit_mode,
+    load_preview_split_preference,
     load_show_sequence_summary,
     load_preview_font_size,
     load_preview_zoom_percent,
+    save_preview_split_preference,
 )
 
 logger = logging.getLogger(__name__)
@@ -3876,6 +3878,7 @@ class PreviewTabWidget(QTabWidget):
             if right_idx >= 0:
                 split.set_pane_fasta_tab("right", right_idx)
             self._set_split_action_checked(True)
+            self._remember_current_split(enabled=True)
             return True
 
         host = self.parentWidget()
@@ -3890,6 +3893,10 @@ class PreviewTabWidget(QTabWidget):
             )
             ok = self._show_floating_preview_window(win)
             self._set_split_action_checked(ok)
+            if ok:
+                self._remember_current_split(
+                    enabled=True, left=left_idx, right=right_idx, page=widget
+                )
             return ok
 
         split = PreviewSplitWindow(
@@ -3927,6 +3934,7 @@ class PreviewTabWidget(QTabWidget):
         host_layout.addWidget(split, stretch=1)
         split.show()
         self._set_split_action_checked(True)
+        self._remember_current_split(enabled=True)
         return True
 
     def _on_header_open_in_panel(self, tab_index: int, side: str) -> None:
@@ -3949,10 +3957,65 @@ class PreviewTabWidget(QTabWidget):
 
             if isinstance(split, PreviewSplitWindow):
                 split.set_pane_fasta_tab(side_key, want)
+                self._remember_current_split(enabled=True)
                 return
         self.open_split_with_tabs(left_tab, right_tab)
 
-    def _close_inline_split(self) -> None:
+    def _preview_split_kind_for_page(self, page: FilePreviewPage | None) -> str | None:
+        if page is None or not page.is_single_fasta_preview():
+            return None
+        return "multi" if page.is_multi_fasta_preview() else "single"
+
+    def _remember_current_split(
+        self,
+        *,
+        enabled: bool,
+        left: int | None = None,
+        right: int | None = None,
+        page: FilePreviewPage | None = None,
+    ) -> None:
+        """Persist auto-split preference for this FASTA shape (MSA vs single)."""
+        target = page if page is not None else self.currentWidget()
+        if not isinstance(target, FilePreviewPage):
+            return
+        kind = self._preview_split_kind_for_page(target)
+        if kind is None:
+            return
+        layout = self._split_layout_snapshot()
+        left_tab = int(left) if left is not None else (layout[0] if layout else 1)
+        right_tab = int(right) if right is not None else (layout[1] if layout else 2)
+        save_preview_split_preference(
+            kind, enabled=bool(enabled), left=left_tab, right=right_tab
+        )
+
+    def _maybe_apply_remembered_split(self) -> None:
+        """Auto-open the last split layout for this FASTA shape, if enabled."""
+        if getattr(self, "_suppress_remembered_split", False):
+            return
+        if not getattr(self, "_allow_inline_split", True):
+            return
+        if self.is_split_active():
+            return
+        page = self.currentWidget()
+        if not isinstance(page, FilePreviewPage):
+            return
+        kind = self._preview_split_kind_for_page(page)
+        if kind is None:
+            return
+        pref = load_preview_split_preference(kind)
+        if pref is None:
+            return
+        enabled, left, right = pref
+        if not enabled:
+            return
+        self.open_split_with_tabs(left, right)
+        self.keep_split_chrome_hidden()
+        self._sync_tab_bar_visible()
+
+    def _close_inline_split(self, *, clear_preference: bool = True) -> None:
+        if clear_preference and self.is_split_active():
+            # User turned Split off → do not auto-split the next MSA/single file.
+            self._remember_current_split(enabled=False)
         split = getattr(self, "_inline_split", None)
         self._inline_split = None
         self._set_split_action_checked(False)
@@ -4030,6 +4093,10 @@ class PreviewTabWidget(QTabWidget):
         file into both panes. Additional Tab briefly leaves split so the new
         file tab is created, then re-opens the same left/right layout on that
         new tab (so the added tab is also split).
+
+        After you use Overview|Dotplot split on an MSA (or a single-seq FASTA),
+        the next open of the same shape auto-restores that split until you
+        turn Split window off.
         """
         resolved = path.expanduser().resolve()
         key = str(resolved)
@@ -4043,10 +4110,17 @@ class PreviewTabWidget(QTabWidget):
         restore_split: tuple[int, int] | None = None
         if not replace and self.is_split_active():
             restore_split = self._split_layout_snapshot()
-            self._close_inline_split()
+            self._close_inline_split(clear_preference=False)
 
         # While split (replace path), keep each pane's Text/Overview/Dotplot.
         split_fasta_tab = -1 if self.is_split_active() else fasta_tab
+
+        def _finish_open_split() -> None:
+            if restore_split is not None:
+                self._restore_split_layout(restore_split)
+                return
+            if not self.is_split_active():
+                self._maybe_apply_remembered_split()
 
         existing = self._path_to_index.get(key)
         if existing is not None:
@@ -4061,7 +4135,7 @@ class PreviewTabWidget(QTabWidget):
                 self._sync_tab_bar_visible()
                 self._emit_current_path_changed()
                 self._sync_inline_split_path(resolved, fasta_tab=split_fasta_tab)
-                self._restore_split_layout(restore_split)
+                _finish_open_split()
                 return True
             del self._path_to_index[key]
 
@@ -4079,6 +4153,7 @@ class PreviewTabWidget(QTabWidget):
             # Same tab index: currentChanged may not fire after replace.
             self._emit_current_path_changed()
             self._sync_inline_split_path(resolved, fasta_tab=split_fasta_tab)
+            _finish_open_split()
             return True
 
         page = FilePreviewPage(resolved)
@@ -4091,7 +4166,7 @@ class PreviewTabWidget(QTabWidget):
         self._sync_tab_bar_visible()
         self._emit_current_path_changed()
         self._sync_inline_split_path(resolved, fasta_tab=split_fasta_tab)
-        self._restore_split_layout(restore_split)
+        _finish_open_split()
         return True
 
     def _sync_inline_split_path(self, path: Path, *, fasta_tab: int = -1) -> None:
@@ -4114,11 +4189,18 @@ class PreviewTabWidget(QTabWidget):
         restore_split = None
         if self.is_split_active():
             restore_split = self._split_layout_snapshot()
-            self._close_inline_split()
-        for path in paths:
-            self.open_file(path, replace=False)
+            self._close_inline_split(clear_preference=False)
+        self._suppress_remembered_split = True
+        try:
+            for path in paths:
+                self.open_file(path, replace=False)
+        finally:
+            self._suppress_remembered_split = False
         self._sync_tab_bar_visible()
-        self._restore_split_layout(restore_split)
+        if restore_split is not None:
+            self._restore_split_layout(restore_split)
+        elif not self.is_split_active():
+            self._maybe_apply_remembered_split()
 
     def open_self_dotplot_tab(self, path: object, sequence_id: str) -> FilePreviewPage | None:
         """A second tab on the same file, showing Dotplot (Self) for one sequence.

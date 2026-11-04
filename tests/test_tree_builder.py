@@ -428,10 +428,29 @@ def test_independent_searches_are_separate_processes(tmp_path, monkeypatch):
 
 def test_iqtree_fast_and_bnni_flags(tmp_path, monkeypatch):
     fa, log = _fake_iqtree(tmp_path, monkeypatch)
-    opts = TreeOptions(use_system_path=True, threads=1, runs=1, bnni=False, iqtree_fast=True)
+    # --fast requires UFBoot off (IQ-TREE rejects the combination).
+    opts = TreeOptions(
+        use_system_path=True,
+        threads=1,
+        runs=1,
+        bnni=False,
+        iqtree_fast=True,
+        ufboot=0,
+        alrt=0,
+    )
     tb.build_tree_run([fa], opts, stamp="t")
     call = next(c for c in log.read_text().splitlines() if "--prefix" in c)
-    assert "--fast" in call and "-bnni" not in call
+    assert "--fast" in call and "-bnni" not in call and "-B" not in call
+
+
+def test_iqtree_fast_ignored_when_ufboot_on(tmp_path, monkeypatch):
+    fa, log = _fake_iqtree(tmp_path, monkeypatch)
+    opts = TreeOptions(
+        use_system_path=True, threads=1, runs=1, iqtree_fast=True, ufboot=1000
+    )
+    tb.build_tree_run([fa], opts, stamp="t")
+    call = next(c for c in log.read_text().splitlines() if "--prefix" in c)
+    assert "--fast" not in call and "-B" in call
 
 
 def test_failed_run_writes_log_next_to_input(tmp_path, monkeypatch):
@@ -663,3 +682,17 @@ def test_fastme_thread_option_only_when_supported(tmp_path):
 def test_readable_fastme_distance_error():
     text = tb.summarize_tool_error("FastME", 1, ". Error: Unable to compute all distances\n")
     assert "not all copies of one family" in text
+
+
+def test_sanitize_newick_replaces_nonfinite_branch_lengths():
+    # FastME writes ``:nan`` on gappy TE MSAs; Bio.Phylo would mis-read leaf names.
+    raw = "(S00001:nan,S00002:nan):inf;"
+    assert ":0" in tb.sanitize_newick_text(raw)
+    tree = tb.read_newick(raw)
+    names = sorted(t.name for t in tree.get_terminals())
+    assert names == ["S00001", "S00002"]
+    assert all(
+        c.branch_length in (None, 0.0)
+        or (isinstance(c.branch_length, float) and c.branch_length == 0.0)
+        for c in tree.find_clades()
+    )

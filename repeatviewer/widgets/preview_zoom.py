@@ -224,6 +224,62 @@ def save_default_fasta_preview_tab(tab: DefaultFastaPreviewTab) -> None:
     s.endGroup()
 
 
+# Remembered inline Split layout per FASTA shape (multi-seq MSA vs single-seq).
+PreviewSplitKind = str  # "multi" | "single"
+
+
+def load_preview_split_preference(
+    kind: PreviewSplitKind,
+) -> tuple[bool, int, int] | None:
+    """Return ``(enabled, left_tab, right_tab)`` for ``kind``, or None if unset.
+
+    ``enabled`` means the next open of that FASTA shape should auto-split.
+    Tab indices: 0=Text, 1=Overview, 2=Dotplot, 3=Cytogenetics.
+    """
+    key = str(kind or "").strip().lower()
+    if key not in {"multi", "single"}:
+        return None
+    s = QSettings()
+    s.beginGroup(PREVIEW_SETTINGS_GROUP)
+    s.beginGroup("split_layout")
+    if not s.contains(f"{key}/enabled"):
+        s.endGroup()
+        s.endGroup()
+        return None
+    enabled = bool(s.value(f"{key}/enabled", False))
+    try:
+        left = int(s.value(f"{key}/left", 1))
+        right = int(s.value(f"{key}/right", 2))
+    except (TypeError, ValueError):
+        left, right = 1, 2
+    s.endGroup()
+    s.endGroup()
+    left = max(0, min(3, left))
+    right = max(0, min(3, right))
+    return enabled, left, right
+
+
+def save_preview_split_preference(
+    kind: PreviewSplitKind,
+    *,
+    enabled: bool,
+    left: int,
+    right: int,
+) -> None:
+    """Persist whether / how to auto-split the next file of this FASTA shape."""
+    key = str(kind or "").strip().lower()
+    if key not in {"multi", "single"}:
+        return
+    s = QSettings()
+    s.beginGroup(PREVIEW_SETTINGS_GROUP)
+    s.beginGroup("split_layout")
+    s.setValue(f"{key}/enabled", bool(enabled))
+    s.setValue(f"{key}/left", max(0, min(3, int(left))))
+    s.setValue(f"{key}/right", max(0, min(3, int(right))))
+    s.endGroup()
+    s.endGroup()
+
+
 DEFAULT_SHOW_SEQUENCE_SUMMARY = True
 
 

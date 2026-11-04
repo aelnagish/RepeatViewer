@@ -6,7 +6,7 @@ import re
 from collections.abc import Mapping, Sequence
 
 from PySide6.QtCore import QObject, Qt, Signal, Slot
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QFont, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import (
     QDialog,
     QHBoxLayout,
@@ -15,6 +15,11 @@ from PySide6.QtWidgets import (
     QPushButton,
     QVBoxLayout,
     QWidget,
+)
+
+from repeatviewer.external_process import (
+    PROCESS_LOG_COMMAND_HEADER,
+    PROCESS_LOG_OUTPUT_HEADER,
 )
 
 
@@ -370,14 +375,46 @@ class ProcessMonitorDialog(QDialog):
         # Near bottom (small slack) → keep following new output.
         return bar.maximum() <= 0 or bar.value() >= bar.maximum() - 8
 
+    @staticmethod
+    def _is_section_heading(line: str) -> bool:
+        """Bold Command: / program output (and related section labels)."""
+        if line in (PROCESS_LOG_COMMAND_HEADER, PROCESS_LOG_OUTPUT_HEADER):
+            return True
+        if line.startswith("Working directory:"):
+            return True
+        if line.startswith("Inputs:"):
+            return True
+        if line.startswith("Output:"):
+            return True
+        if line in ("— finished —",) or line.startswith("— failed:"):
+            return True
+        return False
+
     def append_line(self, text: str) -> None:
         if text is None:
             return
-        line = str(text).rstrip("\r\n")
+        # One physical log line per call; multiline payloads are split so each
+        # command option can keep its own ``\\`` continuation row.
+        raw = str(text).replace("\r\n", "\n").replace("\r", "\n")
+        parts = raw.split("\n")
+        # Trailing newline → final empty part; drop it so we don't add a blank.
+        if parts and parts[-1] == "":
+            parts = parts[:-1]
+        if not parts:
+            parts = [""]
         bar = self._log.verticalScrollBar()
         stick = self._is_scrolled_to_bottom()
         saved = bar.value()
-        self._log.appendPlainText(line)
+        cursor = self._log.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        for part in parts:
+            if self._log.document().characterCount() > 1:
+                cursor.insertText("\n")
+            fmt = QTextCharFormat()
+            if self._is_section_heading(part):
+                fmt.setFontWeight(QFont.Weight.Bold)
+            cursor.insertText(part, fmt)
+        self._log.setTextCursor(cursor)
         if stick:
             # Follow new lines only when the user was already at the bottom.
             bar.setValue(bar.maximum())

@@ -3,15 +3,18 @@
 Tabs: IQ-TREE | FastME | FastTree | Options. The engine tabs share one page:
 Inputs (selected sequences or Define inputs), Alignment (alignment, monomers,
 skip fragments) and Settings (that engine's rows, then Root and Threads).
-IQ-TREE also has Advanced Settings (searches, seed, --bnni, --fast).
+IQ-TREE also has Advanced Settings (searches, seed, --bnni). Fast search
+(--fast) lives in Settings and is disabled when UFBoot is on (IQ-TREE cannot
+combine them).
 Save / Run take the engine from the open tab (on Options, from the last engine
 tab). Input is used as given (DNA or protein).
 
 The dialog opens immediately; sequence lengths for Skip fragments / Outgroup are
 loaded in the background so large FASTA files do not block the window.
 
-Options tab: right-click engine, Executables (PATH checkboxes + grey status),
-then Process output.
+Options tab: right-click engine, Executables (bundled PATH checkboxes for
+IQ-TREE / MAFFT; FastME / FastTree named status like HISAT2), then Process
+output.
 """
 
 from __future__ import annotations
@@ -77,6 +80,7 @@ from repeatviewer.views.tool_dialogs import (
     make_executable_status_label,
     make_process_output_box,
     resolve_system_executable,
+    set_named_executable_status,
     set_path_checkbox_status,
     sync_form_field_column_spacers,
     system_path_executable_label,
@@ -157,7 +161,9 @@ BNNI_INFO = (
 )
 FAST_INFO = (
     "IQ-TREE <b>--fast</b>: faster tree search resembling FastTree. Use for a quick "
-    "look; leave off for a publishable tree."
+    "look; leave off for a publishable tree.<br>"
+    "Not available with <b>UFBoot</b> (IQ-TREE cannot combine <code>--fast</code> "
+    "and ultrafast bootstrap)."
 )
 MASK_INFO = (
     "<b>Methylation check</b>: builds a second tree without the alignment columns where any "
@@ -371,7 +377,7 @@ class TreeParamsDialog(QDialog):
         layout.addWidget(self._stack, 0)
         layout.addWidget(self._button_box, 0)
 
-        for w in (self._align_mode, self._root_mode, self._cov_ref):
+        for w in (self._align_mode, self._root_mode, self._cov_ref, self._support_iq):
             w.currentIndexChanged.connect(self._sync)
         self._min_cov.valueChanged.connect(self._update_check)
         self._input_selected.toggled.connect(self._on_inputs_changed)
@@ -603,6 +609,10 @@ class TreeParamsDialog(QDialog):
             ),
         )
         f.addRow("Threads:", field_with_help(self._threads, "Threads", THREADS_INFO))
+        self._fast_field = field_with_help(
+            self._iqtree_fast, "Fast search", FAST_INFO, stretch=True
+        )
+        f.addRow(self._fast_label, self._fast_field)
         root.addWidget(basic)
 
         self._iq_advanced_panel = QWidget(page)
@@ -623,10 +633,6 @@ class TreeParamsDialog(QDialog):
         af.addRow(
             self._bnni_label,
             field_with_help(self._bnni, "UFBoot NNI", BNNI_INFO, stretch=True),
-        )
-        af.addRow(
-            self._fast_label,
-            field_with_help(self._iqtree_fast, "Fast search", FAST_INFO, stretch=True),
         )
         root.addWidget(self._iq_advanced_panel)
 
@@ -663,6 +669,8 @@ class TreeParamsDialog(QDialog):
             )
         )
 
+        # Bundled tools keep a PATH checkbox; FastME / FastTree are external-only
+        # (HISAT2 style): named status line, no checkbox.
         self._system_boxes: dict[str, QCheckBox] = {}
         self._found: dict[str, QLabel] = {}
         exe_box = QGroupBox("Executables", self)
@@ -671,45 +679,44 @@ class TreeParamsDialog(QDialog):
         exl.setContentsMargins(10, 8, 10, 8)
         exl.setSpacing(8)
         legacy = opts.use_system_path
-        states = {
+        bundled_states = {
             TREE_ENGINE_IQTREE: opts.use_system_iqtree or legacy,
-            TREE_ENGINE_FASTME: opts.use_system_fastme or legacy,
-            TREE_ENGINE_FASTTREE: opts.use_system_fasttree or legacy,
             "mafft": opts.use_system_mafft,
         }
-        names = {**_ENGINE_TITLES, "mafft": "MAFFT"}
-        tooltips = {
+        bundled_tooltips = {
             TREE_ENGINE_IQTREE: (
                 f"Off: IQ-TREE {tpt.IQTREE_VERSION} bundled with RepeatViewer "
                 "(macOS universal / Linux universal / Windows 64-bit). "
                 "On: iqtree from PATH or the defined conda environment."
-            ),
-            TREE_ENGINE_FASTME: (
-                "Off: FastME from the conda env in File → Settings → External tools, "
-                "then PATH. On: PATH / conda only. FastME has no official multi-platform binary."
-            ),
-            TREE_ENGINE_FASTTREE: (
-                "Off: FastTree from the conda env in File → Settings → External tools, "
-                "then PATH. On: PATH / conda only. FastTree has Windows/Linux builds online but "
-                "no macOS binary, so it is not bundled."
             ),
             "mafft": (
                 "Off: the MAFFT bundled with RepeatViewer. "
                 "On: MAFFT from PATH or the defined conda environment."
             ),
         }
-        for key in (*ENGINE_TABS, "mafft"):
-            box = QCheckBox(system_path_executable_label(names[key]), self)
-            box.setChecked(bool(states[key]))
-            box.setToolTip(tooltips[key])
+        for key, label in (
+            (TREE_ENGINE_IQTREE, "IQ-TREE"),
+            ("mafft", "MAFFT"),
+        ):
+            box = QCheckBox(system_path_executable_label(label), self)
+            box.setChecked(bool(bundled_states[key]))
+            box.setToolTip(bundled_tooltips[key])
             box.toggled.connect(self._schedule_found_update)
             status = make_executable_status_label(self)
             self._system_boxes[key] = box
             self._found[key] = status
             exl.addWidget(executable_checkbox_row(self, box, status))
+        for key, label in (
+            (TREE_ENGINE_FASTME, "FastME"),
+            (TREE_ENGINE_FASTTREE, "FastTree"),
+        ):
+            status = make_executable_status_label(self)
+            self._found[key] = status
+            exl.addWidget(status)
         note = _note(
             f"IQ-TREE {tpt.IQTREE_VERSION} is included with RepeatViewer. "
-            "FastME and FastTree need conda or your PATH.",
+            "FastME and FastTree are not bundled — install via conda "
+            "(File → Setting → External tools) like HISAT2.",
             self,
         )
         exl.addWidget(note)
@@ -770,21 +777,67 @@ class TreeParamsDialog(QDialog):
         self._apply_engine_rows()
         self._update_advanced_settings_button()
         self._schedule_found_update()
+        if index in (
+            self._tab_index[TREE_ENGINE_FASTME],
+            self._tab_index[TREE_ENGINE_FASTTREE],
+        ):
+            # Defer so the tab paints before any availability probe / reminder.
+            QTimer.singleShot(0, self._remind_external_engine_if_needed)
         if self.isVisible():
             QTimer.singleShot(0, self._fit_to_content)
+
+    def _remind_external_engine_if_needed(self) -> None:
+        """Show install/bind instructions when FastME / FastTree is missing (HISAT2)."""
+        index = self._tabs.currentIndex()
+        if index == self._tab_index[TREE_ENGINE_FASTME]:
+            engine = TREE_ENGINE_FASTME
+        elif index == self._tab_index[TREE_ENGINE_FASTTREE]:
+            engine = TREE_ENGINE_FASTTREE
+        else:
+            return
+        if tb.engine_available(engine):
+            return
+        tb.show_tree_engine_not_configured_dialog(engine, self)
 
     def _apply_engine_rows(self) -> None:
         """Show only the open engine's Settings rows."""
         engine = self._last_engine
         f = self._form
-        f.setRowVisible(self._support_iq_field, engine == TREE_ENGINE_IQTREE)
+        on_iq = engine == TREE_ENGINE_IQTREE
+        f.setRowVisible(self._support_iq_field, on_iq)
         f.setRowVisible(self._support_fme_field, engine == TREE_ENGINE_FASTME)
         f.setRowVisible(self._support_ft_field, engine == TREE_ENGINE_FASTTREE)
         f.setRowVisible(self._ft_note, engine == TREE_ENGINE_FASTTREE)
-        f.setRowVisible(self._model_field, engine == TREE_ENGINE_IQTREE)
-        f.setRowVisible(
-            self._mask_field, engine == TREE_ENGINE_IQTREE and not self._protein()
+        f.setRowVisible(self._model_field, on_iq)
+        f.setRowVisible(self._mask_field, on_iq and not self._protein())
+        f.setRowVisible(self._fast_field, on_iq)
+        self._sync_iqtree_fast_enabled()
+
+    def _iq_ufboot_replicates(self) -> int:
+        """UFBoot replicate count from the Branch support combo (0 = off)."""
+        data = self._support_iq.currentData()
+        if data is None:
+            return 0
+        try:
+            _alrt, ufboot = (int(x) for x in str(data).split(","))
+        except (TypeError, ValueError):
+            return 0
+        return max(0, ufboot)
+
+    def _sync_iqtree_fast_enabled(self) -> None:
+        """IQ-TREE rejects ``--fast`` with UFBoot; grey the box out when UFBoot is on."""
+        allow = self._iq_ufboot_replicates() == 0
+        self._iqtree_fast.setEnabled(allow)
+        if not allow and self._iqtree_fast.isChecked():
+            self._iqtree_fast.blockSignals(True)
+            self._iqtree_fast.setChecked(False)
+            self._iqtree_fast.blockSignals(False)
+        tip = (
+            ""
+            if allow
+            else "Not available with UFBoot (IQ-TREE cannot combine --fast and ultrafast bootstrap)."
         )
+        self._iqtree_fast.setToolTip(tip)
 
     def _update_advanced_settings_button(self) -> None:
         on_iq = self._tabs.currentIndex() == self._tab_index[TREE_ENGINE_IQTREE]
@@ -930,6 +983,7 @@ class TreeParamsDialog(QDialog):
             else "Choose the sequences that lie outside the rest."
         )
         self._update_check()
+        self._sync_iqtree_fast_enabled()
         self._schedule_found_update()
 
     def _schedule_found_update(self, *_args) -> None:
@@ -948,25 +1002,37 @@ class TreeParamsDialog(QDialog):
             return
         if self._tabs.currentIndex() != self._options_index:
             return
-        for engine in ENGINE_TABS:
-            use_path = self._system_boxes[engine].isChecked()
-            exe = (
-                tb.engine_status_executable(engine, system_path_only=True)
-                if use_path
-                else None
-            )
-            set_path_checkbox_status(
+        # IQ-TREE: bundled + optional PATH checkbox (same as Minimap2).
+        use_iq = self._system_boxes[TREE_ENGINE_IQTREE].isChecked()
+        iq_exe = (
+            tb.engine_status_executable(TREE_ENGINE_IQTREE, system_path_only=True)
+            if use_iq
+            else None
+        )
+        set_path_checkbox_status(
+            self._found[TREE_ENGINE_IQTREE],
+            str(iq_exe) if iq_exe else None,
+            checked=use_iq,
+            has_builtin=True,
+        )
+        self._right_click_buttons[TREE_ENGINE_IQTREE].setText(
+            _ENGINE_TITLES[TREE_ENGINE_IQTREE]
+        )
+        # FastME / FastTree: always show named status (HISAT2 style).
+        for engine, names in (
+            (TREE_ENGINE_FASTME, ("fastme",)),
+            (TREE_ENGINE_FASTTREE, ("FastTreeMP", "FastTree", "fasttree")),
+        ):
+            path = resolve_system_executable(*names)
+            set_named_executable_status(
                 self._found[engine],
-                str(exe) if exe else None,
-                checked=use_path,
-                has_builtin=(engine == TREE_ENGINE_IQTREE),
+                _ENGINE_TITLES[engine],
+                path,
+                missing_text="not configured",
             )
-            missing = use_path and exe is None and engine != TREE_ENGINE_IQTREE
-            # IQ-TREE still has a bundled fallback when PATH is missing.
-            if use_path and exe is None and engine == TREE_ENGINE_IQTREE:
-                missing = False
             self._right_click_buttons[engine].setText(
-                _ENGINE_TITLES[engine] + (" (not found)" if missing else "")
+                _ENGINE_TITLES[engine]
+                + ("" if path else " (not configured)")
             )
         use_mafft = self._system_boxes["mafft"].isChecked()
         set_path_checkbox_status(
@@ -1107,7 +1173,10 @@ class TreeParamsDialog(QDialog):
             ufboot=0 if ufboot == 0 else max(1000, ufboot),
             alrt=alrt,
             bnni=self._bnni.isChecked(),
-            iqtree_fast=self._iqtree_fast.isChecked(),
+            # IQ-TREE rejects --fast with UFBoot; never persist both together.
+            iqtree_fast=(
+                self._iqtree_fast.isChecked() and self._iq_ufboot_replicates() == 0
+            ),
             distance_bootstrap=int(self._support_fme.currentData()),
             root_mode=str(self._root_mode.currentData()),
             outgroup=list(self._outgroup),
@@ -1119,7 +1188,9 @@ class TreeParamsDialog(QDialog):
             ),
             use_system_mafft=sysbox["mafft"].isChecked(),
             use_system_iqtree=sysbox[TREE_ENGINE_IQTREE].isChecked(),
-            use_system_fastme=sysbox[TREE_ENGINE_FASTME].isChecked(),
-            use_system_fasttree=sysbox[TREE_ENGINE_FASTTREE].isChecked(),
+            # FastME / FastTree are external-only (no bundled binary); always
+            # resolve via Settings conda env then PATH — same as HISAT2.
+            use_system_fastme=False,
+            use_system_fasttree=False,
             use_system_path=False,
         )

@@ -64,10 +64,11 @@ def _stream_stderr(
 
 
 def _format_command_line(cmd: list[str]) -> str:
-    import shlex
+    """Pretty command for the process window (one option per line)."""
+    from repeatviewer.external_process import command_text_multiline
 
     try:
-        return shlex.join(str(part) for part in cmd)
+        return command_text_multiline(cmd)
     except Exception:  # noqa: BLE001
         return " ".join(str(part) for part in cmd)
 from pathlib import Path
@@ -430,8 +431,11 @@ def reference_index(
         launch = prepare_command(cmd)
         _say(f"Indexing reference {reference.name} once for all runs…")
         if on_log is not None:
-            on_log("Command:")
-            on_log(_format_command_line(launch))
+            from repeatviewer.external_process import PROCESS_LOG_COMMAND_HEADER
+
+            on_log(PROCESS_LOG_COMMAND_HEADER)
+            for line in _format_command_line(launch).splitlines():
+                on_log(line)
         log_command("GIXmake", launch, inputs=[reference], cwd=reference.parent)
         try:
             proc = subprocess.Popen(
@@ -913,12 +917,18 @@ def run_fastga_alignment(
         launch_cmd = prepare_command(cmd)
 
         if on_log is not None:
-            on_log("Command:")
-            on_log(_format_command_line(launch_cmd))
+            from repeatviewer.external_process import (
+                PROCESS_LOG_COMMAND_HEADER,
+                PROCESS_LOG_OUTPUT_HEADER,
+            )
+
+            on_log(PROCESS_LOG_COMMAND_HEADER)
+            for line in _format_command_line(launch_cmd).splitlines():
+                on_log(line)
             on_log(f"Working directory: {source1.parent}")
             on_log(f"Output: {out_path}")
             on_log("")
-            on_log("—— program output ——")
+            on_log(PROCESS_LOG_OUTPUT_HEADER)
 
         label = (
             source1.name if source2 is None

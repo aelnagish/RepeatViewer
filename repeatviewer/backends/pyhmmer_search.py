@@ -348,14 +348,31 @@ def collect_pyhmmer_domain_hits(
     import pyhmmer  # type: ignore[import-untyped]  # noqa: F401
 
     # Mirror BLAST's "Command:" block so Similarity detailed log shows the search.
-    cpu_n = max(1, int(cpus))
-    _log_scan("Command:")
-    _log_scan(
-        f"pyhmmer hmmscan -E {report_e:g} --cpu {cpu_n} "
-        f"--hmm {hmm_path} --query {query_path}"
+    from repeatviewer.external_process import (
+        PROCESS_LOG_COMMAND_HEADER,
+        PROCESS_LOG_OUTPUT_HEADER,
+        command_text_multiline,
     )
+
+    cpu_n = max(1, int(cpus))
+    _log_scan(PROCESS_LOG_COMMAND_HEADER)
+    for line in command_text_multiline(
+        [
+            "pyhmmer",
+            "hmmscan",
+            "-E",
+            f"{report_e:g}",
+            "--cpu",
+            str(cpu_n),
+            "--hmm",
+            str(hmm_path),
+            "--query",
+            str(query_path),
+        ]
+    ).splitlines():
+        _log_scan(line)
     _log_scan("")
-    _log_scan("—— program output ——")
+    _log_scan(PROCESS_LOG_OUTPUT_HEADER)
 
     if hasattr(pyhmmer, "easy"):
         return _collect_with_legacy_pyhmmer(

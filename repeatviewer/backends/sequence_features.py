@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -60,7 +60,8 @@ FEATURE_TYPE_COLORS: dict[str, str] = {
     "PBS": "#c2185b",
     "PPT": "#e67e22",
     "ORF": "#27ae60",
-    "TSD": "#16a085",
+    # Deep blue (matches TEtrimmer / TEAid TSD arrows).
+    "TSD": "#0000FF",
     "tandem repeat": "#000000",
     "domain": "#2980b9",
     "others": "#7f8c8d",
@@ -68,6 +69,92 @@ FEATURE_TYPE_COLORS: dict[str, str] = {
     "Domain": "#2980b9",
     "Other": "#7f8c8d",
 }
+
+# LTR5 ↔ LTR3, TIR5 ↔ TIR3, TSD5 seq ↔ TSD3 seq (optional " (99.5%)" suffix).
+_TERMINAL_PAIR_RE = re.compile(
+    r"^(?P<kind>LTR|TIR)(?P<end>[53])(?P<idx>_\d+)?(?:\s*\([^)]*\))?\s*$",
+    re.IGNORECASE,
+)
+_TSD_END_PAIR_RE = re.compile(
+    r"^(?P<kind>TSD)(?P<end>[53])\s+(?P<seq>\S+?)(?:\s*\([^)]*\))?\s*$",
+    re.IGNORECASE,
+)
+_TSD_SHARED_NAME_RE = re.compile(
+    r"^(?P<kind>TSD)_(?P<seq>\S+?)(?:\s*\([^)]*\))?\s*$",
+    re.IGNORECASE,
+)
+
+
+def parse_terminal_pair_key(
+    name: str, feature_type: str = ""
+) -> tuple[str, str, str] | None:
+    """Return ``(KIND, end, pair_id)`` for paired LTR/TIR/TSD names.
+
+    ``end`` is ``\"5\"`` / ``\"3\"`` for 5′/3′ copies, or ``\"\"`` when both
+    flanks share one name (RepeatViewer auto TSD_SEQ). ``pair_id`` is ``\"\"`` /
+    ``\"_2\"`` for nested LTR/TIR, or the TSD sequence token.
+    """
+    text = str(name or "").strip()
+    if not text:
+        return None
+    del feature_type  # reserved for callers; pairing is name-based
+    match = _TERMINAL_PAIR_RE.fullmatch(text)
+    if match:
+        return (
+            match.group("kind").upper(),
+            match.group("end"),
+            match.group("idx") or "",
+        )
+    match = _TSD_END_PAIR_RE.fullmatch(text)
+    if match:
+        return "TSD", match.group("end"), match.group("seq").upper()
+    match = _TSD_SHARED_NAME_RE.fullmatch(text)
+    if match:
+        return "TSD", "", match.group("seq").upper()
+    return None
+
+
+def partner_terminal_pair_key(
+    key: tuple[str, str, str],
+) -> tuple[str, str, str] | None:
+    """5′ ↔ 3′ partner key; shared-name TSD keys partner with themselves."""
+    kind, end, pair_id = key
+    if end == "5":
+        return kind, "3", pair_id
+    if end == "3":
+        return kind, "5", pair_id
+    if end == "":
+        return kind, "", pair_id
+    return None
+
+
+def expand_terminal_pair_indices(
+    features: Sequence[object],
+    selected: set[int] | frozenset[int],
+) -> set[int]:
+    """Add LTR/TIR/TSD partner indices for every selected feature index."""
+    if not selected or not features:
+        return set(selected)
+    parsed: list[tuple[str, str, str] | None] = []
+    for feat in features:
+        name = str(getattr(feat, "name", "") or "")
+        ftype = str(getattr(feat, "feature_type", "") or "")
+        parsed.append(parse_terminal_pair_key(name, ftype))
+    out = set(selected)
+    for index in list(selected):
+        if not (0 <= index < len(parsed)):
+            continue
+        key = parsed[index]
+        if key is None:
+            continue
+        want = partner_terminal_pair_key(key)
+        if want is None:
+            continue
+        for other, other_key in enumerate(parsed):
+            if other == index or other_key != want:
+                continue
+            out.add(other)
+    return out
 
 DEFAULT_FEATURE_TYPES = (
     "LTR",
