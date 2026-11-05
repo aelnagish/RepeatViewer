@@ -309,7 +309,8 @@ class SignalsTab(QWidget):
         self._cells_host.setLayout(self._cells_row)
         bottom = QHBoxLayout()
         bottom.setContentsMargins(10, 6, 10, 6)
-        bottom.addWidget(self._hint, 1)
+        self._hint.setVisible(False)  # the step guide on the right says what to do
+        bottom.addStretch(1)
         bottom.addWidget(self._cells_host)
 
         left = QVBoxLayout()
