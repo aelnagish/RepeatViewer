@@ -8,6 +8,7 @@ from pathlib import Path
 from PySide6.QtCore import QPointF, QRectF, QSettings, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (
+    QSizePolicy,
     QButtonGroup,
     QCheckBox,
     QFileDialog,
@@ -250,15 +251,19 @@ class SignalsTab(QWidget):
             b.setCheckable(True)
             b.setChecked(key == self._tool)
             b.clicked.connect(lambda _c=False, k=key: self._set_tool(k))
+            b.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
             self._tool_group.addButton(b)
             bar.addWidget(b)
         bar.addSpacing(12)
-        bar.addWidget(QLabel("Probe", self))
+        self._probe_label = QLabel("Probe", self)
+        bar.addWidget(self._probe_label)
         self._probe = NoWheelComboBox(self)
-        self._probe.setMinimumWidth(140)
+        self._probe.setToolTip("Which probe a click in step 2 marks. Shown only when the cell has more than one probe.")
+        self._probe.setMinimumWidth(120)
         self._probe.currentIndexChanged.connect(lambda _i: self._update_hint())
         bar.addWidget(self._probe)
-        self._auto = QCheckBox("Snap to the centre of the spot", self)
+        self._auto = QCheckBox("Snap to centre", self)
+        self._auto.setToolTip("A click snaps the signal to the centre of the spot")
         self._auto.setChecked(_read("signals_auto", "true") != "false")
         self._auto.toggled.connect(lambda on: _write("signals_auto", "true" if on else "false"))
         bar.addWidget(self._auto)
@@ -288,7 +293,6 @@ class SignalsTab(QWidget):
         # ---- bottom row: what the next click does, then the cells of the slide
         self._hint = QLabel(self)
         self._hint.setObjectName("cytoMuted")
-        from PySide6.QtWidgets import QSizePolicy
 
         self._hint.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self._cells_row = QHBoxLayout()
@@ -303,7 +307,11 @@ class SignalsTab(QWidget):
         left = QVBoxLayout()
         left.setContentsMargins(0, 0, 0, 0)
         left.setSpacing(0)
-        left.addLayout(bar)
+        bar_host = QWidget(self)
+        bar_host.setObjectName("cytoAside")  # controls on the side-panel colour, like the Image tab
+        bar_host.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        bar_host.setLayout(bar)
+        left.addWidget(bar_host)
         left.addWidget(self._canvas, 1)
         left.addLayout(bottom)
 
@@ -379,7 +387,11 @@ class SignalsTab(QWidget):
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
-        root.addLayout(left, 1)
+        left_host = QWidget(self)
+        left_host.setObjectName("cytoMain")  # the work area is white, the side columns stay grey
+        left_host.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        left_host.setLayout(left)
+        root.addWidget(left_host, 1)
         root.addWidget(scroll)
 
         self._selected: tuple[str, str] | None = None
@@ -480,6 +492,7 @@ class SignalsTab(QWidget):
         for b, (key, _text) in zip(self._tool_group.buttons(), ss.TOOLS):
             b.setChecked(key == self._tool)
         self._canvas.set_tool_cursor(Qt.CursorShape.CrossCursor)
+        self._sync_probe_visible()
         self._update_hint()
         self._sync_labels()
 
@@ -693,6 +706,12 @@ class SignalsTab(QWidget):
             self._probe.addItem(f"{probe} · {dye}" if dye else probe, probe)
         if self._probe.count() == 0:
             self._probe.addItem("no probe set", "")
+        self._sync_probe_visible()
+
+    def _sync_probe_visible(self) -> None:
+        show = self._tool == "signal" and self._probe.count() > 1
+        self._probe_label.setVisible(show)
+        self._probe.setVisible(show)
 
     def _fill_karyotypes(self) -> None:
         s = self._session

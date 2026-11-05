@@ -361,10 +361,19 @@ class LibraryTab(QWidget):
         middle = QWidget(self)
         middle.setObjectName("cytoMain")
         middle.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        ml = QVBoxLayout(middle)
-        ml.setContentsMargins(24, 16, 24, 0)
+        outer = QVBoxLayout(middle)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        top_host = QWidget(middle)
+        top_host.setObjectName("cytoAside")  # controls sit on the side-panel colour, the work area is white
+        top_host.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        top.setContentsMargins(24, 8, 24, 8)
+        top_host.setLayout(top)
+        outer.addWidget(top_host)
+        ml = QVBoxLayout()
+        ml.setContentsMargins(24, 12, 24, 0)
         ml.setSpacing(12)
-        ml.addLayout(top)
+        outer.addLayout(ml, 1)
         ml.addWidget(self._progress_row)
         ml.addWidget(self._chip)
         ml.addWidget(self._grid_scroll, 1)
@@ -933,6 +942,7 @@ class LibraryTab(QWidget):
         dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         dialog.destroyed.connect(lambda *_: setattr(self, "_lists_dialog", None))
         self._lists_dialog = dialog
+        _float_above_app(self.window(), "_cyto_lists_dialog", dialog)
         dialog.show()
 
     # ------------------------------------------------------------------ import
@@ -950,6 +960,7 @@ class LibraryTab(QWidget):
         dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         dialog.finished.connect(lambda _r, d=dialog: self._after_import_dialog(d))
         self._import_dialog = dialog
+        _float_above_app(self.window(), "_cyto_import_dialog", dialog)
         dialog.show()
 
     def _after_import_dialog(self, dialog) -> None:
@@ -1002,3 +1013,15 @@ class LibraryTab(QWidget):
 
     def busy(self) -> bool:
         return self._worker is not None
+
+
+def _float_above_app(window, attr: str, dialog) -> None:
+    """Keep a non-modal window above RepeatViewer (not other apps): the main window raises it when it is
+    activated or a panel is clicked."""
+    configure = getattr(type(window), "_configure_app_floating_dialog", None)
+    if callable(configure):
+        configure(dialog)
+    try:
+        setattr(window, attr, dialog)
+    except (AttributeError, RuntimeError):
+        pass

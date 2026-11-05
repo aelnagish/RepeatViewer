@@ -94,7 +94,7 @@ def plan_cells(paths: list[Path], lists: Lists, *, merges: bool = False) -> tupl
             group = CellGroup(key=path.stem)
             for i in range(info.count):
                 dye = dye_for_filename(info.names[i], lists)[0] if info.names[i] else ""
-                group.files.append((path, dye, i))
+                group.files.append((path, dye, info.plane(i)))
                 group.colours.append("" if dye else info.colours[i])
             multi.append(group)
         else:
@@ -201,6 +201,7 @@ def import_cells(
     copy: bool = True,
     pixel_size_um: float | None = None,
     progress=None,
+    channel_plan: list | None = None,
 ) -> tuple[list[CytoImage], list[str]]:
     """Create one image record per cell. Returns (new images, error lines).
 
@@ -222,6 +223,8 @@ def import_cells(
             pixel = pixel_size_um
             stored_as: dict[Path, str] = {}
             for n, (path, dye, index) in enumerate(group.entries()):
+                planned = (channel_plan or [])[n] if n < len(channel_plan or []) else {}
+                dye = str(planned.get("dye") or dye)
                 data = ch.read_plane(path, index)
                 grey = ch.to_grey(data.array)
                 low, high = ch.auto_levels(grey)
@@ -238,8 +241,9 @@ def import_cells(
                 colour = group.colours[n] if n < len(group.colours) and group.colours[n] else ""
                 colour = colour or (dye_color(lists, dye) if dye else ch.UNKNOWN_COLOURS[n % len(ch.UNKNOWN_COLOURS)])
                 display = ChannelDisplay(color=colour, low=low, high=high)
-                label = path.name if index < 0 else f"{path.name} · plane {index + 1}"
-                channels.append(Channel(id=cid, file=file_ref, dye=dye, probe=probes_by_dye.get(dye, "") if dye else "",
+                label = ch.plane_label(path, index)
+                probe = str(planned.get("probe") or (probes_by_dye.get(dye, "") if dye else ""))
+                channels.append(Channel(id=cid, file=file_ref, dye=dye, probe=probe,
                                         bits=data.bits, original_name=label, display=display, index=index))
                 layers.append((grey, display))
                 if pixel is None and data.pixel_size_um:
@@ -275,7 +279,7 @@ def import_cells(
 # One slide session = one request (the Import dialog builds it)
 # ---------------------------------------------------------------------------
 
-from .lists import add_entry, ensure_used_values, entry, load_lists, save_lists  # noqa: E402
+from .lists import add_entry, ensure_used_values, entry, load_lists, names, save_lists  # noqa: E402
 from .model import add_slide, load_slides, save_slides  # noqa: E402
 
 SLIDE_FIELDS = ("date", "species", "accession", "technique", "counterstain")
@@ -293,6 +297,66 @@ class ImportRequest:
     copy: bool = True
     pixel_size_um: float | None = None
     merges: bool = False  # also import merged colour pictures, each as its own cell
+    channel_plan: list = field(default_factory=list)  # per channel position: {"dye": …, "probe": …}, whole slide
+
+
+@dataclass
+class ChannelRow:
+    """One channel position of a slide, as the Import window's Channels table shows it."""
+    position: int  # 1, 2, 3 … (the order of the channels in each cell)
+    found_as: str  # layer or file name that holds this channel in most cells
+    colour: str
+    dye: str = ""
+    probe: str = ""
+
+
+def _found_name(path: Path, index: int) -> str:
+    label = ch.plane_label(path, index)
+    return label.split(" · ", 1)[1] if " · " in label else Path(path).name
+
+
+def _guess_probe(found: str, dye: str, lists: Lists) -> str:
+    """A probe whose name appears in the layer or file name; else the only probe saved with this dye."""
+    text = found.lower()
+    probes = [(str(e["name"]), str(e.get("dye", ""))) for e in lists.get("probes", [])]
+    for name, _d in probes:
+        low = name.lower()
+        if len(low) >= 3 and low in text:
+            return name
+    if dye and dye.lower() not in {n.lower() for n in names(lists, "counterstains")} | {"dapi", "hoechst"}:
+        same = [name for name, d in probes if d == dye]
+        if len(same) == 1:
+            return same[0]
+    return ""
+
+
+def channel_rows(groups: list["CellGroup"], lists: Lists) -> list[ChannelRow]:
+    """The channel positions of a slide with what was found and a first guess of dye and probe."""
+    from collections import Counter
+
+    rows: list[ChannelRow] = []
+    count = max((g.size for g in groups), default=0)
+    for k in range(count):
+        found, colours, dyes = Counter(), Counter(), Counter()
+        for g in groups:
+            if k >= g.size:
+                continue
+            path, dye, index = g.entries()[k]
+            found[_found_name(path, index)] += 1
+            if k < len(g.colours) and g.colours[k]:
+                colours[g.colours[k]] += 1
+            if dye:
+                dyes[dye] += 1
+        name = found.most_common(1)[0][0] if found else f"Channel {k + 1}"
+        dye = dyes.most_common(1)[0][0] if dyes else dye_for_filename(name, lists)[0]
+        colour = colours.most_common(1)[0][0] if colours else (
+            dye_color(lists, dye) if dye else ch.UNKNOWN_COLOURS[k % len(ch.UNKNOWN_COLOURS)])
+        rows.append(ChannelRow(k + 1, name, colour, dye, _guess_probe(name, dye, lists)))
+    return rows
+
+
+def plan_probes_by_dye(plan: list) -> dict[str, str]:
+    return {str(r.get("dye", "")): str(r.get("probe", "")) for r in plan if r.get("dye") and r.get("probe")}
 
 
 def scan_tiffs(source: Path, recursive: bool = False) -> list[Path]:
@@ -331,20 +395,21 @@ def run_request(req: ImportRequest, *, progress=None):
     metadata = {k: v for k, v in values.items() if v}
     if req.stage:
         metadata["stage"] = req.stage
+    probes_by_dye = {**req.probes_by_dye, **plan_probes_by_dye(req.channel_plan)}
     images, errs = import_cells(
         folder, groups, lists=lists, slide_id=slide.id, metadata=metadata,
-        targets=targets_for_probes(lists, req.probes_by_dye), probes_by_dye=req.probes_by_dye,
-        copy=req.copy, pixel_size_um=req.pixel_size_um, progress=progress,
+        targets=targets_for_probes(lists, probes_by_dye), probes_by_dye=probes_by_dye,
+        copy=req.copy, pixel_size_um=req.pixel_size_um, progress=progress, channel_plan=req.channel_plan,
     )
     errors += errs
     if not images:
         save_slides(folder, [s for s in load_slides(folder) if s.id != slide.id])
         return None, [], errors
     lists = load_lists(folder)
-    for probe in req.probes_by_dye.values():
+    for dye, probe in probes_by_dye.items():
         if probe:
-            add_entry(lists, "probes", probe)
-    if ensure_used_values(folder, lists) or req.probes_by_dye:
+            add_entry(lists, "probes", probe, dye=dye)
+    if ensure_used_values(folder, lists) or probes_by_dye:
         save_lists(folder, lists)
     return slide, images, errors
 

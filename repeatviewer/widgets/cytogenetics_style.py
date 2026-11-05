@@ -47,8 +47,9 @@ def workspace_css() -> str:
     """Only backgrounds of the side columns and a few text colours: every control stays the app's native one."""
     return """
 #cytoAside { background: palette(window); }
-#cytoMain { background: palette(window); }
-#cytoPage { background: #DADBDF; }
+QTabWidget#cytoTabs { background: palette(window); }
+#cytoMain { background: palette(base); }
+#cytoPage { background: palette(base); }
 QLabel#cytoMuted, QLabel#cytoCrumb { color: gray; }
 QPushButton#cytoLink { background: transparent; border: none; color: palette(link); padding: 0px; text-align: left; }
 QPushButton#cytoLink:hover { text-decoration: underline; }

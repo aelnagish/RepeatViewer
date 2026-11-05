@@ -233,8 +233,14 @@ class ImageCanvas(QWidget):
 _Canvas = ImageCanvas  # old name
 
 
+ADD_PROBE = "Add a probe…"
+ADD_DYE = "Add a dye…"
+
+
 def _slider(lo: int, hi: int, value: int) -> QSlider:
-    s = QSlider(Qt.Orientation.Horizontal)
+    from repeatviewer.widgets.spin_boxes import NoWheelSlider
+
+    s = NoWheelSlider(Qt.Orientation.Horizontal)  # the wheel scrolls the panel; values change only by dragging
     from repeatviewer.widgets.cytogenetics_style import app_slider
 
     app_slider(s)
@@ -250,10 +256,14 @@ class _ChannelCard(QFrame):
     removeRequested = Signal(int)
     colourRequested = Signal(int)
 
-    def __init__(self, session: isn.ImageSession, index: int, dyes: list[str], probes: list[str], parent: QWidget | None = None) -> None:
+    listsChanged = Signal()
+
+    def __init__(self, session: isn.ImageSession, index: int, dyes: list[str], probes: list[str], parent: QWidget | None = None,
+                 *, folder: Path | None = None) -> None:
         super().__init__(parent)
         self._s = session
         self._i = index
+        self._folder = folder
         c = session.channels[index]
         self.setObjectName("cytoBox")
         from repeatviewer.widgets.cytogenetics_style import BOX_CSS
@@ -272,7 +282,7 @@ class _ChannelCard(QFrame):
         self._show.toggled.connect(self._on_visible)
         self._probe = NoWheelComboBox(self)
         self._probe.setEditable(True)
-        self._probe.addItems([""] + probes)
+        self._probe.addItems(probes + [ADD_PROBE])
         self._probe.setCurrentText(c.probe)
         self._probe.setToolTip("Probe in this channel (type a new name or pick one)")
         self._probe.lineEdit().setPlaceholderText("Probe name")
@@ -303,7 +313,7 @@ class _ChannelCard(QFrame):
 
         self._dye = NoWheelComboBox(self)
         self._dye.setEditable(True)
-        self._dye.addItems([""] + dyes)
+        self._dye.addItems(dyes + [ADD_DYE])
         self._dye.setCurrentText(c.dye)
         self._dye.setToolTip("Dye (fluorochrome) of this channel")
         self._dye.lineEdit().setPlaceholderText("Dye")
@@ -364,17 +374,73 @@ class _ChannelCard(QFrame):
         self.refresh_levels()
         self.changed.emit()
 
+    def offer_names(self, probes: list[str], dyes: list[str]) -> None:
+        for box, names, extra in ((self._probe, probes, ADD_PROBE), (self._dye, dyes, ADD_DYE)):
+            text = box.currentText()
+            box.blockSignals(True)
+            box.clear()
+            box.addItems([n for n in names if n] + [extra])
+            box.setCurrentText(text)
+            box.blockSignals(False)
+
     def _on_visible(self, on: bool) -> None:
         self._s.set_visible(self._i, on)
         self.changed.emit()
 
     def _on_dye(self) -> None:
+        if self._dye.currentText() == ADD_DYE:
+            self._add_to_list("dyes")
+            return
         self._s.channels[self._i].dye = self._dye.currentText().strip()
         self.changed.emit()
 
     def _on_probe(self) -> None:
+        if self._probe.currentText() == ADD_PROBE:
+            self._add_to_list("probes")
+            return
         self._s.channels[self._i].probe = self._probe.currentText().strip()
         self.changed.emit()
+
+    def _add_to_list(self, key: str) -> None:
+        """"Add a probe…" / "Add a dye…": a new list entry, used for this channel right away."""
+        from PySide6.QtWidgets import QColorDialog, QInputDialog, QMessageBox
+
+        from repeatviewer.backends.cytogenetics import lists as ls
+
+        c = self._s.channels[self._i]
+        box, old = (self._probe, c.probe) if key == "probes" else (self._dye, c.dye)
+        box.setCurrentText(old)  # never leave the "Add …" item in the field
+        what = "probe" if key == "probes" else "dye"
+        name, ok = QInputDialog.getText(self, f"Add a {what}", f"Name of the {what}:")
+        name = name.strip()
+        if not ok or not name:
+            return
+        values: dict = {}
+        if key == "dyes":
+            colour = QColorDialog.getColor(QColor(c.display.color or "#ffffff"), self, f"Colour of {name}")
+            values = {"color": colour.name() if colour.isValid() else c.display.color or "#ffffff",
+                      "words": name.lower()}
+        elif c.dye:
+            values = {"dye": c.dye}
+        if self._folder is not None:
+            try:
+                lists = ls.load_lists(self._folder)
+                ls.add_entry(lists, key, name, **values)
+                ls.save_lists(self._folder, lists)
+            except (OSError, ValueError) as exc:
+                QMessageBox.information(self, f"Add a {what}", str(exc))
+                return
+        if key == "probes":
+            c.probe = name
+        else:
+            c.dye = name
+        box.blockSignals(True)
+        if box.findText(name) < 0:
+            box.insertItem(box.count() - 1, name)
+        box.setCurrentText(name)
+        box.blockSignals(False)
+        self.changed.emit()
+        self.listsChanged.emit()
 
     def _on_levels(self) -> None:
         low, high = self._low.value(), self._high.value()
@@ -421,7 +487,7 @@ class ImageTab(QWidget):
         self._canvas = ImageCanvas(self)
         self._canvas.zoomChanged.connect(self._on_zoom)
         out_btn, in_btn, fit_btn, one_btn = (QPushButton(t, self) for t in ("−", "+", "Fit", "100 %"))
-        for b, w in ((out_btn, 28), (in_btn, 28), (fit_btn, 44), (one_btn, 56)):
+        for b, w in ((out_btn, 28), (in_btn, 28), (fit_btn, 44), (one_btn, 64)):
             b.setFixedWidth(w)
         out_btn.clicked.connect(lambda: self._canvas.set_zoom(self._canvas.zoom() / 1.25))
         in_btn.clicked.connect(lambda: self._canvas.set_zoom(self._canvas.zoom() * 1.25))
@@ -467,6 +533,8 @@ class ImageTab(QWidget):
         rule.setStyleSheet("color: palette(mid);")
 
         left_host = QWidget(self)
+        left_host.setObjectName("cytoMain")
+        left_host.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         left = QVBoxLayout(left_host)
         left.setContentsMargins(0, 0, 0, 0)
         left.setSpacing(0)
@@ -625,6 +693,18 @@ class ImageTab(QWidget):
 
     # ------------------------------------------------------------------ side panel
 
+    def _on_lists_added(self) -> None:
+        """A probe or dye was added from a channel card: offer it in the other cards too."""
+        sender = self.sender()
+        lists = load_lists(self._folder) if self._folder else None
+        if not lists:
+            return
+        for card in self._cards or []:
+            if card is None or card is sender:
+                continue
+            card.offer_names([p.get("name", "") for p in lists.get("probes", [])],
+                             [d.get("name", "") for d in lists.get("dyes", [])])
+
     def _build_panel(self) -> None:
         s = self._session
         assert s is not None
@@ -638,7 +718,8 @@ class ImageTab(QWidget):
             order = [s.channels.index(c) for c in ordered_channels(s.details)]
             self._cards = [None] * len(s.channels)
             for i in order:
-                card = _ChannelCard(s, i, dyes, probes, self._chan_host)
+                card = _ChannelCard(s, i, dyes, probes, self._chan_host, folder=self._folder)
+                card.listsChanged.connect(self._on_lists_added)
                 card.changed.connect(self._on_card_changed)
                 card.removeRequested.connect(self._remove_channel)
                 card.colourRequested.connect(self._pick_colour)

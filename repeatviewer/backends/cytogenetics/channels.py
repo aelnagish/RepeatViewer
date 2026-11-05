@@ -164,28 +164,84 @@ class TiffInfo:
     colours: list[str]
     width: int = 0
     height: int = 0
+    indices: list[int] | None = None  # plane index per channel when not 0..count-1 (Photoshop layers)
+
+    def plane(self, i: int) -> int:
+        return self.indices[i] if self.indices else i
+
+
+# A picture is one tinted channel when its signal pixels all share one colour direction. Measured on 1022 lab
+# TIFFs: tinted channels score exactly 0, Photoshop merges 0.0036 and up.
+MERGE_OFF_TINT_SHARE = 0.001
+_SIGNAL_SHARE = 0.15  # pixels brighter than this share of the peak count as signal
+_OFF_TINT_SIN = 0.2  # a signal pixel is off the tint when its colour is turned more than ~12 degrees away
+
+
+def off_tint_share(rgb: np.ndarray) -> float:
+    """Share of signal pixels whose colour is not the picture's tint (0 for one channel saved in colour).
+
+    Only signal pixels are looked at: FISH pictures are mostly black, which hid merges in a whole-picture average.
+    """
+    planes = rgb[..., :3].astype(np.float32)
+    step = max(1, int(np.ceil(np.sqrt(planes.shape[0] * planes.shape[1] / 250_000))))
+    flat = planes[::step, ::step].reshape(-1, 3)
+    intensity = flat.max(axis=1)
+    top = float(intensity.max()) if flat.size else 0.0
+    if top <= 0:
+        return 0.0
+    signal = _signal_pixels(rgb, flat, intensity, top)
+    if not len(signal):
+        return 0.0
+    tint = _tint_direction(signal)
+    unit = signal / np.linalg.norm(signal, axis=1, keepdims=True)
+    off = np.linalg.norm(unit - np.outer(unit @ tint, tint), axis=1)
+    return float((off > _OFF_TINT_SIN).mean())
+
+
+def _signal_pixels(rgb: np.ndarray, flat: np.ndarray, intensity: np.ndarray, top: float) -> np.ndarray:
+    """Bright pixels, without clipped ones: an overexposed spot turns white whatever its tint."""
+    full = float(np.iinfo(rgb.dtype).max) if rgb.dtype.kind in "ui" else top
+    keep = intensity >= max(_SIGNAL_SHARE * top, 0.09 * full if rgb.dtype.kind in "ui" else 0.0)
+    if not keep.any():
+        keep = intensity >= _SIGNAL_SHARE * top
+    unclipped = keep & (flat.max(axis=1) < 0.98 * full)
+    if unclipped.sum() >= max(20, 0.2 * keep.sum()):
+        keep = unclipped
+    return flat[keep]
+
+
+def _tint_direction(signal: np.ndarray) -> np.ndarray:
+    unit = signal / np.linalg.norm(signal, axis=1, keepdims=True)
+    tint = np.median(unit, axis=0)
+    norm = float(np.linalg.norm(tint))
+    return tint / norm if norm > 0 else np.array([1.0, 1.0, 1.0]) / np.sqrt(3.0)
+
+
+def tint_colour(rgb: np.ndarray) -> str:
+    """The main colour of a picture's signal as #rrggbb (brightest plane at full strength)."""
+    flat = rgb[..., :3].reshape(-1, 3).astype(np.float32)
+    intensity = flat.max(axis=1)
+    top = float(intensity.max()) if flat.size else 0.0
+    if top <= 0:
+        return "#ffffff"
+    signal = _signal_pixels(rgb, flat, intensity, top)
+    tint = _tint_direction(signal) if len(signal) else np.array([1.0, 1.0, 1.0])
+    r, g, b = (int(round(255 * max(0.0, v) / float(tint.max()))) for v in tint)
+    return f"#{r:02x}{g:02x}{b:02x}"
 
 
 def colour_of(rgb: np.ndarray) -> str | None:
     """The colour of an RGB picture that holds one channel (Photoshop or ImageJ save a channel tinted:
-    blue DAPI, green FITC, yellow, white ...). None when the planes differ: then it is a merge of channels."""
+    blue DAPI, green FITC, yellow, white ...). None when the signal has several colours: a merge of channels."""
     if rgb.ndim != 3 or rgb.shape[-1] < 3:
         return None
-    planes = rgb[..., :3].astype(np.float32)
-    step = max(1, int(np.ceil(np.sqrt(planes.shape[0] * planes.shape[1] / 250_000))))
-    planes = planes[::step, ::step]
-    peaks = planes.reshape(-1, 3).max(axis=0)
+    peaks = rgb[..., :3].reshape(-1, 3).max(axis=0).astype(np.float32)
     top = float(peaks.max())
     if top <= 0:
         return "#ffffff"
-    intensity = planes.max(axis=-1)
-    full = float(np.iinfo(rgb.dtype).max) if rgb.dtype.kind in "ui" else top
-    for k in range(3):
-        expected = intensity * (peaks[k] / top)
-        if float(np.abs(planes[..., k] - expected).mean()) > 0.01 * full:
-            return None
-    r, g, b = (int(round(255 * p / top)) for p in peaks)
-    return f"#{r:02x}{g:02x}{b:02x}"
+    if off_tint_share(rgb) > MERGE_OFF_TINT_SHARE:
+        return None
+    return tint_colour(rgb)
 
 
 def _rgb_info(array: np.ndarray) -> TiffInfo:
@@ -231,6 +287,73 @@ def _channel_names(tif, count: int) -> list[str]:
     return [names[i] if i < len(names) else "" for i in range(count)]
 
 
+LAYER_BASE = 1000  # Channel.index from here on: a Photoshop layer saved in the TIFF (1000 = first picture layer)
+_LAYER_CACHE: dict[tuple, list] = {}
+
+
+def photoshop_layers(path: Path) -> list:
+    """Picture layers Photoshop saved inside a TIFF (visible, not text, not empty); [] when there are none."""
+    path = Path(path)
+    try:
+        stat = path.stat()
+    except OSError:
+        return []
+    key = (str(path.resolve()), stat.st_mtime_ns, stat.st_size)
+    if key in _LAYER_CACHE:
+        return _LAYER_CACHE[key]
+    layers: list = []
+    try:
+        block, width, height = _photoshop_block(path)
+        if block:
+            from . import photoshop
+
+            layers = photoshop.picture_layers(photoshop.layers_from_block(block, width, height))
+    except Exception:  # noqa: BLE001 - a damaged layer block: use the flat picture
+        layers = []
+    if len(_LAYER_CACHE) > 16:
+        _LAYER_CACHE.clear()
+    _LAYER_CACHE[key] = layers
+    return layers
+
+
+def _photoshop_block(path: Path) -> tuple[bytes, int, int]:
+    if not is_tiff(path):
+        return b"", 0, 0
+    try:
+        tifffile = _tifffile()
+        with tifffile.TiffFile(str(path)) as tif:
+            page = tif.pages[0]
+            tag = page.tags.get(37724)
+            return (bytes(tag.value) if tag is not None else b""), int(page.imagewidth), int(page.imagelength)
+    except Exception:  # noqa: BLE001 - no tifffile: Pillow reads the tag too
+        from PIL import Image  # type: ignore[import-not-found]
+
+        with Image.open(str(path)) as im:
+            value = im.tag_v2.get(37724) if hasattr(im, "tag_v2") else None
+            return (bytes(value) if value else b""), im.width, im.height
+
+
+def layer_info(path: Path) -> TiffInfo | None:
+    """A TIFF with two or more Photoshop picture layers as channels, one per layer."""
+    layers = photoshop_layers(path)
+    if len(layers) < 2:
+        return None
+    h, w = layers[0].rgb.shape[:2]
+    colours = [colour_of(layer.rgb) or tint_colour(layer.rgb) for layer in layers]
+    return TiffInfo("channels", len(layers), [layer.name for layer in layers], colours, w, h,
+                    indices=[LAYER_BASE + k for k in range(len(layers))])
+
+
+def plane_label(path: Path, index: int) -> str:
+    """How a channel's source is named in the record: the file, plus its plane or Photoshop layer."""
+    name = Path(path).name
+    if index >= LAYER_BASE:
+        layers = photoshop_layers(path)
+        k = index - LAYER_BASE
+        return f"{name} · {layers[k].name}" if k < len(layers) and layers[k].name else f"{name} · layer {k + 1}"
+    return name if index < 0 else f"{name} · plane {index + 1}"
+
+
 def inspect_tiff(path: Path) -> TiffInfo:
     """What one picture holds: one grey plane, an RGB merge, or several channels (ImageJ, OME, multi-page)."""
     if not is_tiff(path):
@@ -249,6 +372,9 @@ def _inspect_other(path: Path) -> TiffInfo:
 
 
 def _inspect_tiff(path: Path) -> TiffInfo:
+    layered = layer_info(path)
+    if layered is not None:
+        return layered
     tifffile = _tifffile()
     with tifffile.TiffFile(str(path)) as tif:
         series = tif.series[0]
@@ -277,6 +403,14 @@ def read_plane(path: Path, index: int = -1) -> ChannelData:
     """
     if index < 0:
         return read_channel(path)
+    if index >= LAYER_BASE:
+        layers = photoshop_layers(path)
+        k = index - LAYER_BASE
+        if k >= len(layers):
+            raise ValueError(f"{Path(path).name}: Photoshop layer {k + 1} is missing")
+        data = to_grey(layers[k].rgb)
+        bits = int(data.dtype.itemsize * 8) if data.dtype.kind in "ui" else 32
+        return ChannelData(array=np.ascontiguousarray(data), bits=bits, pixel_size_um=None)
     try:
         return _read_plane_tiff(path, index)
     except Exception as exc:  # noqa: BLE001

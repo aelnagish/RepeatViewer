@@ -52,7 +52,7 @@ _DYE_WORDS = {
 Lists = dict[str, list[dict]]
 
 # order of the lists in the Edit lists window: what you need first comes first
-EDIT_ORDER = ("dyes", "probes", "species", "stages", "techniques", "counterstains")
+EDIT_ORDER = ("dyes", "probes", "stages", "techniques", "counterstains", "species")
 
 # excitation and emission maxima (nm) of common dyes
 DYE_WAVELENGTHS = {

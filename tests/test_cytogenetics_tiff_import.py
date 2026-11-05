@@ -123,3 +123,113 @@ def test_tinted_channels_sizes_and_merges(tmp_path):
     assert "left out" in notes[0]
     cells, _notes = plan_cells(sorted(cell.iterdir()), default_lists(), merges=True)
     assert sorted(g.key for g in cells) == ["cell1", "cell1 (120×90)", "cell1 merge"]
+
+
+def _spots(h, w, centres, value):
+    plane = np.zeros((h, w), dtype=np.float32)
+    yy, xx = np.mgrid[:h, :w]
+    for y, x in centres:
+        plane = np.maximum(plane, value * np.exp(-((yy - y) ** 2 + (xx - x) ** 2) / 18.0))
+    return plane
+
+
+def test_mostly_black_merge_is_not_a_tinted_channel(tmp_path):
+    h, w = 200, 200
+    dapi = _spots(h, w, [(50, 50), (150, 150), (60, 140)], 230)
+    fitc = _spots(h, w, [(52, 54)], 255)
+    cy3 = _spots(h, w, [(148, 146)], 255)
+    tint = np.stack([dapi * 0.0, dapi * 0.5, dapi * 1.0], axis=-1).round().astype(np.uint8)
+    assert ch.off_tint_share(tint) == 0.0
+    assert ch.colour_of(tint) == "#0080ff"
+    merge = np.clip(np.stack([cy3, fitc, dapi], axis=-1), 0, 255).round().astype(np.uint8)
+    assert ch.off_tint_share(merge) > ch.MERGE_OFF_TINT_SHARE
+    assert ch.colour_of(merge) is None
+    cell = tmp_path / "cell1"
+    cell.mkdir()
+    tifffile.imwrite(str(cell / "1.tif"), tint, photometric="rgb")
+    tifffile.imwrite(str(cell / "2.tif"), np.stack([fitc * 0, fitc, fitc * 0], -1).round().astype(np.uint8), photometric="rgb")
+    tifffile.imwrite(str(cell / "Abdullah-101.tif"), merge, photometric="rgb")
+    cells, notes = plan_cells(scan_tiffs(tmp_path, recursive=True), ls.load_lists(tmp_path))
+    assert [p.name for p, _d, _i in cells[0].entries()] == ["1.tif", "2.tif"]
+    assert any("Abdullah-101.tif" in n for n in notes)
+
+
+def _photoshop_block(layers, h, w):
+    """A minimal Photoshop layer block (big-endian, raw channels) as Photoshop writes into TIFF tag 37724."""
+    import struct
+
+    records, data = b"", b""
+    for name, rgb, flags in layers:
+        size = h * w + 2
+        rec = struct.pack(">4iH", 0, 0, h, w, 3) + b"".join(struct.pack(">hI", c, size) for c in range(3))
+        raw = name.encode()
+        pascal = bytes([len(raw)]) + raw
+        pascal += b"\0" * ((-len(pascal)) % 4)
+        extra = struct.pack(">II", 0, 0) + pascal + (b"8BIMTySh" + struct.pack(">I", 0) if name.startswith("T") else b"")
+        rec += b"8BIMnorm" + bytes([255, 0, flags, 0]) + struct.pack(">I", len(extra)) + extra
+        records += rec
+        data += b"".join(struct.pack(">H", 0) + rgb[..., c].tobytes() for c in range(3))
+    body = struct.pack(">h", len(layers)) + records + data
+    return b"Adobe Photoshop Document Data Block\0" + b"8BIMLayr" + struct.pack(">I", len(body)) + body
+
+
+def test_photoshop_layers_become_channels(tmp_path):
+    h, w = 40, 50
+    dapi = _spots(h, w, [(10, 10), (30, 40)], 200)
+    red = _spots(h, w, [(12, 12)], 255)
+    yellow = _spots(h, w, [(28, 38)], 240)
+    layers = [
+        ("DAPI", np.stack([dapi] * 3, -1).round().astype(np.uint8), 0),
+        ("Red", np.stack([red, red * 0, red * 0], -1).round().astype(np.uint8), 0),
+        ("Yellow", np.stack([yellow, yellow, yellow * 0], -1).round().astype(np.uint8), 0),
+        ("Hidden", np.full((h, w, 3), 90, np.uint8), 2),
+        ("T1", np.full((h, w, 3), 255, np.uint8), 0),
+    ]
+    flat = np.clip(sum(l[1].astype(int) for l in layers[:3]), 0, 255).astype(np.uint8)
+    cell = tmp_path / "cell1"
+    cell.mkdir()
+    path = cell / "merged.tif"
+    block = _photoshop_block(layers, h, w)
+    tifffile.imwrite(str(path), flat, photometric="rgb", extratags=[(37724, 7, len(block), block, True)])
+    info = ch.inspect_tiff(path)
+    assert info.kind == "channels" and info.names == ["DAPI", "Red", "Yellow"]
+    assert info.colours == ["#ffffff", "#ff0000", "#ffff00"]
+    plane = ch.read_plane(path, ch.LAYER_BASE + 1).array
+    assert plane.shape == (h, w) and plane.max() == 255 and plane[30, 40] < 5
+    assert ch.plane_label(path, ch.LAYER_BASE + 2) == "merged.tif · Yellow"
+    cells, _notes = plan_cells(scan_tiffs(tmp_path, recursive=True), ls.load_lists(tmp_path))
+    assert [i for _p, _d, i in cells[0].entries()] == [ch.LAYER_BASE, ch.LAYER_BASE + 1, ch.LAYER_BASE + 2]
+
+
+def test_overexposed_tinted_channel_is_not_a_merge():
+    h, w = 120, 120
+    spots = _spots(h, w, [(30, 30), (90, 90), (30, 90)], 200) + _spots(h, w, [(60, 60)], 600)
+    cyan = np.stack([np.clip(spots - 255, 0, 255) * 0.6, np.clip(spots, 0, 255), np.clip(spots, 0, 255)], -1)
+    cyan = cyan.round().astype(np.uint8)
+    assert ch.colour_of(cyan) == "#00ffff"
+
+
+def test_channel_plan_sets_dye_and_probe_for_the_whole_slide(tmp_path):
+    from repeatviewer.backends.cytogenetics.importer import channel_rows
+
+    src = tmp_path / "slide"
+    for cell in ("cell1", "cell2"):
+        (src / cell).mkdir(parents=True)
+        for n, rgb in enumerate(((0, 0, 1), (0, 1, 0), (1, 0, 0)), start=1):
+            plane = _spots(30, 30, [(10 + n, 12)], 200)
+            tifffile.imwrite(str(src / cell / f"{n}.tif"), np.stack([plane * k for k in rgb], -1).round().astype(np.uint8),
+                             photometric="rgb")
+    lists = ls.load_lists(tmp_path)
+    cells, _notes = plan_cells(scan_tiffs(src, recursive=True), lists)
+    rows = channel_rows(cells, lists)
+    assert [r.found_as for r in rows] == ["1.tif", "2.tif", "3.tif"]
+    assert rows[0].colour == "#0000ff" and rows[2].colour == "#ff0000"
+    work = tmp_path / "data"
+    work.mkdir()
+    plan = [{"dye": "DAPI", "probe": ""}, {"dye": "FITC", "probe": "CroSat2"}, {"dye": "Cy3", "probe": "45S"}]
+    _slide, images, errors = run_request(ImportRequest(folder=work, source=src, recursive=True, slide_name="S",
+                                                       channel_plan=plan))
+    assert not errors and len(images) == 2
+    chans = md.image_details(images[0]).channels
+    assert [(c.dye, c.probe) for c in chans] == [("DAPI", ""), ("FITC", "CroSat2"), ("Cy3", "45S")]
+    assert {"CroSat2", "45S"} <= set(ls.names(ls.load_lists(work), "probes"))

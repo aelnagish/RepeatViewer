@@ -10502,6 +10502,8 @@ class MainWindow(
             "_define_database_dialog",
             "_plugin_run_dialog",
             "_primer_check_dialog",
+            "_cyto_import_dialog",
+            "_cyto_lists_dialog",
         ):
             dialog = getattr(self, attr, None)
             if dialog is None:

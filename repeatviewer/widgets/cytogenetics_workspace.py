@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QSettings, Qt, Signal
+from PySide6.QtCore import QTimer, QSettings, Qt, Signal
 from PySide6.QtWidgets import (
     QFormLayout,
     QHBoxLayout,
@@ -142,7 +142,16 @@ class CytogeneticsWorkspace(QWidget):
         cl.addWidget(self._help, 0, Qt.AlignmentFlag.AlignVCenter)
         self._tabs.setCornerWidget(corner, Qt.Corner.TopRightCorner)
         self._tabs.tabBar().setDrawBase(False)  # no line running above the "?" button
-        corner.setFixedHeight(max(self._tabs.tabBar().sizeHint().height(), self._help.sizeHint().height()))
+        # taller tabs, so the "?" fits inside the tab row and never hangs over the line below it
+        bar = self._tabs.tabBar()
+        bar.setStyleSheet("QTabBar::tab { padding: 10px 14px; }")
+        self._tabs.setObjectName("cytoTabs")  # the tab row has the side-panel colour
+        self._tabs.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        corner.setObjectName("cytoAside")
+        corner.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        cl.setContentsMargins(0, 0, 14, 0)
+        self._corner = corner
+        QTimer.singleShot(0, self._fit_corner)
         self._pages: dict[str, QWidget] = {}
         for name in ws.TAB_NAMES:
             page = {"Library": LibraryTab, "Image": ImageTab, "Signals": SignalsTab, "Idiogram": IdiogramTab, "Figure": FigureTab}.get(name, None)
@@ -191,6 +200,17 @@ class CytogeneticsWorkspace(QWidget):
 
     # ---------------------------------------------------------------- side panel
 
+
+    def _fit_corner(self) -> None:
+        """The "?" corner exactly as tall as the tab row, button centred: nothing hangs over the panels below."""
+        h = self._tabs.tabBar().height()
+        if h > 0:
+            self._corner.setFixedHeight(h)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 (Qt API)
+        super().resizeEvent(event)
+        if hasattr(self, "_corner"):
+            QTimer.singleShot(0, self._fit_corner)
     def _build_side(self) -> QWidget:
         from repeatviewer.widgets.sequence_annotation_rail import _CollapsibleSection
 
