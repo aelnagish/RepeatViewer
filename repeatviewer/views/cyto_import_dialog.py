@@ -7,6 +7,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QSettings, Qt, QTimer
 from PySide6.QtWidgets import (
+    QToolButton,
     QGridLayout,
     QInputDialog,
     QMessageBox,
@@ -33,9 +34,7 @@ from repeatviewer.backends import cyto_images as ci
 from repeatviewer.backends.cytogenetics import lists as ls
 from repeatviewer.backends.cytogenetics.importer import (
     ImportRequest,
-    channel_rows,
     plan_cells,
-    plan_probes_by_dye,
     scan_tiffs,
 )
 from repeatviewer.widgets.combo_boxes import NoWheelComboBox
@@ -169,6 +168,9 @@ def _cell(widget: QWidget, parent: QWidget) -> QWidget:
     return host
 
 
+PROBE_ROW_H = 30
+
+
 class CytoImportDialog(PanelPathFields, QDialog):
     """Slide import in the layout of the app's tool windows. Run imports, Save only remembers the settings.
 
@@ -214,8 +216,8 @@ class CytoImportDialog(PanelPathFields, QDialog):
         for b in (cancel, save, run):
             buttons.addWidget(b)
         root = QVBoxLayout(self)
-        root.setContentsMargins(22, 18, 22, 16)
-        root.setSpacing(8)
+        root.setContentsMargins(14, 10, 14, 12)
+        root.setSpacing(6)
         root.addWidget(self._tab_bar)
         root.addWidget(self._stack, 1)
         root.addLayout(buttons)
@@ -235,8 +237,8 @@ class CytoImportDialog(PanelPathFields, QDialog):
     def _build_import_page(self) -> QWidget:
         page = QWidget(self)
         lay = QVBoxLayout(page)
-        lay.setContentsMargins(16, 10, 16, 6)
-        lay.setSpacing(6)
+        lay.setContentsMargins(8, 6, 8, 2)
+        lay.setSpacing(4)
         form = form_layout()
         lists = self._lists
         files_head = QHBoxLayout()
@@ -287,7 +289,7 @@ class CytoImportDialog(PanelPathFields, QDialog):
         self._slide_grid = QGridLayout()
         self._slide_grid.setContentsMargins(0, 2, 0, 0)
         self._slide_grid.setHorizontalSpacing(16)
-        self._slide_grid.setVerticalSpacing(10)
+        self._slide_grid.setVerticalSpacing(6)
         for c in range(3):
             self._slide_grid.setColumnStretch(c, 1)
         self._slide_cells: list[QWidget] = []
@@ -299,25 +301,48 @@ class CytoImportDialog(PanelPathFields, QDialog):
         grid_host = QWidget(page)
         grid_host.setLayout(self._slide_grid)
         form.addRow("", grid_host)  # in the field column: same left and right edges as the Cells table
-        # Channels: one row per channel position of the slide, dye and probe set once for the whole slide
-        form.addRow(section_label("Channels", page))
-        self._chan_table = QTableWidget(0, 4, page)
-        self._chan_table.setHorizontalHeaderLabels(["", "Found as", "Dye", "Probe"])
-        self._chan_table.verticalHeader().setVisible(False)
-        self._chan_table.verticalHeader().setDefaultSectionSize(32)
-        self._chan_table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
-        self._chan_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self._chan_table.setShowGrid(False)
-        self._chan_table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        chan_header = self._chan_table.horizontalHeader()
-        chan_header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)  # columns stay resizable
-        chan_header.setStretchLastSection(True)
-        chan_header.setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        self._chan_table.setColumnWidth(0, 30)
-        self._chan_box = rounded_box(self._chan_table, page)
-        form.addRow("", self._chan_box)
-        self._chan_choice: dict[int, dict] = {}  # position -> {"dye", "probe"} chosen by the user
-        self._chan_rows: list = []
+        # Probes of the slide: probe first, then its dye; only recorded with the slide (no channel linking here)
+        form.addRow(section_label("Probes", page))
+        self._probe_table = QTableWidget(0, 2, page)
+        self._probe_table.setHorizontalHeaderLabels(["Probe", "Dye"])
+        self._probe_table.verticalHeader().setVisible(False)
+        self._probe_table.verticalHeader().setDefaultSectionSize(PROBE_ROW_H)
+        self._probe_table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
+        self._probe_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._probe_table.setShowGrid(False)
+        self._probe_table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        probe_header = self._probe_table.horizontalHeader()
+        probe_header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)  # columns stay resizable
+        probe_header.setStretchLastSection(True)
+        probe_header.setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        add_row = QToolButton(page)
+        add_row.setText("+")
+        add_row.setToolTip("Add a probe row")
+        del_row = QToolButton(page)
+        del_row.setText("−")
+        del_row.setToolTip("Remove the last probe row")
+        for b in (add_row, del_row):
+            b.setAutoRaise(True)
+            b.setFixedSize(30, 24)
+        add_row.clicked.connect(lambda: self._add_probe_row())
+        del_row.clicked.connect(self._remove_probe_row)
+        under = QWidget(page)
+        ul = QHBoxLayout(under)
+        ul.setContentsMargins(2, 0, 2, 0)
+        ul.setSpacing(0)
+        ul.addWidget(add_row)
+        ul.addWidget(del_row)
+        ul.addStretch(1)
+        probe_host = QWidget(page)
+        ph = QVBoxLayout(probe_host)
+        ph.setContentsMargins(0, 0, 0, 0)
+        ph.setSpacing(0)
+        ph.addWidget(self._probe_table)
+        ph.addWidget(under)
+        self._probe_box = rounded_box(probe_host, page)
+        form.addRow("", self._probe_box)
+        for _ in range(2):  # two empty rows; + adds more
+            self._add_probe_row()
         return page
 
     def _add_slide_cell(self, text: str, field: QWidget, parent: QWidget) -> None:
@@ -343,8 +368,8 @@ class CytoImportDialog(PanelPathFields, QDialog):
     def _build_options_tab(self) -> QWidget:
         page = QWidget(self)
         lay = QVBoxLayout(page)
-        lay.setContentsMargins(16, 14, 16, 14)
-        lay.setSpacing(14)
+        lay.setContentsMargins(8, 8, 8, 8)
+        lay.setSpacing(10)
         lay.setAlignment(Qt.AlignmentFlag.AlignTop)
         files_box = QGroupBox("Files", page)
         fl = QVBoxLayout(files_box)
@@ -418,7 +443,7 @@ class CytoImportDialog(PanelPathFields, QDialog):
                 item = QTableWidgetItem(text)
                 item.setToolTip(", ".join(sources) if c == 3 else text)
                 self._table.setItem(r, c, item)
-        rows = max(2, min(8, len(self._groups)))
+        rows = max(2, min(6, len(self._groups)))
         self._table_box.setFixedHeight(self._table.horizontalHeader().sizeHint().height() + rows * 24 + 8)
         header = self._table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)  # columns stay resizable
@@ -435,65 +460,51 @@ class CytoImportDialog(PanelPathFields, QDialog):
         self._fill_probe_form()
 
     def _fill_probe_form(self) -> None:
-        """The Channels table: what was found per channel position, with dye and probe menus."""
-        rows = channel_rows(self._groups, self._lists)
-        counter = {n.lower() for n in ls.names(self._lists, "counterstains")} | {"dapi", "hoechst"}
-        dyes = ls.names(self._lists, "dyes")
-        probes = ls.names(self._lists, "probes")
-        t = self._chan_table
-        t.setRowCount(len(rows))
-        self._chan_rows = rows
-        for r, row in enumerate(rows):
-            chosen = self._chan_choice.get(row.position, {})
-            row.dye = chosen.get("dye", row.dye)
-            row.probe = chosen.get("probe", row.probe or (self._saved_probes.get(row.dye, "") if row.dye else ""))
-            dot = QLabel(t)
-            dot.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            dot.setPixmap(_dot(row.colour))
-            t.setCellWidget(r, 0, dot)
-            item = QTableWidgetItem(row.found_as)
-            item.setToolTip(f"Channel {row.position}: {row.found_as}")
-            t.setItem(r, 1, item)
-            dye_box = _combo(t, dyes, row.dye, key="dyes", folder=self._folder, lists=self._lists,
-                             on_change=lambda text, pos=row.position: self._on_channel(pos, "dye", text))
-            t.setCellWidget(r, 2, _cell(dye_box, t))
-            if row.dye.lower() in counter:
-                note = QLabel("Counterstain", t)
-                note.setStyleSheet("color: gray;")
-                t.setCellWidget(r, 3, _cell(note, t))
-            else:
-                probe_box = _combo(t, probes, row.probe, key="probes", folder=self._folder, lists=self._lists,
-                                   dye=row.dye,
-                                   on_change=lambda text, pos=row.position: self._on_channel(pos, "probe", text))
-                probe_box.lineEdit().setPlaceholderText("Choose or add…")
-                t.setCellWidget(r, 3, _cell(probe_box, t))
-        shown = max(1, min(6, len(rows)))
-        self._chan_box.setFixedHeight(t.horizontalHeader().sizeHint().height() + shown * 32 + 8)
-        self._chan_box.setVisible(bool(rows))
-        if rows and t.columnWidth(1) < 60:
-            width = max(t.viewport().width(), 420) - 30
-            for c, w in ((1, width * 0.36), (2, width * 0.32)):
-                t.setColumnWidth(c, int(w))
+        """Probes are recorded with the slide, not per channel: nothing to refill when the folder changes."""
 
-    def _on_channel(self, position: int, field: str, text: str) -> None:
-        text = text.strip()
-        if text.startswith("Add a "):
-            return
-        choice = self._chan_choice.setdefault(position, {})
-        if choice.get(field) == text:
-            return
-        choice[field] = text
-        if field == "dye":
-            QTimer.singleShot(0, self._fill_probe_form)  # counterstain or probe menu, and the probe's dye
+    def _add_probe_row(self, probe: str = "", dye: str = "") -> None:
+        t = self._probe_table
+        r = t.rowCount()
+        t.insertRow(r)
+        dye_box = _combo(t, ls.names(self._lists, "dyes"), dye, key="dyes", folder=self._folder, lists=self._lists)
+        dye_box.lineEdit().setPlaceholderText("Dye")
+
+        def _probe_chosen(text: str, box=dye_box) -> None:
+            e = ls.entry(self._lists, "probes", text.strip()) if text.strip() else None
+            if e and e.get("dye") and not box.currentText().strip():
+                box.setCurrentText(str(e["dye"]))  # a saved probe brings its usual dye
+
+        probe_box = _combo(t, ls.names(self._lists, "probes"), probe, key="probes", folder=self._folder,
+                           lists=self._lists, on_change=_probe_chosen)
+        probe_box.lineEdit().setPlaceholderText("Choose or add…")
+        t.setCellWidget(r, 0, _cell(probe_box, t))
+        t.setCellWidget(r, 1, _cell(dye_box, t))
+        self._size_probe_table()
+
+    def _remove_probe_row(self) -> None:
+        if self._probe_table.rowCount() > 1:
+            self._probe_table.removeRow(self._probe_table.rowCount() - 1)
+            self._size_probe_table()
+
+    def _size_probe_table(self) -> None:
+        t = self._probe_table
+        t.setFixedHeight(t.horizontalHeader().sizeHint().height() + t.rowCount() * PROBE_ROW_H + 2)
+        if t.columnWidth(0) < 120:
+            t.setColumnWidth(0, 260)
+
+    def _probe_rows(self) -> list[tuple[str, str]]:
+        out = []
+        for r in range(self._probe_table.rowCount()):
+            boxes = [self._probe_table.cellWidget(r, c).findChild(NoWheelComboBox) for c in (0, 1)]
+            probe, dye = (b.currentText().strip() if b is not None else "" for b in boxes)
+            if probe and not probe.startswith("Add a ") and not dye.startswith("Add a "):
+                out.append((probe, dye))
+        return out
 
     # ------------------------------------------------------------------ result
 
-    def _channel_plan(self) -> list[dict]:
-        return [{"dye": row.dye, "probe": self._chan_choice.get(row.position, {}).get("probe", row.probe)}
-                for row in self._chan_rows]
-
     def _probes_by_dye(self) -> dict[str, str]:
-        return plan_probes_by_dye(self._channel_plan())
+        return {dye: probe for probe, dye in self._probe_rows()}
 
     def request(self) -> ImportRequest:
         return ImportRequest(
@@ -513,7 +524,6 @@ class CytoImportDialog(PanelPathFields, QDialog):
             copy=self._copy.isChecked(),
             pixel_size_um=self._pix_value.value() if self._pix_set.isChecked() else None,
             merges=self._merges.isChecked(),
-            channel_plan=self._channel_plan(),
         )
 
     def should_run(self) -> bool:
@@ -531,7 +541,7 @@ class CytoImportDialog(PanelPathFields, QDialog):
         _put("merges", "true" if self._merges.isChecked() else "false")
         _put("pixel_set", "true" if self._pix_set.isChecked() else "false")
         _put("pixel_um", self._pix_value.value())
-        _put("probes_by_dye", json.dumps({**self._saved_probes, **self._probes_by_dye()}))
+        _put("probes_by_dye", json.dumps(self._probes_by_dye()))
 
     def _on_save(self) -> None:
         self._remember()

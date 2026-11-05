@@ -143,7 +143,7 @@ class CytoListsDialog(PanelPathFields, QDialog):
         self._search.textChanged.connect(self._apply_search)
         head = QHBoxLayout()
         head.setSpacing(10)
-        head.addWidget(self._title)
+        self._title.hide()  # the selected list is already marked in the sidebar
         head.addWidget(self._search, 1)
         head.addWidget(make_help_button(self, "Edit lists", HELP))
 
@@ -151,8 +151,12 @@ class CytoListsDialog(PanelPathFields, QDialog):
         self._nav = QListWidget(self)
         self._nav.setSpacing(1)
         self._nav.currentRowChanged.connect(self._on_nav)
+        self._nav.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        fm = self._nav.fontMetrics()
+        widest = max(fm.horizontalAdvance(ls.LIST_TITLES[k]) for k in ls.EDIT_ORDER)
+        nav_w = widest + fm.horizontalAdvance("000") + 64  # name, count, padding and the rounded box
         nav_box = rounded_box(self._nav, self, margin=4)
-        nav_box.setFixedWidth(NAV_W)
+        nav_box.setFixedWidth(max(NAV_W, nav_w))
 
         # ---- list: colour dot, name, used in; + − Merge joined to its bottom edge
         self._table = _ReorderTable(0, 3, self)
@@ -273,7 +277,7 @@ class CytoListsDialog(PanelPathFields, QDialog):
         for label, w, host in (("Name", self._f_name, None), ("Excitation", self._f_ex, _with_unit(self._f_ex, "nm")),
                                ("Emission", self._f_em, _with_unit(self._f_em, "nm")), ("Colour", self._f_colour, None),
                                ("Sequence", self._f_seq, None), ("Dye", self._f_dye, None),
-                               ("Signals are marked on", self._f_marks, None)):
+                               ("Marked on", self._f_marks, None)):
             lab = QLabel(label, self._form_host)
             self._form.addRow(lab, host or w)
             self._rows[w] = lab
@@ -323,7 +327,7 @@ class CytoListsDialog(PanelPathFields, QDialog):
         self._nav.clear()
         for key in ls.EDIT_ORDER:
             item = QListWidgetItem()
-            item.setSizeHint(QSize(180, 28))
+            item.setSizeHint(QSize(10, 28))  # the row follows the list's width
             self._nav.addItem(item)
             self._nav.setItemWidget(item, _NavRow(ls.LIST_TITLES[key], len(self._editor.names(key)), self._nav))
         self._nav.setCurrentRow(row if row >= 0 else ls.EDIT_ORDER.index(self._key))
@@ -372,6 +376,7 @@ class CytoListsDialog(PanelPathFields, QDialog):
             used.setForeground(QColor("gray"))
             self._table.setItem(r, 2, used)
         self._table.setIconSize(QSize(12, 12))
+        self._table.setColumnHidden(0, key not in ("dyes", "probes"))  # no empty column before Name
         self._loading = False
         self._apply_search()
         row = next((r for r, e in enumerate(entries) if str(e["name"]) == select), 0 if entries else -1)
