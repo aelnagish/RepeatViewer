@@ -164,3 +164,42 @@ def test_compute_view(tmp_path):
     assert view.genome is None and view.rows[0].status == idg.STATUS_UNLINKED
     empty = idg.compute_view(tmp_path)
     assert empty.karyotype is None and empty.rows == []
+
+
+def test_extract_region_and_array_span(tmp_path):
+    from repeatviewer.backends.cytogenetics import idiogram as idg2
+
+    genome = tmp_path / "g.fa"
+    genome.write_text(">Chr1 x\nACGTACGTAC\nGGGGGTTTTT\n>Chr2\nAAAA\n")
+    out = idg2.region_output_path(genome, "Chr1", 8, 14)
+    assert out.name == "g.fa_Chr1_8-14.fa"
+    idg2.extract_region(genome, "Chr1", 8, 14, out)
+    assert out.read_text() == ">Chr1:8-14\nTACGGGG\n"
+    arr = idg2.SilicoArray("1", "p", 0.1, 0.3, 100, 2)
+    assert idg2.array_span_bp(arr, 1000, False) == (101, 300)
+    assert idg2.array_span_bp(arr, 1000, True) == (701, 900)
+    assert idg2.sequence_lengths(genome) == {"Chr1": 20, "Chr2": 4}
+    assert (tmp_path / "g.fa_sizes.txt").exists()
+
+
+def test_paper_table_scale_and_pair_compare():
+    from repeatviewer.backends.cytogenetics import idiogram as idg2
+    from repeatviewer.backends.cytogenetics import karyotype as kt2
+
+    assert idg2.nice_scale(14.2) == 5.0 and idg2.nice_scale(300) == 100.0
+    top = kt2.new_karyotype("A", 2, 3)
+    bottom = kt2.new_karyotype("B", 2, 2)
+    top.chromosomes[0].length = 10
+    top.chromosomes[1].bands = [kt2.Band(kt2.BAND_KINDS[0], 0.9, 1.0)]
+
+    def band(chrom, probe, f):
+        return idg2.FishBand(chrom, probe, "q", "terminal", f, 3, 3, 1)
+
+    rows = idg2.paper_table(top, [band("1", "45S", 0.95)])
+    assert rows[0][0] == "1" and "45S q ter (3/3)" in rows[0][4] and rows[1][4] == "NOR q"
+    links, only_top, only_bottom = idg2.pair_compare(top, [band("1", "45S", 0.95), band("2", "Sat", 0.5)],
+                                                     bottom, [band("1", "45S", 0.9)])
+    assert [(ln.probe, ln.index, ln.bottom_index) for ln in links] == [("45S", 0, 0)]
+    assert [b.probe for _i, b in only_top] == ["Sat"] and not only_bottom
+    s = idg2.IdiogramSettings.from_dict({"paper": {"size": 9, "bogus": 1}, "compare_with": "B", "figure_style": "paper"})
+    assert s.paper["size"] == 9 and "bogus" not in s.paper and s.compare_with == "B" and s.figure_style == "paper"

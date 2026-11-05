@@ -279,3 +279,48 @@ def test_nearest_summary_and_manual():
     assert rows[1].position == "terminal"
     assert sg.unsignalled_chromosomes([d1, d2], rows) == ["3"]
     assert sg.summary_tsv(rows).splitlines()[1] == "2\tCroSat2\t\t\t2\t2\t2"
+
+
+def test_karyotype_arms_homologue_names_and_groups():
+    from repeatviewer.backends.cytogenetics import karyotype as kt
+
+    k = kt.new_karyotype("K", 2, 3)
+    c = k.chromosomes[0]
+    c.set_arms(7.0, 3.0)
+    assert c.length == 10.0 and c.centromere_index == 30.0
+    assert c.arms == (3.0, 7.0)
+    assert k.homologue_labels(c) == ["1a", "1b", "1c"]
+    k.homologue_letters = kt.HOMOLOGUE_STYLES["numbers"][1]
+    assert k.homologue_style == "numbers"
+    assert k.homologue_labels(c) == ["1.1", "1.2", "1.3"]
+    k.homologue_letters = "-I,-II,-III"
+    assert k.homologue_style == "custom"
+    assert k.homologue_labels(c) == ["1-I", "1-II", "1-III"]
+    assert kt.chromosome_base_name("3.2") == "3" and kt.chromosome_base_name("2b") == "2"
+    assert kt.group_name(2) == "bivalent" and kt.group_name(6) == "hexavalent"
+    again = kt.Karyotype.from_dict(k.to_dict())
+    assert again.homologue_labels(again.chromosomes[0]) == ["1-I", "1-II", "1-III"]
+
+
+def test_chromosome_sizes_sources(tmp_path):
+    from repeatviewer.backends.cytogenetics import karyotype as kt
+
+    fa = tmp_path / "genome.fa"
+    fa.write_text(">Chr1 desc\nACGT\nAC\n>chr02\nAAAAAAAAAA\n>scaffold_9\nA\n")
+    assert kt.fasta_sizes(fa) == {"Chr1": 6, "chr02": 10, "scaffold_9": 1}
+    out = kt.make_sizes_file(fa)
+    assert out.name == "genome.fa_sizes.txt"
+    assert kt.read_sizes(out) == {"Chr1": 6, "chr02": 10, "scaffold_9": 1}
+    (tmp_path / "x.bed").write_text("track name=x\nChr1\t0\t100\nChr1\t200\t500\nChr2\t5\t50\n")
+    assert kt.read_sizes(tmp_path / "x.bed") == {"Chr1": 500, "Chr2": 50}
+    (tmp_path / "x.gff3").write_text("##gff-version 3\n##sequence-region Chr3 1 900\nChr1\t.\tgene\t1\t400\t.\t+\t.\tID=a\n")
+    assert kt.read_sizes(tmp_path / "x.gff3") == {"Chr1": 400, "Chr3": 900}
+    (tmp_path / "s.sizes").write_text("name\tlength\nChr1\t1500000\n")
+    assert kt.read_sizes(tmp_path / "s.sizes") == {"Chr1": 1500000}
+    assert kt.sizes_sources(tmp_path)[0].name in ("genome.fa_sizes.txt", "s.sizes")
+
+    k = kt.new_karyotype("K", 3, 2)
+    links = kt.match_sequences(k, ["Chr1", "chr02", "scaffold_9"])
+    assert links == {"1": "Chr1", "2": "chr02"}
+    missing = kt.apply_sizes(k, links, {"Chr1": 1_500_000, "chr02": 2_000_000})
+    assert missing == ["3"] and k.unit == "Mb" and k.chromosomes[0].length == 1.5

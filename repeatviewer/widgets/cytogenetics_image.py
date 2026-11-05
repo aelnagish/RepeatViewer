@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QSlider,
+    QSplitter,
     QVBoxLayout,
     QWidget,
 )
@@ -232,8 +233,17 @@ class ImageCanvas(QWidget):
 _Canvas = ImageCanvas  # old name
 
 
+ADD_PROBE = "Add a probe…"
+ADD_DYE = "Add a dye…"
+
+
 def _slider(lo: int, hi: int, value: int) -> QSlider:
-    s = QSlider(Qt.Orientation.Horizontal)
+    from repeatviewer.widgets.spin_boxes import NoWheelSlider
+
+    s = NoWheelSlider(Qt.Orientation.Horizontal)  # the wheel scrolls the panel; values change only by dragging
+    from repeatviewer.widgets.cytogenetics_style import app_slider
+
+    app_slider(s)
     s.setRange(lo, hi)
     s.setValue(max(lo, min(hi, value)))
     return s
@@ -246,58 +256,76 @@ class _ChannelCard(QFrame):
     removeRequested = Signal(int)
     colourRequested = Signal(int)
 
-    def __init__(self, session: isn.ImageSession, index: int, dyes: list[str], probes: list[str], parent: QWidget | None = None) -> None:
+    listsChanged = Signal()
+
+    def __init__(self, session: isn.ImageSession, index: int, dyes: list[str], probes: list[str], parent: QWidget | None = None,
+                 *, folder: Path | None = None) -> None:
         super().__init__(parent)
         self._s = session
         self._i = index
+        self._folder = folder
         c = session.channels[index]
-        self.setFrameShape(QFrame.Shape.StyledPanel)
+        self.setObjectName("cytoBox")
+        from repeatviewer.widgets.cytogenetics_style import BOX_CSS
+
+        self.setStyleSheet(BOX_CSS)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(8, 6, 8, 6)
         lay.setSpacing(4)
 
+        self.setToolTip(f"File: {c.original_name or Path(c.file).name}")
         top = QHBoxLayout()
+        top.setSpacing(6)
         self._show = QCheckBox(self)
         self._show.setChecked(c.display.visible)
         self._show.setToolTip("Show this channel")
         self._show.toggled.connect(self._on_visible)
-        self._dye = NoWheelComboBox(self)
-        self._dye.setEditable(True)
-        self._dye.addItems(dyes)
-        self._dye.setCurrentText(c.dye)
-        self._dye.setFixedWidth(78)
-        self._dye.setToolTip("Dye of this channel")
-        self._dye.lineEdit().editingFinished.connect(self._on_dye)
-        name = QLabel(self)
-        name.setStyleSheet("color: palette(dark); font-size: 11px;")
-        name.setToolTip(c.original_name or c.file)
-        name.setText(name.fontMetrics().elidedText(c.original_name or Path(c.file).name, Qt.TextElideMode.ElideMiddle, 96))
-        name.setMinimumWidth(0)
+        self._probe = NoWheelComboBox(self)
+        self._probe.setEditable(True)
+        self._probe.addItems(probes + [ADD_PROBE])
+        self._probe.setCurrentText(c.probe)
+        self._probe.setToolTip("Probe in this channel (type a new name or pick one)")
+        self._probe.lineEdit().setPlaceholderText("Probe name")
+        self._probe.lineEdit().editingFinished.connect(self._on_probe)
+        self._probe.activated.connect(lambda _i: self._on_probe())
+        self._probe.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._probe.setMinimumContentsLength(6)
         self._colour = QPushButton(self)
         self._colour.setFixedSize(24, 24)
         self._colour.setToolTip("Channel colour")
         self._colour.clicked.connect(lambda: self.colourRequested.emit(self._i))
         self.paint_colour()
+        reset = QPushButton("↺", self)
         remove = QPushButton("×", self)
-        remove.setStyleSheet("QPushButton { padding: 0px; }")
-        remove.setFixedSize(24, 24)
-        remove.setToolTip("Remove this channel from the image")
+        for b, tip in ((reset, "Reset levels, black and gamma of this channel"),
+                       (remove, "Remove this channel from the image")):
+            b.setStyleSheet("QPushButton { padding: 0px; }")
+            b.setFixedSize(24, 24)
+            b.setToolTip(tip)
+        reset.clicked.connect(self._reset)
         remove.clicked.connect(lambda: self.removeRequested.emit(self._i))
         top.addWidget(self._show)
-        top.addWidget(self._dye)
-        top.addWidget(name, 1)
+        top.addWidget(self._probe, 1)
         top.addWidget(self._colour)
+        top.addWidget(reset)
         top.addWidget(remove)
         lay.addLayout(top)
 
-        self._probe = NoWheelComboBox(self)
-        self._probe.setEditable(True)
-        self._probe.addItems([""] + probes)
-        self._probe.setCurrentText(c.probe)
-        self._probe.setToolTip("Probe detected in this channel")
-        self._probe.lineEdit().setPlaceholderText("probe in this channel")
-        self._probe.lineEdit().editingFinished.connect(self._on_probe)
-        lay.addWidget(self._probe)
+        self._dye = NoWheelComboBox(self)
+        self._dye.setEditable(True)
+        self._dye.addItems(dyes + [ADD_DYE])
+        self._dye.setCurrentText(c.dye)
+        self._dye.setToolTip("Dye (fluorochrome) of this channel")
+        self._dye.lineEdit().setPlaceholderText("Dye")
+        self._dye.lineEdit().editingFinished.connect(self._on_dye)
+        self._dye.activated.connect(lambda _i: self._on_dye())
+        self._dye.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        dye_row = QHBoxLayout()
+        dye_row.setSpacing(6)
+        dye_row.addSpacing(self._show.sizeHint().width() + 6)
+        dye_row.addWidget(self._dye, 1)
+        dye_row.addSpacing(3 * 24 + 2 * 6 + 6)
+        lay.addLayout(dye_row)
 
         lo, hi = session.level_range(index)
         self._low = _slider(int(lo), int(hi), int(c.display.low))
@@ -309,7 +337,7 @@ class _ChannelCard(QFrame):
             row = QHBoxLayout()
             label = QLabel(text, self)
             label.setFixedWidth(46)
-            value.setFixedWidth(84 if text == "Levels" else 34)
+            value.setFixedWidth(34)
             value.setStyleSheet("font-size: 11px;")
             value.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             row.addWidget(label)
@@ -336,20 +364,83 @@ class _ChannelCard(QFrame):
 
     def _sync_labels(self) -> None:
         self._low_val.setText(f"{self._low.value()}")
-        self._levels_val.setText(f"{self._low.value()} to {self._high.value()}")
+        self._levels_val.setText(f"{self._high.value()}")
         self._gamma_val.setText(f"{self._gamma.value() / 10:.1f}")
+
+    def _reset(self) -> None:
+        lo, hi = self._s.level_range(self._i)
+        self._s.set_levels(self._i, lo, hi)
+        self._s.set_gamma(self._i, 1.0)
+        self.refresh_levels()
+        self.changed.emit()
+
+    def offer_names(self, probes: list[str], dyes: list[str]) -> None:
+        for box, names, extra in ((self._probe, probes, ADD_PROBE), (self._dye, dyes, ADD_DYE)):
+            text = box.currentText()
+            box.blockSignals(True)
+            box.clear()
+            box.addItems([n for n in names if n] + [extra])
+            box.setCurrentText(text)
+            box.blockSignals(False)
 
     def _on_visible(self, on: bool) -> None:
         self._s.set_visible(self._i, on)
         self.changed.emit()
 
     def _on_dye(self) -> None:
+        if self._dye.currentText() == ADD_DYE:
+            self._add_to_list("dyes")
+            return
         self._s.channels[self._i].dye = self._dye.currentText().strip()
         self.changed.emit()
 
     def _on_probe(self) -> None:
+        if self._probe.currentText() == ADD_PROBE:
+            self._add_to_list("probes")
+            return
         self._s.channels[self._i].probe = self._probe.currentText().strip()
         self.changed.emit()
+
+    def _add_to_list(self, key: str) -> None:
+        """"Add a probe…" / "Add a dye…": a new list entry, used for this channel right away."""
+        from PySide6.QtWidgets import QColorDialog, QInputDialog, QMessageBox
+
+        from repeatviewer.backends.cytogenetics import lists as ls
+
+        c = self._s.channels[self._i]
+        box, old = (self._probe, c.probe) if key == "probes" else (self._dye, c.dye)
+        box.setCurrentText(old)  # never leave the "Add …" item in the field
+        what = "probe" if key == "probes" else "dye"
+        name, ok = QInputDialog.getText(self, f"Add a {what}", f"Name of the {what}:")
+        name = name.strip()
+        if not ok or not name:
+            return
+        values: dict = {}
+        if key == "dyes":
+            colour = QColorDialog.getColor(QColor(c.display.color or "#ffffff"), self, f"Colour of {name}")
+            values = {"color": colour.name() if colour.isValid() else c.display.color or "#ffffff",
+                      "words": name.lower()}
+        elif c.dye:
+            values = {"dye": c.dye}
+        if self._folder is not None:
+            try:
+                lists = ls.load_lists(self._folder)
+                ls.add_entry(lists, key, name, **values)
+                ls.save_lists(self._folder, lists)
+            except (OSError, ValueError) as exc:
+                QMessageBox.information(self, f"Add a {what}", str(exc))
+                return
+        if key == "probes":
+            c.probe = name
+        else:
+            c.dye = name
+        box.blockSignals(True)
+        if box.findText(name) < 0:
+            box.insertItem(box.count() - 1, name)
+        box.setCurrentText(name)
+        box.blockSignals(False)
+        self.changed.emit()
+        self.listsChanged.emit()
 
     def _on_levels(self) -> None:
         low, high = self._low.value(), self._high.value()
@@ -396,43 +487,64 @@ class ImageTab(QWidget):
         self._canvas = ImageCanvas(self)
         self._canvas.zoomChanged.connect(self._on_zoom)
         out_btn, in_btn, fit_btn, one_btn = (QPushButton(t, self) for t in ("−", "+", "Fit", "100 %"))
+        for b, w in ((out_btn, 28), (in_btn, 28), (fit_btn, 44), (one_btn, 64)):
+            b.setFixedWidth(w)
         out_btn.clicked.connect(lambda: self._canvas.set_zoom(self._canvas.zoom() / 1.25))
         in_btn.clicked.connect(lambda: self._canvas.set_zoom(self._canvas.zoom() * 1.25))
         fit_btn.clicked.connect(self._canvas.fit)
         one_btn.clicked.connect(lambda: self._canvas.set_zoom(1.0))
         self._zoom_label = QLabel(self)
-        self._zoom_label.setMinimumWidth(48)
+        self._zoom_label.setFixedWidth(48)
+        self._zoom_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._merge_btn = QPushButton("Merge", self)
         self._split_btn = QPushButton("Channels side by side", self)
         for b in (self._merge_btn, self._split_btn):
             b.setCheckable(True)
         self._merge_btn.clicked.connect(lambda: self._set_mode(True))
         self._split_btn.clicked.connect(lambda: self._set_mode(False))
-        self._prev = QPushButton("◀", self)
-        self._next = QPushButton("▶", self)
+        self._prev = QPushButton("‹", self)
+        self._next = QPushButton("›", self)
+        for b in (self._prev, self._next):
+            b.setFixedWidth(28)
         self._prev.clicked.connect(lambda: self._go(2))
         self._next.clicked.connect(lambda: self._go(3))
         self._nav = QLabel(self)
-        bar = QHBoxLayout()
-        bar.setContentsMargins(10, 8, 10, 6)
-        for w in (out_btn, in_btn, fit_btn, one_btn, self._zoom_label, self._merge_btn, self._split_btn):
+        self._nav.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._nav.setMinimumWidth(90)
+        bar_host = QWidget(self)
+        bar_host.setObjectName("cytoAside")
+        bar_host.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        bar = QHBoxLayout(bar_host)
+        bar.setContentsMargins(10, 6, 10, 6)
+        bar.setSpacing(4)
+        for w in (out_btn, in_btn, fit_btn, one_btn, self._zoom_label):
             bar.addWidget(w)
+        bar.addSpacing(10)
+        bar.addWidget(self._merge_btn)
+        bar.addWidget(self._split_btn)
         bar.addStretch(1)
         bar.addWidget(self._prev)
         bar.addWidget(self._nav)
         bar.addWidget(self._next)
+        bar.addSpacing(8)
         bar.addWidget(make_help_button(self, "Image", HELP_TEXT))
+        rule = QFrame(self)
+        rule.setFrameShape(QFrame.Shape.HLine)
+        rule.setStyleSheet("color: palette(mid);")
 
-        left = QVBoxLayout()
+        left_host = QWidget(self)
+        left_host.setObjectName("cytoMain")
+        left_host.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        left = QVBoxLayout(left_host)
         left.setContentsMargins(0, 0, 0, 0)
         left.setSpacing(0)
-        left.addLayout(bar)
+        left.addWidget(bar_host)
+        left.addWidget(rule)
         left.addWidget(self._canvas, 1)
 
         # side panel
         self._side_body = QWidget(self)
         self._side_body.setObjectName("cytoAside")
-        self._side_body.setMaximumWidth(SIDE_W)
         side = QVBoxLayout(self._side_body)
         side.setContentsMargins(10, 4, 10, 8)
         side.setSpacing(12)
@@ -443,7 +555,7 @@ class ImageTab(QWidget):
         self._chan_lay.setContentsMargins(0, 0, 0, 0)
         self._chan_lay.setSpacing(6)
         self._chan_section.add_widget(self._chan_host)
-        self._add_btn = QPushButton("+ Add channel (TIFF)", self)
+        self._add_btn = QPushButton("+ Add channel", self)
         self._auto_btn = QPushButton("Auto levels (0.1 % saturated)", self)
         self._add_btn.clicked.connect(self._add_channel)
         self._auto_btn.clicked.connect(self._auto_all)
@@ -472,7 +584,7 @@ class ImageTab(QWidget):
         self._scale_section.body_layout().addLayout(form)
         side.addWidget(self._scale_section)
 
-        self._log_section = _CollapsibleSection("Adjustment log", self._side_body, expanded=True)
+        self._log_section = _CollapsibleSection("Adjustment log", self._side_body, expanded=False)
         self._log_label = QLabel(self)
         self._log_label.setWordWrap(True)
         self._log_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -488,13 +600,24 @@ class ImageTab(QWidget):
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setWidget(self._side_body)
-        scroll.setFixedWidth(SIDE_W)
+        scroll.setMinimumWidth(260)
+        scroll.setMaximumWidth(SIDE_W + 260)  # drag the divider to make the panel wider
+        from repeatviewer.widgets.cytogenetics_style import fit_side_scroll
 
+        fit_side_scroll(scroll)
+
+        split = QSplitter(Qt.Orientation.Horizontal, self)
+        split.setChildrenCollapsible(False)
+        split.setHandleWidth(1)
+        split.addWidget(left_host)
+        split.addWidget(scroll)
+        split.setStretchFactor(0, 1)
+        split.setStretchFactor(1, 0)
+        split.setSizes([900, SIDE_W])
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
-        root.addLayout(left, 1)
-        root.addWidget(scroll)
+        root.addWidget(split)
 
         self._render_timer = QTimer(self)
         self._render_timer.setSingleShot(True)
@@ -573,6 +696,18 @@ class ImageTab(QWidget):
 
     # ------------------------------------------------------------------ side panel
 
+    def _on_lists_added(self) -> None:
+        """A probe or dye was added from a channel card: offer it in the other cards too."""
+        sender = self.sender()
+        lists = load_lists(self._folder) if self._folder else None
+        if not lists:
+            return
+        for card in self._cards or []:
+            if card is None or card is sender:
+                continue
+            card.offer_names([p.get("name", "") for p in lists.get("probes", [])],
+                             [d.get("name", "") for d in lists.get("dyes", [])])
+
     def _build_panel(self) -> None:
         s = self._session
         assert s is not None
@@ -586,16 +721,22 @@ class ImageTab(QWidget):
             order = [s.channels.index(c) for c in ordered_channels(s.details)]
             self._cards = [None] * len(s.channels)
             for i in order:
-                card = _ChannelCard(s, i, dyes, probes, self._chan_host)
+                card = _ChannelCard(s, i, dyes, probes, self._chan_host, folder=self._folder)
+                card.listsChanged.connect(self._on_lists_added)
                 card.changed.connect(self._on_card_changed)
                 card.removeRequested.connect(self._remove_channel)
                 card.colourRequested.connect(self._pick_colour)
                 self._chan_lay.addWidget(card)
                 self._cards[i] = card
         else:
-            note = QLabel("A single picture without separate channels. Add a TIFF to turn it into a channel image.", self._chan_host)
+            note = QLabel("One merged picture, no separate channels. Split it into its red, green and blue planes "
+                          "to set levels and mark signals per colour, or add channel TIFFs.", self._chan_host)
             note.setWordWrap(True)
+            note.setObjectName("cytoMuted")
             self._chan_lay.addWidget(note)
+            split = QPushButton("Split into red, green and blue", self._chan_host)
+            split.clicked.connect(self._split_picture)
+            self._chan_lay.addWidget(split)
         self._add_btn.setEnabled(True)
         self._auto_btn.setEnabled(s.is_multichannel)
         self._slide_btn.setEnabled(s.is_multichannel and s.slide_cell_count() > 1)
@@ -609,7 +750,9 @@ class ImageTab(QWidget):
         self._length.setCurrentText("Auto" if not s.scale_length_um else f"{s.scale_length_um:g} µm")
         for w in (self._scale_show, self._pixel, self._length):
             w.blockSignals(False)
-        self._scale_section.setEnabled(s.is_multichannel)
+        self._scale_section.setVisible(s.is_multichannel)
+        self._log_section.setVisible(s.is_multichannel)
+        self._auto_btn.setVisible(s.is_multichannel)
         self._sync_log()
         pos, total, prev_id, next_id = self._neighbours
         self._nav.setText(f"cell {_cell_name(s.image, pos)} of {total}" if total else "")
@@ -660,7 +803,7 @@ class ImageTab(QWidget):
         s = self._session
         if s is None:
             return
-        path, _ = QFileDialog.getOpenFileName(self, "Add channel", str(self._folder or ""), "TIFF (*.tif *.tiff)")
+        path, _ = QFileDialog.getOpenFileName(self, "Add channel", str(self._folder or ""), "Pictures (*.tif *.tiff *.jpg *.jpeg *.png *.bmp);;All files (*)")
         if not path:
             return
         try:
@@ -670,6 +813,25 @@ class ImageTab(QWidget):
             return
         self._build_panel()
         self._schedule()
+
+    def _split_picture(self) -> None:
+        s = self._session
+        if s is None:
+            return
+        rgb = None
+        image = QImage(str(ci.image_file_path(s.folder, s.image)))
+        if not image.isNull():
+            from repeatviewer.widgets.cytogenetics_signals import _qimage_rgb
+
+            rgb = _qimage_rgb(image)
+        try:
+            s.split_picture(rgb)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "Split picture", str(exc))
+            return
+        self._build_panel()
+        self._render(keep_view=True)
+        self.flush()
 
     def _remove_channel(self, index: int) -> None:
         s = self._session

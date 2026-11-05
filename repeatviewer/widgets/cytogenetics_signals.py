@@ -8,6 +8,7 @@ from pathlib import Path
 from PySide6.QtCore import QPointF, QRectF, QSettings, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (
+    QSizePolicy,
     QButtonGroup,
     QCheckBox,
     QFileDialog,
@@ -45,16 +46,20 @@ NEW_KARYOTYPE = "New karyotype…"
 
 HELP_TEXT = (
     "<b>Signals</b><br>"
-    "Number the chromosomes of one cell and mark where each probe signal sits.<br>"
-    "<b>Number chromosomes</b>: click the chromosomes in order (1a, 1b, 1c, 2a …). The next name is taken from the karyotype; "
-    "click a name on the right to choose another one.<br>"
-    "<b>Add signal</b>: click a signal. It is moved to the centre of the bright spot (if \"Find signals automatically\" is on) "
-    "and given to the nearest chromosome.<br>"
-    "<b>Measure</b>: drag from the p (short arm) telomere to the q telomere. The centromere is placed from the centromere index "
-    "of the karyotype. Arm and position of signals on that chromosome are then worked out.<br>"
-    "<b>Select</b>: click a chromosome or a signal to edit it, drag to move it, press Delete to remove it.<br>"
-    "Middle or right mouse button moves the picture, the wheel zooms.<br>"
-    "Arm and position that you set by hand are never recomputed."
+    "Name the chromosomes of one cell, then mark where each probe signal sits.<br>"
+    "<b>1 Karyotype</b>: choose or build the karyotype of the species (number, lengths, bands).<br>"
+    "<b>2 Number chromosomes</b>: click a chromosome to give it the next name (1a, 1b, 1c, 2a …). "
+    "Its axis is found from the DAPI image: square handles are the telomeres (p, q), the round one the centromere. "
+    "Drag them when they are wrong. Click a name on the right to choose another one.<br>"
+    "<b>3 Mark signals</b>: click a spot to add a signal of the chosen probe. With <b>Snap</b> on it moves to the centre "
+    "of the spot. It is given to the nearest chromosome, and its arm and position are worked out from the axis.<br>"
+    "<b>In both steps</b>: drag a name or a signal to move it, right-click for more (change probe, move to another "
+    "chromosome, strength, delete), Backspace deletes the selected one.<br>"
+    "<b>Moving the picture</b>: mouse wheel or trackpad zooms, Option + drag or the middle button moves it.<br>"
+    "Arm and position that you set by hand are never recomputed.<br>"
+    "<b>Guide</b> (right, under the summary): blue = the step you are on, ✓ = done, grey number = still to do; "
+    "click a step to go there. "
+    "⊙ click, ↕ drag, ○ centromere, ● signals, ⌫ delete."
 )
 
 
@@ -79,6 +84,7 @@ class MarkCanvas(ImageCanvas):
     movedTo = Signal(float, float)
     releasedAt = Signal(float, float)
     deleteRequested = Signal()
+    menuAt = Signal(float, float, object)  # image x, y, global position
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -95,12 +101,16 @@ class MarkCanvas(ImageCanvas):
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
         self.setFocus()
-        if event.button() == Qt.MouseButton.LeftButton:
-            p = self.image_point(event.position())
-            self.pressedAt.emit(p.x(), p.y())
-        elif event.button() in (Qt.MouseButton.MiddleButton, Qt.MouseButton.RightButton):
+        alt = bool(event.modifiers() & Qt.KeyboardModifier.AltModifier)
+        if event.button() == Qt.MouseButton.MiddleButton or (event.button() == Qt.MouseButton.LeftButton and alt):
             self._panning = True
             self.start_pan(event.position())
+        elif event.button() == Qt.MouseButton.LeftButton:
+            p = self.image_point(event.position())
+            self.pressedAt.emit(p.x(), p.y())
+        elif event.button() == Qt.MouseButton.RightButton:
+            p = self.image_point(event.position())
+            self.menuAt.emit(p.x(), p.y(), event.globalPosition().toPoint())
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
         if self._panning:
@@ -159,6 +169,21 @@ class MarkCanvas(ImageCanvas):
             if chosen:
                 p.setPen(QPen(GOLD, 2, Qt.PenStyle.DashLine))
                 p.drawEllipse(anchor, 16.0, 16.0)
+                # handles: square telomeres, round centromere (drag them to correct)
+                p.setPen(QPen(QColor("#000000"), 1))
+                for which in ("telomere_p", "telomere_q"):
+                    pt = getattr(m, which)
+                    if pt is not None:
+                        q = self.screen_point(*pt)
+                        p.setBrush(QColor("#FFFFFF"))
+                        p.drawRect(QRectF(q.x() - 5, q.y() - 5, 10, 10))
+                        p.setPen(QColor("#FFFFFF"))
+                        p.drawText(QRectF(q.x() + 7, q.y() - 9, 20, 18), Qt.AlignmentFlag.AlignVCenter, which[-1])
+                        p.setPen(QPen(QColor("#000000"), 1))
+                if m.centromere is not None:
+                    p.setBrush(QColor("#FFFFFF"))
+                    p.drawEllipse(self.screen_point(*m.centromere), 6.0, 6.0)
+                p.setBrush(Qt.BrushStyle.NoBrush)
         for sig in s.details.signals:
             chosen = self.selected == ("signal", sig.id)
             c = self.screen_point(sig.x, sig.y)
@@ -173,6 +198,17 @@ class MarkCanvas(ImageCanvas):
             p.setBrush(Qt.BrushStyle.NoBrush)
             if math.hypot(b.x() - a.x(), b.y() - a.y()) > 12:
                 p.drawEllipse(b, 4.0, 4.0)
+
+
+def _qimage_rgb(image):
+    """QImage -> numpy RGB array (for snapping signals and finding chromosome axes on plain pictures)."""
+    import numpy as np
+    from PySide6.QtGui import QImage
+
+    img = image.convertToFormat(QImage.Format.Format_RGB888)
+    w, h, bpl = img.width(), img.height(), img.bytesPerLine()
+    buf = np.frombuffer(img.constBits(), dtype=np.uint8, count=bpl * h).reshape(h, bpl)
+    return buf[:, : w * 3].reshape(h, w, 3).copy()
 
 
 def _combo(items: list[tuple[str, str]], current: str) -> NoWheelComboBox:
@@ -194,63 +230,100 @@ class SignalsTab(QWidget):
         super().__init__(parent)
         self._folder: Path | None = None
         self._session: ss.SignalsSession | None = None
-        self._tool = "select"
+        self._tool = _read("signals_tool", "number") if _read("signals_tool", "number") in dict(ss.TOOLS) else "number"
         self._pending_label = ""
         self._drag: tuple[str, str] | None = None
-        self._measure_start: QPointF | None = None
-        self._measure_mark = ""
+        self._moved = False
         self._saving = False
         self._pending = ""
         self._label_buttons: dict[str, QPushButton] = {}
 
-        # ---- toolbar
+        # ---- toolbar: 1 Karyotype | 2 Number chromosomes | 3 Mark signals, probe, snap, zoom, cell navigation
         self._canvas = MarkCanvas(self)
         self._canvas.pressedAt.connect(self._on_press)
         self._canvas.movedTo.connect(self._on_move)
         self._canvas.releasedAt.connect(self._on_release)
         self._canvas.deleteRequested.connect(self._delete_selected)
+        self._canvas.menuAt.connect(self._on_menu)
         self._tool_group = QButtonGroup(self)
         self._tool_group.setExclusive(True)
         bar = QHBoxLayout()
         bar.setContentsMargins(10, 8, 10, 6)
+        bar.setSpacing(8)
+        self._step_karyo = QPushButton("1  Karyotype", self)
+        self._step_karyo.setToolTip("Choose or build the karyotype of this species")
+        self._step_karyo.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
+        self._step_karyo.clicked.connect(self._on_step_karyotype)
+        bar.addWidget(self._step_karyo)
         for key, text in ss.TOOLS:
             b = QPushButton(text, self)
             b.setCheckable(True)
             b.setChecked(key == self._tool)
             b.clicked.connect(lambda _c=False, k=key: self._set_tool(k))
+            b.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
             self._tool_group.addButton(b)
             bar.addWidget(b)
-        bar.addSpacing(10)
-        bar.addWidget(QLabel("Probe", self))
+        bar.addSpacing(12)
+        self._probe_label = QLabel("Probe", self)
+        bar.addWidget(self._probe_label)
         self._probe = NoWheelComboBox(self)
-        self._probe.setMinimumWidth(130)
+        self._probe.setToolTip("Which probe a click in step 2 marks. Shown only when the cell has more than one probe.")
+        self._probe.setMinimumWidth(120)
+        self._probe.currentIndexChanged.connect(lambda _i: self._update_hint())
         bar.addWidget(self._probe)
-        self._auto = QCheckBox("Find signals automatically", self)
+        self._auto = QCheckBox("Snap to centre", self)
+        self._auto.setToolTip("A click snaps the signal to the centre of the spot")
         self._auto.setChecked(_read("signals_auto", "true") != "false")
         self._auto.toggled.connect(lambda on: _write("signals_auto", "true" if on else "false"))
         bar.addWidget(self._auto)
-        self._hint = QLabel(self)
-        self._hint.setObjectName("cytoMuted")
-        from PySide6.QtWidgets import QSizePolicy
-
-        self._hint.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        self._hint.setMinimumWidth(40)
-        self._hint.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        bar.addWidget(self._hint, 1)
+        bar.addStretch(1)
+        for text, slot in (("−", lambda: self._canvas.set_zoom(self._canvas.zoom() / 1.25)),
+                           ("+", lambda: self._canvas.set_zoom(self._canvas.zoom() * 1.25)),
+                           ("Fit", lambda: self._canvas.fit())):
+            zb = QPushButton(text, self)
+            zb.setFixedWidth(28 if len(text) == 1 else 44)
+            zb.clicked.connect(slot)
+            bar.addWidget(zb)
+        bar.addSpacing(10)
+        self._prev = QPushButton("‹", self)
+        self._next = QPushButton("›", self)
+        self._prev.setFixedWidth(28)
+        self._next.setFixedWidth(28)
+        self._prev.setToolTip("Previous cell of this slide")
+        self._next.setToolTip("Next cell of this slide")
+        self._prev.clicked.connect(lambda: self._step_cell(-1))
+        self._next.clicked.connect(lambda: self._step_cell(1))
+        self._nav = QLabel(self)
+        bar.addWidget(self._prev)
+        bar.addWidget(self._nav)
+        bar.addWidget(self._next)
         bar.addWidget(make_help_button(self, "Signals", HELP_TEXT))
 
-        # ---- cells row
+        # ---- bottom row: what the next click does, then the cells of the slide
+        self._hint = QLabel(self)
+        self._hint.setObjectName("cytoMuted")
+
+        self._hint.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self._cells_row = QHBoxLayout()
-        self._cells_row.setContentsMargins(10, 6, 10, 6)
+        self._cells_row.setContentsMargins(0, 0, 0, 0)
         self._cells_host = QWidget(self)
         self._cells_host.setLayout(self._cells_row)
+        bottom = QHBoxLayout()
+        bottom.setContentsMargins(10, 6, 10, 6)
+        self._hint.setVisible(False)  # the step guide on the right says what to do
+        bottom.addStretch(1)
+        bottom.addWidget(self._cells_host)
 
         left = QVBoxLayout()
         left.setContentsMargins(0, 0, 0, 0)
         left.setSpacing(0)
-        left.addLayout(bar)
+        bar_host = QWidget(self)
+        bar_host.setObjectName("cytoAside")  # controls on the side-panel colour, like the Image tab
+        bar_host.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        bar_host.setLayout(bar)
+        left.addWidget(bar_host)
         left.addWidget(self._canvas, 1)
-        left.addWidget(self._cells_host)
+        left.addLayout(bottom)
 
         # ---- side panel
         body = QWidget(self)
@@ -273,9 +346,9 @@ class SignalsTab(QWidget):
         kr.addWidget(self._karyo, 1)
         self._labels_grid = QGridLayout()
         self._labels_grid.setSpacing(4)
-        self._chrom_section.body_layout().addWidget(self._chrom_count)
+        self._chrom_count.setVisible(False)  # the step guide shows n / N
         self._chrom_section.body_layout().addLayout(kr)
-        self._chrom_section.body_layout().addWidget(self._edit_karyo, 0, Qt.AlignmentFlag.AlignLeft)
+        self._edit_karyo.setVisible(False)  # step 1 Karyotype opens the editor
         self._chrom_section.body_layout().addLayout(self._labels_grid)
         side.addWidget(self._chrom_section)
 
@@ -304,13 +377,17 @@ class SignalsTab(QWidget):
         hh.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         self._table.setShowGrid(False)
         self._show_idio = QPushButton("Show on idiogram", self)
-        self._show_idio.setFlat(True)
-        self._show_idio.setObjectName("cytoLink")
         self._show_idio.clicked.connect(self.idiogramRequested)
         self._sum_section.body_layout().addLayout(sum_head)
         self._sum_section.body_layout().addWidget(self._table)
-        self._sum_section.body_layout().addWidget(self._show_idio, 0, Qt.AlignmentFlag.AlignLeft)
+        self._sum_section.body_layout().addWidget(self._show_idio)
         side.addWidget(self._sum_section)
+
+        # ---- step guide: three rows, symbols instead of sentences
+        self._guide = QVBoxLayout()
+        self._guide.setSpacing(2)
+        side.addSpacing(6)
+        side.addLayout(self._guide)
         side.addStretch(1)
 
         scroll = QScrollArea(self)
@@ -318,12 +395,20 @@ class SignalsTab(QWidget):
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setWidget(body)
-        scroll.setFixedWidth(SIDE_W)
+        scroll.setMinimumWidth(240)
+        scroll.setMaximumWidth(SIDE_W)
+        from repeatviewer.widgets.cytogenetics_style import fit_side_scroll
+
+        fit_side_scroll(scroll)
 
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
-        root.addLayout(left, 1)
+        left_host = QWidget(self)
+        left_host.setObjectName("cytoMain")  # the work area is white, the side columns stay grey
+        left_host.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        left_host.setLayout(left)
+        root.addWidget(left_host, 1)
         root.addWidget(scroll)
 
         self._selected: tuple[str, str] | None = None
@@ -331,7 +416,7 @@ class SignalsTab(QWidget):
         self._save_timer.setSingleShot(True)
         self._save_timer.setInterval(SAVE_DELAY_MS)
         self._save_timer.timeout.connect(self.flush)
-        self._set_tool("select")
+        self._set_tool(self._tool)  # the step used last time
         self._show_empty()
 
     # ------------------------------------------------------------------ loading
@@ -397,6 +482,8 @@ class SignalsTab(QWidget):
                 qimage = QImage(str(ci.image_file_path(self._folder, image)))
                 if qimage.isNull():
                     qimage, message = None, "The picture file is missing."
+                else:
+                    self._session.set_picture(_qimage_rgb(qimage))
         except Exception as exc:  # noqa: BLE001
             message = f"Cannot show this image:\n{exc}"
         self._canvas.set_image(qimage, keep_view=keep_view and previous == image_id, message=message)
@@ -418,67 +505,152 @@ class SignalsTab(QWidget):
     # ------------------------------------------------------------------ tools and canvas events
 
     def _set_tool(self, tool: str) -> None:
-        self._tool = tool
+        self._tool = tool if tool in dict(ss.TOOLS) else "number"
+        _write("signals_tool", self._tool)
         for b, (key, _text) in zip(self._tool_group.buttons(), ss.TOOLS):
-            b.setChecked(key == tool)
-        self._hint.setText(ss.TOOL_HINTS[tool] + (" (p end first)" if tool == "measure" else ""))
-        self._canvas.set_tool_cursor(Qt.CursorShape.ArrowCursor if tool == "select" else Qt.CursorShape.CrossCursor)
+            b.setChecked(key == self._tool)
+        self._canvas.set_tool_cursor(Qt.CursorShape.CrossCursor)
+        self._sync_probe_visible()
+        self._update_hint()
+        self._sync_labels()
+
+    def _update_hint(self) -> None:
+        s = self._session
+        if s is None:
+            self._hint.setText("")
+            return
+        if self._tool == "number":
+            if s.karyotype is None:
+                self._hint.setText("Make a karyotype first: Chromosomes > Karyotype > New karyotype…")
+                return
+            nxt = self._pending_label if self._pending_label and self._pending_label not in s.used_labels() else s.next_label()
+            self._hint.setText(ss.TOOL_HINTS["number"].format(next=nxt) if nxt else
+                               "All chromosomes are named. Drag a name, a telomere or the centromere to correct it.")
+        else:
+            probe = self._probe.currentData()
+            self._hint.setText(ss.TOOL_HINTS["signal"].format(probe=probe) if probe else
+                               "Add a probe first: Library > Edit lists > Probes.")
+
+    def _tolerance(self, pixels: float) -> float:
+        return pixels / max(self._canvas.zoom(), 0.05)
+
+    def _handle_at(self, x: float, y: float) -> tuple[str, str] | None:
+        """(mark id, which) of a handle of the selected chromosome under the pointer."""
+        s = self._session
+        if s is None or not self._selected or self._selected[0] != "mark":
+            return None
+        mark = s.details.chromosome(self._selected[1])
+        if mark is None:
+            return None
+        tol = self._tolerance(9)
+        for which in ("centromere", "telomere_p", "telomere_q"):
+            pt = getattr(mark, which)
+            if pt is not None and math.hypot(pt[0] - x, pt[1] - y) <= tol:
+                return mark.id, which
+        return None
 
     def _on_press(self, x: float, y: float) -> None:
         s = self._session
         if s is None:
             return
-        tol = ss.HIT_RADIUS / max(self._canvas.zoom(), 0.05) * 0.8
-        if self._tool == "select":
-            hit = s.hit(x, y, max(tol, 6.0))
+        self._moved = False
+        handle = self._handle_at(x, y)
+        if handle is not None:
+            self._drag = ("handle", handle[0], handle[1])
+            return
+        hit = s.hit(x, y, max(self._tolerance(ss.HIT_RADIUS * 0.8), 6.0))
+        if hit is not None:
             self._select(hit)
             self._drag = hit
-        elif self._tool == "number":
+            return
+        self._drag = None
+        if self._tool == "number":
             self._number_at(x, y)
-        elif self._tool == "signal":
+        else:
             self._signal_at(x, y)
-        elif self._tool == "measure":
-            hit = s.hit(x, y, max(tol * 2, 10.0))
-            mark_id = hit[1] if hit and hit[0] == "mark" else (self._selected[1] if self._selected and self._selected[0] == "mark" else "")
-            if not mark_id:
-                self._hint.setText("Number the chromosome first (Number chromosomes), then measure it.")
-                return
-            self._measure_mark = mark_id
-            self._measure_start = QPointF(x, y)
-            self._canvas.rubber = (QPointF(x, y), QPointF(x, y))
 
     def _on_move(self, x: float, y: float) -> None:
         s = self._session
-        if s is None:
+        if s is None or not self._drag:
             return
-        if self._tool == "select" and self._drag:
-            kind, ident = self._drag
-            if kind == "mark":
-                s.move_mark(ident, x, y)
-            else:
-                s.move_signal(ident, x, y)
-            self._canvas.update()
-        elif self._tool == "measure" and self._measure_start is not None:
-            self._canvas.rubber = (self._measure_start, QPointF(x, y))
-            self._canvas.update()
+        self._moved = True
+        if self._drag[0] == "handle":
+            s.set_point(self._drag[1], self._drag[2], (x, y))
+        elif self._drag[0] == "mark":
+            s.move_mark(self._drag[1], x, y)
+        else:
+            s.move_signal(self._drag[1], x, y)
+        self._canvas.update()
 
     def _on_release(self, x: float, y: float) -> None:
+        if self._drag:
+            self._drag = None
+            if getattr(self, "_moved", False):
+                self._changed()
+
+    def _on_menu(self, x: float, y: float, global_pos) -> None:
+        from PySide6.QtWidgets import QMenu
+
         s = self._session
         if s is None:
             return
-        if self._tool == "select" and self._drag:
-            self._drag = None
-            self._changed()
-        elif self._tool == "measure" and self._measure_start is not None:
-            a, b = self._measure_start, QPointF(x, y)
-            self._measure_start = None
-            self._canvas.rubber = None
-            if math.hypot(b.x() - a.x(), b.y() - a.y()) >= 5:
-                s.set_axis(self._measure_mark, (a.x(), a.y()), (b.x(), b.y()))
-                self._select(("mark", self._measure_mark))
-                self._changed()
-            else:
-                self._canvas.update()
+        hit = s.hit(x, y, max(self._tolerance(ss.HIT_RADIUS * 0.8), 6.0))
+        if hit is None:
+            return
+        self._select(hit)
+        menu = QMenu(self)
+        if hit[0] == "signal":
+            sig = s.signal(hit[1])
+            mark = s.details.chromosome(sig.chromosome_id) if sig.chromosome_id else None
+            head = menu.addAction(f"Signal on {mark.label if mark else 'no chromosome'} · {sig.probe}")
+            head.setEnabled(False)
+            sub = menu.addMenu("Change probe")
+            for probe, dye in s.probes():
+                act = sub.addAction(f"{probe} · {dye}" if dye else probe)
+                act.setCheckable(True)
+                act.setChecked(probe == sig.probe)
+                act.triggered.connect(lambda _c=False, pr=probe: self._edit_signal(sig.id, probe=pr))
+            sub = menu.addMenu("Move to chromosome")
+            for m in sorted(s.details.chromosomes, key=lambda m: ss.natural_key(m.label)):
+                act = sub.addAction(m.label)
+                act.setCheckable(True)
+                act.setChecked(m.id == sig.chromosome_id)
+                act.triggered.connect(lambda _c=False, mid=m.id: self._edit_signal(sig.id, chromosome_id=mid))
+            sub = menu.addMenu("Strength")
+            for value in ss.STRENGTHS:
+                act = sub.addAction(value.capitalize())
+                act.setCheckable(True)
+                act.setChecked(value == sig.strength)
+                act.triggered.connect(lambda _c=False, v=value: self._edit_signal(sig.id, strength=v))
+            menu.addSeparator()
+            menu.addAction("Delete signal", self._delete_selected)
+        else:
+            mark = s.details.chromosome(hit[1])
+            head = menu.addAction(f"Chromosome {mark.label}")
+            head.setEnabled(False)
+            sub = menu.addMenu("Rename")
+            for label in s.labels():
+                if label == mark.label or s.mark_for_label(label) is None:
+                    act = sub.addAction(label)
+                    act.setCheckable(True)
+                    act.setChecked(label == mark.label)
+                    act.triggered.connect(lambda _c=False, lb=label: self._relabel(mark.id, lb))
+            menu.addAction("Find the axis again", lambda: (s.auto_axis(mark.id), self._changed()))
+            menu.addAction("Swap p and q", lambda: (s.swap_arms(mark.id), self._changed()))
+            menu.addSeparator()
+            menu.addAction("Remove chromosome", self._delete_selected)
+        menu.exec(global_pos)
+
+    def _step_cell(self, step: int) -> None:
+        s = self._session
+        if s is None:
+            return
+        cells = s.slide_cells()
+        ids = [c.image_id for c in cells]
+        if s.image.id in ids:
+            k = ids.index(s.image.id) + step
+            if 0 <= k < len(ids):
+                self.show_image(ids[k])
 
     def _number_at(self, x: float, y: float) -> None:
         s = self._session
@@ -492,11 +664,10 @@ class SignalsTab(QWidget):
             self._hint.setText("All chromosomes of this karyotype are numbered.")
             return
         mark = s.add_mark(label, x, y)
+        s.auto_axis(mark.id)
         self._pending_label = ""
         self._select(("mark", mark.id))
         self._changed()
-        nxt = s.next_label()
-        self._hint.setText(f"Next: {nxt}" if nxt else "All chromosomes numbered.")
 
     def _signal_at(self, x: float, y: float) -> None:
         s = self._session
@@ -504,7 +675,7 @@ class SignalsTab(QWidget):
             return
         probe = self._probe.currentData()
         if not probe:
-            self._hint.setText("Set a probe on a channel in the Image tab first.")
+            self._update_hint()
             return
         sig = s.add_signal(probe, x, y, refine=self._auto.isChecked())
         self._select(("signal", sig.id))
@@ -521,6 +692,12 @@ class SignalsTab(QWidget):
 
     # ------------------------------------------------------------------ side panel
 
+    def select_signal(self, signal_id: str) -> None:
+        """Select a signal of the shown image (from the Idiogram)."""
+        s = self._session
+        if s is not None and signal_id and s.signal(signal_id) is not None:
+            self._select(("signal", signal_id))
+
     def _select(self, hit: tuple[str, str] | None) -> None:
         self._selected = hit
         self._canvas.selected = hit
@@ -534,6 +711,7 @@ class SignalsTab(QWidget):
         self._save_timer.start()
 
     def _sync_all(self) -> None:
+        self._update_hint()
         self._sync_labels()
         self._sync_selected()
         self._sync_summary()
@@ -546,6 +724,12 @@ class SignalsTab(QWidget):
             self._probe.addItem(f"{probe} · {dye}" if dye else probe, probe)
         if self._probe.count() == 0:
             self._probe.addItem("no probe set", "")
+        self._sync_probe_visible()
+
+    def _sync_probe_visible(self) -> None:
+        show = self._tool == "signal" and self._probe.count() > 1
+        self._probe_label.setVisible(show)
+        self._probe.setVisible(show)
 
     def _fill_karyotypes(self) -> None:
         s = self._session
@@ -580,20 +764,94 @@ class SignalsTab(QWidget):
             return
         from repeatviewer.views.cyto_karyotype_dialog import KaryotypeDialog
 
-        dialog = KaryotypeDialog(self._folder, s.karyotype.name if edit and s.karyotype else "", self)
-        accepted = dialog.exec()
-        s.karyotypes = list_karyotypes(self._folder)
-        if accepted and dialog.saved_name():
-            s.karyotype = next((k for k in s.karyotypes if k.name == dialog.saved_name()), s.karyotype)
-            s.details.karyotype = s.karyotype.name if s.karyotype else ""
-            s.dirty = True
-            self._save_timer.start()
-            self.karyotypesChanged.emit()
-        self._fill_karyotypes()
-        self._sync_all()
-        self._canvas.update()
+        dialog = KaryotypeDialog(self._folder, s.karyotype.name if edit and s.karyotype else "", self.window())
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+
+        def done(accepted: int) -> None:
+            s2 = self._session
+            if s2 is None or self._folder is None:
+                return
+            s2.karyotypes = list_karyotypes(self._folder)
+            if accepted and dialog.saved_name():
+                s2.karyotype = next((k for k in s2.karyotypes if k.name == dialog.saved_name()), s2.karyotype)
+                s2.details.karyotype = s2.karyotype.name if s2.karyotype else ""
+                s2.dirty = True
+                self._save_timer.start()
+                self.karyotypesChanged.emit()
+            self._fill_karyotypes()
+            self._sync_all()
+            self._canvas.update()
+
+        dialog.finished.connect(done)
+        dialog.show()  # not modal: the Files panel stays clickable (Lengths from assembly)
+
+    def _on_step_karyotype(self) -> None:
+        s = self._session
+        if s is None:
+            return
+        self._open_karyotype(edit=s.karyotype is not None)
+
+    def _sync_guide(self) -> None:
+        if not hasattr(self, "_guide"):
+            return
+        clear_layout(self._guide)
+        s = self._session
+        if s is None:
+            return
+        labels = s.labels()
+        named = len(s.used_labels() & set(labels))
+        n_sig = len(s.details.signals)
+        has_k = s.karyotype is not None
+        current = 1 if not has_k else (2 if self._tool == "number" else 3)
+        rows = (
+            (1, "Karyotype", f"{s.karyotype.formula}" if has_k else "", has_k,
+             "▾ choose   ＋ new   ✎ edit", self._on_step_karyotype),
+            (2, "Chromosomes", f"{named} / {len(labels)}" if labels else "", bool(labels) and named == len(labels),
+             "⊙ click   ↕ drag ends   ○ centromere", lambda: self._set_tool("number")),
+            (3, "Signals", f"{n_sig} ●" if n_sig else "", n_sig > 0,
+             "⊙ click a spot   ⇢ drag   ⌫ delete", lambda: self._set_tool("signal")),
+        )
+        self._step_karyo.setText("1  Karyotype ✓" if has_k else "1  Karyotype")
+        for b in self._tool_group.buttons():
+            b.setEnabled(has_k)
+        for n, title, value, done, hint, action in rows:
+            on = n == current
+            row = QPushButton(self)
+            row.setFlat(True)
+            row.setCursor(Qt.CursorShape.PointingHandCursor)
+            row.clicked.connect(action)
+            lay = QHBoxLayout(row)
+            lay.setContentsMargins(6, 3, 6, 3)
+            lay.setSpacing(8)
+            badge = QLabel("✓" if done and not on else str(n), row)
+            badge.setFixedSize(20, 20)
+            badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            colour = "#1F4E9A" if on else ("#8A8D93" if done else "#C7C7CC")  # blue = current step only
+            badge.setStyleSheet(f"QLabel {{ background:{colour}; color:white; border-radius:10px; font-weight:600; }}")
+            name = QLabel(f"<b>{title}</b>" if on else title, row)
+            val = QLabel(value, row)
+            val.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            val.setStyleSheet("color: palette(dark);")
+            for w in (badge, name, val):
+                w.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+            lay.addWidget(badge)
+            lay.addWidget(name)
+            lay.addStretch(1)
+            lay.addWidget(val)
+            row.setMinimumHeight(28)
+            self._guide.addWidget(row)
+            tip = QLabel(hint, self)
+            tip.setWordWrap(True)
+            tip.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+            tip.setStyleSheet(f"color: {'palette(dark)' if on else '#A0A2A8'}; padding-left: 34px;")
+            self._guide.addWidget(tip)
+            if n < 3:
+                arrow = QLabel("↓", self)
+                arrow.setStyleSheet("color: #B0B2B8; padding-left: 12px;")
+                self._guide.addWidget(arrow)
 
     def _sync_labels(self) -> None:
+        self._sync_guide()
         s = self._session
         clear_layout(self._labels_grid)
         self._label_buttons = {}
@@ -619,7 +877,7 @@ class SignalsTab(QWidget):
                 css = "background:#FFFFFF; color:#8A8D93; border:1px dashed #C9D3E6;"
             b.setStyleSheet(f"QPushButton {{ {css} border-radius:5px; padding:4px 0; font-size:12px; }}")
             b.clicked.connect(lambda _c=False, l=label: self._on_label_clicked(l))
-            self._labels_grid.addWidget(b, n // 8, n % 8)
+            self._labels_grid.addWidget(b, n // 5, n % 5)
             self._label_buttons[label] = b
         self._chrom_count.setText(f"{len(used & set(labels))} of {len(labels)}")
 
@@ -649,11 +907,9 @@ class SignalsTab(QWidget):
             sel = self._selected = None
         if sel and sel[0] == "mark" and s.details.chromosome(sel[1]) is None:
             sel = self._selected = None
+        self._sel_section.setVisible(sel is not None)  # shown only while something is selected
         if sel is None:
             self._sel_section._title.setText("Selected")
-            note = QLabel("Nothing selected. Use Select and click a chromosome or a signal.", self._sel_host)
-            note.setWordWrap(True)
-            self._sel_lay.addWidget(note)
             return
         if sel[0] == "signal":
             sig = s.signal(sel[1])
@@ -773,23 +1029,27 @@ class SignalsTab(QWidget):
         cells = s.slide_cells()
         slide = next((sl.name for sl in load_slides(self._folder) if sl.id == s.details.slide_id), "")
         lead = QLabel(f"Cells in {slide}" if slide else "Cells", self._cells_host)
-        lead.setStyleSheet("color: palette(dark);")
+        lead.setObjectName("cytoMuted")
+        ids = [c.image_id for c in cells]
+        pos = ids.index(s.image.id) + 1 if s.image.id in ids else 0
+        self._nav.setText(f"cell {cells[pos - 1].label} of {len(cells)}" if pos else "")
+        self._prev.setEnabled(pos > 1)
+        self._next.setEnabled(0 < pos < len(cells))
         self._cells_row.addWidget(lead)
         for cell in cells:
             b = QPushButton(cell.label, self._cells_host)
-            current = cell.image_id == s.image.id
-            if current:
-                css = "background:#E3EBF8; color:#1C1C1E; border:1px solid #1F4E9A;"
-            elif cell.marked:
-                css = "background:#FFFFFF; color:#1C1C1E; border:1px solid #C4C4CA;"
-            else:
-                css = "background:#F1F1F3; color:#5A5D63; border:1px solid #C4C4CA;"
-            b.setStyleSheet(f"QPushButton {{ {css} border-radius:5px; padding:3px 8px; font-size:12px; }}")
+            b.setCheckable(True)
+            b.setFixedWidth(40)
+            b.setChecked(cell.image_id == s.image.id)
+            b.setToolTip("marked" if cell.marked else "not marked yet")
+            if not cell.marked:
+                f = b.font()
+                f.setItalic(True)
+                b.setFont(f)
             b.clicked.connect(lambda _c=False, i=cell.image_id: self.show_image(i))
             self._cells_row.addWidget(b)
-        self._cells_row.addStretch(1)
         done = sum(1 for c in cells if c.marked)
-        self._cells_row.addWidget(QLabel(f"{done} of {len(cells)} cells marked", self._cells_host))
+        self._cells_row.addWidget(QLabel(f"{done} of {len(cells)} marked", self._cells_host))
 
     # ------------------------------------------------------------------ saving
 

@@ -116,8 +116,8 @@ def test_run_request(tmp_path):
     req = ImportRequest(folder=data, source=src, slide_name="Slide 12", slide_values={"species": "Crocus sativus", "date": "2026-10-14"},
                         stage="Mitotic metaphase", probes_by_dye={"FITC": "CroSat2"})
     slide, images, errors = run_request(req)
-    assert slide.name == "Slide 12" and len(images) == 2
-    assert errors == ["mystery.tif: no known dye in the file name"]
+    assert slide.name == "Slide 12" and len(images) == 3  # mystery.tif is a cell of its own now
+    assert errors == []
     first = ci.load_images(data)[0]
     assert first.metadata == {"species": "Crocus sativus", "date": "2026-10-14", "stage": "Mitotic metaphase"}
     assert [(t.sequence, t.probe, t.dye) for t in first.targets] == [("CroSat2.fasta", "CroSat2", "FITC")]
@@ -127,7 +127,7 @@ def test_run_request(tmp_path):
     empty = tmp_path / "empty"
     empty.mkdir()
     s2, imgs2, errs2 = run_request(ImportRequest(folder=data, source=empty))
-    assert s2 is None and imgs2 == [] and errs2 == ["No channel TIFFs found."]
+    assert s2 is None and imgs2 == [] and errs2 == ["No picture files found (TIFF, JPG, PNG or BMP)."]
     assert len(md.load_slides(data)) == 1
     assert targets_for_probes(ls.load_lists(data), {"FITC": "Unknown"}) == []
 
@@ -169,3 +169,33 @@ def test_texts_like_the_mockup(tmp_path):
     items = _folder(tmp_path)
     groups = lb.group_items(items, "Slide")
     assert groups[0].subtitle == "14 Oct 2026 · C. sativus · CroSat2 + 45S · 2 cells"
+
+
+def test_slide_update_and_assign(tmp_path):
+    from repeatviewer.backends import cyto_images as ci2
+    from repeatviewer.backends.cytogenetics import model as md2
+
+    folder = tmp_path
+    a = md2.add_slide(folder, "S1", species="C. sativus", technique="FISH")
+    b = md2.add_slide(folder, "S2", species="C. cartwrightianus")
+    images = []
+    for n in range(3):
+        im = ci2.CytoImage(id=f"i{n}", file=f"i{n}.png", metadata={"species": "C. sativus", "technique": "FISH"})
+        d = md2.image_details(im)
+        d.slide_id = a.id
+        md2.set_image_details(im, d)
+        images.append(im)
+    images[2].metadata["technique"] = "GISH"  # set by hand
+    ci2.save_images(folder, images)
+    a.technique, a.box, a.hyb_temp = "FISH-2", "Box 4", "37 °C"
+    assert md2.update_slide(folder, a) == 2
+    got = {im.id: im for im in ci2.load_images(folder)}
+    assert got["i0"].metadata["technique"] == "FISH-2" and got["i2"].metadata["technique"] == "GISH"
+    again = next(s for s in md2.load_slides(folder) if s.id == a.id)
+    assert again.box == "Box 4" and again.hyb_temp == "37 °C"
+    assert md2.assign_to_slide(folder, ["i0", "i1"], b.id) == 2
+    got = {im.id: im for im in ci2.load_images(folder)}
+    assert md2.image_details(got["i0"]).slide_id == b.id
+    assert got["i0"].metadata["species"] == "C. cartwrightianus"
+    assert md2.assign_to_slide(folder, ["i1"], "") == 1
+    assert md2.image_details(ci2.load_images(folder)[1]).slide_id == ""

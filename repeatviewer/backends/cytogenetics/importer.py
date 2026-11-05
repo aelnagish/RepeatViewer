@@ -22,12 +22,20 @@ def natural_key(text: str):
 
 @dataclass
 class CellGroup:
-    key: str  # file name without the channel word, e.g. "s12_c03"
-    files: list[tuple[Path, str]] = field(default_factory=list)  # (path, dye)
+    key: str  # file name without the channel word ("s12_c03"), the cell folder ("cell1"), or the file stem
+    files: list[tuple] = field(default_factory=list)  # (path, dye) or (path, dye, plane index)
+    colours: list[str] = field(default_factory=list)  # colour per entry; "" = from the dye
 
     @property
     def dyes(self) -> list[str]:
-        return [d for _, d in self.files]
+        return [f[1] for f in self.files]
+
+    def entries(self) -> list[tuple[Path, str, int]]:
+        return [(f[0], f[1], f[2] if len(f) > 2 else -1) for f in self.files]
+
+    @property
+    def size(self) -> int:
+        return len(self.files)
 
 
 def group_channel_files(paths: list[Path], lists: Lists) -> tuple[list[CellGroup], list[Path]]:
@@ -39,7 +47,7 @@ def group_channel_files(paths: list[Path], lists: Lists) -> tuple[list[CellGroup
     groups: dict[str, CellGroup] = {}
     unmatched: list[Path] = []
     for path in sorted((Path(p) for p in paths), key=lambda p: natural_key(p.name)):
-        if not ch.is_tiff(path):
+        if not ch.is_image(path):
             unmatched.append(path)
             continue
         dye, index = dye_for_filename(path.name, lists)
@@ -57,15 +65,110 @@ def group_channel_files(paths: list[Path], lists: Lists) -> tuple[list[CellGroup
     return ordered, unmatched
 
 
+def plan_cells(paths: list[Path], lists: Lists, *, merges: bool = False) -> tuple[list[CellGroup], list[str]]:
+    """Every picture goes somewhere; nothing needs a dye name. Returns (cells, notes).
+
+    - A multichannel TIFF (ImageJ, OME, several pages) is one cell, split into its channels.
+    - Files named with a dye word (s12_c03_DAPI.tif) are grouped by the rest of the name, as before.
+    - Other files (1.tif, 2.tif …) are grouped by folder: one folder = one cell, one file = one channel,
+      named Channel 1, 2 … in the file order. A channel saved in colour (blue, green, yellow …) keeps that colour.
+    - Channels of one cell must have the same size: files of another size in the same folder are another cell
+      (``cell1 (528×464)``).
+    - Merged colour pictures (all three planes different) are left out unless ``merges`` is set; then each is a
+      cell of its own with its red, green and blue planes. A merge alone in its folder is always taken.
+    """
+    notes: list[str] = []
+    singles: list[Path] = []
+    multi: list[CellGroup] = []
+    infos: dict[Path, ch.TiffInfo] = {}
+    for path in sorted((Path(p) for p in paths), key=lambda p: natural_key(str(p))):
+        if not ch.is_image(path):
+            continue
+        try:
+            info = ch.inspect_tiff(path)
+        except Exception as exc:  # noqa: BLE001 - unreadable file: report, keep going
+            notes.append(f"{path.name}: cannot be read ({exc})")
+            continue
+        infos[path] = info
+        if info.kind == "channels":
+            group = CellGroup(key=path.stem)
+            for i in range(info.count):
+                dye = dye_for_filename(info.names[i], lists)[0] if info.names[i] else ""
+                group.files.append((path, dye, info.plane(i)))
+                group.colours.append("" if dye else info.colours[i])
+            multi.append(group)
+        else:
+            singles.append(path)
+    named, rest = group_channel_files(singles, lists)
+    by_folder: dict[Path, list[Path]] = {}
+    for path in rest:
+        by_folder.setdefault(path.parent, []).append(path)
+    skipped: list[str] = []
+    for parent, files in by_folder.items():
+        files.sort(key=lambda p: natural_key(p.name))
+        rgb = [p for p in files if infos[p].kind == "rgb"]
+        channels = [p for p in files if infos[p].kind != "rgb"]
+        if rgb and not channels and len(rgb) == 1:
+            merges_here, channels = rgb, []
+        elif merges:
+            merges_here = rgb
+        else:
+            merges_here = []
+            skipped += [p.name for p in rgb]
+        for path in merges_here:
+            info = infos[path]
+            group = CellGroup(key=parent.name if len(files) == 1 else f"{parent.name} {path.stem}")
+            for k in range(3):
+                group.files.append((path, "", k))
+                group.colours.append(info.colours[k])
+            multi.append(group)
+        by_size: dict[tuple[int, int], list[Path]] = {}
+        for path in channels:
+            by_size.setdefault((infos[path].width, infos[path].height), []).append(path)
+        main = max(by_size, key=lambda k: len(by_size[k])) if by_size else None
+        for size, members in sorted(by_size.items(), key=lambda kv: (kv[0] != main, kv[0])):
+            if size != main and len(members) == 1 and not merges:
+                skipped.append(members[0].name)  # one picture of another size: a figure or a crop, not a channel
+                continue
+            key = parent.name if size == main else f"{parent.name} ({size[0]}×{size[1]})"
+            group = CellGroup(key=key)
+            used = {infos[p].colours[0].lower() for p in members if infos[p].kind == "colour"}
+            spare = [c for c in ch.UNKNOWN_COLOURS if c.lower() not in used] or list(ch.UNKNOWN_COLOURS)
+            n = 0
+            for path in members:
+                info = infos[path]
+                if info.kind == "colour":
+                    colour = info.colours[0]
+                else:
+                    colour = spare[n % len(spare)]
+                    n += 1
+                group.files.append((path, "", -1))
+                group.colours.append(colour)
+            multi.append(group)
+    if skipped:
+        notes.append(f"{len(skipped)} merged or other picture{'s' if len(skipped) != 1 else ''} left out "
+                     f"({', '.join(skipped[:3])}{' …' if len(skipped) > 3 else ''}); "
+                     "tick Import merged and other pictures under Options to take them too")
+    cells = named + multi
+    # cells with the same name from different folders: add the folder to tell them apart
+    seen: dict[str, int] = {}
+    for g in cells:
+        seen[g.key] = seen.get(g.key, 0) + 1
+    for g in cells:
+        if seen[g.key] > 1:
+            g.key = f"{g.entries()[0][0].parent.name}_{g.key}"
+    return sorted(cells, key=lambda g: natural_key(g.key)), notes
+
+
 def channel_layers(folder: Path, details: ImageDetails, cache: dict | None = None):
     """[(array, display)] for the image's channels, reading each file once per cache."""
     layers = []
     for channel in details.channels:
-        key = str(channel_path(folder, channel))
+        key = f"{channel_path(folder, channel)}#{channel.index}"
         if cache is not None and key in cache:
             array = cache[key]
         else:
-            array = ch.read_channel(channel_path(folder, channel)).array
+            array = ch.read_plane(channel_path(folder, channel), channel.index).array
             if cache is not None:
                 cache[key] = array
         layers.append((array, channel.display))
@@ -73,7 +176,8 @@ def channel_layers(folder: Path, details: ImageDetails, cache: dict | None = Non
 
 
 def refresh_log(details: ImageDetails) -> None:
-    details.adjustment_log = ch.adjustment_log([(c.dye, c.bits, c.display) for c in ordered_channels(details)])
+    named = [(c.dye or f"Channel {details.channels.index(c) + 1}", c.bits, c.display) for c in ordered_channels(details)]
+    details.adjustment_log = ch.adjustment_log(named)
 
 
 def render_preview(folder: Path, image: CytoImage, *, cache: dict | None = None) -> Path:
@@ -97,6 +201,7 @@ def import_cells(
     copy: bool = True,
     pixel_size_um: float | None = None,
     progress=None,
+    channel_plan: list | None = None,
 ) -> tuple[list[CytoImage], list[str]]:
     """Create one image record per cell. Returns (new images, error lines).
 
@@ -116,21 +221,30 @@ def import_cells(
             channels: list[Channel] = []
             layers = []
             pixel = pixel_size_um
-            for path, dye in group.files:
-                data = ch.read_channel(path)
+            stored_as: dict[Path, str] = {}
+            for n, (path, dye, index) in enumerate(group.entries()):
+                planned = (channel_plan or [])[n] if n < len(channel_plan or []) else {}
+                dye = str(planned.get("dye") or dye)
+                data = ch.read_plane(path, index)
                 grey = ch.to_grey(data.array)
                 low, high = ch.auto_levels(grey)
                 cid = new_id()
-                if copy:
-                    stored = directory / f"{image_id}_{cid[:8]}{path.suffix.lower()}"
-                    shutil.copy2(path, stored)
-                    copied.append(stored)
-                    file_ref = stored.name
-                else:
-                    file_ref = str(path.resolve())
-                display = ChannelDisplay(color=dye_color(lists, dye), low=low, high=high)
-                channels.append(Channel(id=cid, file=file_ref, dye=dye, probe=probes_by_dye.get(dye, ""),
-                                        bits=data.bits, original_name=path.name, display=display))
+                if path not in stored_as:
+                    if copy:
+                        stored = directory / f"{image_id}_{cid[:8]}{path.suffix.lower()}"
+                        shutil.copy2(path, stored)
+                        copied.append(stored)
+                        stored_as[path] = stored.name
+                    else:
+                        stored_as[path] = str(path.resolve())
+                file_ref = stored_as[path]
+                colour = group.colours[n] if n < len(group.colours) and group.colours[n] else ""
+                colour = colour or (dye_color(lists, dye) if dye else ch.UNKNOWN_COLOURS[n % len(ch.UNKNOWN_COLOURS)])
+                display = ChannelDisplay(color=colour, low=low, high=high)
+                label = ch.plane_label(path, index)
+                probe = str(planned.get("probe") or (probes_by_dye.get(dye, "") if dye else ""))
+                channels.append(Channel(id=cid, file=file_ref, dye=dye, probe=probe,
+                                        bits=data.bits, original_name=label, display=display, index=index))
                 layers.append((grey, display))
                 if pixel is None and data.pixel_size_um:
                     pixel = data.pixel_size_um
@@ -165,7 +279,7 @@ def import_cells(
 # One slide session = one request (the Import dialog builds it)
 # ---------------------------------------------------------------------------
 
-from .lists import add_entry, ensure_used_values, entry, load_lists, save_lists  # noqa: E402
+from .lists import add_entry, ensure_used_values, entry, load_lists, names, save_lists  # noqa: E402
 from .model import add_slide, load_slides, save_slides  # noqa: E402
 
 SLIDE_FIELDS = ("date", "species", "accession", "technique", "counterstain")
@@ -182,6 +296,67 @@ class ImportRequest:
     probes_by_dye: dict = field(default_factory=dict)  # dye -> probe name
     copy: bool = True
     pixel_size_um: float | None = None
+    merges: bool = False  # also import merged colour pictures, each as its own cell
+    channel_plan: list = field(default_factory=list)  # per channel position: {"dye": …, "probe": …}, whole slide
+
+
+@dataclass
+class ChannelRow:
+    """One channel position of a slide, as the Import window's Channels table shows it."""
+    position: int  # 1, 2, 3 … (the order of the channels in each cell)
+    found_as: str  # layer or file name that holds this channel in most cells
+    colour: str
+    dye: str = ""
+    probe: str = ""
+
+
+def _found_name(path: Path, index: int) -> str:
+    label = ch.plane_label(path, index)
+    return label.split(" · ", 1)[1] if " · " in label else Path(path).name
+
+
+def _guess_probe(found: str, dye: str, lists: Lists) -> str:
+    """A probe whose name appears in the layer or file name; else the only probe saved with this dye."""
+    text = found.lower()
+    probes = [(str(e["name"]), str(e.get("dye", ""))) for e in lists.get("probes", [])]
+    for name, _d in probes:
+        low = name.lower()
+        if len(low) >= 3 and low in text:
+            return name
+    if dye and dye.lower() not in {n.lower() for n in names(lists, "counterstains")} | {"dapi", "hoechst"}:
+        same = [name for name, d in probes if d == dye]
+        if len(same) == 1:
+            return same[0]
+    return ""
+
+
+def channel_rows(groups: list["CellGroup"], lists: Lists) -> list[ChannelRow]:
+    """The channel positions of a slide with what was found and a first guess of dye and probe."""
+    from collections import Counter
+
+    rows: list[ChannelRow] = []
+    count = max((g.size for g in groups), default=0)
+    for k in range(count):
+        found, colours, dyes = Counter(), Counter(), Counter()
+        for g in groups:
+            if k >= g.size:
+                continue
+            path, dye, index = g.entries()[k]
+            found[_found_name(path, index)] += 1
+            if k < len(g.colours) and g.colours[k]:
+                colours[g.colours[k]] += 1
+            if dye:
+                dyes[dye] += 1
+        name = found.most_common(1)[0][0] if found else f"Channel {k + 1}"
+        dye = dyes.most_common(1)[0][0] if dyes else dye_for_filename(name, lists)[0]
+        colour = colours.most_common(1)[0][0] if colours else (
+            dye_color(lists, dye) if dye else ch.UNKNOWN_COLOURS[k % len(ch.UNKNOWN_COLOURS)])
+        rows.append(ChannelRow(k + 1, name, colour, dye, _guess_probe(name, dye, lists)))
+    return rows
+
+
+def plan_probes_by_dye(plan: list) -> dict[str, str]:
+    return {str(r.get("dye", "")): str(r.get("probe", "")) for r in plan if r.get("dye") and r.get("probe")}
 
 
 def scan_tiffs(source: Path, recursive: bool = False) -> list[Path]:
@@ -189,7 +364,7 @@ def scan_tiffs(source: Path, recursive: bool = False) -> list[Path]:
     if not source.is_dir():
         return []
     walker = source.rglob("*") if recursive else source.iterdir()
-    return sorted((p for p in walker if p.is_file() and ch.is_tiff(p) and not p.name.startswith(".")),
+    return sorted((p for p in walker if p.is_file() and ch.is_image(p) and not p.name.startswith(".")),
                   key=lambda p: natural_key(str(p)))
 
 
@@ -212,28 +387,41 @@ def run_request(req: ImportRequest, *, progress=None):
     folder = Path(req.folder).expanduser().resolve()
     lists = load_lists(folder)
     files = scan_tiffs(req.source, req.recursive)
-    groups, unmatched = group_channel_files(files, lists)
-    errors = [f"{p.name}: no known dye in the file name" for p in unmatched if p.suffix.lower() in (".tif", ".tiff")]
+    groups, errors = plan_cells(files, lists, merges=req.merges)
     if not groups:
-        return None, [], errors or ["No channel TIFFs found."]
+        return None, [], errors or ["No picture files found (TIFF, JPG, PNG or BMP)."]
     values = {k: str(req.slide_values.get(k, "")).strip() for k in SLIDE_FIELDS}
     slide = add_slide(folder, req.slide_name or Path(req.source).name, **values)
     metadata = {k: v for k, v in values.items() if v}
     if req.stage:
         metadata["stage"] = req.stage
+    probes_by_dye = {**req.probes_by_dye, **plan_probes_by_dye(req.channel_plan)}
     images, errs = import_cells(
         folder, groups, lists=lists, slide_id=slide.id, metadata=metadata,
-        targets=targets_for_probes(lists, req.probes_by_dye), probes_by_dye=req.probes_by_dye,
-        copy=req.copy, pixel_size_um=req.pixel_size_um, progress=progress,
+        targets=targets_for_probes(lists, probes_by_dye), probes_by_dye=probes_by_dye,
+        copy=req.copy, pixel_size_um=req.pixel_size_um, progress=progress, channel_plan=req.channel_plan,
     )
     errors += errs
     if not images:
         save_slides(folder, [s for s in load_slides(folder) if s.id != slide.id])
         return None, [], errors
     lists = load_lists(folder)
-    for probe in req.probes_by_dye.values():
+    for dye, probe in probes_by_dye.items():
         if probe:
-            add_entry(lists, "probes", probe)
-    if ensure_used_values(folder, lists) or req.probes_by_dye:
+            add_entry(lists, "probes", probe, dye=dye)
+    if ensure_used_values(folder, lists) or probes_by_dye:
         save_lists(folder, lists)
     return slide, images, errors
+
+
+def add_channel_image(folder: Path, path: Path, *, copy: bool = True) -> CytoImage | None:
+    """Add one multichannel TIFF as a channel image (no slide). Returns the new image, or None."""
+    folder = Path(folder).expanduser().resolve()
+    lists = load_lists(folder)
+    cells, _notes = plan_cells([Path(path)], lists)
+    if not cells:
+        return None
+    images, errors = import_cells(folder, cells[:1], lists=lists, copy=copy)
+    if errors:
+        raise ValueError(errors[0])
+    return images[0] if images else None

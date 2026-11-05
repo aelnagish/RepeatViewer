@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QSettings, Qt, Signal
+from PySide6.QtCore import QTimer, QSettings, Qt, Signal
 from PySide6.QtWidgets import (
     QFormLayout,
     QHBoxLayout,
@@ -125,24 +125,33 @@ class CytogeneticsWorkspace(QWidget):
         self._crumb = QLabel(self)
         self._crumb.setObjectName("cytoCrumb")
         self._crumb.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        self._import_btn = QPushButton("Import slide session", self)
+        self._import_btn = QPushButton("Import", self)
         self._import_btn.setObjectName("cytoPrimary")
         self._import_btn.clicked.connect(lambda: self._pages["Library"].start_import())
 
-        chrome = QWidget(self)
-        chrome.setObjectName("cytoChrome")
-        chrome.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        header = QHBoxLayout(chrome)
-        header.setContentsMargins(16, 10, 16, 10)
-        header.setSpacing(12)
-        header.addWidget(self._title)
-        header.addWidget(self._crumb, 1)
-        header.addWidget(self._import_btn)
-        header.addWidget(self._help)
-        self._side_btn.hide()  # the mockup has no options panel; Data counts stay reachable from the code
+        self._import_btn.hide()  # Import lives in the Library count row now
+        self._title.hide()  # no top row: these labels must not paint over the tabs
+        self._crumb.hide()
+        self._side_btn.hide()
 
         self._tabs = QTabWidget(self)
         self._tabs.setDocumentMode(True)
+        corner = QWidget(self)
+        cl = QHBoxLayout(corner)
+        cl.setContentsMargins(0, 0, 8, 0)
+        cl.addWidget(self._help, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._tabs.setCornerWidget(corner, Qt.Corner.TopRightCorner)
+        self._tabs.tabBar().setDrawBase(False)  # no line running above the "?" button
+        # taller tabs, so the "?" fits inside the tab row and never hangs over the line below it
+        bar = self._tabs.tabBar()
+        bar.setStyleSheet("QTabBar::tab { padding: 10px 14px; }")
+        self._tabs.setObjectName("cytoTabs")  # the tab row has the side-panel colour
+        self._tabs.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        corner.setObjectName("cytoAside")
+        corner.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        cl.setContentsMargins(0, 0, 14, 0)
+        self._corner = corner
+        QTimer.singleShot(0, self._fit_corner)
         self._pages: dict[str, QWidget] = {}
         for name in ws.TAB_NAMES:
             page = {"Library": LibraryTab, "Image": ImageTab, "Signals": SignalsTab, "Idiogram": IdiogramTab, "Figure": FigureTab}.get(name, None)
@@ -159,6 +168,8 @@ class CytogeneticsWorkspace(QWidget):
         self._pages["Signals"].karyotypesChanged.connect(self.refresh)
         self._pages["Idiogram"].karyotypesChanged.connect(self.refresh)
         self._pages["Idiogram"].figureRequested.connect(self.add_idiogram_to_figure)
+        self._pages["Idiogram"].openSignalRequested.connect(self.open_signal)
+        self._pages["Idiogram"].openRequested.connect(self.openRequested)
         self._pages["Library"].figureRequested.connect(self.add_to_figure)
         self._pages["Figure"].crumbChanged.connect(self._on_figure_crumb)
 
@@ -177,20 +188,29 @@ class CytogeneticsWorkspace(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
-        root.addWidget(chrome)
         root.addWidget(self._split, 1)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
         self._side_btn.setChecked(False)
         self._on_side_toggled(self._side_btn.isChecked())
         self._tabs.setCurrentIndex(self._tabs.indexOf(self._pages[ws.normalize_tab(_read("tab", ""))]))
-        self._import_btn.setVisible(self.tab_name() == "Library")
         cyto_notifier().changed.connect(self._on_store_changed)
         if path is not None:
             self.load(path)
 
     # ---------------------------------------------------------------- side panel
 
+
+    def _fit_corner(self) -> None:
+        """The "?" corner exactly as tall as the tab row, button centred: nothing hangs over the panels below."""
+        h = self._tabs.tabBar().height()
+        if h > 0:
+            self._corner.setFixedHeight(h)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 (Qt API)
+        super().resizeEvent(event)
+        if hasattr(self, "_corner"):
+            QTimer.singleShot(0, self._fit_corner)
     def _build_side(self) -> QWidget:
         from repeatviewer.widgets.sequence_annotation_rail import _CollapsibleSection
 
@@ -241,8 +261,29 @@ class CytogeneticsWorkspace(QWidget):
         self._folder = ws.workspace_folder(self._path)
         self._title.setText("Cytogenetics")
         self._title.setToolTip(str(self._folder))
-        self._crumb.setText(ws.breadcrumb(self._folder, self._current_image))
+        self._set_crumb(ws.breadcrumb(self._folder, self._current_image))
+        saved = _read(self._last_image_key(), "")  # read before the Library picks its first image
         self.refresh()
+        _write("last_folder", str(self._folder))
+        self._restore_last_image(saved)
+
+    def _last_image_key(self) -> str:
+        import hashlib
+
+        return "last_image_" + hashlib.md5(str(self._folder).encode("utf-8")).hexdigest()[:12]
+
+    def _restore_last_image(self, image_id: str) -> None:
+        """Back on the cell that was open when this folder's workspace was last closed."""
+        from repeatviewer.backends import cyto_images as ci
+
+        if self._folder is None or not image_id or not any(i.id == image_id for i in ci.load_images(self._folder)):
+            return
+        lib = self._pages["Library"]
+        if image_id in getattr(lib, "_thumbs", {}):
+            lib._on_clicked(image_id)  # selects it in the Library too
+        for name in ("Image", "Signals"):
+            self._pages[name].follow(image_id)
+        self._on_image_shown(image_id, "")
 
     def refresh(self) -> None:
         self._fill_data()
@@ -287,6 +328,11 @@ class CytogeneticsWorkspace(QWidget):
         self.show_tab("Signals")
         self._pages["Signals"].show_image(image_id)
 
+    def open_signal(self, image_id: str, signal_id: str) -> None:
+        """Show one image in the Signals tab with one signal selected."""
+        self.open_signals(image_id)
+        self._pages["Signals"].select_signal(signal_id)
+
     def add_to_figure(self, image_id: str) -> None:
         """Add the channels and the merge of one cell to the current figure."""
         if not image_id:
@@ -298,20 +344,25 @@ class CytogeneticsWorkspace(QWidget):
         self.show_tab("Figure")
         self._pages["Figure"].add_idiogram()
 
+    def _set_crumb(self, text: str) -> None:
+        """The path (folder › slide › cell) is shown as the tab row's tooltip."""
+        self._crumb.setText(text)
+        self._tabs.tabBar().setToolTip(text)
+
     def _on_figure_crumb(self, text: str) -> None:
         if self.tab_name() == "Figure" and text:
-            self._crumb.setText(text)
+            self._set_crumb(text)
 
     def _sync_crumb(self) -> None:
         if self._folder is None:
             return
         name = self.tab_name()
         if name == "Figure":
-            self._crumb.setText(self._pages["Figure"].crumb())
+            self._set_crumb(self._pages["Figure"].crumb())
         elif name == "Idiogram":
-            self._crumb.setText(f"{self._folder.name} › all slides")
+            self._set_crumb(f"{self._folder.name} › all slides")
         else:
-            self._crumb.setText(ws.breadcrumb(self._folder, self._current_image))
+            self._set_crumb(ws.breadcrumb(self._folder, self._current_image))
 
     def _on_image_shown(self, image_id: str, source: str = "Library") -> None:
         """Keep the header and the other image tabs on the same cell."""
@@ -319,6 +370,8 @@ class CytogeneticsWorkspace(QWidget):
         self._pages["Figure"].current_image = image_id
         if self._folder is not None:
             self._sync_crumb()
+            if image_id:
+                _write(self._last_image_key(), image_id)
         for name in ("Image", "Signals"):
             if name != source:
                 self._pages[name].follow(image_id)
@@ -329,6 +382,5 @@ class CytogeneticsWorkspace(QWidget):
     def _on_tab_changed(self, index: int) -> None:
         name = self.tab_name()
         _write("tab", name)
-        self._import_btn.setVisible(name == "Library")
         self._sync_crumb()
         self.tabChanged.emit(name)
