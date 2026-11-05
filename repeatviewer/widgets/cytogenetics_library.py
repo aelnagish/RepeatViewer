@@ -933,6 +933,7 @@ class LibraryTab(QWidget):
         dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         dialog.destroyed.connect(lambda *_: setattr(self, "_lists_dialog", None))
         self._lists_dialog = dialog
+        _float_above_app(self.window(), "_cyto_lists_dialog", dialog)
         dialog.show()
 
     # ------------------------------------------------------------------ import
@@ -950,6 +951,7 @@ class LibraryTab(QWidget):
         dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         dialog.finished.connect(lambda _r, d=dialog: self._after_import_dialog(d))
         self._import_dialog = dialog
+        _float_above_app(self.window(), "_cyto_import_dialog", dialog)
         dialog.show()
 
     def _after_import_dialog(self, dialog) -> None:
@@ -1002,3 +1004,15 @@ class LibraryTab(QWidget):
 
     def busy(self) -> bool:
         return self._worker is not None
+
+
+def _float_above_app(window, attr: str, dialog) -> None:
+    """Keep a non-modal window above RepeatViewer (not other apps): the main window raises it when it is
+    activated or a panel is clicked."""
+    configure = getattr(type(window), "_configure_app_floating_dialog", None)
+    if callable(configure):
+        configure(dialog)
+    try:
+        setattr(window, attr, dialog)
+    except (AttributeError, RuntimeError):
+        pass

@@ -9,7 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import QSize, Qt, QTimer
-from PySide6.QtGui import QColor, QFontMetrics, QIcon, QPixmap
+from PySide6.QtGui import QColor, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QColorDialog,
     QDialog,
@@ -53,6 +53,7 @@ HELP = (
 )
 
 ADD_DYE = "Add a dye…"
+NO_DYE = "None"
 
 # (header, field, kind) per list; Name comes first and "Used in" last
 _COLUMNS = {
@@ -109,7 +110,6 @@ class CytoListsDialog(PanelPathFields, QDialog):
         ls.ensure_used_values(self._folder, self._editor.lists)
         self._key = start if start in ls.EDIT_ORDER else "dyes"
         self._loading = False
-        self._min_widths: list[int] = []
 
         self._nav = QListWidget(self)
         self._nav.setSpacing(1)
@@ -139,9 +139,8 @@ class CytoListsDialog(PanelPathFields, QDialog):
         self._table.rowMoved.connect(self._on_row_moved)
         self._table.itemSelectionChanged.connect(self._fill_form)
         header = self._table.horizontalHeader()
-        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        header.setStretchLastSection(True)
-        header.sectionResized.connect(self._keep_min_width)
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self._table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         table_box = rounded_box(self._table, self)
 
         add = QPushButton("+", self)
@@ -178,7 +177,6 @@ class CytoListsDialog(PanelPathFields, QDialog):
             w.editingFinished.connect(lambda w=w, fld=field: self._set_selected(fld, w.text()))
         for w in (self._f_ex, self._f_em):
             w.setPlaceholderText("nm")
-            w.setMaximumWidth(120)
         self._f_colour = QPushButton(self)
         self._f_colour.setText("Choose…")
         self._f_colour.setIconSize(QSize(28, 14))
@@ -189,8 +187,7 @@ class CytoListsDialog(PanelPathFields, QDialog):
         self._f_seq.panel_suffixes = (".fa", ".fasta", ".fna", ".fas")
         self._f_seq.path_changed.connect(self._on_form_sequence)
         self._f_dye = NoWheelComboBox(self)
-        self._f_dye.setSizeAdjustPolicy(NoWheelComboBox.SizeAdjustPolicy.AdjustToContents)
-        self._f_dye.setMinimumWidth(200)
+        self._f_dye.setSizeAdjustPolicy(NoWheelComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         self._f_dye.activated.connect(self._on_form_dye)
         self._f_marks = NoWheelComboBox(self)
         self._f_marks.addItems(list(ls.STAGE_MARKS))
@@ -202,7 +199,9 @@ class CytoListsDialog(PanelPathFields, QDialog):
             lab = QLabel(label, self._form_host)
             self._form.addRow(lab, w)
             self._rows[w] = lab
-        self._f_colour.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        for w in (self._f_name, self._f_ex, self._f_em, self._f_words, self._f_colour, self._f_seq, self._f_dye,
+                  self._f_marks):
+            w.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
         head = QHBoxLayout()
         head.addWidget(self._title, 1)
@@ -221,15 +220,13 @@ class CytoListsDialog(PanelPathFields, QDialog):
         body.addWidget(nav_box)
         body.addLayout(right, 1)
 
-        note = QLabel("Lists are kept per folder. Renaming here updates every image that uses the entry.", self)
-        note.setStyleSheet("color: gray;")
         cancel = QPushButton("Cancel", self)
         save = QPushButton("Save", self)
         save.setDefault(True)
         cancel.clicked.connect(self.reject)
         save.clicked.connect(self._save)
         buttons = QHBoxLayout()
-        buttons.addWidget(note, 1)
+        buttons.addStretch(1)
         buttons.addWidget(cancel)
         buttons.addWidget(save)
 
@@ -320,25 +317,17 @@ class CytoListsDialog(PanelPathFields, QDialog):
             used.setForeground(QColor("gray"))
             self._table.setItem(r, len(cols) + 1, used)
         self._table.setIconSize(QSize(28, 14))
-        metrics = QFontMetrics(self._table.horizontalHeader().font())
-        self._min_widths = [metrics.horizontalAdvance(h) + 28 for h in heads]
-        self._table.resizeColumnsToContents()
-        for c, w in enumerate(self._min_widths):
-            wanted = max(w, self._table.columnWidth(c) + 12)
-            if c == 0:
-                wanted = max(wanted, 150)
-            if 0 < c <= len(cols) and cols[c - 1][2] == "sequence":
-                wanted = max(wanted, 260)
-            self._table.setColumnWidth(c, min(wanted, 360))
+        header = self._table.horizontalHeader()
+        for c in range(len(heads)):
+            kind = cols[c - 1][2] if 0 < c <= len(cols) else "text"
+            fit = kind in ("number", "color")
+            header.setSectionResizeMode(c, QHeaderView.ResizeMode.ResizeToContents if fit
+                                        else QHeaderView.ResizeMode.Stretch)
         self._loading = False
         row = next((r for r, e in enumerate(entries) if str(e["name"]) == select), 0 if entries else -1)
         if row >= 0:
             self._table.selectRow(row)
         self._fill_form()
-
-    def _keep_min_width(self, col: int, _old: int, new: int) -> None:
-        if col < len(self._min_widths) and new < self._min_widths[col]:
-            self._table.horizontalHeader().resizeSection(col, self._min_widths[col])
 
     def _selected_names(self) -> list[str]:
         rows = sorted({i.row() for i in self._table.selectedIndexes()})
@@ -403,11 +392,10 @@ class CytoListsDialog(PanelPathFields, QDialog):
         self._f_seq.set_text(str(e.get("sequence", "")), emit=False)
         self._f_dye.blockSignals(True)
         self._f_dye.clear()
-        self._f_dye.addItem("")
+        self._f_dye.addItem(NO_DYE)
         self._f_dye.addItems(self._editor.names("dyes"))
-        self._f_dye.insertSeparator(self._f_dye.count())
         self._f_dye.addItem(ADD_DYE)
-        self._f_dye.setCurrentText(str(e.get("dye", "")))
+        self._f_dye.setCurrentText(str(e.get("dye", "")) or NO_DYE)
         self._f_dye.blockSignals(False)
         self._f_marks.setCurrentText(str(e.get("marks", "")) or "chromosomes")
 
@@ -434,7 +422,8 @@ class CytoListsDialog(PanelPathFields, QDialog):
 
     def _on_form_dye(self, _index: int) -> None:
         if self._f_dye.currentText() != ADD_DYE:
-            self._set_selected("dye", self._f_dye.currentText())
+            text = self._f_dye.currentText()
+            self._set_selected("dye", "" if text == NO_DYE else text)
             return
         dye, ok = QInputDialog.getText(self, "Add a dye", "Name of the dye:")
         if not ok or not dye.strip():
