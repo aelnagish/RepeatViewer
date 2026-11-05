@@ -802,11 +802,11 @@ class SignalsTab(QWidget):
         current = 1 if not has_k else (2 if self._tool == "number" else 3)
         rows = (
             (1, "Karyotype", f"{s.karyotype.formula}" if has_k else "", has_k,
-             "▾ choose   ＋ new   ✎ edit lengths, bands", self._on_step_karyotype),
+             "▾ choose   ＋ new   ✎ edit", self._on_step_karyotype),
             (2, "Chromosomes", f"{named} / {len(labels)}" if labels else "", bool(labels) and named == len(labels),
              "⊙ click   ↕ drag ends   ○ centromere", lambda: self._set_tool("number")),
             (3, "Signals", f"{n_sig} ●" if n_sig else "", n_sig > 0,
-             "⊙ click a spot   ⇢ drag   ⌫ delete   ▾ probe", lambda: self._set_tool("signal")),
+             "⊙ click a spot   ⇢ drag   ⌫ delete", lambda: self._set_tool("signal")),
         )
         self._step_karyo.setText("1  Karyotype ✓" if has_k else "1  Karyotype")
         for b in self._tool_group.buttons():
@@ -827,6 +827,7 @@ class SignalsTab(QWidget):
             badge.setStyleSheet(f"QLabel {{ background:{colour}; color:white; border-radius:10px; font-weight:600; }}")
             name = QLabel(f"<b>{title}</b>" if on else title, row)
             val = QLabel(value, row)
+            val.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             val.setStyleSheet("color: palette(dark);")
             for w in (badge, name, val):
                 w.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
@@ -837,6 +838,8 @@ class SignalsTab(QWidget):
             row.setMinimumHeight(28)
             self._guide.addWidget(row)
             tip = QLabel(hint, self)
+            tip.setWordWrap(True)
+            tip.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
             tip.setStyleSheet(f"color: {'palette(dark)' if on else '#A0A2A8'}; padding-left: 34px;")
             self._guide.addWidget(tip)
             if n < 3:
@@ -871,7 +874,7 @@ class SignalsTab(QWidget):
                 css = "background:#FFFFFF; color:#8A8D93; border:1px dashed #C9D3E6;"
             b.setStyleSheet(f"QPushButton {{ {css} border-radius:5px; padding:4px 0; font-size:12px; }}")
             b.clicked.connect(lambda _c=False, l=label: self._on_label_clicked(l))
-            self._labels_grid.addWidget(b, n // 8, n % 8)
+            self._labels_grid.addWidget(b, n // 5, n % 5)
             self._label_buttons[label] = b
         self._chrom_count.setText(f"{len(used & set(labels))} of {len(labels)}")
 

@@ -1208,7 +1208,7 @@ class IdiogramTab(QWidget):
         self._side_stack.addWidget(aside)
         self._side_stack.addWidget(self._build_edit_side())
         self._side_stack.addWidget(self._build_paper_side())
-        self._side_stack.setMinimumWidth(240)
+        self._side_stack.setMinimumWidth(320)  # the right column never clips its content
         self._side_stack.setMaximumWidth(SIDE_W)
 
         root = QHBoxLayout(self)
