@@ -8,6 +8,7 @@ from pathlib import Path
 from PySide6.QtCore import QPointF, QRectF, QSettings, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (
+    QSizePolicy,
     QButtonGroup,
     QCheckBox,
     QFileDialog,
@@ -250,12 +251,14 @@ class SignalsTab(QWidget):
             b.setCheckable(True)
             b.setChecked(key == self._tool)
             b.clicked.connect(lambda _c=False, k=key: self._set_tool(k))
-            b.setMinimumWidth(b.sizeHint().width())  # never squeezed (the text was cut)
+            b.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
             self._tool_group.addButton(b)
             bar.addWidget(b)
         bar.addSpacing(12)
-        bar.addWidget(QLabel("Probe", self))
+        self._probe_label = QLabel("Probe", self)
+        bar.addWidget(self._probe_label)
         self._probe = NoWheelComboBox(self)
+        self._probe.setToolTip("Which probe a click in step 2 marks. Shown only when the cell has more than one probe.")
         self._probe.setMinimumWidth(120)
         self._probe.currentIndexChanged.connect(lambda _i: self._update_hint())
         bar.addWidget(self._probe)
@@ -290,7 +293,6 @@ class SignalsTab(QWidget):
         # ---- bottom row: what the next click does, then the cells of the slide
         self._hint = QLabel(self)
         self._hint.setObjectName("cytoMuted")
-        from PySide6.QtWidgets import QSizePolicy
 
         self._hint.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self._cells_row = QHBoxLayout()
@@ -490,6 +492,7 @@ class SignalsTab(QWidget):
         for b, (key, _text) in zip(self._tool_group.buttons(), ss.TOOLS):
             b.setChecked(key == self._tool)
         self._canvas.set_tool_cursor(Qt.CursorShape.CrossCursor)
+        self._sync_probe_visible()
         self._update_hint()
         self._sync_labels()
 
@@ -703,6 +706,12 @@ class SignalsTab(QWidget):
             self._probe.addItem(f"{probe} · {dye}" if dye else probe, probe)
         if self._probe.count() == 0:
             self._probe.addItem("no probe set", "")
+        self._sync_probe_visible()
+
+    def _sync_probe_visible(self) -> None:
+        show = self._tool == "signal" and self._probe.count() > 1
+        self._probe_label.setVisible(show)
+        self._probe.setVisible(show)
 
     def _fill_karyotypes(self) -> None:
         s = self._session
