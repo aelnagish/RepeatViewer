@@ -11,6 +11,8 @@ from pathlib import Path
 from PySide6.QtCore import QSize, Qt, QTimer
 from PySide6.QtGui import QColor, QIcon, QPixmap
 from PySide6.QtWidgets import (
+    QApplication,
+    QFormLayout,
     QColorDialog,
     QDialog,
     QHBoxLayout,
@@ -54,6 +56,7 @@ HELP = (
 
 ADD_DYE = "Add a dye…"
 NO_DYE = "None"
+FIELD_W = 220  # every field of the entry form has this width
 
 # (header, field, kind) per list; Name comes first and "Used in" last
 _COLUMNS = {
@@ -139,8 +142,11 @@ class CytoListsDialog(PanelPathFields, QDialog):
         self._table.rowMoved.connect(self._on_row_moved)
         self._table.itemSelectionChanged.connect(self._fill_form)
         header = self._table.horizontalHeader()
-        header.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self._table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        header.setStretchLastSection(True)
+        header.sectionResized.connect(self._on_column_resized)
+        self._sizing = False
+        self._user_widths: dict[str, dict[int, int]] = {}
         table_box = rounded_box(self._table, self)
 
         add = QPushButton("+", self)
@@ -201,7 +207,9 @@ class CytoListsDialog(PanelPathFields, QDialog):
             self._rows[w] = lab
         for w in (self._f_name, self._f_ex, self._f_em, self._f_words, self._f_colour, self._f_seq, self._f_dye,
                   self._f_marks):
-            w.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            w.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+            w.setFixedWidth(FIELD_W)
+        self._form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
 
         head = QHBoxLayout()
         head.addWidget(self._title, 1)
@@ -317,17 +325,50 @@ class CytoListsDialog(PanelPathFields, QDialog):
             used.setForeground(QColor("gray"))
             self._table.setItem(r, len(cols) + 1, used)
         self._table.setIconSize(QSize(28, 14))
-        header = self._table.horizontalHeader()
-        for c in range(len(heads)):
-            kind = cols[c - 1][2] if 0 < c <= len(cols) else "text"
-            fit = kind in ("number", "color")
-            header.setSectionResizeMode(c, QHeaderView.ResizeMode.ResizeToContents if fit
-                                        else QHeaderView.ResizeMode.Stretch)
+        self._size_columns()
+        QTimer.singleShot(0, self._size_columns)  # again once the layout has settled (the form rows change)
         self._loading = False
         row = next((r for r, e in enumerate(entries) if str(e["name"]) == select), 0 if entries else -1)
         if row >= 0:
             self._table.selectRow(row)
         self._fill_form()
+
+    def _size_columns(self) -> None:
+        """Columns start wide enough for header and content and share the free width; the user can drag them,
+        and dragged widths are kept for that list while the window is open."""
+        key = self._key
+        cols = _COLUMNS[key]
+        header = self._table.horizontalHeader()
+        metrics = header.fontMetrics()
+        self._sizing = True
+        try:
+            self._table.resizeColumnsToContents()
+            n = self._table.columnCount()
+            widths = []
+            for c in range(n):
+                head = self._table.horizontalHeaderItem(c).text() if self._table.horizontalHeaderItem(c) else ""
+                widths.append(max(self._table.columnWidth(c) + 12, metrics.horizontalAdvance(head) + 24))
+            free = self._table.viewport().width() - sum(widths)
+            grow = [c for c in range(n) if not (0 < c <= len(cols) and cols[c - 1][2] in ("number", "color"))]
+            if free > 0 and grow:
+                for c in grow:
+                    widths[c] += free // len(grow)
+            for c, w in self._user_widths.get(key, {}).items():
+                if c < n:
+                    widths[c] = w
+            for c, w in enumerate(widths):
+                self._table.setColumnWidth(c, w)
+        finally:
+            self._sizing = False
+
+    def _on_column_resized(self, col: int, _old: int, new: int) -> None:
+        dragging = QApplication.mouseButtons() != Qt.MouseButton.NoButton  # only the user's own drags are kept
+        if not self._sizing and dragging and col < self._table.columnCount() - 1:
+            self._user_widths.setdefault(self._key, {})[col] = new
+
+    def showEvent(self, event) -> None:  # noqa: N802 (Qt API)
+        super().showEvent(event)
+        QTimer.singleShot(0, self._size_columns)
 
     def _selected_names(self) -> list[str]:
         rows = sorted({i.row() for i in self._table.selectedIndexes()})
