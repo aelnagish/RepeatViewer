@@ -1155,23 +1155,24 @@ def run_on_sequence(
         ):
             raise RuntimeError("Left boundary must be less than the right boundary.")
 
-        out_file = out_dir / f"{kept_input_name(seq_path)}.tsd_search.txt"
-        TSD_identifier(
-            tsd_opts.left_boundary,
-            tsd_opts.right_boundary,
-            tsd_opts.nt_radius,
-            seq_path,
-            out_file,
-            k_min=tsd_opts.min_tsd_length,
-            k_max=tsd_opts.max_tsd_length,
-            min_distance=tsd_opts.min_distance,
-            max_distance=tsd_opts.max_distance,
-            max_sim_threshold=tsd_opts.max_sim_threshold,
-            nt_threshold=tsd_opts.nt_threshold,
-            cluster_eps=tsd_opts.cluster_eps,
-        )
-        created.append(str(out_file.resolve()))
-        # Also write TSD flanks to the annotation JSON so Overview can display them.
+        if bool(getattr(tsd_opts, "write_text_report", False)):
+            out_file = out_dir / f"{kept_input_name(seq_path)}.tsd_search.txt"
+            TSD_identifier(
+                tsd_opts.left_boundary,
+                tsd_opts.right_boundary,
+                tsd_opts.nt_radius,
+                seq_path,
+                out_file,
+                k_min=tsd_opts.min_tsd_length,
+                k_max=tsd_opts.max_tsd_length,
+                min_distance=tsd_opts.min_distance,
+                max_distance=tsd_opts.max_distance,
+                max_sim_threshold=tsd_opts.max_sim_threshold,
+                nt_threshold=tsd_opts.nt_threshold,
+                cluster_eps=tsd_opts.cluster_eps,
+            )
+            created.append(str(out_file.resolve()))
+        # Write TSD flanks to the annotation JSON so Overview can display them.
         ann = run_te_annotation_on_fasta(
             seq_path,
             TeAnnotationOptions(auto_modes=(AutoAnnotationMode.TSD,)),

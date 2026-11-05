@@ -7381,6 +7381,21 @@ class TsdSearchSettingsPanel(QWidget):
             ),
         )
 
+        self._write_text_report = QCheckBox(
+            "Write .tsd_search.txt report", self
+        )
+        self._write_text_report.setChecked(bool(opts.write_text_report))
+        form.addRow(
+            _label(""),
+            field_with_help(
+                self._write_text_report,
+                "Write .tsd_search.txt report",
+                "When checked, write a clustered TSD text report beside the "
+                "MSA (shows in Files). Off by default.",
+                parent=self,
+            ),
+        )
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
@@ -7409,6 +7424,7 @@ class TsdSearchSettingsPanel(QWidget):
             nt_threshold=prev.nt_threshold,
             cluster_eps=prev.cluster_eps,
             boundary_source=str(source),
+            write_text_report=self._write_text_report.isChecked(),
         )
 
 

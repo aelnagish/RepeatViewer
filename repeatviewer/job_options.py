@@ -249,6 +249,7 @@ DEFAULT_TSD_MAX_DISTANCE = 0  # 0 = no upper limit on TE span between flanks
 DEFAULT_TSD_MAX_SIM_THRESHOLD = 0.3
 DEFAULT_TSD_NT_THRESHOLD = 0.95
 DEFAULT_TSD_CLUSTER_EPS = 1.0
+DEFAULT_TSD_WRITE_TEXT_REPORT = False
 
 # How left/right TE edges are chosen for a TSD run.
 TSD_BOUNDARY_REPEATVIEWER = "repeatviewer"  # *.boundaries_RV.json
@@ -269,6 +270,8 @@ class TsdSearchOptions:
     the TE body edges (0 = unset). ``nt_radius`` is MSA columns to search
     outside each edge on both sides (gaps count as positions).
     ``boundary_source`` is RepeatViewer sidecar or user-define dialog.
+    ``write_text_report`` writes ``*.tsd_search.txt`` beside the MSA (off by
+    default so the Files list stays clean).
     Hits are filtered / clustered like TEtrimmer.
     """
 
@@ -283,6 +286,7 @@ class TsdSearchOptions:
     nt_threshold: float = DEFAULT_TSD_NT_THRESHOLD
     cluster_eps: float = DEFAULT_TSD_CLUSTER_EPS
     boundary_source: str = DEFAULT_TSD_BOUNDARY_SOURCE
+    write_text_report: bool = DEFAULT_TSD_WRITE_TEXT_REPORT
 
 
 DEFAULT_ALIGN_THREADS = 5
@@ -1459,6 +1463,9 @@ def load_tsd_search_options() -> TsdSearchOptions:
         nt_threshold=float(v.get("nt_threshold", DEFAULT_TSD_NT_THRESHOLD)),
         cluster_eps=float(v.get("cluster_eps", DEFAULT_TSD_CLUSTER_EPS)),
         boundary_source=source,
+        write_text_report=_to_bool(
+            v.get("write_text_report"), DEFAULT_TSD_WRITE_TEXT_REPORT
+        ),
     )
 
 
@@ -1480,6 +1487,7 @@ def save_tsd_search_options(opts: TsdSearchOptions) -> None:
             "nt_threshold": opts.nt_threshold,
             "cluster_eps": opts.cluster_eps,
             "boundary_source": source,
+            "write_text_report": bool(opts.write_text_report),
         },
     )
 

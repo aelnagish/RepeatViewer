@@ -6630,12 +6630,20 @@ class TsdSearchParamsDialog(QDialog):
         )
         self._saved_max_distance = max(0, int(opts.max_distance))
 
+        self._write_text_report = QCheckBox("Write .tsd_search.txt report")
+        self._write_text_report.setChecked(bool(opts.write_text_report))
+        self._write_text_report.setToolTip(
+            "When checked, write a clustered TSD text report beside the MSA "
+            "(shows in Files). Off by default."
+        )
+
         form = QFormLayout()
         form.addRow("Boundary definition:", self._boundary_source)
         form.addRow("Search range around boundary (bp):", self._radius)
         form.addRow("Min TSD length (bp):", self._min_len)
         form.addRow("Max TSD length (bp):", self._max_len)
         form.addRow("Min distance between TSDs (bp):", self._min_dist)
+        form.addRow("", self._write_text_report)
 
         if self._include_clustering:
             self._max_sim = QDoubleSpinBox()
@@ -6715,6 +6723,7 @@ class TsdSearchParamsDialog(QDialog):
                 else defaults.cluster_eps
             ),
             boundary_source=str(source),
+            write_text_report=self._write_text_report.isChecked(),
         )
 
 

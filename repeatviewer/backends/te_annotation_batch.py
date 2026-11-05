@@ -446,9 +446,12 @@ def run_te_annotation_on_fasta(
                 f"{resolved.name}: TSD scan (before other detectors)",
             )
         tsd_opts = tsd_search_options or load_tsd_search_options()
-        # Always write the clustered text report beside the MSA (same as
-        # Tools → TSD search), including Feature detection Preview.
-        report_path = tsd_cluster_report_path(resolved)
+        # Optional clustered text report (off by default; TSD settings).
+        report_path = (
+            tsd_cluster_report_path(resolved)
+            if bool(getattr(tsd_opts, "write_text_report", False))
+            else None
+        )
         tsd_by_id = detect_tsd_features_by_id(
             resolved,
             record_ids=all_record_ids,
@@ -465,7 +468,7 @@ def run_te_annotation_on_fasta(
             cluster_report_path=report_path,
             progress=_tsd_progress,
         )
-        if report_path.is_file():
+        if report_path is not None and report_path.is_file():
             tsd_report_holder.append(report_path.resolve())
         for rid in annotate_ids:
             existing = list(features_by_id.get(rid) or [])

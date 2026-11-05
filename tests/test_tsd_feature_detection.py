@@ -418,8 +418,8 @@ def test_preferred_boundaries_from_sidecar(tmp_path: Path) -> None:
     assert (left, right) == (6, 25)
 
 
-def test_tool_tsd_search_writes_text_and_json(tmp_path: Path) -> None:
-    """Tools → TSD search: clustered text report + annotation JSON for Overview."""
+def test_tool_tsd_search_skips_text_report_by_default(tmp_path: Path) -> None:
+    """Tools → TSD search: annotation JSON only; no .tsd_search.txt by default."""
     from repeatviewer.backends.curation import run_on_sequence
     from repeatviewer.backends.sequence_features import load_features_by_id_from_json
     from repeatviewer.project import RepeatViewerProject
@@ -435,6 +435,34 @@ def test_tool_tsd_search_writes_text_and_json(tmp_path: Path) -> None:
             right_boundary=_TE_RIGHT_1BASED,
             nt_radius=10,
             min_distance=0,
+        ),
+    )
+    text_files = [p for p in outs if str(p).endswith(".tsd_search.txt")]
+    assert not text_files
+    assert not list(tmp_path.glob("*.tsd_search.txt"))
+    features = load_features_by_id_from_json(fasta, ["a", "b"])
+    assert features["a"]
+    assert all(f.feature_type == "TSD" for f in features["a"])
+
+
+def test_tool_tsd_search_writes_text_when_enabled(tmp_path: Path) -> None:
+    """Tools → TSD search: clustered text report when write_text_report is on."""
+    from repeatviewer.backends.curation import run_on_sequence
+    from repeatviewer.backends.sequence_features import load_features_by_id_from_json
+    from repeatviewer.project import RepeatViewerProject
+
+    fasta = tmp_path / "msa.fa"
+    _write_msa_with_tsd(fasta)
+    outs = run_on_sequence(
+        "tsd_search",
+        fasta,
+        RepeatViewerProject(),
+        tsd_search_options=TsdSearchOptions(
+            left_boundary=_TE_LEFT_1BASED,
+            right_boundary=_TE_RIGHT_1BASED,
+            nt_radius=10,
+            min_distance=0,
+            write_text_report=True,
         ),
     )
     text_files = [p for p in outs if str(p).endswith(".tsd_search.txt")]
