@@ -219,6 +219,10 @@ class FigurePainter:
         canvas = self._idiogram_canvas()
         logical_h = IDIOGRAM_LOGICAL_W * r.height() / max(r.width(), 1.0)
         canvas.resize(int(IDIOGRAM_LOGICAL_W), int(max(logical_h, 200)))
+        canvas.karyotype = view.karyotype
+        canvas.assembly_active = view.genome is not None
+        st = view.settings
+        canvas.show_bands, canvas.show_measured, canvas.show_assembly = st.show_bands, st.show_measured, st.show_assembly
         canvas.set_rows(view.rows, view.heights, view.colours)
         canvas.resize(int(IDIOGRAM_LOGICAL_W), int(max(logical_h, 200)))
         p.save()
@@ -718,6 +722,9 @@ class FigureTab(QWidget):
         aside.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         aside.setWidget(body)
         aside.setMinimumWidth(240)
+        from repeatviewer.widgets.cytogenetics_style import fit_side_scroll
+
+        fit_side_scroll(aside)  # never narrower than its content, on any platform
         aside.setMaximumWidth(SIDE_W)
 
         root = QHBoxLayout(self)

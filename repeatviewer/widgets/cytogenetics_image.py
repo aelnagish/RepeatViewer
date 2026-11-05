@@ -602,6 +602,9 @@ class ImageTab(QWidget):
         scroll.setWidget(self._side_body)
         scroll.setMinimumWidth(260)
         scroll.setMaximumWidth(SIDE_W + 260)  # drag the divider to make the panel wider
+        from repeatviewer.widgets.cytogenetics_style import fit_side_scroll
+
+        fit_side_scroll(scroll)
 
         split = QSplitter(Qt.Orientation.Horizontal, self)
         split.setChildrenCollapsible(False)

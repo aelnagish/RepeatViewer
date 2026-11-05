@@ -47,15 +47,19 @@ NEW_KARYOTYPE = "New karyotype…"
 HELP_TEXT = (
     "<b>Signals</b><br>"
     "Name the chromosomes of one cell, then mark where each probe signal sits.<br>"
-    "<b>1 Number chromosomes</b>: click a chromosome to give it the next name (1a, 1b, 1c, 2a …). "
+    "<b>1 Karyotype</b>: choose or build the karyotype of the species (number, lengths, bands).<br>"
+    "<b>2 Number chromosomes</b>: click a chromosome to give it the next name (1a, 1b, 1c, 2a …). "
     "Its axis is found from the DAPI image: square handles are the telomeres (p, q), the round one the centromere. "
     "Drag them when they are wrong. Click a name on the right to choose another one.<br>"
-    "<b>2 Mark signals</b>: click a spot to add a signal of the chosen probe. With <b>Snap</b> on it moves to the centre "
+    "<b>3 Mark signals</b>: click a spot to add a signal of the chosen probe. With <b>Snap</b> on it moves to the centre "
     "of the spot. It is given to the nearest chromosome, and its arm and position are worked out from the axis.<br>"
     "<b>In both steps</b>: drag a name or a signal to move it, right-click for more (change probe, move to another "
     "chromosome, strength, delete), Backspace deletes the selected one.<br>"
     "<b>Moving the picture</b>: mouse wheel or trackpad zooms, Option + drag or the middle button moves it.<br>"
-    "Arm and position that you set by hand are never recomputed."
+    "Arm and position that you set by hand are never recomputed.<br>"
+    "<b>Guide</b> (right, under the summary): blue = the step you are on, ✓ = done, grey number = still to do; "
+    "click a step to go there. "
+    "⊙ click, ↕ drag, ○ centromere, ● signals, ⌫ delete."
 )
 
 
@@ -226,7 +230,7 @@ class SignalsTab(QWidget):
         super().__init__(parent)
         self._folder: Path | None = None
         self._session: ss.SignalsSession | None = None
-        self._tool = "number"
+        self._tool = _read("signals_tool", "number") if _read("signals_tool", "number") in dict(ss.TOOLS) else "number"
         self._pending_label = ""
         self._drag: tuple[str, str] | None = None
         self._moved = False
@@ -234,7 +238,7 @@ class SignalsTab(QWidget):
         self._pending = ""
         self._label_buttons: dict[str, QPushButton] = {}
 
-        # ---- toolbar: 1 Number chromosomes | 2 Mark signals, probe, snap, zoom, cell navigation
+        # ---- toolbar: 1 Karyotype | 2 Number chromosomes | 3 Mark signals, probe, snap, zoom, cell navigation
         self._canvas = MarkCanvas(self)
         self._canvas.pressedAt.connect(self._on_press)
         self._canvas.movedTo.connect(self._on_move)
@@ -246,6 +250,11 @@ class SignalsTab(QWidget):
         bar = QHBoxLayout()
         bar.setContentsMargins(10, 8, 10, 6)
         bar.setSpacing(8)
+        self._step_karyo = QPushButton("1  Karyotype", self)
+        self._step_karyo.setToolTip("Choose or build the karyotype of this species")
+        self._step_karyo.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
+        self._step_karyo.clicked.connect(self._on_step_karyotype)
+        bar.addWidget(self._step_karyo)
         for key, text in ss.TOOLS:
             b = QPushButton(text, self)
             b.setCheckable(True)
@@ -301,7 +310,8 @@ class SignalsTab(QWidget):
         self._cells_host.setLayout(self._cells_row)
         bottom = QHBoxLayout()
         bottom.setContentsMargins(10, 6, 10, 6)
-        bottom.addWidget(self._hint, 1)
+        self._hint.setVisible(False)  # the step guide on the right says what to do
+        bottom.addStretch(1)
         bottom.addWidget(self._cells_host)
 
         left = QVBoxLayout()
@@ -336,9 +346,9 @@ class SignalsTab(QWidget):
         kr.addWidget(self._karyo, 1)
         self._labels_grid = QGridLayout()
         self._labels_grid.setSpacing(4)
-        self._chrom_section.body_layout().addWidget(self._chrom_count)
+        self._chrom_count.setVisible(False)  # the step guide shows n / N
         self._chrom_section.body_layout().addLayout(kr)
-        self._chrom_section.body_layout().addWidget(self._edit_karyo, 0, Qt.AlignmentFlag.AlignLeft)
+        self._edit_karyo.setVisible(False)  # step 1 Karyotype opens the editor
         self._chrom_section.body_layout().addLayout(self._labels_grid)
         side.addWidget(self._chrom_section)
 
@@ -367,13 +377,17 @@ class SignalsTab(QWidget):
         hh.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         self._table.setShowGrid(False)
         self._show_idio = QPushButton("Show on idiogram", self)
-        self._show_idio.setFlat(True)
-        self._show_idio.setObjectName("cytoLink")
         self._show_idio.clicked.connect(self.idiogramRequested)
         self._sum_section.body_layout().addLayout(sum_head)
         self._sum_section.body_layout().addWidget(self._table)
-        self._sum_section.body_layout().addWidget(self._show_idio, 0, Qt.AlignmentFlag.AlignLeft)
+        self._sum_section.body_layout().addWidget(self._show_idio)
         side.addWidget(self._sum_section)
+
+        # ---- step guide: three rows, symbols instead of sentences
+        self._guide = QVBoxLayout()
+        self._guide.setSpacing(2)
+        side.addSpacing(6)
+        side.addLayout(self._guide)
         side.addStretch(1)
 
         scroll = QScrollArea(self)
@@ -383,6 +397,9 @@ class SignalsTab(QWidget):
         scroll.setWidget(body)
         scroll.setMinimumWidth(240)
         scroll.setMaximumWidth(SIDE_W)
+        from repeatviewer.widgets.cytogenetics_style import fit_side_scroll
+
+        fit_side_scroll(scroll)
 
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -399,7 +416,7 @@ class SignalsTab(QWidget):
         self._save_timer.setSingleShot(True)
         self._save_timer.setInterval(SAVE_DELAY_MS)
         self._save_timer.timeout.connect(self.flush)
-        self._set_tool("number")
+        self._set_tool(self._tool)  # the step used last time
         self._show_empty()
 
     # ------------------------------------------------------------------ loading
@@ -489,6 +506,7 @@ class SignalsTab(QWidget):
 
     def _set_tool(self, tool: str) -> None:
         self._tool = tool if tool in dict(ss.TOOLS) else "number"
+        _write("signals_tool", self._tool)
         for b, (key, _text) in zip(self._tool_group.buttons(), ss.TOOLS):
             b.setChecked(key == self._tool)
         self._canvas.set_tool_cursor(Qt.CursorShape.CrossCursor)
@@ -767,7 +785,73 @@ class SignalsTab(QWidget):
         dialog.finished.connect(done)
         dialog.show()  # not modal: the Files panel stays clickable (Lengths from assembly)
 
+    def _on_step_karyotype(self) -> None:
+        s = self._session
+        if s is None:
+            return
+        self._open_karyotype(edit=s.karyotype is not None)
+
+    def _sync_guide(self) -> None:
+        if not hasattr(self, "_guide"):
+            return
+        clear_layout(self._guide)
+        s = self._session
+        if s is None:
+            return
+        labels = s.labels()
+        named = len(s.used_labels() & set(labels))
+        n_sig = len(s.details.signals)
+        has_k = s.karyotype is not None
+        current = 1 if not has_k else (2 if self._tool == "number" else 3)
+        rows = (
+            (1, "Karyotype", f"{s.karyotype.formula}" if has_k else "", has_k,
+             "▾ choose   ＋ new   ✎ edit", self._on_step_karyotype),
+            (2, "Chromosomes", f"{named} / {len(labels)}" if labels else "", bool(labels) and named == len(labels),
+             "⊙ click   ↕ drag ends   ○ centromere", lambda: self._set_tool("number")),
+            (3, "Signals", f"{n_sig} ●" if n_sig else "", n_sig > 0,
+             "⊙ click a spot   ⇢ drag   ⌫ delete", lambda: self._set_tool("signal")),
+        )
+        self._step_karyo.setText("1  Karyotype ✓" if has_k else "1  Karyotype")
+        for b in self._tool_group.buttons():
+            b.setEnabled(has_k)
+        for n, title, value, done, hint, action in rows:
+            on = n == current
+            row = QPushButton(self)
+            row.setFlat(True)
+            row.setCursor(Qt.CursorShape.PointingHandCursor)
+            row.clicked.connect(action)
+            lay = QHBoxLayout(row)
+            lay.setContentsMargins(6, 3, 6, 3)
+            lay.setSpacing(8)
+            badge = QLabel("✓" if done and not on else str(n), row)
+            badge.setFixedSize(20, 20)
+            badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            colour = "#1F4E9A" if on else ("#8A8D93" if done else "#C7C7CC")  # blue = current step only
+            badge.setStyleSheet(f"QLabel {{ background:{colour}; color:white; border-radius:10px; font-weight:600; }}")
+            name = QLabel(f"<b>{title}</b>" if on else title, row)
+            val = QLabel(value, row)
+            val.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            val.setStyleSheet("color: palette(dark);")
+            for w in (badge, name, val):
+                w.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+            lay.addWidget(badge)
+            lay.addWidget(name)
+            lay.addStretch(1)
+            lay.addWidget(val)
+            row.setMinimumHeight(28)
+            self._guide.addWidget(row)
+            tip = QLabel(hint, self)
+            tip.setWordWrap(True)
+            tip.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+            tip.setStyleSheet(f"color: {'palette(dark)' if on else '#A0A2A8'}; padding-left: 34px;")
+            self._guide.addWidget(tip)
+            if n < 3:
+                arrow = QLabel("↓", self)
+                arrow.setStyleSheet("color: #B0B2B8; padding-left: 12px;")
+                self._guide.addWidget(arrow)
+
     def _sync_labels(self) -> None:
+        self._sync_guide()
         s = self._session
         clear_layout(self._labels_grid)
         self._label_buttons = {}
@@ -793,7 +877,7 @@ class SignalsTab(QWidget):
                 css = "background:#FFFFFF; color:#8A8D93; border:1px dashed #C9D3E6;"
             b.setStyleSheet(f"QPushButton {{ {css} border-radius:5px; padding:4px 0; font-size:12px; }}")
             b.clicked.connect(lambda _c=False, l=label: self._on_label_clicked(l))
-            self._labels_grid.addWidget(b, n // 8, n % 8)
+            self._labels_grid.addWidget(b, n // 5, n % 5)
             self._label_buttons[label] = b
         self._chrom_count.setText(f"{len(used & set(labels))} of {len(labels)}")
 
@@ -823,11 +907,9 @@ class SignalsTab(QWidget):
             sel = self._selected = None
         if sel and sel[0] == "mark" and s.details.chromosome(sel[1]) is None:
             sel = self._selected = None
+        self._sel_section.setVisible(sel is not None)  # shown only while something is selected
         if sel is None:
             self._sel_section._title.setText("Selected")
-            note = QLabel("Nothing selected. Use Select and click a chromosome or a signal.", self._sel_host)
-            note.setWordWrap(True)
-            self._sel_lay.addWidget(note)
             return
         if sel[0] == "signal":
             sig = s.signal(sel[1])

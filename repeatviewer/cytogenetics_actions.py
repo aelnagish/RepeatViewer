@@ -14,12 +14,19 @@ CYTO_TITLE = "Cytogenetics"
 class CytogeneticsActionsMixin:
     """Tools > Cytogenetics for ``MainWindow``."""
 
-    def _open_cytogenetics_workspace(self, *, tab: str = "", sequence: Path | None = None, image_id: str = ""):
+    def _open_cytogenetics_workspace(self, *, tab: str = "", sequence: Path | None = None, image_id: str = "",
+                                     last: bool = False):
         """Open the workspace in the Preview area: the sequence's folder, else the current folder.
 
         Returns the workspace panel (or None). With ``image_id`` that image opens in the Image tab.
         """
         folder = Path(sequence).expanduser().resolve().parent if sequence is not None else getattr(self, "_current_folder", None)
+        if (last or not folder or not Path(folder).is_dir()) and sequence is None:
+            from PySide6.QtCore import QSettings
+
+            last = str(QSettings().value("cytogenetics_workspace/last_folder", "") or "")
+            if last and ws.workspace_path(Path(last)).exists():
+                folder = Path(last)  # no folder chosen: back to the workspace used last time
         if not folder or not Path(folder).is_dir():
             QMessageBox.information(
                 self, CYTO_TITLE, "Select a folder in the Folders panel first."
@@ -57,7 +64,8 @@ class CytogeneticsActionsMixin:
         self._cytogenetics_library_action("edit_lists")
 
     def _populate_cytogenetics_menu(self, menu) -> None:
-        menu.addAction("Open workspace", lambda: self._open_cytogenetics_workspace())
+        menu.addAction("Open workspace", lambda: self._open_cytogenetics_workspace(last=True))
+        menu.addAction("Open workspace in current folder", lambda: self._open_cytogenetics_workspace())
         menu.addAction("Import", self._cytogenetics_import_session)
         menu.addAction("Add image...", lambda: self._cytogenetics_library_action("add_image"))
         menu.addAction("Edit lists...", self._cytogenetics_edit_lists)
@@ -102,7 +110,7 @@ class CytogeneticsActionsMixin:
                 progress_cb((i + 1) * 100, f"{i + 1} done, {n - i - 1} left")
             if cancel.requested:
                 raise JobCancelledError("Job stopped by user")
-            return {"func_name": "chromosome_sizes", "created_outputs": created,
+            return {"func_name": "chromosome_sizes", "created_outputs": created, "total": n, "failures": [],
                     "source_files": [str(s) for s, _ in jobs]}
 
         worker = WorkflowWorker(_run, {"jobs": jobs, "cancel": self._job_cancel})
