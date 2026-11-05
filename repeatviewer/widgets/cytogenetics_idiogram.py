@@ -1214,6 +1214,9 @@ class IdiogramTab(QWidget):
         aside.setFrameShape(QFrame.Shape.NoFrame)
         aside.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         aside.setWidget(body)
+        from repeatviewer.widgets.cytogenetics_style import fit_side_scroll
+
+        fit_side_scroll(aside)
 
         self._side_stack = QStackedWidget(self)
         self._side_stack.addWidget(aside)

@@ -110,7 +110,7 @@ class CytogeneticsActionsMixin:
                 progress_cb((i + 1) * 100, f"{i + 1} done, {n - i - 1} left")
             if cancel.requested:
                 raise JobCancelledError("Job stopped by user")
-            return {"func_name": "chromosome_sizes", "created_outputs": created,
+            return {"func_name": "chromosome_sizes", "created_outputs": created, "total": n, "failures": [],
                     "source_files": [str(s) for s, _ in jobs]}
 
         worker = WorkflowWorker(_run, {"jobs": jobs, "cancel": self._job_cancel})

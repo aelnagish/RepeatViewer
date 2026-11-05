@@ -394,6 +394,9 @@ class LibraryTab(QWidget):
         details_scroll.setFrameShape(QFrame.Shape.NoFrame)
         details_scroll.setWidget(self._details_body)
         details_scroll.setMinimumWidth(220)
+        from repeatviewer.widgets.cytogenetics_style import fit_side_scroll
+
+        fit_side_scroll(details_scroll)
 
         split = QSplitter(Qt.Orientation.Horizontal, self)
         split.setChildrenCollapsible(False)

@@ -397,6 +397,9 @@ class SignalsTab(QWidget):
         scroll.setWidget(body)
         scroll.setMinimumWidth(240)
         scroll.setMaximumWidth(SIDE_W)
+        from repeatviewer.widgets.cytogenetics_style import fit_side_scroll
+
+        fit_side_scroll(scroll)
 
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)

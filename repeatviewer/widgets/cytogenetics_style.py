@@ -141,3 +141,51 @@ def section_label(text: str, parent=None):
     from PySide6.QtWidgets import QLabel
 
     return QLabel(f"<b>{text}</b>", parent)
+
+
+def fit_side_scroll(scroll) -> None:
+    """Keep a side column at least as wide as its content, so nothing is cut off at the right.
+
+    The panels have no sideways scroll bar; their content width depends on the platform's fonts (macOS is wider
+    than Linux), so the minimum width is measured whenever the content changes, not fixed in pixels.
+    """
+    from PySide6.QtCore import QEvent, QObject, QTimer
+
+    class _Fit(QObject):
+        def __init__(self, area) -> None:
+            super().__init__(area)
+            self._area = area
+            self._queued = False
+            if area.widget() is not None:
+                area.widget().installEventFilter(self)
+            self.queue()
+
+        def queue(self) -> None:
+            if not self._queued:
+                self._queued = True
+                QTimer.singleShot(0, self.fit)
+
+        def eventFilter(self, obj, event) -> bool:  # noqa: N802
+            if event.type() in (QEvent.Type.LayoutRequest, QEvent.Type.Show, QEvent.Type.FontChange):
+                self.queue()
+            return False
+
+        def fit(self) -> None:
+            self._queued = False
+            area = self._area
+            body = area.widget()
+            if body is None:
+                return
+            need = (body.minimumSizeHint().width() + area.verticalScrollBar().sizeHint().width()
+                    + 2 * area.frameWidth() + 2)
+            if area.minimumWidth() < need:
+                area.setMinimumWidth(need)
+            w = area
+            for _ in range(3):  # a stacked widget or frame around the column must not cap it either
+                if w is None:
+                    break
+                if w.maximumWidth() < need:
+                    w.setMaximumWidth(need)
+                w = w.parentWidget()
+
+    scroll._fit_side = _Fit(scroll)

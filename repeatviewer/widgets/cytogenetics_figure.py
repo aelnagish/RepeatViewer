@@ -721,7 +721,10 @@ class FigureTab(QWidget):
         aside.setFrameShape(QFrame.Shape.NoFrame)
         aside.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         aside.setWidget(body)
-        aside.setMinimumWidth(310)  # never narrower than its content
+        aside.setMinimumWidth(240)
+        from repeatviewer.widgets.cytogenetics_style import fit_side_scroll
+
+        fit_side_scroll(aside)  # never narrower than its content, on any platform
         aside.setMaximumWidth(SIDE_W)
 
         root = QHBoxLayout(self)
