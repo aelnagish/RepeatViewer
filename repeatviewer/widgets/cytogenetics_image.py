@@ -512,7 +512,7 @@ class ImageTab(QWidget):
         self._nav.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._nav.setMinimumWidth(90)
         bar_host = QWidget(self)
-        bar_host.setObjectName("cytoMain")
+        bar_host.setObjectName("cytoAside")
         bar_host.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         bar = QHBoxLayout(bar_host)
         bar.setContentsMargins(10, 6, 10, 6)
