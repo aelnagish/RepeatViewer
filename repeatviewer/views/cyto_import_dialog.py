@@ -7,6 +7,8 @@ from pathlib import Path
 
 from PySide6.QtCore import QSettings, Qt, QTimer
 from PySide6.QtWidgets import (
+    QInputDialog,
+    QMessageBox,
     QCheckBox,
     QDialog,
     QDoubleSpinBox,
@@ -85,13 +87,46 @@ def _put(key: str, value) -> None:
         pass
 
 
-def _combo(parent: QWidget, values: list[str], current: str = "", editable: bool = True) -> NoWheelComboBox:
+ADD_ITEM = {"species": "Add a species…", "techniques": "Add a technique…", "counterstains": "Add a counterstain…",
+            "stages": "Add a cell stage…", "probes": "Add a probe…"}
+
+
+def _combo(parent: QWidget, values: list[str], current: str = "", editable: bool = True, *,
+           key: str = "", folder: Path | None = None, lists: dict | None = None, dye: str = "") -> NoWheelComboBox:
+    """A menu of list values that ends with "Add a …": a new entry is saved to the folder's lists right away."""
     box = NoWheelComboBox(parent)
     box.setEditable(editable)
-    box.addItem("")
-    box.addItems(values)
-    if current:
-        box.setCurrentText(current)
+    box.addItems([v for v in values if v])
+    extra = ADD_ITEM.get(key, "")
+    if extra:
+        box.addItem(extra)
+    box.setCurrentText(current or "")
+    box.setProperty("previous", current or "")
+
+    def _activated(_i: int) -> None:
+        text = box.currentText()
+        if not extra or text != extra:
+            box.setProperty("previous", text)
+            return
+        box.setCurrentText(str(box.property("previous") or ""))
+        what = extra[len("Add a "):].rstrip("…")
+        name, ok = QInputDialog.getText(box.window(), extra.rstrip("…"), f"Name of the {what}:")
+        name = name.strip()
+        if not ok or not name:
+            return
+        if folder is not None and lists is not None:
+            try:
+                ls.add_entry(lists, key, name, **({"dye": dye} if key == "probes" and dye else {}))
+                ls.save_lists(folder, lists)
+            except (OSError, ValueError) as exc:
+                QMessageBox.information(box.window(), extra.rstrip("…"), str(exc))
+                return
+        if box.findText(name) < 0:
+            box.insertItem(box.count() - 1, name)
+        box.setCurrentText(name)
+        box.setProperty("previous", name)
+
+    box.activated.connect(_activated)
     return box
 
 
@@ -202,11 +237,11 @@ class CytoImportDialog(PanelPathFields, QDialog):
         self._slide_name = QLineEdit(page)
         self._slide_date = QLineEdit(page)
         self._slide_date.setPlaceholderText("YYYY-MM-DD")
-        self._species = _combo(page, ls.names(lists, "species"), _get("species"))
+        self._species = _combo(page, ls.names(lists, "species"), _get("species"), key="species", folder=self._folder, lists=lists)
         self._accession = QLineEdit(_get("accession"), page)
-        self._technique = _combo(page, ls.names(lists, "techniques"), _get("technique", "FISH"))
-        self._counterstain = _combo(page, ls.names(lists, "counterstains"), _get("counterstain", "DAPI"))
-        self._stage = _combo(page, ls.names(lists, "stages"), _get("stage", "Mitotic metaphase"))
+        self._technique = _combo(page, ls.names(lists, "techniques"), _get("technique", "FISH"), key="techniques", folder=self._folder, lists=lists)
+        self._counterstain = _combo(page, ls.names(lists, "counterstains"), _get("counterstain", "DAPI"), key="counterstains", folder=self._folder, lists=lists)
+        self._stage = _combo(page, ls.names(lists, "stages"), _get("stage", "Mitotic metaphase"), key="stages", folder=self._folder, lists=lists)
         lay.addLayout(form)
         # Slide: two equal columns side by side; probe rows go to the shorter column
         self._slide_forms = (form_layout(), form_layout())
@@ -342,7 +377,8 @@ class CytoImportDialog(PanelPathFields, QDialog):
             if dye == "DAPI":
                 continue  # the counterstain carries no probe
             default = next((str(e["name"]) for e in self._lists.get("probes", []) if e.get("dye") == dye), "")
-            box = _combo(self, probes, current.get(dye) or self._saved_probes.get(dye, "") or default)
+            box = _combo(self, probes, current.get(dye) or self._saved_probes.get(dye, "") or default,
+                         key="probes", folder=self._folder, lists=self._lists, dye=dye)
             box.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
             self._probe_boxes[dye] = box
             box.setFixedWidth(FIELD_W)

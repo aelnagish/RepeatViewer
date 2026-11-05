@@ -487,8 +487,8 @@ class ImageTab(QWidget):
         self._canvas = ImageCanvas(self)
         self._canvas.zoomChanged.connect(self._on_zoom)
         out_btn, in_btn, fit_btn, one_btn = (QPushButton(t, self) for t in ("−", "+", "Fit", "100 %"))
-        for b, w in ((out_btn, 28), (in_btn, 28), (fit_btn, 44), (one_btn, 56)):
-            b.setFixedWidth(max(w, b.sizeHint().width()))  # never narrower than macOS draws the button
+        for b, w in ((out_btn, 28), (in_btn, 28), (fit_btn, 44), (one_btn, 64)):
+            b.setFixedWidth(w)
         out_btn.clicked.connect(lambda: self._canvas.set_zoom(self._canvas.zoom() / 1.25))
         in_btn.clicked.connect(lambda: self._canvas.set_zoom(self._canvas.zoom() * 1.25))
         fit_btn.clicked.connect(self._canvas.fit)
@@ -505,14 +505,14 @@ class ImageTab(QWidget):
         self._prev = QPushButton("‹", self)
         self._next = QPushButton("›", self)
         for b in (self._prev, self._next):
-            b.setFixedWidth(max(28, b.sizeHint().width()))
+            b.setFixedWidth(28)
         self._prev.clicked.connect(lambda: self._go(2))
         self._next.clicked.connect(lambda: self._go(3))
         self._nav = QLabel(self)
         self._nav.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._nav.setMinimumWidth(90)
         bar_host = QWidget(self)
-        bar_host.setObjectName("cytoAside")
+        bar_host.setObjectName("cytoMain")
         bar_host.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         bar = QHBoxLayout(bar_host)
         bar.setContentsMargins(10, 6, 10, 6)
@@ -527,14 +527,14 @@ class ImageTab(QWidget):
         bar.addWidget(self._nav)
         bar.addWidget(self._next)
         bar.addSpacing(8)
-        bar.addWidget(make_help_button(self, "Image", HELP_TEXT), 0, Qt.AlignmentFlag.AlignVCenter)
-        # the bar keeps its full height: squeezed, macOS draws the buttons flat and the rule cuts through them
-        bar_host.setFixedHeight(bar.sizeHint().height())
+        bar.addWidget(make_help_button(self, "Image", HELP_TEXT))
         rule = QFrame(self)
         rule.setFrameShape(QFrame.Shape.HLine)
         rule.setStyleSheet("color: palette(mid);")
 
         left_host = QWidget(self)
+        left_host.setObjectName("cytoMain")
+        left_host.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         left = QVBoxLayout(left_host)
         left.setContentsMargins(0, 0, 0, 0)
         left.setSpacing(0)

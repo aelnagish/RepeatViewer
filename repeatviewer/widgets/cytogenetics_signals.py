@@ -379,7 +379,11 @@ class SignalsTab(QWidget):
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
-        root.addLayout(left, 1)
+        left_host = QWidget(self)
+        left_host.setObjectName("cytoMain")  # the work area is white, the side columns stay grey
+        left_host.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        left_host.setLayout(left)
+        root.addWidget(left_host, 1)
         root.addWidget(scroll)
 
         self._selected: tuple[str, str] | None = None
