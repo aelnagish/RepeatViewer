@@ -60,7 +60,7 @@ HELP = (
     "Lengths from Assembly reads a sizes file, .fai, BED, GFF or FASTA and matches Chr1, Chr01 … to chromosome 1.<br>"
     "<b>Preview</b>: click a homologue to edit it below. Drag the round centromere handle, the bottom end (length), "
     "a band (move) or its top or bottom edge (resize). <b>Draw band</b>: drag along a chromosome; the colour boxes "
-    "choose the kind (NOR, DAPI+, CMA+, FISH probes) or, with a band selected, change it; <b>+</b> adds a new probe, "
+    "choose the kind (NOR, DAPI+, CMA+, FISH probes) or, with a band selected, change it; <b>Add</b> makes a new probe, "
     "draws with any other probe or picks an own colour. In a band row, the Kind list also has New Probe…. "
     "Backspace removes the selected band.<br>"
     "<b>Same as the other homologues</b> (ticked by default): edits apply to every copy. Untick it to give one "
@@ -867,11 +867,8 @@ class KaryotypeDialog(QDialog):
         self._swatch_row.setSpacing(5)
         bar.addLayout(self._swatch_row)
         self._fill_swatches()
-        own = QToolButton(self)
-        own.setText("+")
-        own.setAutoRaise(True)
-        own.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        own.setToolTip("New probe, other probes or an own colour")
+        own = QPushButton("Add", self)
+        own.setToolTip("New probe, draw with any probe, or an own colour")
         self._plus_menu = QMenu(own)
         self._plus_menu.aboutToShow.connect(self._fill_plus_menu)
         own.setMenu(self._plus_menu)
