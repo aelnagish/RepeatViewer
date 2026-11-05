@@ -113,6 +113,7 @@ class IdiogramCanvas(QWidget):
         self.assembly_active = False
         self.drag_enabled = True
         self.reorder_enabled = False
+        self.fit = True  # shrink to the width (Figure); the Idiogram tab keeps full size and scrolls
         self._drag_band: tuple[int, int] | None = None
         self._drag_frac = 0.0
         self._drag_slot: int | None = None
@@ -129,9 +130,9 @@ class IdiogramCanvas(QWidget):
         self.rows, self.heights, self.colours = rows, heights, colours
         self._size = (0, 0)
         n_groups = len(self._groups())
-        f_min = 10.0 / self.BAR_W  # the scale at which bars reach their smallest width (same rules as _layout)
+        f_min = 10.0 / self.BAR_W if self.fit else 1.0  # smallest scale used by _layout
         asm = (self.ASM_W + self.ASM_GAP) * f_min if self.show_assembly and self.assembly_active else 0.0
-        smallest = (n_groups * self.LABEL_W + len(rows) * (10.0 + asm)
+        smallest = (n_groups * self.LABEL_W + len(rows) * (self.BAR_W * f_min + asm)
                     + (len(rows) - n_groups) * max(4.0, self.HOM_GAP * f_min)
                     + max(0, n_groups - 1) * max(14.0, self.GROUP_GAP * f_min) + 50)
         self.setMinimumWidth(max(300, int(smallest) + 1))  # a scroll bar only when even the smallest bars do not fit
@@ -167,7 +168,7 @@ class IdiogramCanvas(QWidget):
         asm_full = (self.ASM_W + self.ASM_GAP) if has_asm else 0.0
         fixed = lab * n_groups  # chromosome names do not shrink
         scalable = n_bars * (self.BAR_W + asm_full) + (n_bars - n_groups) * self.HOM_GAP + (n_groups - 1) * self.GROUP_GAP
-        f = min(1.0, max(0.05, (width - 40 - fixed) / scalable)) if scalable > 0 else 1.0
+        f = min(1.0, max(0.05, (width - 40 - fixed) / scalable)) if scalable > 0 and self.fit else 1.0
         bar = max(10.0, self.BAR_W * f)
         gap = max(4.0, self.HOM_GAP * f)
         ggap = max(14.0, self.GROUP_GAP * f)
@@ -1363,6 +1364,7 @@ class IdiogramTab(QWidget):
                     colours[pr] = self._colour(pr, len(colours))
         other = next((x for x in self._karyotypes if x.name == s.compare_with and x is not k), None)
         for cv, kk in ((self._canvas, k), (self._canvas2, other)):
+            cv.fit = False  # full-size chromosomes; a scroll bar when they do not fit
             cv.karyotype = kk
             cv.show_bands, cv.show_measured, cv.show_assembly = s.show_bands, s.show_measured, s.show_assembly
             cv.assembly_active = genome is not None
