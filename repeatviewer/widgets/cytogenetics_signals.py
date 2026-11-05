@@ -57,7 +57,8 @@ HELP_TEXT = (
     "chromosome, strength, delete), Backspace deletes the selected one.<br>"
     "<b>Moving the picture</b>: mouse wheel or trackpad zooms, Option + drag or the middle button moves it.<br>"
     "Arm and position that you set by hand are never recomputed.<br>"
-    "<b>Guide</b> (right, under the summary): ✓ done, blue = the step you are on; click a step to go there. "
+    "<b>Guide</b> (right, under the summary): blue = the step you are on, ✓ = done, grey number = still to do; "
+    "click a step to go there. "
     "⊙ click, ↕ drag, ○ centromere, ● signals, ⌫ delete."
 )
 
@@ -800,11 +801,11 @@ class SignalsTab(QWidget):
         current = 1 if not has_k else (2 if self._tool == "number" else 3)
         rows = (
             (1, "Karyotype", f"{s.karyotype.formula}" if has_k else "", has_k,
-             "＋ new   ✎ edit", self._on_step_karyotype),
+             "▾ choose   ＋ new   ✎ edit lengths, bands", self._on_step_karyotype),
             (2, "Chromosomes", f"{named} / {len(labels)}" if labels else "", bool(labels) and named == len(labels),
              "⊙ click   ↕ drag ends   ○ centromere", lambda: self._set_tool("number")),
             (3, "Signals", f"{n_sig} ●" if n_sig else "", n_sig > 0,
-             "⊙ click spot   ⇢ drag   ⌫ delete", lambda: self._set_tool("signal")),
+             "⊙ click a spot   ⇢ drag   ⌫ delete   ▾ probe", lambda: self._set_tool("signal")),
         )
         self._step_karyo.setText("1  Karyotype ✓" if has_k else "1  Karyotype")
         for b in self._tool_group.buttons():
@@ -821,7 +822,7 @@ class SignalsTab(QWidget):
             badge = QLabel("✓" if done and not on else str(n), row)
             badge.setFixedSize(20, 20)
             badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            colour = "#1F4E9A" if on else ("#2E8B57" if done else "#B0B2B8")
+            colour = "#1F4E9A" if on else ("#8A8D93" if done else "#C7C7CC")  # blue = current step only
             badge.setStyleSheet(f"QLabel {{ background:{colour}; color:white; border-radius:10px; font-weight:600; }}")
             name = QLabel(f"<b>{title}</b>" if on else title, row)
             val = QLabel(value, row)
@@ -834,10 +835,9 @@ class SignalsTab(QWidget):
             lay.addWidget(val)
             row.setMinimumHeight(28)
             self._guide.addWidget(row)
-            if on:
-                tip = QLabel(hint, self)
-                tip.setStyleSheet("color: palette(dark); padding-left: 34px;")
-                self._guide.addWidget(tip)
+            tip = QLabel(hint, self)
+            tip.setStyleSheet(f"color: {'palette(dark)' if on else '#A0A2A8'}; padding-left: 34px;")
+            self._guide.addWidget(tip)
             if n < 3:
                 arrow = QLabel("↓", self)
                 arrow.setStyleSheet("color: #B0B2B8; padding-left: 12px;")
