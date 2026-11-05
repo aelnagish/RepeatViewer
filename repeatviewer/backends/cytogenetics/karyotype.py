@@ -8,6 +8,7 @@ from the assembly sequence lengths.
 
 from __future__ import annotations
 
+import copy
 import csv
 import io
 import json
@@ -62,12 +63,27 @@ class Band:
     start: float  # fraction of the chromosome from the p telomere (0) to the q telomere (1)
     end: float
     color: str = ""  # own colour; empty = the colour of the kind
+    satellite: bool = False  # NOR drawn as a secondary constriction with the satellite beyond it
 
     def __post_init__(self) -> None:
         self.start = max(0.0, min(1.0, float(self.start)))
         self.end = max(0.0, min(1.0, float(self.end)))
         if self.start > self.end:
             self.start, self.end = self.end, self.start
+
+
+@dataclass
+class Homologue:
+    """How one homologue differs from its chromosome. None = same as the chromosome."""
+
+    length: float | None = None
+    centromere_index: float | None = None
+    bands: list[Band] | None = None
+    missing: bool = False
+
+    @property
+    def separate(self) -> bool:
+        return self.length is not None or self.centromere_index is not None or self.bands is not None
 
 
 @dataclass
@@ -78,6 +94,8 @@ class KaryoChromosome:
     copies: int | None = None  # None = the karyotype's ploidy
     assembly_seq: str = ""
     bands: list[Band] = field(default_factory=list)
+    homologues: dict[int, Homologue] = field(default_factory=dict)  # index of the copy -> its own values
+    b_chromosome: bool = False
 
     @property
     def type(self) -> str:
@@ -115,21 +133,35 @@ class Karyotype:
     homologue_letters: str = "abcdefghijkl"
 
     def copies_of(self, chrom: KaryoChromosome) -> int:
+        """Homologue slots of a chromosome (missing ones included)."""
         return self.ploidy if chrom.copies is None else max(0, int(chrom.copies))
+
+    def present_copies(self, chrom: KaryoChromosome) -> int:
+        n = self.copies_of(chrom)
+        return sum(1 for i in range(n) if not (chrom.homologues.get(i) and chrom.homologues[i].missing))
+
+    def a_chromosomes(self) -> list[KaryoChromosome]:
+        return [c for c in self.chromosomes if not c.b_chromosome]
+
+    def b_count(self) -> int:
+        return sum(self.present_copies(c) for c in self.chromosomes if c.b_chromosome)
 
     @property
     def total_count(self) -> int:
-        return sum(self.copies_of(c) for c in self.chromosomes)
+        return sum(self.present_copies(c) for c in self.chromosomes)
 
     @property
     def formula(self) -> str:
         base = self.ploidy * self.basic_number
-        total = self.total_count if self.chromosomes else base
+        a_total = sum(self.present_copies(c) for c in self.a_chromosomes()) if self.chromosomes else base
         head = f"2n = {self.ploidy}x"
-        diff = total - base
+        diff = a_total - base
         if diff:
             head += f" {'+' if diff > 0 else '-'} {abs(diff)}"
-        return f"{head} = {total}"
+        nb = self.b_count()
+        if nb:
+            head += f" + {nb}B"
+        return f"{head} = {a_total + nb}"
 
     def homologue_suffixes(self) -> list[str]:
         """Suffixes added to the chromosome name: a, b, c or .1, .2 or the user's own comma separated list."""
@@ -145,10 +177,16 @@ class Karyotype:
                 return key
         return "custom"
 
-    def homologue_labels(self, chrom: KaryoChromosome) -> list[str]:
+    def homologue_label(self, chrom: KaryoChromosome, i: int) -> str:
         suffixes = self.homologue_suffixes()
-        n = self.copies_of(chrom)
-        return [f"{chrom.name}{suffixes[i] if i < len(suffixes) else f'.{i + 1}'}" for i in range(n)]
+        if self.copies_of(chrom) == 1 and chrom.b_chromosome:
+            return chrom.name
+        return f"{chrom.name}{suffixes[i] if i < len(suffixes) else f'.{i + 1}'}"
+
+    def homologue_labels(self, chrom: KaryoChromosome) -> list[str]:
+        """Names of the homologues that are present (a missing one is left out, the others keep their names)."""
+        return [self.homologue_label(chrom, i) for i in range(self.copies_of(chrom))
+                if not (chrom.homologues.get(i) and chrom.homologues[i].missing)]
 
     def all_labels(self) -> list[str]:
         return [label for c in self.chromosomes for label in self.homologue_labels(c)]
@@ -160,13 +198,16 @@ class Karyotype:
         """Add (named by number) or drop chromosomes at the end so there are ``n``."""
         n = max(1, int(n))
         self.basic_number = n
-        while len(self.chromosomes) < n:
-            used = {c.name for c in self.chromosomes}
-            k = len(self.chromosomes) + 1
+        a = [c for c in self.chromosomes if not c.b_chromosome]
+        b = [c for c in self.chromosomes if c.b_chromosome]
+        while len(a) < n:
+            used = {c.name for c in self.chromosomes} | {c.name for c in a}
+            k = len(a) + 1
             while str(k) in used:
                 k += 1
-            self.chromosomes.append(KaryoChromosome(name=str(k)))
-        del self.chromosomes[n:]
+            a.append(KaryoChromosome(name=str(k)))
+        del a[n:]
+        self.chromosomes[:] = a + b
 
     def ordered(self, order: str = "listed") -> list[KaryoChromosome]:
         chroms = list(self.chromosomes)
@@ -194,11 +235,22 @@ class Karyotype:
                 continue
             bands = []
             for b in item.get("bands") or []:
-                try:
-                    bands.append(Band(str(b.get("kind", "")), float(b["start"]), float(b["end"]), str(b.get("color") or "")))
-                except (KeyError, TypeError, ValueError, AttributeError):
-                    continue
+                band = _band(b)
+                if band is not None:
+                    bands.append(band)
             copies = item.get("copies")
+            homs: dict[int, Homologue] = {}
+            for key, h in (item.get("homologues") or {}).items():
+                try:
+                    hb = h.get("bands")
+                    homs[int(key)] = Homologue(
+                        length=None if h.get("length") is None else _num(h.get("length")),
+                        centromere_index=None if h.get("centromere_index") is None else _num(h.get("centromere_index"), 50.0),
+                        bands=None if hb is None else [_band(b) for b in hb if _band(b) is not None],
+                        missing=bool(h.get("missing")),
+                    )
+                except (TypeError, ValueError, AttributeError):
+                    continue
             chroms.append(KaryoChromosome(
                 name=str(item["name"]).strip(),
                 length=_num(item.get("length")),
@@ -206,6 +258,8 @@ class Karyotype:
                 copies=int(copies) if copies not in (None, "") else None,
                 assembly_seq=str(item.get("assembly_seq") or ""),
                 bands=bands,
+                homologues=homs,
+                b_chromosome=bool(item.get("b_chromosome")),
             ))
         return cls(
             name=str(raw.get("name") or "Karyotype"),
@@ -216,6 +270,14 @@ class Karyotype:
             chromosomes=chroms,
             homologue_letters=str(raw.get("homologue_letters") or "abcdefghijkl"),
         )
+
+
+def _band(raw) -> Band | None:
+    try:
+        return Band(str(raw.get("kind", "")), float(raw["start"]), float(raw["end"]), str(raw.get("color") or ""),
+                    bool(raw.get("satellite")))
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return None
 
 
 def _num(value, default: float = 0.0) -> float:
@@ -649,4 +711,157 @@ def apply_sizes(karyotype: Karyotype, links: dict[str, str], sizes: dict[str, in
         else:
             missing.append(chrom.name)
     karyotype.unit = "Mb"
+    return missing
+
+
+# ---------------------------------------------------------------------------
+# Homologues that differ from their chromosome
+# ---------------------------------------------------------------------------
+
+
+def homologue_view(chrom: KaryoChromosome, i: int) -> KaryoChromosome:
+    """Chromosome as homologue ``i`` looks (its own length, centromere and bands where it has them)."""
+    h = chrom.homologues.get(i)
+    if h is None or not h.separate:
+        return chrom
+    return KaryoChromosome(
+        name=chrom.name,
+        length=chrom.length if h.length is None else h.length,
+        centromere_index=chrom.centromere_index if h.centromere_index is None else h.centromere_index,
+        copies=chrom.copies,
+        assembly_seq=chrom.assembly_seq,
+        bands=chrom.bands if h.bands is None else h.bands,
+        b_chromosome=chrom.b_chromosome,
+    )
+
+
+def is_separate(chrom: KaryoChromosome, i: int) -> bool:
+    h = chrom.homologues.get(i)
+    return bool(h and h.separate)
+
+
+def is_missing(chrom: KaryoChromosome, i: int) -> bool:
+    h = chrom.homologues.get(i)
+    return bool(h and h.missing)
+
+
+def differs(chrom: KaryoChromosome) -> bool:
+    """True when any homologue has its own values or is missing."""
+    return any(h.separate or h.missing for h in chrom.homologues.values())
+
+
+def _tidy(chrom: KaryoChromosome, i: int) -> None:
+    h = chrom.homologues.get(i)
+    if h is not None and not h.separate and not h.missing:
+        del chrom.homologues[i]
+
+
+def set_separate(chrom: KaryoChromosome, i: int, separate: bool) -> None:
+    """Give homologue ``i`` its own copy of the chromosome's values, or make it the same as the others again."""
+    h = chrom.homologues.setdefault(i, Homologue())
+    if separate and not h.separate:
+        h.length = chrom.length
+        h.centromere_index = chrom.centromere_index
+        h.bands = [copy.deepcopy(b) for b in chrom.bands]
+    elif not separate:
+        h.length = h.centromere_index = None
+        h.bands = None
+    _tidy(chrom, i)
+
+
+def set_missing(chrom: KaryoChromosome, i: int, missing: bool) -> None:
+    chrom.homologues.setdefault(i, Homologue()).missing = bool(missing)
+    _tidy(chrom, i)
+
+
+def target(chrom: KaryoChromosome, i: int):
+    """Object to edit for homologue ``i``: its own Homologue when separate, else the chromosome."""
+    return chrom.homologues[i] if i >= 0 and is_separate(chrom, i) else chrom
+
+
+def drop_extra_homologues(karyotype: Karyotype, chrom: KaryoChromosome) -> None:
+    n = karyotype.copies_of(chrom)
+    for i in [i for i in chrom.homologues if i >= n]:
+        del chrom.homologues[i]
+
+
+def mirror_bands(chrom: KaryoChromosome, i: int) -> None:
+    """Turn the band pattern of homologue ``i`` end to end (an inversion); the homologue becomes separate."""
+    if i >= 0:
+        set_separate(chrom, i, True)
+    owner = target(chrom, i)
+    owner.bands = [Band(b.kind, 1.0 - b.end, 1.0 - b.start, b.color, b.satellite) for b in owner.bands]
+
+
+def copy_bands_to_others(karyotype: Karyotype, chrom: KaryoChromosome, i: int) -> None:
+    """Every homologue (and the chromosome) gets the bands of homologue ``i``."""
+    bands = homologue_view(chrom, i).bands
+    chrom.bands = [copy.deepcopy(b) for b in bands]
+    for j, h in list(chrom.homologues.items()):
+        if j != i and h.bands is not None:
+            h.bands = [copy.deepcopy(b) for b in bands]
+    if i in chrom.homologues and chrom.homologues[i].bands is not None:
+        chrom.homologues[i].bands = [copy.deepcopy(b) for b in bands]
+        h = chrom.homologues[i]
+        if (h.length in (None, chrom.length)) and (h.centromere_index in (None, chrom.centromere_index)):
+            set_separate(chrom, i, False)
+
+
+def add_b_chromosome(karyotype: Karyotype, chrom: KaryoChromosome, i: int) -> KaryoChromosome:
+    """New B chromosome (one copy) shaped like homologue ``i`` of ``chrom``, added at the end."""
+    view = homologue_view(chrom, max(0, i))
+    used = {c.name for c in karyotype.chromosomes}
+    n = 1
+    while f"B{n}" in used:
+        n += 1
+    new = KaryoChromosome(name=f"B{n}", length=view.length, centromere_index=view.centromere_index, copies=1,
+                          bands=[copy.deepcopy(b) for b in view.bands], b_chromosome=True)
+    karyotype.chromosomes.append(new)
+    return new
+
+
+# ---------------------------------------------------------------------------
+# Band presets per species (band_presets.json in the karyotype store)
+# ---------------------------------------------------------------------------
+
+
+def presets_path(folder: Path) -> Path:
+    return karyotype_path(folder, "x").parent / "band_presets.json"
+
+
+def _load_presets(folder: Path) -> dict:
+    try:
+        raw = json.loads(presets_path(folder).read_text(encoding="utf-8"))
+        return raw if isinstance(raw, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def list_presets(folder: Path, species: str) -> list[str]:
+    return sorted((_load_presets(folder).get(species.strip() or "Any species") or {}).keys(), key=str.lower)
+
+
+def save_preset(folder: Path, species: str, name: str, karyotype: Karyotype) -> Path:
+    """Store the bands of every chromosome under ``name`` for ``species``."""
+    data = _load_presets(folder)
+    bands = {c.name: [asdict(b) for b in c.bands] for c in karyotype.chromosomes if c.bands}
+    data.setdefault(species.strip() or "Any species", {})[name.strip()] = bands
+    path = presets_path(folder)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
+    return path
+
+
+def apply_preset(folder: Path, species: str, name: str, karyotype: Karyotype) -> list[str]:
+    """Replace the bands of the chromosomes named in the preset. Returns preset chromosomes not in the karyotype."""
+    preset = (_load_presets(folder).get(species.strip() or "Any species") or {}).get(name) or {}
+    missing = []
+    for cname, bands in preset.items():
+        chrom = karyotype.chromosome(cname)
+        if chrom is None:
+            missing.append(cname)
+            continue
+        chrom.bands = [b for b in (_band(x) for x in bands) if b is not None]
     return missing

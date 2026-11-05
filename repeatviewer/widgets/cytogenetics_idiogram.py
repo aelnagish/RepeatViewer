@@ -42,7 +42,7 @@ from repeatviewer.backends.cytogenetics.model import image_details
 from repeatviewer.widgets.combo_boxes import NoWheelComboBox
 from repeatviewer.widgets.cytogenetics_style import clear_layout
 from repeatviewer.widgets.help_button import make_help_button
-from repeatviewer.views.cyto_karyotype_dialog import BAND_COLOURS, KaryoPreview
+from repeatviewer.views.cyto_karyotype_dialog import BAND_COLOURS, KaryoPreview, chromosome_path
 from repeatviewer.widgets.sequence_annotation_rail import _CollapsibleSection
 
 SIDE_W = 330
@@ -405,7 +405,7 @@ def _bar_path(r: QRectF) -> QPainterPath:
 def _draw_chromosome(p: QPainter, r: QRectF, chrom: kt.KaryoChromosome, bands: list[tuple[float, str, bool]],
                      colours: dict[str, str], *, outline: QColor, line: float) -> None:
     """One chromosome: white bar, karyotype bands, FISH signals (fraction, probe, centromeric) and the centromere."""
-    path = _bar_path(r)
+    path = chromosome_path(r, chrom, 0.0) if any(b.satellite for b in chrom.bands) else _bar_path(r)
     p.setPen(Qt.PenStyle.NoPen)
     p.setBrush(QColor("#FFFFFF"))
     p.drawPath(path)
