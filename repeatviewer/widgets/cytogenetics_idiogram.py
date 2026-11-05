@@ -128,7 +128,13 @@ class IdiogramCanvas(QWidget):
     def set_rows(self, rows: list[idg.ChromosomeRow], heights: list[float], colours: dict[str, str]) -> None:
         self.rows, self.heights, self.colours = rows, heights, colours
         self._size = (0, 0)
-        self.setMinimumWidth(max(300, int(len(rows) * 22 + len(self._groups()) * 30 + 40)))
+        n_groups = len(self._groups())
+        f_min = 10.0 / self.BAR_W  # the scale at which bars reach their smallest width (same rules as _layout)
+        asm = (self.ASM_W + self.ASM_GAP) * f_min if self.show_assembly and self.assembly_active else 0.0
+        smallest = (n_groups * self.LABEL_W + len(rows) * (10.0 + asm)
+                    + (len(rows) - n_groups) * max(4.0, self.HOM_GAP * f_min)
+                    + max(0, n_groups - 1) * max(14.0, self.GROUP_GAP * f_min) + 50)
+        self.setMinimumWidth(max(300, int(smallest) + 1))  # a scroll bar only when even the smallest bars do not fit
         self.update()
 
     def sizeHint(self) -> QSize:  # noqa: D102
@@ -156,12 +162,17 @@ class IdiogramCanvas(QWidget):
         has_asm = self._has_asm()
         top = self.TOP + (22 if self.title else 0)
         bottom = self.BOTTOM + (34 if self.assembly_active and self.show_assembly else 0)
-        bar, gap, ggap, lab = self.BAR_W, self.HOM_GAP, self.GROUP_GAP, self.LABEL_W
-        asm_w = (self.ASM_W + self.ASM_GAP) if has_asm else 0.0
-        need = sum(lab + len(g) * (bar + asm_w) + (len(g) - 1) * gap for g in groups) + ggap * (len(groups) - 1)
-        f = min(1.0, max(0.3, (width - 40) / need)) if need > 0 else 1.0
-        bar, gap, ggap, asm_w = max(10.0, bar * f), gap * f, ggap * f, asm_w * f
-        need = sum(lab + len(g) * (bar + asm_w) + (len(g) - 1) * gap for g in groups) + ggap * (len(groups) - 1)
+        lab = self.LABEL_W
+        n_bars, n_groups = len(self.rows), len(groups)
+        asm_full = (self.ASM_W + self.ASM_GAP) if has_asm else 0.0
+        fixed = lab * n_groups  # chromosome names do not shrink
+        scalable = n_bars * (self.BAR_W + asm_full) + (n_bars - n_groups) * self.HOM_GAP + (n_groups - 1) * self.GROUP_GAP
+        f = min(1.0, max(0.05, (width - 40 - fixed) / scalable)) if scalable > 0 else 1.0
+        bar = max(10.0, self.BAR_W * f)
+        gap = max(4.0, self.HOM_GAP * f)
+        ggap = max(14.0, self.GROUP_GAP * f)
+        asm_w = asm_full * f
+        need = fixed + n_bars * (bar + asm_w) + (n_bars - n_groups) * gap + (n_groups - 1) * ggap
         usable = max(80.0, height - top - bottom)
         x = max(20.0, (width - need) / 2)
         self._rects = [(QRectF(), QRectF())] * len(self.rows)
