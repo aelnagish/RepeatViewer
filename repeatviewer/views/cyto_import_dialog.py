@@ -68,6 +68,9 @@ def _settings() -> QSettings:
     return QSettings()
 
 
+FIELD_W = 220  # slide fields: compact, as in the other Cytogenetics forms
+
+
 def _get(key: str, default: str = "") -> str:
     try:
         return str(_settings().value(f"{_GROUP}/{key}", default))
@@ -194,11 +197,6 @@ class CytoImportDialog(PanelPathFields, QDialog):
         self._table.setAlternatingRowColors(True)
         self._table_box = rounded_box(self._table, page)
         form.addRow("Cells", self._table_box)
-        self._info = QLabel(page)
-        self._info.setWordWrap(True)
-        self._info.setStyleSheet("color: gray;")
-        self._info.hide()  # shown only when something needs saying (files that could not be read, left out)
-        form.addRow("", self._info)
 
         form.addRow(section_label("Slide", page))
         self._slide_name = QLineEdit(page)
@@ -210,8 +208,10 @@ class CytoImportDialog(PanelPathFields, QDialog):
         self._counterstain = _combo(page, ls.names(lists, "counterstains"), _get("counterstain", "DAPI"))
         self._stage = _combo(page, ls.names(lists, "stages"), _get("stage", "Mitotic metaphase"))
         form.addRow("Name", self._slide_name)
-        for box in (self._species, self._technique, self._counterstain, self._stage):
-            box.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        for w in (self._slide_name, self._slide_date, self._species, self._accession, self._technique,
+                  self._counterstain, self._stage):
+            w.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+            w.setFixedWidth(FIELD_W)
         for label, w in (("Date", self._slide_date), ("Species", self._species), ("Accession / line", self._accession),
                          ("Technique", self._technique), ("Counterstain", self._counterstain), ("Cell stage", self._stage)):
             form.addRow(label, w)
@@ -261,12 +261,12 @@ class CytoImportDialog(PanelPathFields, QDialog):
         row.addWidget(self._pix_value)
         row.addStretch(1)
         pl.addLayout(row)
-        top = QHBoxLayout()
-        top.addStretch(1)
-        top.addWidget(make_help_button(page, "Import options", HELP_OPTIONS))
-        lay.addLayout(top)
         lay.addWidget(files_box)
         lay.addWidget(pix_box)
+        help_row = QHBoxLayout()
+        help_row.addWidget(make_help_button(page, "Import options", HELP_OPTIONS))
+        help_row.addStretch(1)
+        lay.addLayout(help_row)
         return page
 
     # ------------------------------------------------------------------ scanning
@@ -298,20 +298,16 @@ class CytoImportDialog(PanelPathFields, QDialog):
                 item = QTableWidgetItem(text)
                 item.setToolTip(", ".join(sources) if c == 3 else text)
                 self._table.setItem(r, c, item)
-        problems = []
-        if src is not None and not self._groups and not notes:
-            problems.append("No pictures here (TIFF, JPG, PNG or BMP)."
-                            + ("" if self._recursive.isChecked() else " Tick Include subfolders when each cell has its own folder."))
-        problems += notes[:6]
-        self._info.setText("<br>".join(problems))
-        self._info.setVisible(bool(problems))
         rows = max(2, min(8, len(self._groups)))
         self._table_box.setFixedHeight(self._table.horizontalHeader().sizeHint().height() + rows * 24 + 8)
         header = self._table.horizontalHeader()
-        header.setStretchLastSection(False)
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)  # columns stay resizable
+        header.setStretchLastSection(True)
+        self._table.resizeColumnsToContents()
+        rest = sum(self._table.columnWidth(c) + 12 for c in (1, 2, 3))
         for c in (1, 2, 3):
-            header.setSectionResizeMode(c, QHeaderView.ResizeMode.ResizeToContents)
+            self._table.setColumnWidth(c, self._table.columnWidth(c) + 12)
+        self._table.setColumnWidth(0, max(self._table.columnWidth(0) + 12, self._table.viewport().width() - rest))
         if src is not None and not self._slide_name.text().strip():
             self._slide_name.setText(src.name)
         if src is not None and not self._slide_date.text().strip() and self._groups:
@@ -332,6 +328,7 @@ class CytoImportDialog(PanelPathFields, QDialog):
             box = _combo(self, probes, current.get(dye) or self._saved_probes.get(dye, "") or default)
             box.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             self._probe_boxes[dye] = box
+            box.setFixedWidth(FIELD_W)
             self._probe_form.addRow(f"Probe in {dye}", box)
 
     # ------------------------------------------------------------------ result
