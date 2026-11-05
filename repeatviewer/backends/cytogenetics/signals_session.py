@@ -24,7 +24,7 @@ from .model import POSITIONS, STRENGTHS, ChromosomeMark, ImageDetails, Signal, i
 
 ARM_LABELS = {"cen": "Centromere", "p": "p", "q": "q"}
 POSITION_CHOICES = POSITIONS
-TOOLS = (("number", "1  Number chromosomes"), ("signal", "2  Mark signals"))
+TOOLS = (("number", "2  Number chromosomes"), ("signal", "3  Mark signals"))
 TOOL_HINTS = {
     "number": "Click a chromosome to name it {next}. Drag a name, a telomere or the centromere to move it. Right-click for more.",
     "signal": "Click a spot to add a {probe} signal. Drag a signal to move it. Right-click for more.",
