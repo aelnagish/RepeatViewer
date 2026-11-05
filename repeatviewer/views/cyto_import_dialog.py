@@ -254,7 +254,9 @@ class CytoImportDialog(PanelPathFields, QDialog):
                         ("Cell stage", self._stage)):
             self._add_slide_cell(text, w, page)
         self._slide_base = len(self._slide_cells)
-        lay.addLayout(self._slide_grid)
+        grid_host = QWidget(page)
+        grid_host.setLayout(self._slide_grid)
+        form.addRow("", grid_host)  # in the field column: same left and right edges as the Cells table
         return page
 
     def _add_slide_cell(self, text: str, field: QWidget, parent: QWidget) -> None:
