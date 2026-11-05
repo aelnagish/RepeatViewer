@@ -263,6 +263,26 @@ class CytogeneticsWorkspace(QWidget):
         self._title.setToolTip(str(self._folder))
         self._set_crumb(ws.breadcrumb(self._folder, self._current_image))
         self.refresh()
+        _write("last_folder", str(self._folder))
+        self._restore_last_image()
+
+    def _last_image_key(self) -> str:
+        import hashlib
+
+        return "last_image_" + hashlib.md5(str(self._folder).encode("utf-8")).hexdigest()[:12]
+
+    def _restore_last_image(self) -> None:
+        """Back on the cell that was open when this folder's workspace was last closed."""
+        if self._folder is None or self._current_image:
+            return
+        image_id = _read(self._last_image_key(), "")
+        from repeatviewer.backends import cyto_images as ci
+
+        if not image_id or not any(i.id == image_id for i in ci.load_images(self._folder)):
+            return
+        for name in ("Image", "Signals"):
+            self._pages[name].follow(image_id)
+        self._on_image_shown(image_id, "")
 
     def refresh(self) -> None:
         self._fill_data()
@@ -349,6 +369,8 @@ class CytogeneticsWorkspace(QWidget):
         self._pages["Figure"].current_image = image_id
         if self._folder is not None:
             self._sync_crumb()
+            if image_id:
+                _write(self._last_image_key(), image_id)
         for name in ("Image", "Signals"):
             if name != source:
                 self._pages[name].follow(image_id)

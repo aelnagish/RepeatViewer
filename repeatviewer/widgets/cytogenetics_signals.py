@@ -230,7 +230,7 @@ class SignalsTab(QWidget):
         super().__init__(parent)
         self._folder: Path | None = None
         self._session: ss.SignalsSession | None = None
-        self._tool = "number"
+        self._tool = _read("signals_tool", "number") if _read("signals_tool", "number") in dict(ss.TOOLS) else "number"
         self._pending_label = ""
         self._drag: tuple[str, str] | None = None
         self._moved = False
@@ -503,6 +503,7 @@ class SignalsTab(QWidget):
 
     def _set_tool(self, tool: str) -> None:
         self._tool = tool if tool in dict(ss.TOOLS) else "number"
+        _write("signals_tool", self._tool)
         for b, (key, _text) in zip(self._tool_group.buttons(), ss.TOOLS):
             b.setChecked(key == self._tool)
         self._canvas.set_tool_cursor(Qt.CursorShape.CrossCursor)

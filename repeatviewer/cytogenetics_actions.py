@@ -20,6 +20,12 @@ class CytogeneticsActionsMixin:
         Returns the workspace panel (or None). With ``image_id`` that image opens in the Image tab.
         """
         folder = Path(sequence).expanduser().resolve().parent if sequence is not None else getattr(self, "_current_folder", None)
+        if (not folder or not Path(folder).is_dir()) and sequence is None:
+            from PySide6.QtCore import QSettings
+
+            last = str(QSettings().value("cytogenetics_workspace/last_folder", "") or "")
+            if last and ws.workspace_path(Path(last)).exists():
+                folder = Path(last)  # no folder chosen: back to the workspace used last time
         if not folder or not Path(folder).is_dir():
             QMessageBox.information(
                 self, CYTO_TITLE, "Select a folder in the Folders panel first."
