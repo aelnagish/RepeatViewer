@@ -94,7 +94,7 @@ def plan_cells(paths: list[Path], lists: Lists, *, merges: bool = False) -> tupl
             group = CellGroup(key=path.stem)
             for i in range(info.count):
                 dye = dye_for_filename(info.names[i], lists)[0] if info.names[i] else ""
-                group.files.append((path, dye, i))
+                group.files.append((path, dye, info.plane(i)))
                 group.colours.append("" if dye else info.colours[i])
             multi.append(group)
         else:
@@ -238,7 +238,7 @@ def import_cells(
                 colour = group.colours[n] if n < len(group.colours) and group.colours[n] else ""
                 colour = colour or (dye_color(lists, dye) if dye else ch.UNKNOWN_COLOURS[n % len(ch.UNKNOWN_COLOURS)])
                 display = ChannelDisplay(color=colour, low=low, high=high)
-                label = path.name if index < 0 else f"{path.name} · plane {index + 1}"
+                label = ch.plane_label(path, index)
                 channels.append(Channel(id=cid, file=file_ref, dye=dye, probe=probes_by_dye.get(dye, "") if dye else "",
                                         bits=data.bits, original_name=label, display=display, index=index))
                 layers.append((grey, display))

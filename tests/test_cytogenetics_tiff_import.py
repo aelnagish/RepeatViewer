@@ -152,3 +152,58 @@ def test_mostly_black_merge_is_not_a_tinted_channel(tmp_path):
     cells, notes = plan_cells(scan_tiffs(tmp_path, recursive=True), ls.load_lists(tmp_path))
     assert [p.name for p, _d, _i in cells[0].entries()] == ["1.tif", "2.tif"]
     assert any("Abdullah-101.tif" in n for n in notes)
+
+
+def _photoshop_block(layers, h, w):
+    """A minimal Photoshop layer block (big-endian, raw channels) as Photoshop writes into TIFF tag 37724."""
+    import struct
+
+    records, data = b"", b""
+    for name, rgb, flags in layers:
+        size = h * w + 2
+        rec = struct.pack(">4iH", 0, 0, h, w, 3) + b"".join(struct.pack(">hI", c, size) for c in range(3))
+        raw = name.encode()
+        pascal = bytes([len(raw)]) + raw
+        pascal += b"\0" * ((-len(pascal)) % 4)
+        extra = struct.pack(">II", 0, 0) + pascal + (b"8BIMTySh" + struct.pack(">I", 0) if name.startswith("T") else b"")
+        rec += b"8BIMnorm" + bytes([255, 0, flags, 0]) + struct.pack(">I", len(extra)) + extra
+        records += rec
+        data += b"".join(struct.pack(">H", 0) + rgb[..., c].tobytes() for c in range(3))
+    body = struct.pack(">h", len(layers)) + records + data
+    return b"Adobe Photoshop Document Data Block\0" + b"8BIMLayr" + struct.pack(">I", len(body)) + body
+
+
+def test_photoshop_layers_become_channels(tmp_path):
+    h, w = 40, 50
+    dapi = _spots(h, w, [(10, 10), (30, 40)], 200)
+    red = _spots(h, w, [(12, 12)], 255)
+    yellow = _spots(h, w, [(28, 38)], 240)
+    layers = [
+        ("DAPI", np.stack([dapi] * 3, -1).round().astype(np.uint8), 0),
+        ("Red", np.stack([red, red * 0, red * 0], -1).round().astype(np.uint8), 0),
+        ("Yellow", np.stack([yellow, yellow, yellow * 0], -1).round().astype(np.uint8), 0),
+        ("Hidden", np.full((h, w, 3), 90, np.uint8), 2),
+        ("T1", np.full((h, w, 3), 255, np.uint8), 0),
+    ]
+    flat = np.clip(sum(l[1].astype(int) for l in layers[:3]), 0, 255).astype(np.uint8)
+    cell = tmp_path / "cell1"
+    cell.mkdir()
+    path = cell / "merged.tif"
+    block = _photoshop_block(layers, h, w)
+    tifffile.imwrite(str(path), flat, photometric="rgb", extratags=[(37724, 7, len(block), block, True)])
+    info = ch.inspect_tiff(path)
+    assert info.kind == "channels" and info.names == ["DAPI", "Red", "Yellow"]
+    assert info.colours == ["#ffffff", "#ff0000", "#ffff00"]
+    plane = ch.read_plane(path, ch.LAYER_BASE + 1).array
+    assert plane.shape == (h, w) and plane.max() == 255 and plane[30, 40] < 5
+    assert ch.plane_label(path, ch.LAYER_BASE + 2) == "merged.tif · Yellow"
+    cells, _notes = plan_cells(scan_tiffs(tmp_path, recursive=True), ls.load_lists(tmp_path))
+    assert [i for _p, _d, i in cells[0].entries()] == [ch.LAYER_BASE, ch.LAYER_BASE + 1, ch.LAYER_BASE + 2]
+
+
+def test_overexposed_tinted_channel_is_not_a_merge():
+    h, w = 120, 120
+    spots = _spots(h, w, [(30, 30), (90, 90), (30, 90)], 200) + _spots(h, w, [(60, 60)], 600)
+    cyan = np.stack([np.clip(spots - 255, 0, 255) * 0.6, np.clip(spots, 0, 255), np.clip(spots, 0, 255)], -1)
+    cyan = cyan.round().astype(np.uint8)
+    assert ch.colour_of(cyan) == "#00ffff"
