@@ -136,6 +136,36 @@ class ImageSession:
         self.cache.clear()
         return channel
 
+    def split_picture(self, rgb: np.ndarray | None = None) -> None:
+        """Turn a plain colour picture into three channels (red, green, blue), for example a Photoshop merge.
+
+        A TIFF picture is used as it is; other formats need ``rgb`` (the view reads them) and are kept as a TIFF copy.
+        The picture file itself is never changed.
+        """
+        if self.channels:
+            return
+        from ..cyto_images import image_file_path
+
+        source = image_file_path(self.folder, self.image)
+        if ch.is_tiff(source):
+            file_ref = source.name
+            planes = [ch.read_plane(source, k).array for k in range(3)]
+        else:
+            if rgb is None or rgb.ndim != 3 or rgb.shape[2] < 3:
+                raise ValueError("This picture has no colour planes to split")
+            tif = ch._tifffile()
+            stored = store_dir(self.folder) / f"{self.image.id}_rgb.tif"
+            tif.imwrite(str(stored), np.ascontiguousarray(rgb[..., :3]), photometric="rgb")
+            file_ref = stored.name
+            planes = [rgb[..., k] for k in range(3)]
+        for k, (name, colour) in enumerate((("red", "#ff3333"), ("green", "#33ff33"), ("blue", "#4d6bff"))):
+            low, high = ch.auto_levels(planes[k])
+            self.channels.append(Channel(id=new_id(), file=file_ref, dye="", bits=int(planes[k].dtype.itemsize * 8),
+                                         original_name=f"{source.name} · {name}", index=k,
+                                         display=ChannelDisplay(color=colour, low=low, high=high)))
+        self.image.file = f"{self.image.id}_preview.png"
+        self.cache.clear()
+
     def remove_channel(self, index: int) -> None:
         """Remove a channel from the image. A copy in the store is deleted, other files are left."""
         channel = self.channels.pop(index)
@@ -198,6 +228,7 @@ class ImageSession:
         stored.pixel_size_um = self.details.pixel_size_um
         stored.adjustment_log = self.details.adjustment_log
         set_image_details(fresh, stored)
+        fresh.file = self.image.file  # changes when a picture is split into channels
         fresh.extra["scale_bar"] = {"show": self.scale_show, "length_um": self.scale_length_um}
         update_image(self.folder, fresh)
         self.image = fresh

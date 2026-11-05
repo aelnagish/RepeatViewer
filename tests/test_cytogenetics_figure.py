@@ -106,7 +106,7 @@ def test_legend_and_methods(tmp_path):
 
 
 def test_store_roundtrip(tmp_path):
-    fig = fg.Figure(name="Figure CroSat2", layout="4row", same_crop=False, crop=(0.1, 0.1, 0.9, 0.8))
+    fig = fg.Figure(name="Figure CroSat2", layout="1row", same_crop=False, crop=(0.1, 0.1, 0.9, 0.8))
     fig.panels = [fg.Panel(id="p1", image_id="i", view="c1", arrows=[fg.Arrow(0.2, 0.3, 200)], crop=(0, 0, 0.5, 0.5))]
     fg.save_figure(tmp_path, fig)
     [again] = fg.list_figures(tmp_path)
@@ -118,3 +118,19 @@ def test_store_roundtrip(tmp_path):
     fg.save_figure(tmp_path, fig, old_name="Figure CroSat2")
     assert sorted(f.name for f in fg.list_figures(tmp_path)) == ["Figure 1", "Renamed"]
     assert fg.delete_figure(tmp_path, "Renamed")
+
+
+def test_layout_choices_and_font():
+    from repeatviewer.backends.cytogenetics import figure as fg2
+
+    fig = fg2.Figure()
+    fig.panels = [fg2.Panel(id=str(i), image_id="x") for i in range(5)]
+    for layout, cols in (("1row", 5), ("1col", 1), ("2x3", 3), ("3x2", 2), ("3x3", 3)):
+        fig.layout = layout
+        assert fg2.columns_for(fig) == cols
+    fig.layout, fig.rows, fig.cols = "custom", 1, 4
+    assert fg2.columns_for(fig) == 4
+    boxes, _h = fg2.layout(fig, {})
+    assert len({round(b.x, 3) for _p, b in boxes}) == 4
+    again = fg2.Figure.from_dict({"layout": "4row", "font_family": "Helvetica", "cols": 5})
+    assert again.layout == "1row" and again.font_family == "Helvetica" and again.cols == 5

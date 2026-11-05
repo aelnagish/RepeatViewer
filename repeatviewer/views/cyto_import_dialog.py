@@ -1,4 +1,4 @@
-"""Import slide session: channel TIFFs from the microscope, grouped into cells."""
+"""Import: microscope pictures (TIFF, JPG, PNG …) of one slide, grouped into cells."""
 
 from __future__ import annotations
 
@@ -10,36 +10,46 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
     QDoubleSpinBox,
-    QFormLayout,
+    QGroupBox,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QLineEdit,
     QPushButton,
     QRadioButton,
+    QSizePolicy,
+    QStackedWidget,
+    QTabBar,
     QTableWidget,
     QTableWidgetItem,
-    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
 from repeatviewer.backends import cyto_images as ci
 from repeatviewer.backends.cytogenetics import lists as ls
-from repeatviewer.backends.cytogenetics.importer import ImportRequest, group_channel_files, scan_tiffs
+from repeatviewer.backends.cytogenetics.importer import ImportRequest, plan_cells, scan_tiffs
 from repeatviewer.widgets.combo_boxes import NoWheelComboBox
+from repeatviewer.widgets.cyto_panel_targets import PanelPathFields
+from repeatviewer.widgets.cytogenetics_style import form_layout, rounded_box, section_label
 from repeatviewer.widgets.help_button import make_help_button
 from repeatviewer.widgets.path_browse import PathBrowseRow
 
 _GROUP = "cytogenetics_import"
 
 HELP_FILES = (
-    "<b>Folder</b>: the folder with the microscope TIFFs of one slide.<br>"
-    "<b>Cells</b>: files are grouped by their name without the dye word, so "
-    "<i>s12_c03_DAPI.tif</i>, <i>s12_c03_FITC.tif</i> and <i>s12_c03_Cy3.tif</i> become cell "
-    "<i>s12_c03</i> with three channels.<br>"
-    "<b>Dye words</b> (DAPI, FITC, 488, Cy3 ...) come from <b>Edit lists</b> under Dyes and channels.<br>"
-    "<b>Probe per dye</b>: the probe shown in that channel. A probe with a sequence in the Probes list "
-    "also links the images to that FASTA file."
+    "<b>Folder</b>: the folder with the microscope pictures of one slide (TIFF in any compression, JPG, PNG, BMP). "
+    "Click a folder in the Folders panel or a file in the Files panel to fill it. Tick <b>Include subfolders</b> "
+    "when each cell has its own folder.<br>"
+    "<b>Cells</b>, decided in this order:<br>"
+    "1. A multichannel TIFF (ImageJ, OME, several pages) is one cell, split into its channels.<br>"
+    "2. Files named with a dye word (<i>s12_c03_DAPI.tif</i>, <i>s12_c03_FITC.tif</i>) are grouped by the rest of the name.<br>"
+    "3. Any other files (<i>1.tif</i>, <i>2.tif</i> ...) are grouped by folder: one folder is one cell, "
+    "each file one channel (Channel 1, 2 ...).<br>"
+    "4. An RGB merge on its own is split into its red, green and blue planes.<br>"
+    "Photoshop files (.psd) are skipped. Dyes and probes that are not in the file names are set later in the "
+    "Image tab, once for the whole slide.<br>"
+    "<b>Probe per dye</b> appears only for dyes found in file names."
 )
 HELP_SLIDE = (
     "Details that apply to every cell of this slide. They are kept on the slide and copied to each image, "
@@ -82,17 +92,21 @@ def _combo(parent: QWidget, values: list[str], current: str = "", editable: bool
     return box
 
 
-class CytoImportDialog(QDialog):
-    """Slide session import. Run imports, Save only remembers the settings."""
+class CytoImportDialog(PanelPathFields, QDialog):
+    """Slide import in the layout of the app's tool windows. Run imports, Save only remembers the settings.
+
+    Not modal: a click on a folder in the Folders panel (or a file in the Files panel) fills the Folder field.
+    """
 
     def __init__(self, folder: Path, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Import slide session")
-        self.setMinimumWidth(760)
+        self.setWindowTitle("Import")
+        self.setWindowModality(Qt.WindowModality.NonModal)
         self._folder = Path(folder).expanduser().resolve()
         self._lists = ls.load_lists(self._folder)
         self._run = False
         self._groups = []
+        self._notes: list[str] = []
         self._probe_boxes: dict[str, NoWheelComboBox] = {}
         self._saved_probes: dict[str, str] = {}
         try:
@@ -100,10 +114,15 @@ class CytoImportDialog(QDialog):
         except (ValueError, TypeError):
             pass
 
-        self._tabs = QTabWidget(self)
-        self._tabs.addTab(self._build_files_tab(), "Files")
-        self._tabs.addTab(self._build_slide_tab(), "Slide details")
-        self._tabs.addTab(self._build_options_tab(), "Options")
+        self._tab_bar = QTabBar(self)
+        self._tab_bar.setExpanding(False)
+        self._tab_bar.setDocumentMode(True)
+        self._tab_bar.addTab("Import")
+        self._tab_bar.addTab("Options")
+        self._stack = QStackedWidget(self)
+        self._stack.addWidget(self._build_import_page())
+        self._stack.addWidget(self._build_options_tab())
+        self._tab_bar.currentChanged.connect(self._stack.setCurrentIndex)
 
         cancel = QPushButton("Cancel", self)
         save = QPushButton("Save", self)
@@ -113,11 +132,15 @@ class CytoImportDialog(QDialog):
         save.clicked.connect(self._on_save)
         run.clicked.connect(self._on_run)
         buttons = QHBoxLayout()
+        buttons.setSpacing(8)
         buttons.addStretch(1)
         for b in (cancel, save, run):
             buttons.addWidget(b)
         root = QVBoxLayout(self)
-        root.addWidget(self._tabs)
+        root.setContentsMargins(22, 18, 22, 16)
+        root.setSpacing(8)
+        root.addWidget(self._tab_bar)
+        root.addWidget(self._stack, 1)
         root.addLayout(buttons)
 
         self._timer = QTimer(self)
@@ -126,49 +149,58 @@ class CytoImportDialog(QDialog):
         self._timer.timeout.connect(self._rescan)
         self._source.line_edit().textChanged.connect(lambda _t: self._timer.start())
         self._recursive.toggled.connect(lambda _on: self._timer.start())
+        self.watch_path_fields(self._source)
         self._rescan()
+        self.resize(640, self.sizeHint().height())
 
-    # ------------------------------------------------------------------ tabs
+    # ------------------------------------------------------------------ pages
 
-    def _build_files_tab(self) -> QWidget:
+    def _build_import_page(self) -> QWidget:
         page = QWidget(self)
         lay = QVBoxLayout(page)
-        row = QHBoxLayout()
-        row.addWidget(QLabel("Folder", page))
+        lay.setContentsMargins(16, 10, 16, 6)
+        lay.setSpacing(6)
+        form = form_layout()
+        lists = self._lists
+        files_head = QHBoxLayout()
+        files_head.addWidget(section_label("Files", page))
+        files_head.addStretch(1)
+        files_head.addWidget(make_help_button(page, "Import", HELP_FILES + "<br>" + HELP_SLIDE))
+        form.addRow(files_head)
         self._source = PathBrowseRow(
             page,
             initial=_get("source") or None,
-            placeholder="Folder with the channel TIFFs of one slide",
-            browse_title="Choose the folder with the channel TIFFs",
+            placeholder="Click a folder in the Folders panel, or Browse",
+            browse_title="Choose the folder of the slide",
             mode="directory",
         )
-        row.addWidget(self._source, 1)
-        row.addWidget(make_help_button(page, "Import slide session", HELP_FILES))
-        lay.addLayout(row)
-        self._recursive = QCheckBox("Include subfolders", page)
-        self._recursive.setChecked(_get("recursive", "false") == "true")
-        lay.addWidget(self._recursive)
-        self._info = QLabel(page)
-        self._info.setWordWrap(True)
-        lay.addWidget(self._info)
-        self._table = QTableWidget(0, 3, page)
-        self._table.setHorizontalHeaderLabels(["Cell", "Channels", "Files"])
+        form.addRow("Folder", self._source)
+        self._recursive = QCheckBox("Include subfolders (one folder per cell)", page)
+        self._recursive.setChecked(_get("recursive", "true") == "true")
+        form.addRow("", self._recursive)
+        self._table = QTableWidget(0, 4, page)
+        self._table.setHorizontalHeaderLabels(["Cell", "Channels", "Size", "From"])
+        self._table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._table.setTextElideMode(Qt.TextElideMode.ElideRight)
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
         self._table.verticalHeader().setVisible(False)
-        self._table.horizontalHeader().setStretchLastSection(True)
-        self._table.setColumnWidth(0, 200)
-        self._table.setColumnWidth(1, 260)
-        self._table.setMinimumHeight(200)
-        lay.addWidget(self._table, 1)
-        self._probe_form = QFormLayout()
-        lay.addLayout(self._probe_form)
-        return page
+        self._table.verticalHeader().setDefaultSectionSize(24)
+        header = self._table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        header.setStretchLastSection(True)
+        header.setMinimumSectionSize(60)
+        self._table.setShowGrid(False)
+        self._table.setAlternatingRowColors(True)
+        self._table_box = rounded_box(self._table, page)
+        form.addRow("Cells", self._table_box)
+        self._info = QLabel(page)
+        self._info.setWordWrap(True)
+        self._info.setStyleSheet("color: gray;")
+        self._info.hide()  # shown only when something needs saying (files that could not be read, left out)
+        form.addRow("", self._info)
 
-    def _build_slide_tab(self) -> QWidget:
-        page = QWidget(self)
-        form = QFormLayout(page)
-        lists = self._lists
+        form.addRow(section_label("Slide", page))
         self._slide_name = QLineEdit(page)
         self._slide_date = QLineEdit(page)
         self._slide_date.setPlaceholderText("YYYY-MM-DD")
@@ -177,30 +209,42 @@ class CytoImportDialog(QDialog):
         self._technique = _combo(page, ls.names(lists, "techniques"), _get("technique", "FISH"))
         self._counterstain = _combo(page, ls.names(lists, "counterstains"), _get("counterstain", "DAPI"))
         self._stage = _combo(page, ls.names(lists, "stages"), _get("stage", "Mitotic metaphase"))
-        top = QHBoxLayout()
-        top.addWidget(QLabel("Details of the slide", page))
-        top.addStretch(1)
-        top.addWidget(make_help_button(page, "Slide details", HELP_SLIDE))
-        form.addRow(top)
-        for label, w in (("Slide name", self._slide_name), ("Date", self._slide_date), ("Species", self._species),
-                         ("Accession / line", self._accession), ("Technique", self._technique),
-                         ("Counterstain", self._counterstain), ("Cell stage", self._stage)):
+        form.addRow("Name", self._slide_name)
+        for box in (self._species, self._technique, self._counterstain, self._stage):
+            box.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        for label, w in (("Date", self._slide_date), ("Species", self._species), ("Accession / line", self._accession),
+                         ("Technique", self._technique), ("Counterstain", self._counterstain), ("Cell stage", self._stage)):
             form.addRow(label, w)
+        self._probe_form = form
+        self._probe_rows_start = form.rowCount()
+        lay.addLayout(form)
         return page
 
     def _build_options_tab(self) -> QWidget:
         page = QWidget(self)
         lay = QVBoxLayout(page)
-        top = QHBoxLayout()
-        top.addStretch(1)
-        top.addWidget(make_help_button(page, "Import options", HELP_OPTIONS))
-        lay.addLayout(top)
-        self._copy = QCheckBox("Copy the TIFFs into the project (originals are never changed)", page)
+        lay.setContentsMargins(16, 14, 16, 14)
+        lay.setSpacing(14)
+        lay.setAlignment(Qt.AlignmentFlag.AlignTop)
+        files_box = QGroupBox("Files", page)
+        fl = QVBoxLayout(files_box)
+        fl.setContentsMargins(10, 8, 10, 8)
+        self._copy = QCheckBox("Copy the pictures into the project (originals are never changed)", files_box)
         self._copy.setChecked(_get("copy", "true") == "true")
-        lay.addWidget(self._copy)
-        self._pix_auto = QRadioButton("Pixel size from the TIFF", page)
-        self._pix_set = QRadioButton("Set the pixel size:", page)
-        self._pix_value = QDoubleSpinBox(page)
+        fl.addWidget(self._copy)
+        self._merges = QCheckBox("Import merged and other pictures too (each as its own cell)", files_box)
+        self._merges.setToolTip("A merge is a colour picture made from several channels (for example in Photoshop). "
+                                "Other pictures are single files of another size than the channels next to them (a figure, a crop). "
+                                "Both are left out by default: the channels are imported instead.")
+        self._merges.setChecked(_get("merges", "false") == "true")
+        self._merges.toggled.connect(lambda _on: self._timer.start())
+        fl.addWidget(self._merges)
+        pix_box = QGroupBox("Pixel size", page)
+        pl = QVBoxLayout(pix_box)
+        pl.setContentsMargins(10, 8, 10, 8)
+        self._pix_auto = QRadioButton("From the TIFF", pix_box)
+        self._pix_set = QRadioButton("Set by hand:", pix_box)
+        self._pix_value = QDoubleSpinBox(pix_box)
         self._pix_value.setDecimals(4)
         self._pix_value.setRange(0.0001, 100.0)
         self._pix_value.setSuffix(" µm per pixel")
@@ -211,13 +255,18 @@ class CytoImportDialog(QDialog):
         (self._pix_set if _get("pixel_set", "false") == "true" else self._pix_auto).setChecked(True)
         self._pix_value.setEnabled(self._pix_set.isChecked())
         self._pix_set.toggled.connect(self._pix_value.setEnabled)
-        lay.addWidget(self._pix_auto)
+        pl.addWidget(self._pix_auto)
         row = QHBoxLayout()
         row.addWidget(self._pix_set)
         row.addWidget(self._pix_value)
         row.addStretch(1)
-        lay.addLayout(row)
-        lay.addStretch(1)
+        pl.addLayout(row)
+        top = QHBoxLayout()
+        top.addStretch(1)
+        top.addWidget(make_help_button(page, "Import options", HELP_OPTIONS))
+        lay.addLayout(top)
+        lay.addWidget(files_box)
+        lay.addWidget(pix_box)
         return page
 
     # ------------------------------------------------------------------ scanning
@@ -229,33 +278,51 @@ class CytoImportDialog(QDialog):
     def _rescan(self) -> None:
         src = self._source_path()
         files = scan_tiffs(src, self._recursive.isChecked()) if src else []
-        self._groups, unmatched = group_channel_files(files, self._lists)
-        tiffs = [p for p in unmatched if p.suffix.lower() in (".tif", ".tiff")]
+        self._groups, notes = plan_cells(files, self._lists, merges=self._merges.isChecked())
+        self._notes = notes
         self._table.setRowCount(len(self._groups))
         for r, g in enumerate(self._groups):
-            for c, text in enumerate((g.key, ", ".join(sorted(g.dyes)), str(len(g.files)))):
-                self._table.setItem(r, c, QTableWidgetItem(text))
-        if src is None:
-            self._info.setText("Choose the folder with the channel TIFFs.")
-        elif not self._groups:
-            self._info.setText("No channel TIFFs with a known dye word in their name were found.")
-        else:
-            text = f"{len(self._groups)} cell{'s' if len(self._groups) != 1 else ''} with {sum(len(g.files) for g in self._groups)} files."
-            if tiffs:
-                names = ", ".join(p.name for p in tiffs[:3]) + (" ..." if len(tiffs) > 3 else "")
-                text += f" {len(tiffs)} TIFF{'s' if len(tiffs) != 1 else ''} skipped (no known dye word, or the same dye twice in one cell): {names}"
-            self._info.setText(text)
+            sources = sorted({p.name for p, _d, _i in g.entries()}, key=lambda n: n.lower())
+            origin = sources[0] if len(sources) == 1 else f"{len(sources)} files"
+            named = [d for d in g.dyes if d]
+            channels = ", ".join(named) if named and len(named) == g.size else f"{g.size} channel{'s' if g.size != 1 else ''}"
+            size = ""
+            try:
+                from repeatviewer.backends.cytogenetics import channels as chn
+
+                info = chn.inspect_tiff(g.entries()[0][0])
+                size = f"{info.width} × {info.height}" if info.width else ""
+            except Exception:  # noqa: BLE001
+                pass
+            for c, text in enumerate((g.key, channels, size, origin)):
+                item = QTableWidgetItem(text)
+                item.setToolTip(", ".join(sources) if c == 3 else text)
+                self._table.setItem(r, c, item)
+        problems = []
+        if src is not None and not self._groups and not notes:
+            problems.append("No pictures here (TIFF, JPG, PNG or BMP)."
+                            + ("" if self._recursive.isChecked() else " Tick Include subfolders when each cell has its own folder."))
+        problems += notes[:6]
+        self._info.setText("<br>".join(problems))
+        self._info.setVisible(bool(problems))
+        rows = max(2, min(8, len(self._groups)))
+        self._table_box.setFixedHeight(self._table.horizontalHeader().sizeHint().height() + rows * 24 + 8)
+        header = self._table.horizontalHeader()
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        for c in (1, 2, 3):
+            header.setSectionResizeMode(c, QHeaderView.ResizeMode.ResizeToContents)
         if src is not None and not self._slide_name.text().strip():
             self._slide_name.setText(src.name)
         if src is not None and not self._slide_date.text().strip() and self._groups:
-            self._slide_date.setText(ci.image_file_date(self._groups[0].files[0][0]))
+            self._slide_date.setText(ci.image_file_date(self._groups[0].entries()[0][0]))
         self._fill_probe_form()
 
     def _fill_probe_form(self) -> None:
-        dyes = sorted({d for g in self._groups for d in g.dyes})
+        dyes = sorted({d for g in self._groups for d in g.dyes if d})
         current = {d: b.currentText() for d, b in self._probe_boxes.items()}
-        while self._probe_form.rowCount():
-            self._probe_form.removeRow(0)
+        while self._probe_form.rowCount() > self._probe_rows_start:
+            self._probe_form.removeRow(self._probe_rows_start)
         self._probe_boxes = {}
         probes = ls.names(self._lists, "probes")
         for dye in dyes:
@@ -263,6 +330,7 @@ class CytoImportDialog(QDialog):
                 continue  # the counterstain carries no probe
             default = next((str(e["name"]) for e in self._lists.get("probes", []) if e.get("dye") == dye), "")
             box = _combo(self, probes, current.get(dye) or self._saved_probes.get(dye, "") or default)
+            box.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             self._probe_boxes[dye] = box
             self._probe_form.addRow(f"Probe in {dye}", box)
 
@@ -288,6 +356,7 @@ class CytoImportDialog(QDialog):
             probes_by_dye=self._probes_by_dye(),
             copy=self._copy.isChecked(),
             pixel_size_um=self._pix_value.value() if self._pix_set.isChecked() else None,
+            merges=self._merges.isChecked(),
         )
 
     def should_run(self) -> bool:
@@ -302,6 +371,7 @@ class CytoImportDialog(QDialog):
             _put(key, box.currentText().strip())
         _put("accession", self._accession.text().strip())
         _put("copy", "true" if self._copy.isChecked() else "false")
+        _put("merges", "true" if self._merges.isChecked() else "false")
         _put("pixel_set", "true" if self._pix_set.isChecked() else "false")
         _put("pixel_um", self._pix_value.value())
         _put("probes_by_dye", json.dumps({**self._saved_probes, **self._probes_by_dye()}))
@@ -314,7 +384,10 @@ class CytoImportDialog(QDialog):
         from PySide6.QtWidgets import QMessageBox
 
         if not self._groups:
-            QMessageBox.information(self, "Import slide session", "There are no cells to import. Choose a folder with channel TIFFs first.")
+            text = "There is nothing to import in this folder."
+            if self._notes:
+                text += "\n\n" + "\n".join(self._notes[:8])
+            QMessageBox.information(self, "Import", text)
             return
         self._remember()
         self._run = True

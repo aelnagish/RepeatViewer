@@ -143,3 +143,45 @@ def test_arm_text_and_bands():
     assert kt.arm_text_to_fraction("x 1", 0.4) is None
     c = kt.KaryoChromosome("1", centromere_index=40, bands=[kt.Band("Secondary constriction (NOR)", 0.9, 1.0)])
     assert kt.band_summary(c) == "NOR (q)" and kt.band_summary(kt.KaryoChromosome("2")) == "none"
+
+
+def test_auto_axis_finds_telomeres_and_centromere(tmp_path):
+    src = tmp_path / "scope2"
+    src.mkdir()
+    dapi = np.full((120, 120), 50, dtype=np.uint16)
+    dapi[20:100, 55:65] = 3000          # vertical chromosome, y 20..99
+    dapi[44:48, 55:58] = 50              # constriction at y ~46 (p arm is the short top part)
+    dapi[44:48, 62:65] = 50
+    tifffile.imwrite(str(src / "c01_DAPI.tif"), dapi)
+    tifffile.imwrite(str(src / "c01_FITC.tif"), np.full((120, 120), 100, dtype=np.uint16))
+    work = tmp_path / "w2"
+    work.mkdir()
+    run_request(ImportRequest(folder=work, source=src, slide_name="S"))
+    kt.save_karyotype(work, kt.new_karyotype("K", 1, 2))
+    s = ss.SignalsSession(work, ci.load_images(work)[0])
+    mark = s.add_mark("1a", 60, 70)
+    assert s.auto_axis(mark.id)
+    assert mark.centromere is not None and abs(mark.centromere[1] - 46) < 6
+    assert mark.telomere_p[1] < mark.telomere_q[1]  # p (short arm) is at the top
+    assert s.estimate_axis(5, 5) is None
+    s.set_point(mark.id, "centromere", (60, 60))
+    assert mark.centromere == (60.0, 60.0)
+    s.swap_arms(mark.id)
+    assert mark.telomere_p[1] > mark.telomere_q[1]
+
+
+def test_probes_include_lists_and_picture_snap(tmp_path):
+    work = _folder(tmp_path)
+    from repeatviewer.backends.cytogenetics import lists as ls
+    lists = ls.load_lists(work)
+    ls.add_entry(lists, "probes", "45S rDNA", dye="Cy3")
+    ls.save_lists(work, lists)
+    s = _session(work)
+    assert ("CroSat2", "FITC") in s.probes() and ("45S rDNA", "Cy3") in s.probes()
+    s2 = _session(work)
+    s2.details.channels = []
+    pic = np.zeros((80, 100, 3), dtype=np.uint8)
+    pic[28:33, 58:63] = (255, 30, 40)  # red spot
+    s2.set_picture(pic)
+    x, y = s2.refine_position("45S rDNA", 57, 27)
+    assert (round(x), round(y)) == (60, 30)

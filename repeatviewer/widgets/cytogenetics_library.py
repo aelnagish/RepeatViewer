@@ -39,7 +39,7 @@ HELP_TEXT = (
     "Every image of this folder, grouped by slide (or by probe, species or cell stage).<br>"
     "<b>Click</b> an image to see its details, <b>double-click</b> to open it.<br>"
     "<b>Filters</b> on the left narrow the list; the numbers show how many images each value would give.<br>"
-    "<b>Import slide session</b> reads channel TIFFs from the microscope and sorts them into cells.<br>"
+    "<b>Import</b> reads the microscope pictures of a slide (TIFF, JPG, PNG) and sorts them into cells.<br>"
     "<b>Add image</b> stores one finished picture (merged RGB or a single file).<br>"
     "<b>Edit lists</b> changes the probes, species, stages, dyes and techniques offered."
 )
@@ -94,6 +94,7 @@ class _Thumb(QFrame):
     clicked = Signal(str)
     doubleClicked = Signal(str)
     menuRequested = Signal(str, object)
+    dragRequested = Signal(str)
 
     def __init__(self, item: lb.LibraryItem, folder: Path, side: int, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -145,8 +146,24 @@ class _Thumb(QFrame):
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
+            self._press = event.position()
             self.clicked.emit(self.image_id)
         super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        press = getattr(self, "_press", None)
+        if press is not None and event.buttons() & Qt.MouseButton.LeftButton:
+            from PySide6.QtWidgets import QApplication
+
+            if (event.position() - press).manhattanLength() >= QApplication.startDragDistance():
+                self._press = None
+                self.dragRequested.emit(self.image_id)
+                return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        self._press = None
+        super().mouseReleaseEvent(event)
 
     def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
@@ -154,8 +171,64 @@ class _Thumb(QFrame):
         super().mouseDoubleClickEvent(event)
 
     def contextMenuEvent(self, event) -> None:  # noqa: N802
-        self.clicked.emit(self.image_id)
         self.menuRequested.emit(self.image_id, event.globalPos())
+
+
+DRAG_MIME = "application/x-repeatviewer-cyto-images"
+
+
+class _SlideHeader(QFrame):
+    """Heading of a slide group: double-click to edit the slide, drop images on it to move them there."""
+
+    dropped = Signal(list, str)  # image ids, slide id
+    editRequested = Signal(str)
+    menuRequested = Signal(str, object)
+
+    def __init__(self, html: str, slide_id: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.slide_id = slide_id
+        self.setObjectName("cytoSlideHeader")
+        self.setAcceptDrops(True)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 2, 0, 0)
+        lay.setSpacing(4)
+        label = QLabel(html, self)
+        label.setTextFormat(Qt.TextFormat.RichText)
+        lay.addWidget(label)
+        rule = QFrame(self)
+        rule.setFrameShape(QFrame.Shape.HLine)
+        rule.setStyleSheet("color: palette(mid);")
+        lay.addWidget(rule)
+        if slide_id:
+            self.setToolTip("Double-click to edit the slide. Drop images here to put them on this slide.")
+
+    def _ids(self, event) -> list[str]:
+        data = event.mimeData()
+        if not data.hasFormat(DRAG_MIME):
+            return []
+        return [x for x in bytes(data.data(DRAG_MIME)).decode("utf-8").split("\n") if x]
+
+    def dragEnterEvent(self, event) -> None:  # noqa: N802
+        if self._ids(event):
+            event.acceptProposedAction()
+            self.setStyleSheet("#cytoSlideHeader { border: 2px dashed palette(highlight); border-radius: 6px; }")
+
+    def dragLeaveEvent(self, event) -> None:  # noqa: N802
+        self.setStyleSheet("")
+
+    def dropEvent(self, event) -> None:  # noqa: N802
+        self.setStyleSheet("")
+        ids = self._ids(event)
+        if ids:
+            event.acceptProposedAction()
+            self.dropped.emit(ids, self.slide_id)
+
+    def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802
+        if self.slide_id:
+            self.editRequested.emit(self.slide_id)
+
+    def contextMenuEvent(self, event) -> None:  # noqa: N802
+        self.menuRequested.emit(self.slide_id, event.globalPos())
 
 
 class LibraryTab(QWidget):
@@ -183,6 +256,7 @@ class LibraryTab(QWidget):
         self._count = QLabel(self)
         self._count_sub = QLabel(self)
         self._count_sub.setObjectName("cytoMuted")
+        self._count_sub.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self._group = NoWheelComboBox(self)
         self._group.addItems(lb.GROUP_BYS)
         self._group.setCurrentText(_read("library_group", "Slide"))
@@ -193,7 +267,11 @@ class LibraryTab(QWidget):
             self._size.setValue(int(_read("library_thumb", str(THUMB_DEFAULT))))
         except ValueError:
             self._size.setValue(THUMB_DEFAULT)
-        self._size.setFixedWidth(170)
+        self._size.setMinimumWidth(60)
+        self._size.setMaximumWidth(150)
+        from repeatviewer.widgets.cytogenetics_style import app_slider
+
+        app_slider(self._size)
         self._size.sliderReleased.connect(self._render)
         self._size.valueChanged.connect(lambda v: _write("library_thumb", int(v)))
         top = QHBoxLayout()
@@ -202,6 +280,10 @@ class LibraryTab(QWidget):
         top.addWidget(self._count)
         top.addWidget(self._count_sub)
         top.addStretch(1)
+        self._import_btn = QPushButton("Import", self)
+        self._import_btn.clicked.connect(self.start_import)
+        top.addWidget(self._import_btn)
+        top.addSpacing(10)
         top.addWidget(QLabel("Group by", self))
         top.addWidget(self._group)
         top.addSpacing(6)
@@ -260,7 +342,7 @@ class LibraryTab(QWidget):
         filters_scroll.setFrameShape(QFrame.Shape.NoFrame)
         filters_scroll.setWidget(filters)
         filters_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        filters_scroll.setFixedWidth(FILTER_W)
+        filters_scroll.setMinimumWidth(170)
         filters_scroll.setObjectName("cytoAsideScroll")
 
         # ---- grid
@@ -302,15 +384,19 @@ class LibraryTab(QWidget):
         details_scroll.setWidgetResizable(True)
         details_scroll.setFrameShape(QFrame.Shape.NoFrame)
         details_scroll.setWidget(self._details_body)
-        details_scroll.setFixedWidth(DETAILS_W)
+        details_scroll.setMinimumWidth(220)
 
         split = QSplitter(Qt.Orientation.Horizontal, self)
         split.setChildrenCollapsible(False)
         split.addWidget(filters_scroll)
         split.addWidget(middle)
         split.addWidget(details_scroll)
+        split.setStretchFactor(0, 0)
         split.setStretchFactor(1, 1)
+        split.setStretchFactor(2, 0)
         split.setHandleWidth(1)
+        split.setSizes([FILTER_W, 700, DETAILS_W])
+        middle.setMinimumWidth(260)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -379,6 +465,7 @@ class LibraryTab(QWidget):
                 rl.setContentsMargins(0, 0, 0, 0)
                 rl.setSpacing(6)
                 box = QCheckBox(row)
+                box.setStyleSheet("QCheckBox::indicator { width: 13px; height: 13px; }")
                 box.setChecked(value not in excluded)
                 box.toggled.connect(lambda on, f=facet, v=value: self._toggle(f, v, on))
                 rl.addWidget(box)
@@ -445,7 +532,7 @@ class LibraryTab(QWidget):
         slides = {i.slide.id for i in items if i.slide}
         self._count_sub.setText(f"in {len(slides)} slide{'s' if len(slides) != 1 else ''}" if slides else "")
         if self._folder is None or not items:
-            msg = ("No images yet. Use Import slide session for channel TIFFs, or Add image for a finished picture."
+            msg = ("No images yet. Use Import for the microscope pictures of a slide, or Add image for a finished picture."
                    if not total else "No image matches the filters.")
             label = QLabel(msg, self._grid_body)
             label.setWordWrap(True)
@@ -460,13 +547,15 @@ class LibraryTab(QWidget):
             sl.setContentsMargins(0, 0, 0, 0)
             sl.setSpacing(4)
             if group.title:
-                head = QLabel(f"<b>{group.title}</b>&nbsp;&nbsp;&nbsp;<span style='color:#5A5D63'>{group.subtitle}</span>", section)
-                head.setTextFormat(Qt.TextFormat.RichText)
+                by_slide = self._group.currentText() == "Slide"
+                slide = group.items[0].slide if by_slide and group.items else None
+                head = _SlideHeader(f"<b>{group.title}</b>&nbsp;&nbsp;&nbsp;<span style='color:gray'>{group.subtitle}</span>",
+                                    slide.id if slide else "", section)
+                if by_slide:
+                    head.dropped.connect(self._assign)
+                    head.editRequested.connect(self.edit_slide)
+                    head.menuRequested.connect(self._slide_menu)
                 sl.addWidget(head)
-                rule = QFrame(section)
-                rule.setFrameShape(QFrame.Shape.HLine)
-                rule.setStyleSheet("color: palette(mid);")
-                sl.addWidget(rule)
             grid = QGridLayout()
             grid.setSpacing(12)
             grid.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
@@ -476,14 +565,16 @@ class LibraryTab(QWidget):
                 t.clicked.connect(self._on_clicked)
                 t.doubleClicked.connect(self._on_double_clicked)
                 t.menuRequested.connect(self._thumb_menu)
+                t.dragRequested.connect(self._start_drag)
                 self._thumbs[item.image.id] = t
                 thumbs.append(t)
             self._cols_for.append((grid, thumbs))
             sl.addLayout(grid)
             self._grid_lay.addWidget(section)
         self._grid_lay.addStretch(1)
-        if self._selected in self._thumbs:
-            self._thumbs[self._selected].set_selected(True)
+        for image_id in self._selection_ids():
+            if image_id in self._thumbs:
+                self._thumbs[image_id].set_selected(True)
         self._relayout()
 
     def _relayout(self) -> None:
@@ -507,16 +598,42 @@ class LibraryTab(QWidget):
         return self._selected
 
     def select(self, image_id: str) -> None:
-        self._on_clicked(image_id)
-
-    def _on_clicked(self, image_id: str) -> None:
-        if self._selected in self._thumbs:
-            self._thumbs[self._selected].set_selected(False)
+        self._multi = []
         self._selected = image_id
-        if image_id in self._thumbs:
-            self._thumbs[image_id].set_selected(True)
-        self._show_details(self._item(image_id))
-        self.imageSelected.emit(image_id)
+        self._on_clicked(image_id, keep=True)
+
+    def _selection_ids(self) -> list[str]:
+        """The selected images: the current one plus those added with Cmd- or Shift-click."""
+        extra = [i for i in getattr(self, "_multi", []) if i in {x.image.id for x in self._items}]
+        return list(dict.fromkeys(([self._selected] if self._selected else []) + extra))
+
+    def _on_clicked(self, image_id: str, *, keep: bool = False) -> None:
+        from PySide6.QtWidgets import QApplication
+
+        mods = QApplication.keyboardModifiers()
+        multi = list(getattr(self, "_multi", []))
+        if not keep and mods & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier):
+            current = self._selection_ids()
+            if image_id in current and len(current) > 1:
+                current.remove(image_id)
+                self._selected, multi = current[0], current[1:]
+            else:
+                multi = current
+                self._selected = image_id
+        elif not keep and mods & Qt.KeyboardModifier.ShiftModifier and self._selected:
+            order = [i for i in self._thumbs]
+            a, b = order.index(self._selected) if self._selected in order else 0, order.index(image_id) if image_id in order else 0
+            lo, hi = min(a, b), max(a, b)
+            multi = order[lo:hi + 1]
+        elif not keep:
+            multi = []
+            self._selected = image_id
+        self._multi = [i for i in multi if i != self._selected]
+        chosen = set(self._selection_ids())
+        for tid, t in self._thumbs.items():
+            t.set_selected(tid in chosen)
+        self._show_details(self._item(self._selected))
+        self.imageSelected.emit(self._selected)
 
     def _on_double_clicked(self, image_id: str) -> None:
         self._on_clicked(image_id)
@@ -542,7 +659,8 @@ class LibraryTab(QWidget):
         pic = QLabel(self._details_body)
         source = thumbnail(ci.image_file_path(self._folder, item.image), side)
         aspect = source.height() / source.width() if not source.isNull() and source.width() else 0.72
-        pic.setFixedSize(side, int(side * min(max(aspect, 0.5), 1.0)))
+        pic.setFixedHeight(int(side * min(max(aspect, 0.5), 1.0)))
+        pic.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)  # never forces the column wider
         pic.setAlignment(Qt.AlignmentFlag.AlignCenter)
         pic.setStyleSheet("background:#06070A; color:#aaa; border-radius:6px;")
         pix = thumbnail(ci.image_file_path(self._folder, item.image), side)
@@ -631,20 +749,110 @@ class LibraryTab(QWidget):
     def _thumb_menu(self, image_id: str, pos) -> None:
         from PySide6.QtWidgets import QMenu
 
+        if image_id not in self._selection_ids():
+            self._on_clicked(image_id)
+        ids = self._selection_ids()
         menu = QMenu(self)
         menu.addAction("Open", self._open_selected)
         menu.addAction("Mark signals", lambda: self.signalsRequested.emit(image_id))
         menu.addAction("Add to figure", lambda: self.figureRequested.emit(image_id))
         menu.addSeparator()
         menu.addAction("Edit details…", self._edit_selected)
+        menu.addSeparator()
+        self._add_assign_menu(menu, ids)
+        item = self._item(image_id)
+        if item is not None and item.slide is not None:
+            menu.addAction("Edit slide…", lambda s=item.slide.id: self.edit_slide(s))
+        menu.addSeparator()
         menu.addAction("Remove…", self._remove_selected)
         menu.exec(pos)
+
+    # ------------------------------------------------------------------ slides
+
+    def _add_assign_menu(self, menu, ids: list[str]) -> None:
+        from repeatviewer.backends.cytogenetics.model import load_slides
+
+        n = len(ids)
+        sub = menu.addMenu(f"Assign {n} image{'s' if n != 1 else ''} to slide" if n > 1 else "Assign to slide")
+        current = {self._item(i).slide.id if self._item(i) and self._item(i).slide else "" for i in ids}
+        for slide in load_slides(self._folder) if self._folder else []:
+            act = sub.addAction(slide.name, lambda s=slide.id: self._assign(ids, s))
+            act.setCheckable(True)
+            act.setChecked(current == {slide.id})
+        sub.addSeparator()
+        sub.addAction("New slide…", lambda: self._assign_new(ids))
+        if current - {""}:
+            sub.addAction("Remove from slide", lambda: self._assign(ids, ""))
+
+    def _assign(self, ids: list, slide_id: str) -> None:
+        if self._folder is None or not ids:
+            return
+        from repeatviewer.backends.cytogenetics.model import assign_to_slide
+        from repeatviewer.widgets.cyto_images_ui import notify_changed
+
+        if assign_to_slide(self._folder, [str(i) for i in ids], slide_id):
+            notify_changed(self._folder)
+
+    def _assign_new(self, ids: list[str]) -> None:
+        from PySide6.QtWidgets import QInputDialog
+
+        from repeatviewer.backends.cytogenetics.model import add_slide
+
+        name, ok = QInputDialog.getText(self, "New slide", "Name of the slide:")
+        if not ok or not name.strip() or self._folder is None:
+            return
+        slide = add_slide(self._folder, name.strip())
+        self._assign(ids, slide.id)
+        self.edit_slide(slide.id)
+
+    def edit_slide(self, slide_id: str) -> None:
+        from repeatviewer.backends.cytogenetics.model import load_slides
+        from repeatviewer.views.cyto_slide_dialog import SlideDialog
+
+        slide = next((s for s in load_slides(self._folder) if s.id == slide_id), None) if self._folder else None
+        if slide is None:
+            return
+        dialog = SlideDialog(self._folder, slide, self.window())
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        dialog.show()
+
+    def _slide_menu(self, slide_id: str, pos) -> None:
+        from PySide6.QtWidgets import QMenu
+
+        menu = QMenu(self)
+        if slide_id:
+            menu.addAction("Edit slide…", lambda: self.edit_slide(slide_id))
+        ids = self._selection_ids()
+        if ids:
+            n = len(ids)
+            menu.addAction(f"Put the {n} selected image{'s' if n != 1 else ''} here" if slide_id else
+                           f"Remove the {n} selected image{'s' if n != 1 else ''} from their slide",
+                           lambda: self._assign(ids, slide_id))
+        if not menu.isEmpty():
+            menu.exec(pos)
+
+    def _start_drag(self, image_id: str) -> None:
+        from PySide6.QtCore import QMimeData
+        from PySide6.QtGui import QDrag
+
+        if image_id not in self._selection_ids():
+            self._on_clicked(image_id)
+        ids = self._selection_ids()
+        data = QMimeData()
+        data.setData(DRAG_MIME, "\n".join(ids).encode("utf-8"))
+        drag = QDrag(self)
+        drag.setMimeData(data)
+        thumb = self._thumbs.get(image_id)
+        if thumb is not None:
+            pix = thumb.grab().scaledToWidth(90, Qt.TransformationMode.SmoothTransformation)
+            drag.setPixmap(pix)
+        drag.exec(Qt.DropAction.MoveAction)
 
     def _grid_menu(self, pos) -> None:
         from PySide6.QtWidgets import QMenu
 
         menu = QMenu(self)
-        menu.addAction("Import slide session…", self.start_import)
+        menu.addAction("Import", self.start_import)
         menu.addAction("Add image…", self.add_image)
         menu.addAction("Edit lists…", self.edit_lists)
         menu.exec(self._grid_body.mapToGlobal(pos))
@@ -686,17 +894,46 @@ class LibraryTab(QWidget):
             return
         from repeatviewer.widgets.cyto_images_ui import IMAGE_FILE_FILTER, AttachImageDialog
 
+        from repeatviewer.backends.cytogenetics import channels as chn
+        from repeatviewer.backends.cytogenetics.importer import add_channel_image
+        from repeatviewer.widgets.cyto_images_ui import edit_image, notify_changed
+
         chosen, _ = QFileDialog.getOpenFileNames(self, "Add cytogenetic image", str(self._folder), IMAGE_FILE_FILTER)
         for path in chosen:
-            if ci.is_image_path(Path(path)):
-                AttachImageDialog(self._folder, source=Path(path), targets=[], allow_no_targets=True, parent=self).exec()
+            path = Path(path)
+            if not ci.is_image_path(path):
+                continue
+            try:
+                multichannel = chn.is_tiff(path) and chn.inspect_tiff(path).kind == "channels"
+            except Exception:  # noqa: BLE001 - unreadable TIFF: let the picture dialog try
+                multichannel = False
+            if multichannel:
+                try:
+                    image = add_channel_image(self._folder, path)
+                except Exception as exc:  # noqa: BLE001
+                    QMessageBox.warning(self, "Add image", f"{path.name} could not be read:\n{exc}")
+                    continue
+                if image is not None:
+                    notify_changed(self._folder)
+                    edit_image(self, self._folder, image, allow_no_targets=True)
+                continue
+            AttachImageDialog(self._folder, source=path, targets=[], allow_no_targets=True, parent=self).exec()
 
     def edit_lists(self) -> None:
         if self._folder is None:
             return
         from repeatviewer.views.cyto_lists_dialog import CytoListsDialog
 
-        CytoListsDialog(self._folder, self).exec()
+        old = getattr(self, "_lists_dialog", None)
+        if old is not None and old.isVisible():
+            old.raise_()
+            old.activateWindow()
+            return
+        dialog = CytoListsDialog(self._folder, self.window())
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        dialog.destroyed.connect(lambda *_: setattr(self, "_lists_dialog", None))
+        self._lists_dialog = dialog
+        dialog.show()
 
     # ------------------------------------------------------------------ import
 
@@ -705,23 +942,34 @@ class LibraryTab(QWidget):
             return
         from repeatviewer.views.cyto_import_dialog import CytoImportDialog
 
-        dialog = CytoImportDialog(self._folder, self)
-        dialog.exec()
-        if not dialog.should_run():
+        if getattr(self, "_import_dialog", None) is not None and self._import_dialog.isVisible():
+            self._import_dialog.raise_()
+            self._import_dialog.activateWindow()
+            return
+        dialog = CytoImportDialog(self._folder, self.window())
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        dialog.finished.connect(lambda _r, d=dialog: self._after_import_dialog(d))
+        self._import_dialog = dialog
+        dialog.show()
+
+    def _after_import_dialog(self, dialog) -> None:
+        self._import_dialog = None
+        if not dialog.should_run() or self._worker is not None:
             return
         self._worker = _ImportWorker(dialog.request(), self)
         self._worker.progressed.connect(self._on_progress)
         self._worker.finishedWith.connect(self._on_import_done)
         self.import_running.emit(True)
+        self._import_btn.setEnabled(False)
         self._progress.setRange(0, 0)
-        self._progress_label.setText("Importing slide session…")
+        self._progress_label.setText("Importing…")
         self._progress_row.show()
         self._worker.start()
 
     def _on_progress(self, done: int, total: int) -> None:
         self._progress.setRange(0, max(1, total))
         self._progress.setValue(done)
-        self._progress_label.setText(f"Importing slide session: {done} done, {max(0, total - done)} left")
+        self._progress_label.setText(f"Importing: {done} done, {max(0, total - done)} left")
 
     def _on_stop(self) -> None:
         if self._worker is not None:
@@ -735,8 +983,9 @@ class LibraryTab(QWidget):
             worker.deleteLater()
         self._progress_row.hide()
         self.import_running.emit(False)
+        self._import_btn.setEnabled(True)
         if isinstance(result, Exception):
-            QMessageBox.critical(self, "Import slide session", f"The import failed:\n{result}")
+            QMessageBox.critical(self, "Import", f"The import failed:\n{result}")
             return
         slide, images, errors = result
         if self._folder is not None:
@@ -749,7 +998,7 @@ class LibraryTab(QWidget):
                 if images else "Nothing was imported.")
         if errors:
             text += "\n\n" + "\n".join(errors[:12]) + ("\n..." if len(errors) > 12 else "")
-        (QMessageBox.warning if errors or not images else QMessageBox.information)(self, "Import slide session", text)
+        (QMessageBox.warning if errors or not images else QMessageBox.information)(self, "Import", text)
 
     def busy(self) -> bool:
         return self._worker is not None

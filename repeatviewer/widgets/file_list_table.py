@@ -190,6 +190,7 @@ class FileListTableWidget(QTableWidget):
     add_annotation_requested = Signal(Path)
     export_annotation_requested = Signal(Path)
     cyto_images_requested = Signal(Path)             # open the image(s) of a sequence
+    chromosome_sizes_requested = Signal(Path)        # write <name>_sizes.txt for a FASTA
     attach_cyto_image_requested = Signal(Path, list)  # FASTA, image paths ([] = ask)
     annotation_files_dropped = Signal(Path, list)  # FASTA, GFF/GTF/BED paths
 
@@ -1350,6 +1351,10 @@ class FileListTableWidget(QTableWidget):
                                 f"Show Cytogenetic Images ({n_images})",
                                 lambda p=path: self.cyto_images_requested.emit(p),
                             )
+                        menu.addAction(
+                            "Make Chromosome Sizes File",
+                            lambda p=path: self.chromosome_sizes_requested.emit(p),
+                        )
                         try:
                             seq_n = count_fasta_sequences(path)
                         except Exception:  # noqa: BLE001

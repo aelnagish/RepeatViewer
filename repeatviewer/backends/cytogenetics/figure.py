@@ -23,7 +23,11 @@ from .model import ImageDetails, image_details, load_slides, new_id, ordered_cha
 
 SUFFIX = ".rvfig"
 WIDTHS = (("Two columns (174 mm)", 174.0), ("One column (84 mm)", 84.0), ("Custom", 0.0))
-LAYOUTS = (("2 × 2", "2x2"), ("4 in a row", "4row"), ("3 + idiogram", "3+idiogram"), ("One row per cell", "auto"))
+LAYOUTS = (("1 row", "1row"), ("1 column", "1col"), ("2 × 2", "2x2"), ("2 × 3", "2x3"), ("3 × 2", "3x2"),
+           ("3 × 3", "3x3"), ("3 + idiogram", "3+idiogram"), ("One row per cell", "auto"),
+           ("Custom rows × columns", "custom"))
+# old saved layouts
+LAYOUT_ALIASES = {"4row": "1row"}
 FONTS = (("Arial 8 pt", 8.0), ("Arial 10 pt", 10.0))
 VIEW_MERGE = "merge"
 VIEW_IDIOGRAM = "idiogram"
@@ -59,6 +63,9 @@ class Figure:
     layout: str = "2x2"
     spacing: int = 2  # 0..10, half millimetres
     font_pt: float = 8.0
+    font_family: str = "Arial"
+    rows: int = 2  # Custom rows × columns
+    cols: int = 3
     panels: list[Panel] = field(default_factory=list)
     same_crop: bool = True
     crop: tuple[float, float, float, float] | None = None
@@ -116,6 +123,7 @@ class Figure:
             fig.panels.append(Panel(id=str(p["id"]), image_id=str(p.get("image_id") or ""),
                                     view=str(p.get("view") or VIEW_MERGE), label=str(p.get("label") or ""),
                                     arrows=arrows, crop=_crop(p.get("crop"))))
+        fig.layout = LAYOUT_ALIASES.get(fig.layout, fig.layout)
         return fig
 
 
@@ -332,11 +340,17 @@ class Box:
 
 def columns_for(fig: Figure) -> int:
     n = len([p for p in fig.panels if not p.is_idiogram])
-    if fig.layout == "2x2":
-        return 2
-    if fig.layout == "4row":
-        return 4
-    if fig.layout == "3+idiogram":
+    layout = LAYOUT_ALIASES.get(fig.layout, fig.layout)
+    if layout == "1row":
+        return max(1, n)
+    if layout == "1col":
+        return 1
+    if layout == "custom":
+        return max(1, min(12, int(fig.cols)))
+    m = re.match(r"^(\d+)x(\d+)$", layout)
+    if m:  # rows × columns
+        return int(m.group(2))
+    if layout == "3+idiogram":
         return 3
     # one row per cell: as many columns as panels of the first cell (at most 5)
     first = fig.panels[0].image_id if fig.panels else ""

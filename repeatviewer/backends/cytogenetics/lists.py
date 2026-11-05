@@ -51,8 +51,48 @@ _DYE_WORDS = {
 
 Lists = dict[str, list[dict]]
 
+# order of the lists in the Edit lists window: what you need first comes first
+EDIT_ORDER = ("dyes", "probes", "species", "stages", "techniques", "counterstains")
+
+# excitation and emission maxima (nm) of common dyes
+DYE_WAVELENGTHS = {
+    "dapi": (358, 461), "hoechst": (350, 461), "pi": (535, 617), "dy-415": (418, 467), "deac": (432, 472),
+    "aqua": (433, 480), "fitc": (495, 519), "alexa 488": (490, 525), "gfp": (488, 507), "cy3": (550, 570),
+    "tritc": (557, 576), "rhodamine": (552, 575), "texas red": (596, 615), "alexa 594": (590, 617),
+    "cy5": (649, 666), "atto 647n": (646, 664), "alexa 647": (650, 668), "cy7": (743, 767),
+}
+
+# every cell stage a FISH lab meets, with what the Signals tab marks on it
+STANDARD_STAGES = (
+    ("Interphase", "nuclei"), ("Prophase", "chromosomes"), ("Prometaphase", "chromosomes"),
+    ("Mitotic metaphase", "chromosomes"), ("Anaphase", "chromosomes"), ("Telophase", "chromosomes"),
+    ("Leptotene", "chromosomes"), ("Zygotene", "bivalents"), ("Pachytene", "bivalents"), ("Diplotene", "bivalents"),
+    ("Diakinesis", "bivalents"), ("Metaphase I", "bivalents"), ("Anaphase I", "chromosomes"),
+    ("Telophase I", "chromosomes"), ("Metaphase II", "chromosomes"), ("Anaphase II", "chromosomes"),
+    ("Telophase II", "chromosomes"), ("Tetrad", "nuclei"), ("Pollen mitosis", "chromosomes"),
+    ("Extended fibre", "fibres"),
+)
+
+
+def complete_lists(lists: Lists) -> Lists:
+    """Add the standard stages that are missing and the known wavelengths of dyes. Never removes anything."""
+    have = {str(e["name"]).lower() for e in lists.get("stages", [])}
+    for name, marks in STANDARD_STAGES:
+        if name.lower() not in have:
+            lists.setdefault("stages", []).append({"name": name, "marks": marks})
+    for e in lists.get("dyes", []):
+        known = DYE_WAVELENGTHS.get(str(e["name"]).lower())
+        if known:
+            e.setdefault("excitation", str(known[0]))
+            e.setdefault("emission", str(known[1]))
+    return lists
+
 
 def default_lists() -> Lists:
+    return complete_lists(_base_lists())
+
+
+def _base_lists() -> Lists:
     stage_marks = {
         "Pachytene": "bivalents",
         "Interphase": "nuclei",
@@ -87,7 +127,7 @@ def load_lists(folder: Path) -> Lists:
         items = saved.get(key)
         if isinstance(items, list):
             lists[key] = [dict(x) for x in items if isinstance(x, dict) and str(x.get("name", "")).strip()]
-    return lists
+    return complete_lists(lists)
 
 
 def save_lists(folder: Path, lists: Lists) -> None:
@@ -243,7 +283,7 @@ def remove_entry(folder: Path, lists: Lists, key: str, name: str) -> None:
 
 def filename_tokens(name: str) -> list[str]:
     stem = Path(name).name
-    for suffix in (".ome.tiff", ".ome.tif", ".tiff", ".tif"):
+    for suffix in (".ome.tiff", ".ome.tif", ".tiff", ".tif", ".jpeg", ".jpg", ".png", ".bmp", ".gif", ".webp"):
         if stem.lower().endswith(suffix):
             stem = stem[: -len(suffix)]
             break
@@ -310,6 +350,12 @@ class ListsEditor:
         if self._exists(key, name):
             raise ValueError(f"{name} is already in the list.")
         return add_entry(self.lists, key, name, **values)
+
+    def move(self, key: str, src: int, dst: int) -> None:
+        """Change the order of the entries (drag in the table)."""
+        items = self.lists.get(key, [])
+        if 0 <= src < len(items) and 0 <= dst < len(items) and src != dst:
+            items.insert(dst, items.pop(src))
 
     def rename(self, key: str, old: str, new: str) -> None:
         new = str(new).strip()

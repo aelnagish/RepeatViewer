@@ -34,6 +34,8 @@ dependencies = [
   "primer3-py>=2.0",
   # Cytogenetics: 16-bit channel TIFFs and their pixel size
   "tifffile>=2023.1",
+  # Cytogenetics: LZW and other compressed TIFFs from microscope software
+  "imagecodecs>=2023.1",
 ]
 
 [project.optional-dependencies]

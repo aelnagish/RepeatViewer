@@ -125,24 +125,24 @@ class CytogeneticsWorkspace(QWidget):
         self._crumb = QLabel(self)
         self._crumb.setObjectName("cytoCrumb")
         self._crumb.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        self._import_btn = QPushButton("Import slide session", self)
+        self._import_btn = QPushButton("Import", self)
         self._import_btn.setObjectName("cytoPrimary")
         self._import_btn.clicked.connect(lambda: self._pages["Library"].start_import())
 
-        chrome = QWidget(self)
-        chrome.setObjectName("cytoChrome")
-        chrome.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        header = QHBoxLayout(chrome)
-        header.setContentsMargins(16, 10, 16, 10)
-        header.setSpacing(12)
-        header.addWidget(self._title)
-        header.addWidget(self._crumb, 1)
-        header.addWidget(self._import_btn)
-        header.addWidget(self._help)
-        self._side_btn.hide()  # the mockup has no options panel; Data counts stay reachable from the code
+        self._import_btn.hide()  # Import lives in the Library count row now
+        self._title.hide()  # no top row: these labels must not paint over the tabs
+        self._crumb.hide()
+        self._side_btn.hide()
 
         self._tabs = QTabWidget(self)
         self._tabs.setDocumentMode(True)
+        corner = QWidget(self)
+        cl = QHBoxLayout(corner)
+        cl.setContentsMargins(0, 0, 8, 0)
+        cl.addWidget(self._help, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._tabs.setCornerWidget(corner, Qt.Corner.TopRightCorner)
+        self._tabs.tabBar().setDrawBase(False)  # no line running above the "?" button
+        corner.setFixedHeight(max(self._tabs.tabBar().sizeHint().height(), self._help.sizeHint().height()))
         self._pages: dict[str, QWidget] = {}
         for name in ws.TAB_NAMES:
             page = {"Library": LibraryTab, "Image": ImageTab, "Signals": SignalsTab, "Idiogram": IdiogramTab, "Figure": FigureTab}.get(name, None)
@@ -159,6 +159,8 @@ class CytogeneticsWorkspace(QWidget):
         self._pages["Signals"].karyotypesChanged.connect(self.refresh)
         self._pages["Idiogram"].karyotypesChanged.connect(self.refresh)
         self._pages["Idiogram"].figureRequested.connect(self.add_idiogram_to_figure)
+        self._pages["Idiogram"].openSignalRequested.connect(self.open_signal)
+        self._pages["Idiogram"].openRequested.connect(self.openRequested)
         self._pages["Library"].figureRequested.connect(self.add_to_figure)
         self._pages["Figure"].crumbChanged.connect(self._on_figure_crumb)
 
@@ -177,14 +179,12 @@ class CytogeneticsWorkspace(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
-        root.addWidget(chrome)
         root.addWidget(self._split, 1)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
         self._side_btn.setChecked(False)
         self._on_side_toggled(self._side_btn.isChecked())
         self._tabs.setCurrentIndex(self._tabs.indexOf(self._pages[ws.normalize_tab(_read("tab", ""))]))
-        self._import_btn.setVisible(self.tab_name() == "Library")
         cyto_notifier().changed.connect(self._on_store_changed)
         if path is not None:
             self.load(path)
@@ -241,7 +241,7 @@ class CytogeneticsWorkspace(QWidget):
         self._folder = ws.workspace_folder(self._path)
         self._title.setText("Cytogenetics")
         self._title.setToolTip(str(self._folder))
-        self._crumb.setText(ws.breadcrumb(self._folder, self._current_image))
+        self._set_crumb(ws.breadcrumb(self._folder, self._current_image))
         self.refresh()
 
     def refresh(self) -> None:
@@ -287,6 +287,11 @@ class CytogeneticsWorkspace(QWidget):
         self.show_tab("Signals")
         self._pages["Signals"].show_image(image_id)
 
+    def open_signal(self, image_id: str, signal_id: str) -> None:
+        """Show one image in the Signals tab with one signal selected."""
+        self.open_signals(image_id)
+        self._pages["Signals"].select_signal(signal_id)
+
     def add_to_figure(self, image_id: str) -> None:
         """Add the channels and the merge of one cell to the current figure."""
         if not image_id:
@@ -298,20 +303,25 @@ class CytogeneticsWorkspace(QWidget):
         self.show_tab("Figure")
         self._pages["Figure"].add_idiogram()
 
+    def _set_crumb(self, text: str) -> None:
+        """The path (folder › slide › cell) is shown as the tab row's tooltip."""
+        self._crumb.setText(text)
+        self._tabs.tabBar().setToolTip(text)
+
     def _on_figure_crumb(self, text: str) -> None:
         if self.tab_name() == "Figure" and text:
-            self._crumb.setText(text)
+            self._set_crumb(text)
 
     def _sync_crumb(self) -> None:
         if self._folder is None:
             return
         name = self.tab_name()
         if name == "Figure":
-            self._crumb.setText(self._pages["Figure"].crumb())
+            self._set_crumb(self._pages["Figure"].crumb())
         elif name == "Idiogram":
-            self._crumb.setText(f"{self._folder.name} › all slides")
+            self._set_crumb(f"{self._folder.name} › all slides")
         else:
-            self._crumb.setText(ws.breadcrumb(self._folder, self._current_image))
+            self._set_crumb(ws.breadcrumb(self._folder, self._current_image))
 
     def _on_image_shown(self, image_id: str, source: str = "Library") -> None:
         """Keep the header and the other image tabs on the same cell."""
@@ -329,6 +339,5 @@ class CytogeneticsWorkspace(QWidget):
     def _on_tab_changed(self, index: int) -> None:
         name = self.tab_name()
         _write("tab", name)
-        self._import_btn.setVisible(name == "Library")
         self._sync_crumb()
         self.tabChanged.emit(name)
