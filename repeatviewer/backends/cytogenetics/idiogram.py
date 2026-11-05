@@ -78,6 +78,10 @@ class IdiogramSettings:
     link_probes: bool = True
     paper: dict = field(default_factory=lambda: dict(PAPER_DEFAULTS))
     figure_style: str = "compare"  # how the idiogram is drawn in a figure: "compare" or "paper"
+    show_bands: bool = True  # layers of the Idiogram tab
+    show_measured: bool = True
+    show_assembly: bool = True
+    views: dict = field(default_factory=dict)  # karyotype name -> its own view settings (see view_of)
 
     def source(self, probe: str) -> ProbeSource:
         return self.sources.setdefault(probe, ProbeSource())
@@ -101,7 +105,9 @@ class IdiogramSettings:
                 pass
         if isinstance(raw.get("paper"), dict):
             s.paper.update({k: v for k, v in raw["paper"].items() if k in PAPER_DEFAULTS})
-        for key in ("homologues", "drag", "link_probes"):
+        if isinstance(raw.get("views"), dict):
+            s.views = {str(k): v for k, v in raw["views"].items() if isinstance(v, dict)}
+        for key in ("homologues", "drag", "link_probes", "show_bands", "show_measured", "show_assembly"):
             if key in raw:
                 setattr(s, key, bool(raw[key]))
         s.hidden_probes = [str(x) for x in raw.get("hidden_probes") or []]
@@ -116,6 +122,30 @@ class IdiogramSettings:
         if s.lengths not in LENGTHS:
             s.lengths = "karyotype"
         return s
+
+
+VIEW_SKIP = ("karyotype", "views", "paper", "figure_style")
+
+
+def view_of(settings: IdiogramSettings) -> dict:
+    """The settings that belong to one karyotype (probes, assembly, layout, layers)."""
+    return {k: v for k, v in settings.to_dict().items() if k not in VIEW_SKIP}
+
+
+def switch_karyotype(settings: IdiogramSettings, name: str) -> IdiogramSettings:
+    """Keep the current karyotype's view, then load the view saved for ``name`` (if any)."""
+    if settings.karyotype:
+        settings.views[settings.karyotype] = view_of(settings)
+    saved = settings.views.get(name)
+    if saved:
+        raw = settings.to_dict()
+        raw.update(saved)
+        new = IdiogramSettings.from_dict(raw)
+        new.views = settings.views
+    else:
+        new = settings
+    new.karyotype = name
+    return new
 
 
 def settings_path(folder: Path) -> Path:

@@ -7,7 +7,7 @@ from pathlib import Path
 import re
 
 from PySide6.QtCore import QPoint, QPointF, QRectF, QSize, Qt, Signal
-from PySide6.QtGui import QBrush, QColor, QFont, QIcon, QImage, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtGui import QBrush, QColor, QFont, QIcon, QImage, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
 from repeatviewer.backends import cyto_images as ci
 from repeatviewer.backends.cytogenetics import idiogram as idg
 from repeatviewer.backends.cytogenetics import karyotype as kt
+from repeatviewer.backends.cytogenetics import lists as lists_mod
 from repeatviewer.backends.cytogenetics.model import image_details
 from repeatviewer.widgets.combo_boxes import NoWheelComboBox
 from repeatviewer.widgets.cytogenetics_style import clear_layout
@@ -60,26 +61,21 @@ GENOME_NONE, GENOME_BROWSE = "(no genome)", "Browse…"
 
 HELP_TEXT = (
     "<b>Idiogram</b><br>"
-    "Each chromosome has two bars. <b>Left (in situ)</b>: the FISH signals you marked in the Signals tab, pooled over all cells; "
-    "the number is on how many of the marked homologues the signal was seen.<br>"
-    "<b>Right (in silico)</b>: the assembly sequence linked to the chromosome, with the arrays of the probe "
-    "(hits closer than 50 kb are merged; short arrays are hidden because FISH cannot see them).<br>"
-    "<b>Status</b>: Agrees when every FISH band has an array within the tolerance and the other way round; "
-    "FISH only, Assembly only or Differs otherwise; No assembly when the chromosome has no linked sequence.<br>"
-    "<b>Drag a band</b> (when allowed in Layout) to correct where the signal sits; all signals pooled in that band are changed "
-    "and kept as set by hand.<br>"
-    "<b>Chromosome names</b>: which assembly sequence belongs to which FISH chromosome. Tick Flip when the sequence starts at the q end.<br>"
-    "Signals without an arm (chromosome not measured) cannot be placed; measure the chromosome in the Signals tab.<br>"
-    "<b>Click a band</b> to see the cells it was seen in; click a cell to open it in Signals with the signal selected. "
-    "<b>Click an array</b> to open the genome or extract the array as FASTA.<br>"
-    "<b>Show</b>: <i>One per type</i> pools the homologues, <i>Homologue groups</i> draws each homologue (bivalent, "
-    "trivalent … hexavalent).<br>"
-    "<b>Edit</b>: draw on the chromosomes. <i>Select</i>: drag the top of a chromosome to change its length, the "
-    "centromere handle or a band edge. <i>Paint band</i>: drag over a chromosome to add a band of the chosen kind. "
-    "<i>Place signal</i>: click to add a signal of the chosen probe by hand. Every change is saved to the karyotype "
-    "and shows in Signals and Figure."
+    "The karyotype drawn as in Edit karyotype, with what you measured in the Signals tab on top.<br>"
+    "<b>Karyotype</b>: which karyotype to show; each one keeps its own view (probes, assembly, layout).<br>"
+    "<b>Compare with</b>: a second karyotype drawn under the first, for example a related species.<br>"
+    "<b>Show</b>: every homologue (1a, 1b, 1c) or one bar per chromosome.<br>"
+    "<b>Layers</b>: ■ karyotype bands (drawn in Edit karyotype), ▶ measured signals (pooled over the marked cells; "
+    "hover for how often each was seen), dashed bar = assembly (choose a genome under Assembly).<br>"
+    "<b>Probes</b>: untick to hide a probe; <i>Seen in at least</i> hides rare signals.<br>"
+    "<b>Measured, not in the karyotype</b>: signals with no band of that probe nearby. "
+    "<b>Add to karyotype</b> makes them bands.<br>"
+    "<b>Drag</b> a triangle to correct a signal (Layout > Drag signals). Click it to open the cells it comes from.<br>"
+    "<b>Add to figure</b>: Colour, or Journal (black and white with a table)."
 )
-SHOW_ITEMS = (("One per type", False), ("Homologue groups", True))
+
+
+SHOW_ITEMS = (("Every homologue", True), ("One per chromosome", False))
 PAINT_KINDS = (("NOR (hatched)", kt.BAND_KINDS[0]), ("DAPI+ (blue)", kt.BAND_KINDS[1]), ("CMA+ (yellow)", kt.BAND_KINDS[2]))
 OWN_COLOUR = "Own colour…"
 TOOLS = (("select", "Select"), ("paint", "Paint band"), ("place", "Place signal"))
@@ -93,22 +89,28 @@ def _section_label(text: str) -> QLabel:
 
 
 class IdiogramCanvas(QWidget):
-    """Pairs of bars, one pair per chromosome (or homologue)."""
+    """Chromosomes drawn like the Edit karyotype window, grouped by chromosome (one bar per homologue or one per
+    chromosome). Layers: karyotype bands (boxes), measured signals (triangles on the left), assembly (thin bar)."""
 
     bandMoved = Signal(object, float)  # FishBand, new fraction
     orderChanged = Signal(list)  # chromosome names
     bandClicked = Signal(int, int, QPoint)  # row, band, global position
     arrayClicked = Signal(int, int, QPoint)  # row, array, global position
 
-    SLOT_MIN = 74
-    FISH_W, ASM_W, GAP = 26, 16, 8
-    TOP, BOTTOM = 26, 78
+    BAR_W, HOM_GAP, GROUP_GAP, LABEL_W, ASM_W, ASM_GAP = 26.0, 14.0, 46.0, 28.0, 9.0, 5.0
+    TOP, BOTTOM = 30, 44
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.rows: list[idg.ChromosomeRow] = []
         self.heights: list[float] = []
         self.colours: dict[str, str] = {}
+        self.karyotype: kt.Karyotype | None = None
+        self.title = ""
+        self.show_bands = True
+        self.show_measured = True
+        self.show_assembly = True
+        self.assembly_active = False
         self.drag_enabled = True
         self.reorder_enabled = False
         self._drag_band: tuple[int, int] | None = None
@@ -116,44 +118,96 @@ class IdiogramCanvas(QWidget):
         self._drag_slot: int | None = None
         self._drag_x = 0.0
         self._press: tuple[QPointF, tuple] | None = None
+        self._rects: list[tuple[QRectF, QRectF]] = []
+        self._labels: list[tuple[str, QRectF]] = []
+        self._size = (0, 0)
         self.setMouseTracking(True)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setMinimumHeight(420)
 
     def set_rows(self, rows: list[idg.ChromosomeRow], heights: list[float], colours: dict[str, str]) -> None:
         self.rows, self.heights, self.colours = rows, heights, colours
-        self.setMinimumWidth(max(300, len(rows) * self.SLOT_MIN + 20))
+        self._size = (0, 0)
+        self.setMinimumWidth(max(300, int(len(rows) * 22 + len(self._groups()) * 30 + 40)))
         self.update()
 
     def sizeHint(self) -> QSize:  # noqa: D102
-        return QSize(max(600, len(self.rows) * 96), 560)
+        return QSize(max(600, len(self.rows) * 48), 560)
 
     # ---------------------------------------------------------------- geometry
 
-    def _slot(self) -> float:
-        return max(float(self.SLOT_MIN), (self.width() - 20) / max(1, len(self.rows)))
+    def _groups(self) -> list[list[int]]:
+        groups: list[list[int]] = []
+        for i, row in enumerate(self.rows):
+            if groups and self.rows[groups[-1][0]].chromosome.name == row.chromosome.name:
+                groups[-1].append(i)
+            else:
+                groups.append([i])
+        return groups
+
+    def _has_asm(self) -> bool:
+        return self.show_assembly and self.assembly_active and any(r.sequence_length for r in self.rows)
+
+    def _layout(self, width: float, height: float) -> None:
+        self._rects, self._labels = [], []
+        groups = self._groups()
+        if not groups:
+            return
+        has_asm = self._has_asm()
+        top = self.TOP + (22 if self.title else 0)
+        bottom = self.BOTTOM + (34 if self.assembly_active and self.show_assembly else 0)
+        bar, gap, ggap, lab = self.BAR_W, self.HOM_GAP, self.GROUP_GAP, self.LABEL_W
+        asm_w = (self.ASM_W + self.ASM_GAP) if has_asm else 0.0
+        need = sum(lab + len(g) * (bar + asm_w) + (len(g) - 1) * gap for g in groups) + ggap * (len(groups) - 1)
+        f = min(1.0, max(0.3, (width - 40) / need)) if need > 0 else 1.0
+        bar, gap, ggap, asm_w = max(10.0, bar * f), gap * f, ggap * f, asm_w * f
+        need = sum(lab + len(g) * (bar + asm_w) + (len(g) - 1) * gap for g in groups) + ggap * (len(groups) - 1)
+        usable = max(80.0, height - top - bottom)
+        x = max(20.0, (width - need) / 2)
+        self._rects = [(QRectF(), QRectF())] * len(self.rows)
+        for g in groups:
+            gh = max(usable * (self.heights[i] if i < len(self.heights) else 1.0) for i in g)
+            self._labels.append((self.rows[g[0]].chromosome.name, QRectF(x, top, lab - 6, gh)))
+            x += lab
+            for i in g:
+                h = usable * (self.heights[i] if i < len(self.heights) else 1.0)
+                fish = QRectF(x, top, bar, h)
+                asm = QRectF(x + bar + self.ASM_GAP * f, top, self.ASM_W * f, h) if has_asm else QRectF()
+                self._rects[i] = (fish, asm)
+                x += bar + asm_w + gap
+            x += ggap - gap
 
     def _bars(self, i: int) -> tuple[QRectF, QRectF]:
-        slot = self._slot()
-        cx = 10 + slot * (i + 0.5)
-        usable = max(80.0, self.height() - self.TOP - self.BOTTOM)
-        h = usable * (self.heights[i] if i < len(self.heights) else 1.0)
-        bottom = self.TOP + usable
-        pair = self.FISH_W + self.GAP + self.ASM_W
-        x0 = cx - pair / 2 + 8  # leave room on the left for the "seen" numbers
-        fish = QRectF(x0, bottom - h, self.FISH_W, h)
-        asm = QRectF(x0 + self.FISH_W + self.GAP, bottom - h, self.ASM_W, h)
-        return fish, asm
+        if self._size != (self.width(), self.height()) or len(self._rects) != len(self.rows):
+            self._size = (self.width(), self.height())
+            self._layout(self.width(), self.height())
+        return self._rects[i] if i < len(self._rects) else (QRectF(), QRectF())
 
     def _band_rect(self, fish: QRectF, row: idg.ChromosomeRow, band: idg.FishBand, fraction: float | None = None) -> QRectF:
         f = band.fraction if fraction is None else fraction
-        tall = band.arm == "cen"
-        h = 20.0 if tall else 12.0
         y = fish.top() + f * fish.height()
-        return QRectF(fish.left(), y - h / 2, fish.width(), h)
+        return QRectF(fish.left() - 13, y - 7, 13, 14)
 
     def colour(self, probe: str) -> QColor:
         return QColor(self.colours.get(probe, "#8A8D93"))
+
+    def _view(self, row: idg.ChromosomeRow) -> kt.KaryoChromosome:
+        k = self.karyotype
+        if not row.homologue or k is None:
+            return row.chromosome
+        suffixes = k.homologue_suffixes()
+        i = suffixes.index(row.homologue) if row.homologue in suffixes else -1
+        return kt.homologue_view(row.chromosome, i)
+
+    def _band_brush(self, b: kt.Band) -> QBrush:
+        probe = kt.manual_probe(b.kind)
+        if b.color:
+            return QBrush(QColor(b.color))
+        if probe:
+            return QBrush(self.colour(probe))
+        if b.kind.startswith("Secondary"):
+            return QBrush(QColor("#8A8D93"), Qt.BrushStyle.BDiagPattern)
+        return QBrush(QColor(BAND_COLOURS.get(b.kind, "#8A8D93")))
 
     # ---------------------------------------------------------------- painting
 
@@ -167,111 +221,107 @@ class IdiogramCanvas(QWidget):
         if not self.rows:
             p.setPen(QColor("#5A5D63"))
             p.drawText(QRectF(0, 0, width, height), Qt.AlignmentFlag.AlignCenter,
-                       "No karyotype yet. Make one in the Signals tab (Edit karyotype).")
+                       "No karyotype yet: Signals > 1 Karyotype, or Edit karyotype on the right.")
             return
+        self._size = (width, height)
+        self._layout(width, height)
         small = QFont(self.font())
-        small.setPixelSize(10)
+        small.setPixelSize(11)
         bold = QFont(self.font())
-        bold.setPixelSize(13)
+        bold.setPixelSize(15)
         bold.setBold(True)
+        if self.title:
+            p.setFont(bold)
+            p.setPen(QColor("#1C1C1E"))
+            p.drawText(QRectF(20, 6, width - 40, 22), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, self.title)
+        outline = QColor("#6C6F75")
         for i, row in enumerate(self.rows):
-            fish, asm = self._bars(i)
+            fish, asm = self._rects[i]
             if self._drag_slot == i:
-                shift = self._drag_x - (fish.left() + fish.width())
-                fish.translate(shift, 0)
-                asm.translate(shift, 0)
-            # FISH bar
-            p.setPen(QPen(QColor("#6C6F75"), 1.5))
+                dx = self._drag_x - fish.center().x()
+                fish, asm = fish.translated(dx, 0), asm.translated(dx, 0)
+            view = self._view(row)
+            path = chromosome_path(fish, view)
+            p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(QColor("#FFFFFF"))
-            p.drawRoundedRect(fish, self.FISH_W / 2, self.FISH_W / 2)
-            for kb in row.chromosome.bands:  # bands and signals drawn in Edit
-                top = fish.top() + kb.start * fish.height()
-                rect = QRectF(fish.left() + 1, top, fish.width() - 2, max(2.0, (kb.end - kb.start) * fish.height()))
-                probe = kt.manual_probe(kb.kind)
-                if probe:
-                    p.setPen(QPen(self.colour(probe), 3))
-                    p.setBrush(QColor("#FFFFFF"))
-                    p.drawEllipse(QPointF(fish.center().x(), rect.center().y()), 6, 6)
-                    continue
-                p.setPen(Qt.PenStyle.NoPen)
-                if kb.kind.startswith("Secondary"):
-                    p.setBrush(QBrush(QColor("#8A8D93"), Qt.BrushStyle.BDiagPattern))
-                else:
-                    p.setBrush(QColor(kb.color or BAND_COLOURS.get(kb.kind, "#8A8D93")))
-                p.drawRect(rect)
-            for j, band in enumerate(row.fish):
-                frac = self._drag_frac if self._drag_band == (i, j) else None
-                r = self._band_rect(fish, row, band, frac)
-                p.setPen(Qt.PenStyle.NoPen)
-                p.setBrush(self.colour(band.probe))
-                clip = QPainterPath()
-                clip.addRoundedRect(fish, self.FISH_W / 2, self.FISH_W / 2)
+            p.drawPath(path)
+            if self.show_bands:
                 p.save()
-                p.setClipPath(clip)
-                p.drawRect(r)
+                p.setClipPath(path)
+                for b in view.bands:
+                    p.setBrush(self._band_brush(b))
+                    p.drawRect(QRectF(fish.left(), fish.top() + b.start * fish.height(), fish.width(),
+                                      max(1.5, (b.end - b.start) * fish.height())))
                 p.restore()
-                if j not in row.matched_fish and row.sequence_length:
-                    p.setPen(QPen(QColor("#A3213B"), 1.2, Qt.PenStyle.DashLine))
-                    p.setBrush(Qt.BrushStyle.NoBrush)
-                    p.drawRect(r.adjusted(-3, -2, 3, 2))
-                p.setFont(small)
-                p.setPen(QColor("#45484D"))
-                p.drawText(QRectF(fish.left() - 46, r.center().y() - 8, 42, 16),
-                           Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, band.label)
-            cy = fish.top() + row.chromosome.centromere_fraction * fish.height()
-            p.setPen(QPen(QColor("#6C6F75"), 1.5))
+            p.setPen(QPen(outline, 1.4))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawPath(path)
+            cy = fish.top() + view.centromere_fraction * fish.height()
             p.setBrush(QColor("#FFFFFF"))
-            p.drawRoundedRect(QRectF(fish.left() - 2, cy - 3, fish.width() + 4, 6), 3, 3)
-            # assembly bar
-            if row.sequence_length:
+            p.drawEllipse(QPointF(fish.center().x(), cy), 5, 5)
+            if self.show_measured:
+                for j, band in enumerate(row.fish):
+                    frac = self._drag_frac if self._drag_band == (i, j) else band.fraction
+                    y = fish.top() + frac * fish.height()
+                    tri = QPolygonF([QPointF(fish.left() - 11, y - 5.5), QPointF(fish.left() - 11, y + 5.5),
+                                     QPointF(fish.left() - 2, y)])
+                    p.setPen(QPen(QColor("#1D1D1F"), 0.8))
+                    p.setBrush(self.colour(band.probe))
+                    p.drawPolygon(tri)
+                    if self._has_asm() and row.sequence_length and j not in row.matched_fish:
+                        p.setPen(QPen(QColor("#A3213B"), 1.2, Qt.PenStyle.DashLine))
+                        p.setBrush(Qt.BrushStyle.NoBrush)
+                        p.drawRect(QRectF(fish.left() - 14, y - 8, 16, 16))
+            if not asm.isNull() and row.sequence_length:
                 p.setPen(QPen(QColor("#8A8D93"), 1, Qt.PenStyle.DashLine))
                 p.setBrush(QColor("#EEF0F4"))
-                p.drawRoundedRect(asm, 4, 4)
+                p.drawRoundedRect(asm, 3, 3)
                 p.setPen(Qt.PenStyle.NoPen)
                 for array in row.silico:
                     top = asm.top() + array.start * asm.height()
-                    h = max(3.0, (array.end - array.start) * asm.height())
                     p.setBrush(self.colour(array.probe))
-                    p.drawRect(QRectF(asm.left() + 1, top, asm.width() - 2, h))
-            # labels
-            bottom = max(fish.bottom(), asm.bottom())
-            slot = self._slot()
-            text_rect = QRectF(fish.center().x() + (self.ASM_W + self.GAP) / 2 - slot / 2, bottom + 6, slot, 18)
-            p.setFont(bold)
-            p.setPen(QColor("#1C1C1E"))
-            p.drawText(text_rect, Qt.AlignmentFlag.AlignCenter, row.name)
+                    p.drawRect(QRectF(asm.left() + 1, top, asm.width() - 2, max(3.0, (array.end - array.start) * asm.height())))
             p.setFont(small)
             p.setPen(QColor("#5A5D63"))
-            seq = row.sequence or "not linked"
-            p.drawText(text_rect.translated(0, 18), Qt.AlignmentFlag.AlignCenter,
-                       p.fontMetrics().elidedText(seq, Qt.TextElideMode.ElideMiddle, int(slot) - 4))
-            bg, fg = STATUS_COLOURS.get(row.status, ("#F1F1F3", "#45484D"))
-            w = p.fontMetrics().horizontalAdvance(row.status) + 16
-            pill = QRectF(text_rect.center().x() - w / 2, text_rect.top() + 38, w, 18)
-            p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(QColor(bg))
-            p.drawRoundedRect(pill, 9, 9)
-            p.setPen(QColor(fg))
-            p.drawText(pill, Qt.AlignmentFlag.AlignCenter, row.status)
+            if row.homologue:
+                p.drawText(QRectF(fish.left() - 12, fish.bottom() + 8, fish.width() + 24, 14),
+                           Qt.AlignmentFlag.AlignHCenter, row.homologue.lstrip("."))
+            if self.assembly_active and self.show_assembly:
+                text = row.sequence or "not linked"
+                y0 = fish.bottom() + (24 if row.homologue else 8)
+                p.drawText(QRectF(fish.left() - 20, y0, fish.width() + 40, 14), Qt.AlignmentFlag.AlignHCenter,
+                           p.fontMetrics().elidedText(text, Qt.TextElideMode.ElideMiddle, int(fish.width() + 38)))
+        p.setFont(bold)
+        p.setPen(QColor("#1C1C1E"))
+        for name, rect in self._labels:
+            p.drawText(rect, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, name)
 
     # ---------------------------------------------------------------- mouse
 
     def _hit(self, pos: QPointF):
         for i, row in enumerate(self.rows):
             fish, asm = self._bars(i)
-            for j, band in enumerate(row.fish):
-                if self._band_rect(fish, row, band).adjusted(-4, -3, 4, 3).contains(pos):
-                    return ("band", i, j)
-            if row.sequence_length:
+            if self.show_measured:
+                for j, band in enumerate(row.fish):
+                    if self._band_rect(fish, row, band).adjusted(-3, -2, 3, 2).contains(pos):
+                        return ("band", i, j)
+            if not asm.isNull() and row.sequence_length:
                 for j, array in enumerate(row.silico):
                     top = asm.top() + array.start * asm.height()
                     h = max(5.0, (array.end - array.start) * asm.height())
                     if QRectF(asm.left() - 3, top - 2, asm.width() + 6, h + 4).contains(pos):
                         return ("array", i, j)
-            name_rect = QRectF(fish.left() - 20, max(fish.bottom(), asm.bottom()), 80, 60)
-            if name_rect.contains(pos) or fish.contains(pos) or asm.contains(pos):
+            if fish.adjusted(-6, -6, 6, 40).contains(pos) or (not asm.isNull() and asm.contains(pos)):
                 return ("slot", i, -1)
         return None
+
+    def _row_at_x(self, x: float) -> int:
+        best, dist = 0, None
+        for i in range(len(self.rows)):
+            d = abs(self._bars(i)[0].center().x() - x)
+            if dist is None or d < dist:
+                best, dist = i, d
+        return best
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
         hit = self._hit(event.position())
@@ -311,7 +361,7 @@ class IdiogramCanvas(QWidget):
             where = f"{b.arm} {b.position}" if b.arm in ("p", "q") else b.position
             text = (f"{b.probe}, {where}\nseen on {b.seen} of {b.total} marked homologues in {b.cells} "
                     f"cell{'s' if b.cells != 1 else ''}")
-            if j not in row.matched_fish and row.sequence_length:
+            if self._has_asm() and j not in row.matched_fish and row.sequence_length:
                 text += "\nno array of this probe nearby in the assembly"
             QToolTip.showText(event.globalPosition().toPoint(), text, self)
         elif kind == "array":
@@ -347,7 +397,7 @@ class IdiogramCanvas(QWidget):
         elif self._drag_slot is not None:
             src = self._drag_slot
             self._drag_slot = None
-            dst = int(max(0, min(len(self.rows) - 1, (event.position().x() - 10) // self._slot())))
+            dst = self._row_at_x(event.position().x())
             names: list[str] = []
             for r in self.rows:
                 if r.chromosome.name not in names:
@@ -370,6 +420,7 @@ class IdiogramCanvas(QWidget):
         p.scale(scale, scale)
         self.paint_on(p, size.width(), size.height())
         p.end()
+        self._size = (0, 0)
         return image
 
     def to_svg(self, path: Path) -> None:
@@ -384,6 +435,7 @@ class IdiogramCanvas(QWidget):
         p = QPainter(gen)
         self.paint_on(p, size.width(), size.height())
         p.end()
+        self._size = (0, 0)
 
 
 def _font(p: QPainter, family: str, size: float, *, bold: bool = False, italic: bool = False) -> QFont:
@@ -883,10 +935,9 @@ class IdiogramTab(QWidget):
         self._title.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self._legend = QHBoxLayout()
         self._legend.setSpacing(14)
+        self._title.hide()
         head = QHBoxLayout()
-        head.addWidget(self._title, 1)
-        head.addLayout(self._legend)
-        head.addWidget(make_help_button(self, "Idiogram", HELP_TEXT))
+        head.setSpacing(8)
 
         self._canvas = IdiogramCanvas(self)
         self._canvas.bandMoved.connect(self._on_band_moved)
@@ -906,8 +957,18 @@ class IdiogramTab(QWidget):
         scroll = QScrollArea(frame)
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setWidget(self._canvas)
+        self._canvas2 = IdiogramCanvas(self)
+        self._canvas2.hide()
+        self._canvas2.bandClicked.connect(lambda i, j, pos: None)
+        canvases = QWidget(self)
+        canvases.setObjectName("idioCanvases")
+        canvases.setStyleSheet("QWidget#idioCanvases { background:#FFFFFF; }")
+        cl = QVBoxLayout(canvases)
+        cl.setContentsMargins(0, 0, 0, 0)
+        cl.setSpacing(10)
+        cl.addWidget(self._canvas, 1)
+        cl.addWidget(self._canvas2, 1)
+        scroll.setWidget(canvases)
         scroll.setStyleSheet("QScrollArea { background:#FFFFFF; }")
         self._stack = QStackedWidget(frame)
         self._stack.addWidget(scroll)
@@ -983,13 +1044,15 @@ class IdiogramTab(QWidget):
         notes.addWidget(self._note_asm, 1)
 
         main = QVBoxLayout()
-        main.setContentsMargins(24, 16, 24, 16)
+        main.setContentsMargins(16, 12, 16, 12)
         main.setSpacing(14)
         main.addLayout(head)
-        main.addLayout(modes)
         main.addWidget(frame, 1)
-        main.addLayout(notes)
         main.addWidget(self._note_warn)
+        for b in self._mode_btns.values():
+            b.hide()
+        self._note_fish.hide()
+        self._note_asm.hide()
         main_host = QWidget(self)
         main_host.setObjectName("cytoMain")
         main_host.setLayout(main)
@@ -1001,6 +1064,21 @@ class IdiogramTab(QWidget):
         side.setContentsMargins(14, 12, 14, 12)
         side.setSpacing(14)
 
+        self._layers_section = _CollapsibleSection("Layers", body, expanded=True)
+        self._layer_boxes: dict[str, QCheckBox] = {}
+        for key, text, mark in (("show_bands", "Karyotype bands", "■"), ("show_measured", "Measured signals", "▶"),
+                                ("show_assembly", "Assembly", "┆")):
+            row = QHBoxLayout()
+            box = QCheckBox(text, self)
+            box.toggled.connect(lambda on, k=key: self._on_layer(k, on))
+            self._layer_boxes[key] = box
+            sym = QLabel(mark, self)
+            sym.setStyleSheet("color:#8A8D93;")
+            row.addWidget(box, 1)
+            row.addWidget(sym)
+            self._layers_section.body_layout().addLayout(row)
+        side.addWidget(self._layers_section)
+
         self._probe_section = _CollapsibleSection("Probes", body, expanded=True)
         self._probe_host = QWidget(self._probe_section)
         self._probe_lay = QVBoxLayout(self._probe_host)
@@ -1011,15 +1089,25 @@ class IdiogramTab(QWidget):
             self._share.addItem(text, value)
         self._share.activated.connect(self._on_share)
         r = QHBoxLayout()
-        lab = QLabel("Show signals seen in at least", self)
-        lab.setWordWrap(True)
+        lab = QLabel("Seen in at least", self)
         lab.setFixedWidth(110)
         r.addWidget(lab)
         r.addWidget(self._share, 1)
         self._probe_section.body_layout().addLayout(r)
         side.addWidget(self._probe_section)
 
-        self._silico_section = _CollapsibleSection("In silico", body, expanded=True)
+        self._measured_section = _CollapsibleSection("Measured, not in the karyotype", body, expanded=True)
+        self._measured_grid = QGridLayout()
+        self._measured_grid.setHorizontalSpacing(8)
+        self._measured_grid.setVerticalSpacing(4)
+        self._measured_section.body_layout().addLayout(self._measured_grid)
+        self._add_measured = QPushButton("Add to karyotype", self)
+        self._add_measured.setToolTip("Make these measured signals bands of the karyotype")
+        self._add_measured.clicked.connect(self._add_measured_to_karyotype)
+        self._measured_section.body_layout().addWidget(self._add_measured, 0, Qt.AlignmentFlag.AlignLeft)
+        side.addWidget(self._measured_section)
+
+        self._silico_section = _CollapsibleSection("Assembly", body, expanded=False)
         self._genome = NoWheelComboBox(self)
         self._genome.activated.connect(self._on_genome)
         g = QHBoxLayout()
@@ -1052,7 +1140,7 @@ class IdiogramTab(QWidget):
             self._silico_section.body_layout().addLayout(r)
         side.addWidget(self._silico_section)
 
-        self._layout_section = _CollapsibleSection("Layout", body, expanded=True)
+        self._layout_section = _CollapsibleSection("Layout", body, expanded=False)
         self._karyo = NoWheelComboBox(self)
         self._karyo.activated.connect(self._on_karyotype)
         self._order = NoWheelComboBox(self)
@@ -1063,7 +1151,7 @@ class IdiogramTab(QWidget):
         for key in idg.LENGTHS:
             self._lengths_box.addItem(idg.LENGTH_LABELS[key], key)
         self._lengths_box.activated.connect(self._on_layout)
-        for text, w in (("Karyotype", self._karyo), ("Order", self._order), ("Lengths", self._lengths_box)):
+        for text, w in (("Order", self._order), ("Lengths", self._lengths_box)):
             r = QHBoxLayout()
             lab = QLabel(text, self)
             lab.setFixedWidth(90)
@@ -1075,33 +1163,21 @@ class IdiogramTab(QWidget):
             self._show.addItem(text, value)
         self._show.setToolTip("Homologue groups draw each homologue: bivalents, trivalents … up to hexavalents")
         self._show.activated.connect(self._on_layout)
-        r = QHBoxLayout()
-        lab = QLabel("Show", self)
-        lab.setFixedWidth(90)
-        r.addWidget(lab)
-        r.addWidget(self._show, 1)
         self._drag = QCheckBox("Drag signals to correct their position", self)
         self._drag.toggled.connect(self._on_layout)
-        self._layout_section.body_layout().addLayout(r)
         self._layout_section.add_widget(self._drag)
-        edit = QPushButton("Edit karyotype (lengths, centromeres, bands)", self)
-        edit.setFlat(True)
-        edit.setObjectName("cytoLink")
-        edit.setCursor(Qt.CursorShape.PointingHandCursor)
-        edit.clicked.connect(self._edit_karyotype)
-        self._layout_section.add_widget(edit)
-        side.addWidget(self._layout_section)
 
-        self._names_section = _CollapsibleSection("Chromosome names", body, expanded=True)
-        self._names_section.add_widget(_section_label("FISH number to assembly sequence (edit when the order differs)"))
+        self._names_section = self._silico_section  # chromosome names belong to the assembly comparison
+        self._silico_section.add_widget(_section_label("Chromosome names: FISH number to assembly sequence"))
         self._names_grid = QGridLayout()
         self._names_grid.setHorizontalSpacing(8)
         self._names_grid.setVerticalSpacing(4)
-        self._names_section.body_layout().addLayout(self._names_grid)
-        side.addWidget(self._names_section)
+        self._silico_section.body_layout().addLayout(self._names_grid)
+        side.addWidget(self._silico_section)
+        side.addWidget(self._layout_section)
         side.addStretch(1)
 
-        save = QPushButton("Save ▾", self)
+        save = QPushButton("Save", self)
         menu = QMenu(save)
         menu.addAction("Picture (PNG)…", self._save_png)
         menu.addAction("Vector (SVG)…", self._save_svg)
@@ -1109,11 +1185,17 @@ class IdiogramTab(QWidget):
         save.setMenu(menu)
         fig = QPushButton("Add to figure", self)
         fig.setToolTip("Add this idiogram as a panel of the current figure")
-        fig.clicked.connect(lambda: self._add_to_figure("compare"))
+        fig_menu = QMenu(fig)
+        fig_menu.addAction("Colour", lambda: self._add_to_figure("compare"))
+        fig_menu.addAction("Journal (Black and White, with Table)", lambda: self._add_to_figure("paper"))
+        fig.setMenu(fig_menu)
+        edit = QPushButton("Edit karyotype", self)
+        edit.clicked.connect(self._edit_karyotype)
         bottom = QHBoxLayout()
+        bottom.setSpacing(6)
+        bottom.addWidget(edit, 1)
+        bottom.addWidget(fig, 1)
         bottom.addWidget(save)
-        bottom.addWidget(fig)
-        bottom.addStretch(1)
         side.addLayout(bottom)
 
         aside = QScrollArea(self)
@@ -1138,6 +1220,19 @@ class IdiogramTab(QWidget):
         line.setStyleSheet("color: palette(mid);")
         root.addWidget(line)
         root.addWidget(self._side_stack)
+
+        # ---- top bar: Karyotype, Compare with, Show, "?"
+        self._compare = NoWheelComboBox(self)
+        self._compare.activated.connect(self._on_compare)
+        for text, w, width in (("Karyotype", self._karyo, 200), ("Compare with", self._compare, 160),
+                               ("Show", self._show, 160)):
+            w.setFixedWidth(width)
+            head.addWidget(QLabel(text, self))
+            head.addWidget(w)
+            head.addSpacing(14)
+        self._show.setToolTip("Every homologue (1a, 1b, 1c) or one bar per chromosome")
+        head.addStretch(1)
+        head.addWidget(make_help_button(self, "Idiogram", HELP_TEXT))
 
     # ------------------------------------------------------------------ loading
 
@@ -1174,6 +1269,11 @@ class IdiogramTab(QWidget):
             for c in image_details(image).channels:
                 if c.probe and c.probe not in colours and c.display.color.lower() not in ("#ffffff", "#5b74ff"):
                     colours[c.probe] = c.display.color
+        lists = lists_mod.load_lists(self._folder)
+        for e in lists.get("probes", []):
+            name, dye = str(e.get("name") or ""), str(e.get("dye") or "")
+            if name and name not in colours and dye:
+                colours[name] = lists_mod.dye_color(lists, dye, "#8A8D93")
         return colours
 
     def _colour(self, probe: str, n: int) -> str:
@@ -1215,6 +1315,8 @@ class IdiogramTab(QWidget):
         if self._folder is None or k is None:
             self._rows = []
             self._canvas.set_rows([], [], {})
+            self._canvas2.hide()
+            self._fill_measured([])
             self._edit.karyotype = None
             self._edit.update()
             self._title.setText("Idiogram")
@@ -1240,9 +1342,29 @@ class IdiogramTab(QWidget):
         silico = idg.collect_silico(k, self._lengths, hits, min_array_kb=s.min_array_kb, flips=s.flips)
         self._rows = idg.build_rows(k, s, self._fish, silico, self._lengths)
         colours = {p: self._colour(p, n) for n, p in enumerate(self._all_probes())}
-        self._canvas.drag_enabled = s.drag
-        self._canvas.reorder_enabled = s.order == "custom"
+        for c in k.chromosomes:  # probes drawn as karyotype bands
+            for b in c.bands:
+                pr = kt.manual_probe(b.kind)
+                if pr and pr not in colours:
+                    colours[pr] = self._colour(pr, len(colours))
+        other = next((x for x in self._karyotypes if x.name == s.compare_with and x is not k), None)
+        for cv, kk in ((self._canvas, k), (self._canvas2, other)):
+            cv.karyotype = kk
+            cv.show_bands, cv.show_measured, cv.show_assembly = s.show_bands, s.show_measured, s.show_assembly
+            cv.assembly_active = genome is not None
+            cv.drag_enabled = s.drag
+            cv.reorder_enabled = s.order == "custom" and cv is self._canvas
+            cv.title = f"{kk.name}  {kk.formula}" if (kk is not None and other is not None) else ""
         self._canvas.set_rows(self._rows, idg.relative_heights(self._rows, s.lengths), colours)
+        if other is not None:
+            fish2 = idg.collect_fish(self._folder, other, per_homologue=s.homologues)
+            silico2 = idg.collect_silico(other, self._lengths, hits, min_array_kb=s.min_array_kb, flips=s.flips)
+            rows2 = idg.build_rows(other, s, fish2, silico2, self._lengths)
+            self._canvas2.set_rows(rows2, idg.relative_heights(rows2, s.lengths), colours)
+            self._canvas2.show()
+        else:
+            self._canvas2.hide()
+        self._fill_measured(self._unmatched())
         self._edit.karyotype = k
         self._edit.groups = s.homologues
         self._edit.probe_colours = colours
@@ -1258,9 +1380,7 @@ class IdiogramTab(QWidget):
         self._sync_edit_side()
         self._refresh_pair()
         self._refresh_paper()
-        head, species = idg.title_text(k, probes)
-        self._title.setText(f"{head} <i>{species}</i> karyotype")
-        self._fill_legend(probes, colours)
+        self._probe_colour_map = colours
         f = self._fish
         self._note_fish.setText(f"Left bar: signals from {f.homologues} marked homologues in {f.cells} "
                                 f"cell{'s' if f.cells != 1 else ''}; the number is how often the signal was seen.")
@@ -1286,6 +1406,7 @@ class IdiogramTab(QWidget):
         clear_layout(layout)
 
     def _fill_legend(self, probes: list[str], colours: dict[str, str]) -> None:
+        return  # the Probes box is the legend
         self._clear(self._legend)
         for text, css in [(p, f"background:{colours.get(p, '#8A8D93')}; border-radius:2px;") for p in probes] + [
             ("In situ (FISH)", "background:#FFFFFF; border:1px solid #8A8D93; border-radius:2px;"),
@@ -1307,12 +1428,23 @@ class IdiogramTab(QWidget):
         fish_cells = self._fish.cells_per_probe if self._fish else {}
         if self._karyotype is not None and self._folder is not None:
             fish_cells = idg.collect_fish(self._folder, self._karyotype).cells_per_probe
-        for probe in self._all_probes_with(fish_cells):
+        lists = lists_mod.load_lists(self._folder) if self._folder else {}
+        for n_, probe in enumerate(self._all_probes_with(fish_cells)):
             n = fish_cells.get(probe, 0)
-            box = QCheckBox(f"{probe} ({n} cell{'s' if n != 1 else ''})", self._probe_host)
+            row = QHBoxLayout()
+            row.setSpacing(8)
+            box = QCheckBox(probe, self._probe_host)
+            pm = QPixmap(14, 10)
+            pm.fill(QColor(self._colour(probe, n_)))
+            box.setIcon(QIcon(pm))
             box.setChecked(probe not in s.hidden_probes)
             box.toggled.connect(lambda on, p=probe: self._on_probe(p, on))
-            self._probe_lay.addWidget(box)
+            dye = str((lists_mod.entry(lists, "probes", probe) or {}).get("dye") or "") if lists else ""
+            info = QLabel(f"{dye}   {n} cell{'s' if n != 1 else ''}".strip(), self._probe_host)
+            info.setStyleSheet("color: palette(dark);")
+            row.addWidget(box, 1)
+            row.addWidget(info)
+            self._probe_lay.addLayout(row)
         if not self._probe_lay.count():
             self._probe_lay.addWidget(_section_label("No probes yet. Set the probe of each channel in the Image tab."))
         self._share.setCurrentIndex(max(0, self._share.findData(s.min_share)))
@@ -1336,7 +1468,20 @@ class IdiogramTab(QWidget):
             self._karyo.setCurrentIndex(max(0, self._karyo.findData(self._karyotype.name)))
         self._order.setCurrentIndex(max(0, self._order.findData(s.order)))
         self._lengths_box.setCurrentIndex(max(0, self._lengths_box.findData(s.lengths)))
-        self._show.setCurrentIndex(1 if s.homologues else 0)
+        self._show.setCurrentIndex(max(0, self._show.findData(bool(s.homologues))))
+        self._compare.blockSignals(True)
+        self._compare.clear()
+        self._compare.addItem("None", "")
+        for k in self._karyotypes:
+            if self._karyotype is None or k.name != self._karyotype.name:
+                self._compare.addItem(f"{k.name} {k.formula}", k.name)
+        self._compare.setCurrentIndex(max(0, self._compare.findData(s.compare_with)))
+        self._compare.blockSignals(False)
+        for key, box in self._layer_boxes.items():
+            box.blockSignals(True)
+            box.setChecked(bool(getattr(s, key)))
+            box.blockSignals(False)
+        self._layer_boxes["show_assembly"].setEnabled(bool(s.genome))
         self._drag.blockSignals(True)
         self._drag.setChecked(s.drag)
         self._drag.blockSignals(False)
@@ -1478,9 +1623,87 @@ class IdiogramTab(QWidget):
         self._store()
 
     def _on_karyotype(self, index: int) -> None:
-        self._settings.karyotype = str(self._karyo.itemData(index) or "")
-        self._karyotype = next((k for k in self._karyotypes if k.name == self._settings.karyotype), self._karyotype)
+        name = str(self._karyo.itemData(index) or "")
+        if not name or name == self._settings.karyotype:
+            return
+        self._settings = idg.switch_karyotype(self._settings, name)  # each karyotype keeps its own view
+        if self._settings.compare_with == name:
+            self._settings.compare_with = ""
+        self._karyotype = next((k for k in self._karyotypes if k.name == name), self._karyotype)
         self._store(controls=True)
+
+    def _on_compare(self, index: int) -> None:
+        self._settings.compare_with = str(self._compare.itemData(index) or "")
+        self._store()
+
+    def _on_layer(self, key: str, on: bool) -> None:
+        setattr(self._settings, key, on)
+        for cv in (self._canvas, self._canvas2):
+            setattr(cv, key, on)
+            cv.update()
+        if self._folder is not None and not self._busy:
+            idg.save_settings(self._folder, self._settings)
+
+    # ------------------------------------------------------------------ measured, not in the karyotype
+
+    def _unmatched(self) -> list[tuple[idg.ChromosomeRow, idg.FishBand]]:
+        out = []
+        for row in self._rows:
+            view = self._canvas._view(row)
+            for band in row.fish:
+                near = any(kt.manual_probe(b.kind) == band.probe and b.start - 0.03 <= band.fraction <= b.end + 0.03
+                           for b in view.bands)
+                if not near:
+                    out.append((row, band))
+        return out
+
+    def _fill_measured(self, items: list) -> None:
+        self._clear(self._measured_grid)
+        self._unmatched_items = items
+        self._measured_section.setVisible(bool(items))
+        for r, (row, band) in enumerate(items[:12]):
+            dot = QLabel(self)
+            pm = QPixmap(10, 10)
+            pm.fill(Qt.GlobalColor.transparent)
+            pt = QPainter(pm)
+            pt.setRenderHint(QPainter.RenderHint.Antialiasing)
+            pt.setPen(Qt.PenStyle.NoPen)
+            pt.setBrush(self._canvas.colour(band.probe))
+            pt.drawEllipse(QRectF(0, 0, 10, 10))
+            pt.end()
+            dot.setPixmap(pm)
+            where = f"{band.arm} {band.position}" if band.arm in ("p", "q") else band.position
+            for c, w in enumerate((QLabel(row.name, self), dot, QLabel(band.probe, self), QLabel(where, self),
+                                   QLabel(f"{band.seen}/{band.total}", self))):
+                if c >= 3:
+                    w.setStyleSheet("color: palette(dark);")
+                self._measured_grid.addWidget(w, r, c)
+        self._measured_grid.setColumnStretch(2, 1)
+        if len(items) > 12:
+            more = QLabel(f"+ {len(items) - 12} more", self)
+            more.setStyleSheet("color: palette(dark);")
+            self._measured_grid.addWidget(more, 12, 0, 1, 5)
+
+    def _add_measured_to_karyotype(self) -> None:
+        k = self._karyotype
+        items = getattr(self, "_unmatched_items", [])
+        if k is None or not items or self._folder is None:
+            return
+        suffixes = k.homologue_suffixes()
+        for row, band in items:
+            chrom = k.chromosome(row.chromosome.name)
+            if chrom is None:
+                continue
+            i = suffixes.index(row.homologue) if row.homologue in suffixes else -1
+            owner = kt.target(chrom, i)
+            f = band.fraction
+            owner.bands.append(kt.Band(kt.SIGNAL_KIND_PREFIX + band.probe, max(0.0, f - 0.015), min(1.0, f + 0.015)))
+        kt.save_karyotype(self._folder, k, old_name=k.name)
+        from repeatviewer.widgets.cyto_images_ui import notify_changed
+
+        notify_changed(self._folder)
+        self.karyotypesChanged.emit()
+        self._rebuild()
 
     def _on_layout(self, *_args) -> None:
         s = self._settings
