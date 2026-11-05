@@ -123,3 +123,32 @@ def test_tinted_channels_sizes_and_merges(tmp_path):
     assert "left out" in notes[0]
     cells, _notes = plan_cells(sorted(cell.iterdir()), default_lists(), merges=True)
     assert sorted(g.key for g in cells) == ["cell1", "cell1 (120×90)", "cell1 merge"]
+
+
+def _spots(h, w, centres, value):
+    plane = np.zeros((h, w), dtype=np.float32)
+    yy, xx = np.mgrid[:h, :w]
+    for y, x in centres:
+        plane = np.maximum(plane, value * np.exp(-((yy - y) ** 2 + (xx - x) ** 2) / 18.0))
+    return plane
+
+
+def test_mostly_black_merge_is_not_a_tinted_channel(tmp_path):
+    h, w = 200, 200
+    dapi = _spots(h, w, [(50, 50), (150, 150), (60, 140)], 230)
+    fitc = _spots(h, w, [(52, 54)], 255)
+    cy3 = _spots(h, w, [(148, 146)], 255)
+    tint = np.stack([dapi * 0.0, dapi * 0.5, dapi * 1.0], axis=-1).round().astype(np.uint8)
+    assert ch.off_tint_share(tint) == 0.0
+    assert ch.colour_of(tint) == "#0080ff"
+    merge = np.clip(np.stack([cy3, fitc, dapi], axis=-1), 0, 255).round().astype(np.uint8)
+    assert ch.off_tint_share(merge) > ch.MERGE_OFF_TINT_SHARE
+    assert ch.colour_of(merge) is None
+    cell = tmp_path / "cell1"
+    cell.mkdir()
+    tifffile.imwrite(str(cell / "1.tif"), tint, photometric="rgb")
+    tifffile.imwrite(str(cell / "2.tif"), np.stack([fitc * 0, fitc, fitc * 0], -1).round().astype(np.uint8), photometric="rgb")
+    tifffile.imwrite(str(cell / "Abdullah-101.tif"), merge, photometric="rgb")
+    cells, notes = plan_cells(scan_tiffs(tmp_path, recursive=True), ls.load_lists(tmp_path))
+    assert [p.name for p, _d, _i in cells[0].entries()] == ["1.tif", "2.tif"]
+    assert any("Abdullah-101.tif" in n for n in notes)

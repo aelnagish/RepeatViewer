@@ -166,24 +166,47 @@ class TiffInfo:
     height: int = 0
 
 
-def colour_of(rgb: np.ndarray) -> str | None:
-    """The colour of an RGB picture that holds one channel (Photoshop or ImageJ save a channel tinted:
-    blue DAPI, green FITC, yellow, white ...). None when the planes differ: then it is a merge of channels."""
-    if rgb.ndim != 3 or rgb.shape[-1] < 3:
-        return None
+# A picture is one tinted channel when its signal pixels all share one colour direction. Measured on 1022 lab
+# TIFFs: tinted channels score exactly 0, Photoshop merges 0.0036 and up.
+MERGE_OFF_TINT_SHARE = 0.001
+_SIGNAL_SHARE = 0.15  # pixels brighter than this share of the peak count as signal
+_OFF_TINT_SIN = 0.2  # a signal pixel is off the tint when its colour is turned more than ~12 degrees away
+
+
+def off_tint_share(rgb: np.ndarray) -> float:
+    """Share of signal pixels whose colour is not the picture's tint (0 for one channel saved in colour).
+
+    Only signal pixels are looked at: FISH pictures are mostly black, which hid merges in a whole-picture average.
+    """
     planes = rgb[..., :3].astype(np.float32)
     step = max(1, int(np.ceil(np.sqrt(planes.shape[0] * planes.shape[1] / 250_000))))
-    planes = planes[::step, ::step]
-    peaks = planes.reshape(-1, 3).max(axis=0)
+    flat = planes[::step, ::step].reshape(-1, 3)
+    intensity = flat.max(axis=1)
+    top = float(intensity.max()) if flat.size else 0.0
+    if top <= 0:
+        return 0.0
+    full = float(np.iinfo(rgb.dtype).max) if rgb.dtype.kind in "ui" else top
+    signal = flat[intensity >= max(_SIGNAL_SHARE * top, 0.09 * full if rgb.dtype.kind in "ui" else 0.0)]
+    if not len(signal):
+        signal = flat[intensity >= _SIGNAL_SHARE * top]
+    peaks = flat.max(axis=0)
+    tint = peaks / float(np.linalg.norm(peaks))
+    unit = signal / np.linalg.norm(signal, axis=1, keepdims=True)
+    off = np.linalg.norm(unit - np.outer(unit @ tint, tint), axis=1)
+    return float((off > _OFF_TINT_SIN).mean())
+
+
+def colour_of(rgb: np.ndarray) -> str | None:
+    """The colour of an RGB picture that holds one channel (Photoshop or ImageJ save a channel tinted:
+    blue DAPI, green FITC, yellow, white ...). None when the signal has several colours: a merge of channels."""
+    if rgb.ndim != 3 or rgb.shape[-1] < 3:
+        return None
+    peaks = rgb[..., :3].reshape(-1, 3).max(axis=0).astype(np.float32)
     top = float(peaks.max())
     if top <= 0:
         return "#ffffff"
-    intensity = planes.max(axis=-1)
-    full = float(np.iinfo(rgb.dtype).max) if rgb.dtype.kind in "ui" else top
-    for k in range(3):
-        expected = intensity * (peaks[k] / top)
-        if float(np.abs(planes[..., k] - expected).mean()) > 0.01 * full:
-            return None
+    if off_tint_share(rgb) > MERGE_OFF_TINT_SHARE:
+        return None
     r, g, b = (int(round(255 * p / top)) for p in peaks)
     return f"#{r:02x}{g:02x}{b:02x}"
 
