@@ -68,7 +68,7 @@ def _settings() -> QSettings:
     return QSettings()
 
 
-FIELD_W = 220  # slide fields: compact, as in the other Cytogenetics forms
+FIELD_W = 170  # slide fields: two equal columns
 
 
 def _get(key: str, default: str = "") -> str:
@@ -207,18 +207,34 @@ class CytoImportDialog(PanelPathFields, QDialog):
         self._technique = _combo(page, ls.names(lists, "techniques"), _get("technique", "FISH"))
         self._counterstain = _combo(page, ls.names(lists, "counterstains"), _get("counterstain", "DAPI"))
         self._stage = _combo(page, ls.names(lists, "stages"), _get("stage", "Mitotic metaphase"))
-        form.addRow("Name", self._slide_name)
-        for w in (self._slide_name, self._slide_date, self._species, self._accession, self._technique,
-                  self._counterstain, self._stage):
-            w.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-            w.setFixedWidth(FIELD_W)
-        for label, w in (("Date", self._slide_date), ("Species", self._species), ("Accession / line", self._accession),
-                         ("Technique", self._technique), ("Counterstain", self._counterstain), ("Cell stage", self._stage)):
-            form.addRow(label, w)
-        self._probe_form = form
-        self._probe_rows_start = form.rowCount()
         lay.addLayout(form)
+        # Slide: two equal columns side by side; probe rows go to the shorter column
+        self._slide_forms = (form_layout(), form_layout())
+        rows = ((("Name", self._slide_name), ("Date", self._slide_date), ("Species", self._species),
+                 ("Accession / line", self._accession)),
+                (("Technique", self._technique), ("Counterstain", self._counterstain), ("Cell stage", self._stage)))
+        label_w = max(page.fontMetrics().horizontalAdvance(t) for col in rows for t, _w in col) + 4
+        label_w = max(label_w, page.fontMetrics().horizontalAdvance("Probe in Alexa 594") + 4)
+        self._slide_label_w = label_w
+        for f, col in zip(self._slide_forms, rows):
+            for text, w in col:
+                w.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+                w.setFixedWidth(FIELD_W)
+                f.addRow(self._slide_label(text, page), w)
+        self._slide_base = [len(rows[0]), len(rows[1])]
+        cols = QHBoxLayout()
+        cols.setSpacing(24)
+        for f in self._slide_forms:
+            cols.addLayout(f)
+        cols.addStretch(1)
+        lay.addLayout(cols)
         return page
+
+    def _slide_label(self, text: str, parent: QWidget) -> QLabel:
+        label = QLabel(text, parent)
+        label.setFixedWidth(self._slide_label_w)
+        label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        return label
 
     def _build_options_tab(self) -> QWidget:
         page = QWidget(self)
@@ -317,8 +333,9 @@ class CytoImportDialog(PanelPathFields, QDialog):
     def _fill_probe_form(self) -> None:
         dyes = sorted({d for g in self._groups for d in g.dyes if d})
         current = {d: b.currentText() for d, b in self._probe_boxes.items()}
-        while self._probe_form.rowCount() > self._probe_rows_start:
-            self._probe_form.removeRow(self._probe_rows_start)
+        for f, base in zip(self._slide_forms, self._slide_base):
+            while f.rowCount() > base:
+                f.removeRow(base)
         self._probe_boxes = {}
         probes = ls.names(self._lists, "probes")
         for dye in dyes:
@@ -326,10 +343,11 @@ class CytoImportDialog(PanelPathFields, QDialog):
                 continue  # the counterstain carries no probe
             default = next((str(e["name"]) for e in self._lists.get("probes", []) if e.get("dye") == dye), "")
             box = _combo(self, probes, current.get(dye) or self._saved_probes.get(dye, "") or default)
-            box.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            box.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
             self._probe_boxes[dye] = box
             box.setFixedWidth(FIELD_W)
-            self._probe_form.addRow(f"Probe in {dye}", box)
+            target = min(self._slide_forms, key=lambda f: f.rowCount())
+            target.addRow(self._slide_label(f"Probe in {dye}", self), box)
 
     # ------------------------------------------------------------------ result
 
