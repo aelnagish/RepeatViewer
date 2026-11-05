@@ -185,7 +185,7 @@ _UNSUPPORTED_PREVIEW_SUFFIXES = {
 
 def _preview_kind(path: Path) -> str:
     suffix = path.suffix.lower()
-    if suffix == _CONTIG_PREVIEW_SUFFIX:
+    if suffix in (_CONTIG_PREVIEW_SUFFIX, _BROWSER_SESSION_SUFFIX):
         return "contig"
     if suffix == _CYTO_WORKSPACE_SUFFIX:
         return "cytogenetics"
@@ -280,6 +280,8 @@ _DOTPLOT_PREVIEW_SUFFIXES = frozenset({".paf", ".1aln"})
 from repeatviewer.backends.tree_layout import is_tree_file as _is_tree_path  # noqa: E402
 # Map to Reference results (.rvmap) open in the contig view.
 _CONTIG_PREVIEW_SUFFIX = ".rvmap"
+# Genome browser sessions (.rvgb: a reference + annotation / alignment tracks) too.
+_BROWSER_SESSION_SUFFIX = ".rvgb"
 # Cytogenetics workspace marker (Tools > Cytogenetics) opens the workspace page.
 _CYTO_WORKSPACE_SUFFIX = ".rvcyto"
 
@@ -291,7 +293,7 @@ def is_previewable_file(path: Path) -> bool:
     name = resolved.name.lower()
     if suffix in _DOTPLOT_PREVIEW_SUFFIXES or _is_tree_path(resolved):
         return True
-    if suffix in (_CONTIG_PREVIEW_SUFFIX, _CYTO_WORKSPACE_SUFFIX):
+    if suffix in (_CONTIG_PREVIEW_SUFFIX, _BROWSER_SESSION_SUFFIX, _CYTO_WORKSPACE_SUFFIX):
         return True
     if is_bismark_cov_file(resolved):
         return True
@@ -316,7 +318,7 @@ def preview_path_priority(path: Path) -> int:
         return 1
     if suffix in _DOTPLOT_PREVIEW_SUFFIXES or _is_tree_path(path):
         return 2
-    if suffix in (_CONTIG_PREVIEW_SUFFIX, _CYTO_WORKSPACE_SUFFIX):
+    if suffix in (_CONTIG_PREVIEW_SUFFIX, _BROWSER_SESSION_SUFFIX, _CYTO_WORKSPACE_SUFFIX):
         return 2
     if suffix == ".pdf":
         return 3
@@ -2536,7 +2538,7 @@ class FilePreviewPage(QWidget):
         if _is_tree_path(path):
             self._show_tree(path)
             return
-        if suffix == _CONTIG_PREVIEW_SUFFIX:
+        if suffix in (_CONTIG_PREVIEW_SUFFIX, _BROWSER_SESSION_SUFFIX):
             self._show_contig(path)
             return
         if suffix == _CYTO_WORKSPACE_SUFFIX:
