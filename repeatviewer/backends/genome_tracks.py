@@ -43,6 +43,9 @@ import numpy as np
 
 KIND_ANNOTATION = "annotation"
 KIND_ALIGNMENT = "alignment"
+KIND_SIGNAL = "signal"           # a value along the genome (bigWig, bedGraph)
+KIND_VARIANT = "variant"         # VCF: variant sites and each sample's genotype
+KIND_JUNCTION = "junction"       # splice junctions of an RNA-seq BAM's reads
 
 COV_BIN = 64                     # bp per bin of the in-memory coverage profile
 BAM_READ_WINDOW = 100_000        # wider than this: coverage only for BAM / CRAM
@@ -51,11 +54,14 @@ BAM_FETCH_LIMIT = 50_000         # reads kept per fetched window (downsampled be
 SESSION_SUFFIX = ".rvgb"
 SESSION_FORMAT = "repeatviewer-browser"
 
-ANNOTATION_SUFFIXES = (".gff", ".gff3", ".gtf", ".bed", ".vcf", ".gff.gz", ".gff3.gz",
-                       ".gtf.gz", ".bed.gz", ".vcf.gz")
+ANNOTATION_SUFFIXES = (".gff", ".gff3", ".gtf", ".bed", ".gff.gz", ".gff3.gz",
+                       ".gtf.gz", ".bed.gz")
+VCF_SUFFIXES = (".vcf", ".vcf.gz", ".vcf.bgz", ".bcf")
 PAF_SUFFIXES = (".paf", ".paf.gz")
 SAM_SUFFIXES = (".sam", ".sam.gz")
 BAM_SUFFIXES = (".bam", ".cram")
+BIGWIG_SUFFIXES = (".bw", ".bigwig")
+BEDGRAPH_SUFFIXES = (".bedgraph", ".bdg", ".bedgraph.gz", ".bdg.gz")
 BLAST_SUFFIXES = (".blast", ".blastn", ".outfmt6", ".m8", ".tsv", ".txt", ".tab")
 
 _CHILD_TYPES = {"exon", "cds", "five_prime_utr", "three_prime_utr", "utr", "start_codon",
@@ -107,10 +113,18 @@ class ChromIndex:
     """Intervals of one sequence, sorted by start, for fast window queries."""
 
     def __init__(self, items: list[TrackItem]) -> None:
-        items.sort(key=lambda it: (it.start, it.end))
+        starts = np.fromiter((it.start for it in items), dtype=np.int64, count=len(items))
+        ends = np.fromiter((it.end for it in items), dtype=np.int64, count=len(items))
+        if len(items) > 1:
+            # by start, then end; reads from a sorted BAM are usually in order already,
+            # so the list is only rebuilt when it is not
+            order = np.lexsort((ends, starts))
+            if (order[1:] < order[:-1]).any():
+                items[:] = [items[i] for i in order.tolist()]
+                starts, ends = starts[order], ends[order]
         self.items = items
-        self.starts = np.fromiter((it.start for it in items), dtype=np.int64, count=len(items))
-        self.ends = np.fromiter((it.end for it in items), dtype=np.int64, count=len(items))
+        self.starts = starts
+        self.ends = ends
         self._max_end = np.maximum.accumulate(self.ends) if len(items) else self.ends
         self._lanes: list[int] | None = None
         self.lane_count = 0
@@ -546,6 +560,13 @@ class Track:
         """False when [start, end) may still miss items (a drawn tile is then not kept)."""
         return True
 
+    def junctions(self, ref_id: str, start: int, end: int) -> np.ndarray:
+        """Splice junctions (introns, N in CIGAR) of the reads that overlap
+        [start, end): rows of (start, end, reads on +, reads on -, reads with no
+        strand), the strand from the XS / TS tag."""
+        ix = self.index(ref_id)
+        return _window_junctions([ix] if ix is not None else [], start, end)
+
     def coverage_peak(self, ref_id: str, start: int, end: int) -> float:
         cov = self.coverage(ref_id, start, end, 256)
         return float(cov.max()) if cov is not None and len(cov) else 0.0
@@ -564,6 +585,31 @@ class Track:
                     if len(out) >= limit:
                         return out
         return out
+
+    def search(self, text: str, limit: int = 200) -> tuple[list[tuple[str, TrackItem]], int]:
+        """Features whose name, type or any attribute (ID, gene_id, product, Note…)
+        contains ``text``, case-insensitive: (up to ``limit`` of them, how many in
+        all). Names that match come first. Only annotation tracks have features."""
+        if self.kind != KIND_ANNOTATION:
+            return [], 0
+        q = text.strip().lower()
+        if not q:
+            return [], 0
+        by_name: list = []
+        other: list = []
+        for chrom, ix in getattr(self, "_chroms", {}).items():
+            for it in ix.items:
+                if q in it.name.lower():
+                    by_name.append((chrom, it))
+                elif q in it.kind.lower() or any(
+                        q in str(v).lower() for k, v in it.info.items()
+                        if not str(k).startswith("_")):
+                    other.append((chrom, it))
+        # exact names first, then names that start with it, then the rest
+        by_name.sort(key=lambda ci: (ci[1].name.lower() != q,
+                                     not ci[1].name.lower().startswith(q)))
+        hits = by_name + other
+        return hits[:limit], len(hits)
 
     def to_json(self) -> dict:
         return {"path": str(self.path), "name": self.name, "settings": dict(self.settings)}
@@ -1218,7 +1264,7 @@ class _BamRegion:
     """Reads of consecutive BAM tiles with stable rows. It grows tile by tile at
     either end while panning, so rows already drawn never move."""
 
-    MAX_TILES = 16
+    MAX_TILES = 32
 
     def __init__(self, key: str, serial: int, tile: int, group_fn=None,
                  pairs: bool = False) -> None:
@@ -1238,6 +1284,10 @@ class _BamRegion:
 
     def _chunk(self, items: list[TrackItem]) -> ChromIndex:
         ix = ChromIndex(items)
+        pre = getattr(items, "prepared", None)
+        if pre is not None:
+            # block arrays and depth were worked out by the worker that read the tile
+            ix._blk, ix._depth = pre
         if len(ix):
             self.max_len = max(self.max_len, int((ix.ends - ix.starts).max()))
         return ix
@@ -1343,12 +1393,153 @@ class _BamRegion:
         return total
 
 
+MIN_INTRON = 20      # without the CIGAR, a gap between blocks this long is a junction
+
+
+def item_junctions(it) -> list[tuple[int, int, int]]:
+    """(intron start, intron end, strand 0 + / 1 - / 2 unknown) of one alignment."""
+    seg = getattr(it, "seg", None)
+    out: list[tuple[int, int, int]] = []
+    if seg is not None:
+        cig = seg.cigartuples
+        if not cig or not any(op == 3 for op, _n in cig):
+            return out
+        strand = 2
+        for tag in ("XS", "TS"):
+            if seg.has_tag(tag):
+                v = seg.get_tag(tag)
+                strand = 0 if v == "+" else 1 if v == "-" else 2
+                if tag == "TS" and seg.is_reverse and strand < 2:
+                    strand = 1 - strand      # TS is given relative to the read
+                break
+        ref = seg.reference_start
+        for op, n in cig:
+            if op == 3:
+                out.append((ref, ref + n, strand))
+            if op in (0, 2, 3, 7, 8):        # M D N = X move along the reference
+                ref += n
+        return out
+    blocks = it.ref_blocks
+    tags = it.info.get("_tags", {}) if isinstance(it.info, dict) else {}
+    xs = str(tags.get("XS", tags.get("TS", "")))
+    strand = 0 if xs.endswith("+") else 1 if xs.endswith("-") else 2
+    for (s0, e0, _q0), (s1, _e1, _q1) in zip(blocks, blocks[1:]):
+        if s1 - e0 >= MIN_INTRON:
+            out.append((e0, s1, strand))
+    return out
+
+
+def _chunk_junctions(ix) -> np.ndarray:
+    """Junction rows (start, end, strand) of every read in a chunk, worked out once."""
+    got = getattr(ix, "_junctions", None)
+    if got is None:
+        rows = [j for it in ix.items for j in item_junctions(it)]
+        got = np.array(rows, dtype=np.int64).reshape(-1, 3)
+        ix._junctions = got
+    return got
+
+
+def _window_junctions(chunks, start: int, end: int) -> np.ndarray:
+    """(start, end, + count, - count, unknown count) of the junctions overlapping
+    [start, end), from the reads of ``chunks``."""
+    parts = [_chunk_junctions(ix) for ix in chunks]
+    parts = [a for a in parts if len(a)]
+    if not parts:
+        return np.zeros((0, 5), dtype=np.int64)
+    j = np.concatenate(parts)
+    j = j[(j[:, 1] > start) & (j[:, 0] < end)]
+    if not len(j):
+        return np.zeros((0, 5), dtype=np.int64)
+    keys, inv = np.unique(j[:, :2], axis=0, return_inverse=True)
+    counts = np.zeros((len(keys), 3), dtype=np.int64)
+    np.add.at(counts, (inv.ravel(), j[:, 2]), 1)
+    return np.concatenate([keys, counts], axis=1)
+
+
+class JunctionTrack(Track):
+    """The splice junctions of an alignment track (the same BAM / SAM file), drawn
+    as arcs. ``source`` is that track; the view links it, or it is opened here."""
+
+    kind = KIND_JUNCTION
+    format = "junctions"
+
+    def __init__(self, path: Path, name: str | None = None, source: Track | None = None,
+                 reference_fasta: Path | None = None) -> None:
+        super().__init__(path, name or f"{Path(path).name} junctions")
+        self.source = source
+        self._ref_fa = reference_fasta
+        self.settings["view"] = "junctions"
+
+    def _src(self) -> Track:
+        if self.source is None:
+            self.source = open_track(self.path, reference_fasta=self._ref_fa)
+        return self.source
+
+    def chrom_names(self) -> list[str]:
+        return self._src().chrom_names()
+
+    def resolve(self, ref_id: str) -> str | None:
+        return self._src().resolve(ref_id)
+
+    def reads_visible(self, start: int, end: int) -> bool:
+        return self._src().reads_visible(start, end)
+
+    def fetch(self, ref_id: str, start: int, end: int) -> list[tuple[TrackItem, int]]:
+        return []
+
+    def row_count(self, ref_id: str) -> int:
+        return 0
+
+    def count(self, ref_id: str) -> int:
+        return 0
+
+    def count_in(self, ref_id: str, start: int, end: int) -> int:
+        return 0
+
+    def junctions(self, ref_id: str, start: int, end: int) -> np.ndarray:
+        return self._src().junctions(ref_id, start, end)
+
+    def drawing(self):
+        d = getattr(self._src(), "drawing", None)
+        if d is None:
+            from contextlib import nullcontext
+
+            return nullcontext()
+        return d()
+
+
+class _TileItems(list):
+    """A decoded tile's reads, sorted, with their aligned blocks and depth already
+    worked out (in the worker thread, so the screen does not wait for it)."""
+
+    prepared: tuple | None = None
+    kept: list | None = None          # the reads the filter keeps ...
+    kept_for = None                   # ... and that filter
+
+
+def _prepare_tile(items: list, s0: int, tile: int, keep=None) -> list:
+    out = _TileItems(items)
+    try:
+        shown = out
+        if keep is not None:
+            shown = out.kept = _TileItems(it for it in out if keep(it))
+            out.kept_for = keep
+        ix = ChromIndex(shown)                # sorts the list in place
+        e0 = max(s0 + tile, int(ix.ends.max()) if len(ix) else s0 + tile)
+        shown.prepared = (ix.block_arrays(), (s0, ix.window_depth(s0, e0)))
+    except Exception:  # noqa: BLE001 - worked out on the main thread instead
+        out.prepared = out.kept = out.kept_for = None
+    return out
+
+
 class IndexedBamTrack(Track):
     """BAM / CRAM with an index, read window by window through pysam."""
 
     format = "bam"
     read_window = BAM_READ_WINDOW
-    TILE = 50_000
+    TILE = 25_000               # smaller tiles: the first reads of a new place come sooner
+    PAINT_WAIT = 0.015          # while drawing, wait at most this long for a tile (s)
+    HTS_THREADS = 2             # htslib threads decompressing the BAM
 
     def __init__(self, path: Path, name: str | None = None, *,
                  reference_fasta: Path | None = None) -> None:
@@ -1360,7 +1551,8 @@ class IndexedBamTrack(Track):
             kw["reference_filename"] = str(reference_fasta)
         try:
             self._bam = pysam.AlignmentFile(str(self.path), "rc" if self.path.suffix.lower()
-                                            == ".cram" else "rb", **kw)
+                                            == ".cram" else "rb", threads=self.HTS_THREADS,
+                                            **kw)
         except (OSError, ValueError) as exc:
             raise TrackError(f"Cannot open {self.path.name}: {exc}") from exc
         if not self._bam.has_index():
@@ -1377,7 +1569,11 @@ class IndexedBamTrack(Track):
         self._lock = threading.Lock()
         self._pending: dict = {}
         self._local = threading.local()
-        self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="bam-prefetch")
+        # two workers: the tile under the view is decoded while a neighbour still is
+        self._pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="bam-prefetch")
+        self.on_tile_ready = None   # called (from a worker) when a tile is decoded
+        self._nonblocking = 0       # > 0 while the view draws: never wait long for a tile
+        self._deadline = 0.0
         self._cache = _WindowCache(size=16)
         self._region = None          # (name, start, end, ChromIndex, serial)
         self._region_serial = 0
@@ -1437,13 +1633,35 @@ class IndexedBamTrack(Track):
             items.append(BamItem(a))
         return items, truncated
 
-    def _tile(self, key: str, t: int) -> tuple[list[TrackItem], bool]:
+    def _tile(self, key: str, t: int, deadline: float | None = None):
+        """Tile ``t``'s reads. With a ``deadline`` (while the view draws) a tile that
+        is not decoded by then is left to a worker and None comes back: the view
+        draws what it has and is told (``on_tile_ready``) when the tile is there."""
         with self._lock:
             hit = self._cache.get((key, t))
             fut = self._pending.get((key, t))
         if hit is not None:
             return hit
-        if fut is not None:
+        if deadline is not None:
+            import time
+            from concurrent.futures import TimeoutError as _Timeout
+
+            if fut is None:
+                self._prefetch(key, t)
+                with self._lock:
+                    fut = self._pending.get((key, t))
+                    hit = self._cache.get((key, t))
+                if hit is not None:
+                    return hit
+            if fut is None:
+                return None
+            try:
+                return fut.result(timeout=max(0.0, deadline - time.monotonic()))
+            except _Timeout:
+                return None
+            except Exception:  # noqa: BLE001 - decode it here instead
+                pass
+        elif fut is not None:
             try:
                 return fut.result()
             except Exception:  # noqa: BLE001, S110 - decode it here instead
@@ -1452,6 +1670,31 @@ class IndexedBamTrack(Track):
         with self._lock:
             self._cache.put((key, t), res)
         return res
+
+    def drawing(self):
+        """``with track.drawing():`` the view's paint never blocks on the BAM."""
+        from contextlib import contextmanager
+
+        @contextmanager
+        def _ctx():
+            import time
+
+            if not self._nonblocking:
+                # one wait for the whole frame, however many times it asks for reads
+                self._deadline = time.monotonic() + self.PAINT_WAIT
+            self._nonblocking += 1
+            try:
+                yield
+            finally:
+                self._nonblocking -= 1
+        return _ctx()
+
+    def _cancel_far(self, key: str, keep: set) -> None:
+        """Drop queued (not started) decodes of tiles the view no longer needs."""
+        with self._lock:
+            for k, fut in list(self._pending.items()):
+                if k not in keep and fut.cancel():
+                    self._pending.pop(k, None)
 
     def _prefetch(self, key: str, t: int) -> None:
         if t < 0 or t * self.TILE >= self._lengths.get(key, 0):
@@ -1468,14 +1711,22 @@ class IndexedBamTrack(Track):
             bam = getattr(self._local, "bam", None)
             if bam is None:
                 path, mode, kw = self._open_args
-                bam = self._local.bam = pysam.AlignmentFile(path, mode, **kw)
+                bam = self._local.bam = pysam.AlignmentFile(path, mode,
+                                                            threads=self.HTS_THREADS, **kw)
             res = self._decode_tile(bam, key, t)
+            res = (_prepare_tile(res[0], t * self.TILE, self.TILE, self._filter_fn), res[1])
             with self._lock:
                 self._cache.put((key, t), res)
             return res
         finally:
             with self._lock:
                 self._pending.pop((key, t), None)
+            cb = self.on_tile_ready
+            if cb is not None:
+                try:
+                    cb()
+                except Exception:  # noqa: BLE001, S110 - the view may be gone
+                    pass
 
     def _region_for(self, ref_id: str, start: int, end: int) -> _BamRegion | None:
         """Reads from one view width left to one right of [start, end), in tiles that
@@ -1485,28 +1736,50 @@ class IndexedBamTrack(Track):
             return None
         length = self._lengths.get(key, end)
         span = max(1, end - start)
-        want_lo, want_hi = max(0, start - span // 2), min(length, end + span // 2)
-        r = self._region
+        # what must be loaded: the view itself; half a view either side is read ahead
+        # in the background (so the first reads of a new place come sooner)
+        want_lo, want_hi = max(0, start), min(length, end)
         T = self.TILE
+        ahead = range(max(0, (start - span // 2) // T),
+                      min(length, end + span // 2) // T + 1)
+        deadline = self._deadline if self._nonblocking else None
+        r = self._region
         if r is not None and r.key == key and r.covers(want_lo, want_hi, length):
+            for t in (*ahead, r.lo - 1, r.hi):
+                self._prefetch(key, t)
             return r
         if (r is None or r.key != key or want_hi // T < r.lo - 1 or want_lo // T > r.hi
                 or r.hi - r.lo >= _BamRegion.MAX_TILES):
+            first = want_lo // T
+            # a new place: the tiles of the view first, queued reads elsewhere dropped
+            self._cancel_far(key, {(key, t) for t in ahead})
+            for t in range(first, want_hi // T + 1):
+                self._prefetch(key, t)
+            got = self._tile(key, first, deadline)
+            if got is None:
+                for t in ahead:
+                    self._prefetch(key, t)
+                return r if r is not None and r.key == key else None
             self._region_serial += 1
             r = self._region = _BamRegion(key, self._region_serial, T, self._group_fn,
                                           self.pairs)
-            first = want_lo // T
-            r.add_right(first, self._kept(self._tile(key, first)[0]))
+            r.add_right(first, self._kept(got[0]))
         self.truncated = False
         while r.hi * T < want_hi:
-            items, cut = self._tile(key, r.hi)
+            got = self._tile(key, r.hi, deadline)
+            if got is None:
+                break
+            items, cut = got
             self.truncated |= cut
             r.add_right(r.hi, self._kept(items))
         while r.lo > 0 and r.complete_from() > want_lo:
-            items, cut = self._tile(key, r.lo - 1)
+            got = self._tile(key, r.lo - 1, deadline)
+            if got is None:
+                break
+            items, cut = got
             self.truncated |= cut
             r.add_left(r.lo - 1, self._kept(items))
-        for t in (r.lo - 1, r.lo - 2, r.hi, r.hi + 1):
+        for t in (*ahead, r.lo - 1, r.hi):
             self._prefetch(key, t)
         return r
 
@@ -1517,6 +1790,12 @@ class IndexedBamTrack(Track):
     def row_count(self, ref_id: str) -> int:
         r = self._region
         return len(r.last_end) if r is not None else 0
+
+    def loaded_near(self, ref_id: str, start: int, end: int) -> bool:
+        """Whether any reads of [start, end) are loaded (a new place: not yet)."""
+        r = self._region
+        return (r is not None and r.key == self.resolve(ref_id) and bool(r.chunks)
+                and r.lo * r.tile < end and r.hi * r.tile > start)
 
     def rows_known(self, ref_id: str) -> bool:
         """Whether reads of this sequence are loaded, so row_count means something
@@ -1539,6 +1818,8 @@ class IndexedBamTrack(Track):
 
     def _kept(self, items: list) -> list:
         keep = self._filter_fn
+        if keep is not None and getattr(items, "kept_for", None) is keep:
+            return items.kept             # filtered by the worker already
         return items if keep is None else [it for it in items if keep(it)]
 
     def fetch_groups(self, ref_id: str, start: int, end: int) -> list[tuple]:
@@ -1559,7 +1840,16 @@ class IndexedBamTrack(Track):
         if r is None or r.key != self.resolve(ref_id):
             return 0.0
         a, b = max(start, r.lo * r.tile), min(end, r.hi * r.tile)
-        return float(r.depth(a, b).max()) if b > a else 0.0
+        if b <= a:
+            return 0.0
+        # remembered per region and loaded tiles: the same view asks on every frame
+        memo = r.__dict__.setdefault("_peaks", {})
+        k = (a, b, r.lo, r.hi)
+        if k not in memo:
+            if len(memo) > 64:
+                memo.clear()
+            memo[k] = float(r.depth(a, b).max())
+        return memo[k]
 
     def tile_complete(self, ref_id: str, start: int, end: int) -> bool:
         r = self._region
@@ -1581,6 +1871,14 @@ class IndexedBamTrack(Track):
 
     def find(self, text: str, limit: int = 50) -> list[tuple[str, TrackItem]]:
         return []
+
+    def junctions(self, ref_id: str, start: int, end: int) -> np.ndarray:
+        if not self.reads_visible(start, end):
+            return np.zeros((0, 5), dtype=np.int64)
+        r = self._region_for(ref_id, start, end)
+        if r is None:
+            return np.zeros((0, 5), dtype=np.int64)
+        return _window_junctions(list(r._chunks_for(start, end)), start, end)
 
     def reload_coverage(self) -> None:
         self._cov_cache = load_coverage_cache(self.path)
@@ -1870,13 +2168,435 @@ def load_coverage_cache(path: Path) -> dict | None:
 
 
 # --------------------------------------------------------------------------
+# Signal tracks: a number along the genome (bigWig, bedGraph)
+# --------------------------------------------------------------------------
+
+
+class SignalTrack(Track):
+    """A value per base range, drawn as bars. ``signal`` gives one value per pixel
+    column: the highest in that column (NaN where the file has no data)."""
+
+    kind = KIND_SIGNAL
+
+    def fetch(self, ref_id: str, start: int, end: int) -> list[tuple[TrackItem, int]]:
+        return []
+
+    def row_count(self, ref_id: str) -> int:
+        return 0
+
+    def count(self, ref_id: str) -> int:
+        return 0
+
+    def count_in(self, ref_id: str, start: int, end: int) -> int:
+        return 0
+
+    def coverage(self, ref_id: str, start: int, end: int, n: int) -> np.ndarray | None:
+        return self.signal(ref_id, start, end, n)
+
+    def signal(self, ref_id: str, start: int, end: int, n: int) -> np.ndarray | None:
+        raise NotImplementedError
+
+    def value_at(self, ref_id: str, pos: int) -> float | None:
+        got = self.signal(ref_id, pos, pos + 1, 1)
+        if got is None or not len(got) or np.isnan(got[0]):
+            return None
+        return float(got[0])
+
+
+class BigWigTrack(SignalTrack):
+    format = "bigwig"
+
+    def __init__(self, path: Path, name: str | None = None) -> None:
+        super().__init__(path, name)
+        try:
+            import pyBigWig
+        except ImportError as exc:
+            raise TrackError("bigWig files need the pyBigWig library "
+                             "(pip install pyBigWig).") from exc
+        try:
+            self._bw = pyBigWig.open(str(self.path))
+        except (OSError, RuntimeError) as exc:
+            raise TrackError(f"Cannot open {self.path.name}: {exc}") from exc
+        if self._bw is None or not self._bw.isBigWig():
+            raise TrackError(f"{self.path.name} is not a bigWig file.")
+        self._lengths = dict(self._bw.chroms())
+        self._memo: tuple | None = None
+
+    def chrom_names(self) -> list[str]:
+        return list(self._lengths)
+
+    def signal(self, ref_id: str, start: int, end: int, n: int) -> np.ndarray | None:
+        key = self.resolve(ref_id)
+        if key is None or n <= 0:
+            return None
+        length = self._lengths[key]
+        a, b = max(0, int(start)), min(length, int(end))
+        if b <= a:
+            return np.full(n, np.nan, dtype=np.float32)
+        memo = self._memo
+        if memo is not None and memo[0] == (key, a, b, n):
+            return memo[1]                   # the same view asks on every frame
+        try:
+            if b - a <= n:
+                # zoomed in past one base per column: each base's value, spread out
+                vals = np.asarray(self._bw.values(key, a, b, numpy=True), dtype=np.float32)
+                idx = np.minimum((np.arange(n) * (b - a)) // n, b - a - 1)
+                out = vals[idx]
+            else:
+                # the file's zoom levels give the maximum per column directly
+                out = np.array([np.nan if v is None else v for v in
+                                self._bw.stats(key, a, b, nBins=n, type="max")],
+                               dtype=np.float32)
+        except (RuntimeError, OSError):
+            return None
+        if (a, b) != (start, end):
+            # part of the view lies past the sequence end: no data there
+            full = np.full(n, np.nan, dtype=np.float32)
+            i0 = int((a - start) * n / max(1, end - start))
+            i1 = max(i0 + 1, int((b - start) * n / max(1, end - start)))
+            full[i0:i1] = _resample(out, i1 - i0)
+            out = full
+        self._memo = ((key, a, b, n), out)
+        return out
+
+
+def _resample(values: np.ndarray, n: int) -> np.ndarray:
+    if n <= 0 or not len(values):
+        return np.full(max(0, n), np.nan, dtype=np.float32)
+    idx = np.minimum((np.arange(n) * len(values)) // n, len(values) - 1)
+    return values[idx]
+
+
+class BedGraphTrack(SignalTrack):
+    """bedGraph (chrom, start, end, value), read into memory, sorted per sequence."""
+
+    format = "bedgraph"
+
+    def __init__(self, path: Path, name: str | None = None) -> None:
+        super().__init__(path, name)
+        rows: dict[str, tuple[list, list, list]] = {}
+        try:
+            with _open_text(self.path) as fh:
+                for line in fh:
+                    if not line.strip() or line.startswith(("#", "track", "browser")):
+                        continue
+                    f = line.split()
+                    if len(f) < 4:
+                        continue
+                    try:
+                        s0, e0, v = int(f[1]), int(f[2]), float(f[3])
+                    except ValueError:
+                        continue
+                    r = rows.setdefault(f[0], ([], [], []))
+                    r[0].append(s0)
+                    r[1].append(e0)
+                    r[2].append(v)
+        except (OSError, EOFError) as exc:
+            raise TrackError(f"Cannot read {self.path.name}: {exc}") from exc
+        if not rows:
+            raise TrackError(f"No values found in {self.path.name}.")
+        self._data: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+        for chrom, (st, en, va) in rows.items():
+            st_a = np.asarray(st, dtype=np.int64)
+            order = np.argsort(st_a, kind="stable")
+            self._data[chrom] = (st_a[order], np.asarray(en, dtype=np.int64)[order],
+                                 np.asarray(va, dtype=np.float32)[order])
+        # ends in order too (intervals that do not overlap, the usual case): the
+        # first interval of a window is found by a search
+        self._ends_sorted = {c: _sorted(d[1]) for c, d in self._data.items()}
+
+    def chrom_names(self) -> list[str]:
+        return list(self._data)
+
+    def signal(self, ref_id: str, start: int, end: int, n: int) -> np.ndarray | None:
+        key = self.resolve(ref_id)
+        if key is None or n <= 0:
+            return None
+        st, en, va = self._data[key]
+        out = np.full(n, np.nan, dtype=np.float32)
+        span = max(1, end - start)
+        lo = int(np.searchsorted(en, start, side="right")) if self._ends_sorted[key] else 0
+        hi = int(np.searchsorted(st, end, side="left"))
+        if hi <= lo:
+            return out
+        s_, e_, v_ = st[lo:hi], en[lo:hi], va[lo:hi]
+        keep = (e_ > start) & (s_ < end)
+        s_, e_, v_ = s_[keep], e_[keep], v_[keep]
+        if not len(v_):
+            return out
+        # every interval counts in the columns its two ends fall in ...
+        b0 = np.clip(((s_ - start) * n) // span, 0, n - 1)
+        b1 = np.clip(((e_ - 1 - start) * n) // span, 0, n - 1)
+        np.fmax.at(out, b0, v_)
+        np.fmax.at(out, b1, v_)
+        # ... and in every column between, through the column centres it covers
+        centre = start + (np.arange(n) + 0.5) * span / n
+        j = np.searchsorted(s_, centre, side="right") - 1
+        ok = j >= 0
+        jj = np.where(ok, j, 0)
+        inside = ok & (e_[jj] > centre)
+        out = np.where(inside, np.fmax(out, v_[jj]), out)
+        return out.astype(np.float32)
+
+
+def _sorted(arr: np.ndarray) -> bool:
+    return len(arr) < 2 or bool((arr[1:] >= arr[:-1]).all())
+
+
+# --------------------------------------------------------------------------
+# Variant tracks: VCF sites and per-sample genotypes
+# --------------------------------------------------------------------------
+
+GT_NONE, GT_NOCALL, GT_HOMREF, GT_HET, GT_HOMALT = 0, 1, 2, 3, 4
+GT_NAMES = {GT_NOCALL: "no call", GT_HOMREF: "hom ref", GT_HET: "het",
+            GT_HOMALT: "hom var"}
+VARIANT_WINDOW = 2_000_000       # an indexed VCF is read for views up to this wide
+VARIANT_FETCH_LIMIT = 200_000    # variants read per window at most
+
+
+def genotype_code(gt: str) -> int:
+    """VCF GT text ("0/1", "1|1", "./.", "0") -> GT_* code."""
+    if not gt:
+        return GT_NOCALL
+    alleles = gt.replace("|", "/").split("/")
+    if any(a in (".", "") for a in alleles):
+        return GT_NOCALL
+    if all(a == "0" for a in alleles):
+        return GT_HOMREF
+    if len(set(alleles)) == 1:
+        return GT_HOMALT
+    return GT_HET
+
+
+def _variant_item(chrom: str, pos: int, vid: str, ref: str, alt: str, qual: str,
+                  filt: str, info_raw: str) -> TrackItem:
+    from repeatviewer.backends.gff_features import _parse_vcf_info, _vcf_variant_type
+
+    start = pos - 1
+    end = start + max(1, len(ref) if ref not in (".", "") else 1)
+    info = _parse_vcf_info(info_raw)
+    info["REF"], info["ALT"] = ref, alt
+    if qual not in (".", ""):
+        info["QUAL"] = qual
+    if filt not in (".", ""):
+        info["FILTER"] = filt
+    name = vid if vid not in (".", "") else f"{ref}>{alt.split(',')[0]}"
+    return TrackItem(start, end, ".", name, _vcf_variant_type(ref, alt), info=info)
+
+
+class VariantTrack(Track):
+    """VCF / BCF. Each variant is a TrackItem (ID or REF>ALT as its name, INFO,
+    REF, ALT, QUAL, FILTER in ``info``); ``variants`` adds a genotype matrix
+    (variants x samples, GT_* codes). A bgzipped file with a tabix / CSI index is
+    read window by window (pysam); any other file is read whole."""
+
+    kind = KIND_VARIANT
+    format = "vcf"
+
+    def __init__(self, path: Path, name: str | None = None) -> None:
+        super().__init__(path, name)
+        self.samples: list[str] = []
+        self._gts: dict[str, np.ndarray] = {}
+        self._vf = None
+        self._win: tuple | None = None          # (key, lo, hi, ChromIndex, gts)
+        low = self.path.name.lower()
+        indexed = low.endswith((".gz", ".bgz", ".bcf")) and any(
+            Path(str(self.path) + ext).is_file() for ext in (".tbi", ".csi"))
+        if indexed and pysam_available():
+            self._open_indexed()
+        elif low.endswith(".bcf"):
+            raise TrackError("BCF files need pysam and an index (bcftools index).")
+        else:
+            self._read_all()
+
+    # ---- whole file
+
+    def _read_all(self) -> None:
+        rows: dict[str, list] = {}
+        try:
+            with _open_text(self.path) as fh:
+                for line in fh:
+                    if line.startswith("##"):
+                        continue
+                    if line.startswith("#"):
+                        cols = line.rstrip("\n").split("\t")
+                        self.samples = cols[9:] if len(cols) > 9 else []
+                        continue
+                    f = line.rstrip("\n").split("\t")
+                    if len(f) < 8:
+                        continue
+                    try:
+                        pos = int(f[1])
+                    except ValueError:
+                        continue
+                    it = _variant_item(f[0], pos, f[2], f[3], f[4], f[5], f[6], f[7])
+                    codes = b""
+                    if len(f) > 9:
+                        fmt = f[8].split(":")
+                        gi = fmt.index("GT") if "GT" in fmt else -1
+                        codes = bytes(genotype_code(c.split(":")[gi]) if gi >= 0
+                                      else GT_NOCALL for c in f[9:])
+                    rows.setdefault(f[0], []).append((it, codes))
+        except (OSError, EOFError, UnicodeDecodeError) as exc:
+            raise TrackError(f"Cannot read {self.path.name}: {exc}") from exc
+        if not rows:
+            raise TrackError(f"No variants found in {self.path.name}.")
+        n = len(self.samples)
+        for chrom, got in rows.items():
+            got.sort(key=lambda r: (r[0].start, r[0].end))
+            self._chroms[chrom] = ChromIndex([it for it, _c in got])
+            gts = np.full((len(got), n), GT_NOCALL, dtype=np.uint8)
+            for i, (_it, codes) in enumerate(got):
+                if codes:
+                    gts[i, :min(n, len(codes))] = np.frombuffer(codes, dtype=np.uint8)[:n]
+            self._gts[chrom] = gts
+
+    # ---- indexed
+
+    def _open_indexed(self) -> None:
+        import pysam
+
+        try:
+            self._vf = pysam.VariantFile(str(self.path))
+        except (OSError, ValueError) as exc:
+            raise TrackError(f"Cannot open {self.path.name}: {exc}") from exc
+        self.samples = list(self._vf.header.samples)
+        self.read_window = VARIANT_WINDOW
+        self._names = list(self._vf.header.contigs) or list(self._vf.index.keys())
+
+    def chrom_names(self) -> list[str]:
+        return self._names if self._vf is not None else list(self._chroms)
+
+    def _window(self, key: str, start: int, end: int):
+        w = self._win
+        if w is not None and w[0] == key and w[1] <= start and end <= w[2]:
+            return w[3], w[4]
+        span = max(1, end - start)
+        lo, hi = max(0, start - span), end + span
+        items: list[TrackItem] = []
+        codes: list[bytes] = []
+        try:
+            for rec in self._vf.fetch(key, lo, hi):
+                alts = ",".join(rec.alts or ())
+                info = ";".join(f"{k}={v if not isinstance(v, tuple) else ','.join(map(str, v))}"
+                                for k, v in rec.info.items())
+                it = _variant_item(key, rec.pos, rec.id or ".", rec.ref or ".", alts or ".",
+                                   "." if rec.qual is None else f"{rec.qual:g}",
+                                   ";".join(rec.filter.keys()) or ".", info)
+                items.append(it)
+                row = []
+                for smp in rec.samples.values():
+                    g = smp.get("GT") if "GT" in rec.format else None
+                    if not g or any(a is None for a in g):
+                        row.append(GT_NOCALL)
+                    elif all(a == 0 for a in g):
+                        row.append(GT_HOMREF)
+                    elif len(set(g)) == 1:
+                        row.append(GT_HOMALT)
+                    else:
+                        row.append(GT_HET)
+                codes.append(bytes(row))
+                if len(items) >= VARIANT_FETCH_LIMIT:
+                    hi = it.end            # what was read is complete up to here
+                    break
+        except (ValueError, OSError) as exc:
+            raise TrackError(f"Cannot read {self.path.name}: {exc}") from exc
+        ix = ChromIndex(items)
+        n = len(self.samples)
+        gts = np.full((len(items), n), GT_NOCALL, dtype=np.uint8)
+        for i, c in enumerate(codes):
+            if c:
+                gts[i, :n] = np.frombuffer(c, dtype=np.uint8)[:n]
+        self._win = (key, lo, hi, ix, gts)
+        return ix, gts
+
+    # ---- queries
+
+    def index(self, ref_id: str) -> ChromIndex | None:
+        key = self.resolve(ref_id)
+        if key is None:
+            return None
+        if self._vf is not None:
+            w = self._win
+            return w[3] if w is not None and w[0] == key else None
+        return self._chroms.get(key)
+
+    def variants(self, ref_id: str, start: int, end: int):
+        """(variant items overlapping [start, end), their genotypes: an array of
+        len(items) x len(samples) GT_* codes)."""
+        key = self.resolve(ref_id)
+        empty = ([], np.zeros((0, len(self.samples)), dtype=np.uint8))
+        if key is None:
+            return empty
+        if self._vf is not None:
+            if not self.reads_visible(start, end):
+                return empty
+            ix, gts = self._window(key, start, end)
+        else:
+            ix, gts = self._chroms.get(key), self._gts.get(key)
+            if ix is None:
+                return empty
+        idx = ix.query(start, end)
+        return [ix.items[i] for i in idx], gts[idx] if len(idx) else empty[1]
+
+    def fetch(self, ref_id: str, start: int, end: int) -> list[tuple[TrackItem, int]]:
+        return [(it, 0) for it in self.variants(ref_id, start, end)[0]]
+
+    def row_count(self, ref_id: str) -> int:
+        return len(self.samples)
+
+    def count(self, ref_id: str) -> int:
+        if self._vf is not None:
+            return 0                    # not known without reading the whole file
+        ix = self._chroms.get(self.resolve(ref_id) or "")
+        return len(ix) if ix is not None else 0
+
+    def count_in(self, ref_id: str, start: int, end: int) -> int:
+        return len(self.variants(ref_id, start, end)[0])
+
+    def allele_freq(self, item: TrackItem, gts_row: np.ndarray | None) -> float | None:
+        """Alternate allele frequency: INFO AF, or worked out from the genotypes."""
+        af = item.info.get("AF")
+        if af:
+            try:
+                return max(0.0, min(1.0, float(str(af).split(",")[0])))
+            except ValueError:
+                pass
+        if gts_row is None or not len(gts_row):
+            return None
+        called = gts_row[gts_row >= GT_HOMREF]
+        if not len(called):
+            return None
+        alt = (called == GT_HET).sum() + 2 * (called == GT_HOMALT).sum()
+        return float(alt) / (2 * len(called))
+
+    def search(self, text: str, limit: int = 200):
+        """Variants whose ID or INFO contains ``text`` (whole-file VCFs only)."""
+        if self._vf is not None:
+            return [], 0
+        q = text.strip().lower()
+        if not q:
+            return [], 0
+        hits = [(c, it) for c, ix in self._chroms.items() for it in ix.items
+                if q in it.name.lower() or any(q in str(v).lower() for v in it.info.values())]
+        return hits[:limit], len(hits)
+
+
+# --------------------------------------------------------------------------
 # Opening files and sessions
 # --------------------------------------------------------------------------
 
 
 def track_kind_for(path: Path) -> str | None:
-    """'annotation' / 'paf' / 'sam' / 'bam' / 'blast', or None for an unknown file."""
+    """'annotation' / 'paf' / 'sam' / 'bam' / 'bigwig' / 'bedgraph' / 'blast', or None
+    for an unknown file."""
     name = Path(path).name.lower()
+    if name.endswith(VCF_SUFFIXES):
+        return "vcf"
+    if name.endswith(BIGWIG_SUFFIXES):
+        return "bigwig"
+    if name.endswith(BEDGRAPH_SUFFIXES):
+        return "bedgraph"
     if name.endswith(ANNOTATION_SUFFIXES):
         return "annotation"
     if name.endswith(PAF_SUFFIXES):
@@ -1896,8 +2616,12 @@ def open_track(path: Path, *, reference_names: Iterable[str] = (),
     if not path.is_file():
         raise TrackError(f"{path} does not exist.")
     kind = track_kind_for(path)
+    if (settings or {}).get("view") == "junctions" and kind in ("bam", "sam"):
+        track: Track = JunctionTrack(path, reference_fasta=reference_fasta)
+        track.settings.update(settings or {})
+        return track
     if kind == "annotation":
-        track: Track = AnnotationTrack(path)
+        track = AnnotationTrack(path)
     elif kind == "paf":
         track = PafTrack(path)
     elif kind == "sam":
@@ -1909,12 +2633,18 @@ def open_track(path: Path, *, reference_names: Iterable[str] = (),
             raise TrackError("CRAM files need pysam (macOS / Linux: pip install pysam).")
         else:
             track = MemoryBamTrack(path)
+    elif kind == "vcf":
+        track = VariantTrack(path)
+    elif kind == "bigwig":
+        track = BigWigTrack(path)
+    elif kind == "bedgraph":
+        track = BedGraphTrack(path)
     elif kind == "blast":
         track = BlastTrack(path, genome_side=(settings or {}).get("genome_side", "auto"),
                            reference_names=reference_names)
     else:
         raise TrackError(f"{path.name}: unknown track format. Use GFF/GTF/BED/VCF, PAF, SAM, "
-                         "BAM or BLAST tabular output (-outfmt 6).")
+                         "BAM, bigWig, bedGraph or BLAST tabular output (-outfmt 6).")
     if settings:
         track.settings.update(settings)
     return track

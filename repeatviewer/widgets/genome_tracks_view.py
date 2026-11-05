@@ -7,9 +7,20 @@ Data come from ``backends/genome_tracks.py``; nothing here reads files.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 from PySide6.QtCore import QLineF, QPointF, QRectF, Qt
-from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen, QPolygonF
+from PySide6.QtGui import (
+    QColor,
+    QFont,
+    QFontMetrics,
+    QImage,
+    QPainter,
+    QPainterPath,
+    QPen,
+    QPolygonF,
+)
 from PySide6.QtWidgets import QWidget
 
 from repeatviewer.backends import alignment_style as style
@@ -25,6 +36,14 @@ NOTE_H = 14
 TRACK_GAP = 6
 DEFAULT_ANN_ROWS = 8
 DEFAULT_ALN_ROWS = 20       # rows of an alignment track in the old row-count setting
+SIGNAL_H = 60               # a bigWig / bedGraph track's default height
+SIGNAL_COLOR = "#3a6ea5"
+VAR_SITE_H = 24             # a VCF track's variant band (allele frequency bars)
+VAR_ROW_H = 10              # one sample's genotype row (Squished: VAR_SQUISH_H)
+VAR_SQUISH_H = 4
+DEFAULT_VAR_ROWS = 30       # samples shown by default (Show all / a drag: more)
+JUNCTION_H = 70             # a splice junction track's default height
+JUNCTION_COLORS = ("#c8453a", "#3a6bc8", "#8a6aa8")    # + strand, - strand, unknown
 DEFAULT_ALN_TRACK_H = 320   # a BAM / SAM track is at most this tall unless resized
 SHOW_ALL_MAX_H = 12_000     # Track height > Show all: as tall as the rows need, up to this
 MIN_ROWS_H = 12           # a track dragged shorter still keeps one row
@@ -47,6 +66,14 @@ _INTRON_LINE = QColor(110, 118, 130, 170)   # spliced gaps: one neutral colour (
 _SEL_FILL = QColor(31, 95, 191, 22)
 _SEL_EDGE = QColor("#1f5fbf")
 DEFAULT_CLIP_MIN = 20     # mark soft clips of at least this many bases
+
+
+class _no_ctx:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
 
 
 def _pointed_bar(x0: float, x1: float, y: float, h: float, rev: bool,
@@ -79,6 +106,40 @@ def _edge_color(fill: QColor) -> QColor:
     """Outline of a read bar: the fill, darker and a little more saturated."""
     h, s_, v, _a = fill.getHsvF()
     return QColor.fromHsvF(max(0.0, h), min(1.0, s_ * 1.5 + 0.1), v * 0.72)
+
+
+def _is_signal(t) -> bool:
+    return getattr(t, "kind", None) == gt.KIND_SIGNAL
+
+
+def _is_variant(t) -> bool:
+    return getattr(t, "kind", None) == gt.KIND_VARIANT
+
+
+def _is_junction(t) -> bool:
+    return getattr(t, "kind", None) == gt.KIND_JUNCTION
+
+
+def _is_custom(t) -> bool:
+    """Tracks drawn by their own code (no read rows, no coverage band)."""
+    return getattr(t, "kind", None) in (gt.KIND_SIGNAL, gt.KIND_VARIANT, gt.KIND_JUNCTION)
+
+
+# genotype colours (index = GT_* code), light and dark
+_GT_COLORS = {False: ["#00000000", "#eceef1", "#c9cdd3", "#2c5fd3", "#1fb3c8"],
+              True: ["#00000000", "#2c3035", "#4b525b", "#5b8cf0", "#2fc6da"]}
+
+
+def _fmt_value(v: float) -> str:
+    """A signal value, short: 12, 3.5, 0.042, 1.2e+06."""
+    if v == 0:
+        return "0"
+    a = abs(v)
+    if a >= 1e5 or a < 1e-3:
+        return f"{v:.2g}"
+    if a >= 100:
+        return f"{v:,.0f}"
+    return f"{v:.3g}"
 
 
 def _type_color(kind: str, custom: dict[str, str]) -> QColor:
@@ -137,9 +198,9 @@ class GenomeTracksMixin:
         track goes above the read tracks, as in IGV, so it never has to be dragged past
         a tall alignment track. Sessions load with their saved order."""
         at = len(self.tracks)
-        if above_reads and track.kind == gt.KIND_ANNOTATION:
-            at = next((i for i, t in enumerate(self.tracks)
-                       if t.kind != gt.KIND_ANNOTATION), at)
+        upper = (gt.KIND_ANNOTATION, gt.KIND_SIGNAL, gt.KIND_VARIANT, gt.KIND_JUNCTION)
+        if above_reads and track.kind in upper:
+            at = next((i for i, t in enumerate(self.tracks) if t.kind not in upper), at)
         self.tracks.insert(at, track)
         self._tracks_changed()
 
@@ -182,6 +243,8 @@ class GenomeTracksMixin:
 
     def _row_h(self, t) -> int:
         squished = self._mode(t) == MODE_SQUISHED
+        if _is_variant(t):
+            return VAR_SQUISH_H if squished else VAR_ROW_H
         if t.kind == gt.KIND_ANNOTATION:
             return ANN_SQUISH_H if squished else ANN_ROW_H
         if self._mode(t) == MODE_COLLAPSED:
@@ -194,6 +257,15 @@ class GenomeTracksMixin:
         h = t.settings.get("height")
         if h is not None:
             return max(MIN_ROWS_H, int(h))
+        if _is_signal(t):
+            return SIGNAL_H
+        if _is_junction(t):
+            return JUNCTION_H
+        if _is_variant(t):
+            n = len(t.samples)
+            if not t.settings.get("show_all"):
+                n = min(n, int(t.settings.get("max_rows", DEFAULT_VAR_ROWS)))
+            return min(SHOW_ALL_MAX_H, VAR_SITE_H + (2 + n * self._row_h(t) if n else 0))
         if t.settings.get("show_all"):
             # every row (fitted to the rows used, as the default is), within a bound
             # that keeps the drawn tiles a sane size for a very deep BAM
@@ -250,7 +322,7 @@ class GenomeTracksMixin:
     def _rows_area_h(self, t) -> int:
         """The height the track's rows take now (what a bottom-edge drag starts from)."""
         h = self._extra_track_h(t) - TRACK_GAP
-        if t.kind != gt.KIND_ANNOTATION:
+        if t.kind != gt.KIND_ANNOTATION and not _is_custom(t):
             h -= ALN_COV_H + 2
         return max(MIN_ROWS_H, h)
 
@@ -268,6 +340,8 @@ class GenomeTracksMixin:
         return -1
 
     def _extra_track_h(self, t) -> int:
+        if _is_custom(t):
+            return self.rows_height(t) + TRACK_GAP
         if t.kind == gt.KIND_ANNOTATION:
             rows = self._shown_rows(t) * self._row_h(t)
             if "height" in t.settings:
@@ -293,6 +367,8 @@ class GenomeTracksMixin:
         """(groups as [(label, top, rows shown)], height of the rows) of an alignment
         track; one unnamed group when the reads are not grouped."""
         rh = self._row_h(t)
+        if _is_custom(t):
+            return [], self.rows_height(t)
         if t.kind == gt.KIND_ANNOTATION or self.model is None:
             return [], self._shown_rows(t) * rh
         self._sync_grouping(t)
@@ -450,9 +526,12 @@ class GenomeTracksMixin:
         pal = self.palette()
         mid = pal.color(pal.ColorRole.Mid)
         last = len(self._extra_spans) - 1
+        # read tracks whose pixels a sideways scroll may shift (see _on_hscroll)
+        self._blit_rects = []
         # browser: the page scrolls; tracks wholly above or below the view are skipped
         vis = None
-        if m.browser and self._wrap_origin is None:
+        exporting = getattr(self, "_exporting", False)
+        if m.browser and self._wrap_origin is None and not exporting:
             v = self.verticalScrollBar().value()
             vis = (v - 4, v + self.viewport().height() + 4)
         for k, (t, (top, h)) in enumerate(zip(self.tracks, self._extra_spans)):
@@ -462,26 +541,372 @@ class GenomeTracksMixin:
                 p.setPen(QPen(self._track_rule_color(), 1))
                 p.drawLine(QPointF(self.label_w, top + h - 2), QPointF(w, top + h - 2))
             try:
-                if t.kind == gt.KIND_ANNOTATION:
+                if _is_signal(t):
+                    self._paint_signal_track(p, t, top, h - TRACK_GAP, bp0, bp1, w)
+                elif _is_variant(t):
+                    self._paint_variant_track(p, t, top, h - TRACK_GAP, bp0, bp1, w)
+                elif _is_junction(t):
+                    self._link_junctions(t)
+                    t.source.on_tile_ready = self._tile_ready_soon
+                    with t.drawing() if not exporting else _no_ctx():
+                        self._paint_junction_track(p, t, top, h - TRACK_GAP, bp0, bp1, w)
+                elif t.kind == gt.KIND_ANNOTATION:
                     self._paint_body(p, t, top, h - TRACK_GAP, bp0, bp1)
                 else:
-                    span = self._reads_span(t, bp0, bp1, w)
-                    if isinstance(span, tuple):
-                        # coverage and reads come from the tiles, coverage scaled to
-                        # the peak of the surrounding region so the tiles stay valid
-                        self._tile_peak = self._coverage_peak(t, *span)
-                        self._cov_max = getattr(self, "_cov_max", {})
-                        self._cov_max[id(t)] = self._tile_peak
-                        self._paint_body(p, t, top, h - TRACK_GAP, *span,
-                                         extra_key=self._tile_peak)
-                        if t.grouped:
-                            self._paint_group_heads(p, t, top + ALN_COV_H + 2, h, w)
-                    else:
-                        self._paint_alignment_head(p, t, top, bp0, bp1, w, mid, note=span)
+                    # a BAM never makes the view wait: tiles not decoded yet are read
+                    # in the background and the view is drawn again when they arrive
+                    drawing = getattr(t, "drawing", None) if not exporting else None
+                    if drawing is not None:
+                        t.on_tile_ready = self._tile_ready_soon
+                    with drawing() if drawing is not None else _no_ctx():
+                        self._paint_aln_track(p, t, top, h, bp0, bp1, w, mid)
             except Exception as exc:  # noqa: BLE001 - a bad file must not break the view
                 p.setPen(mid)
                 p.drawText(QRectF(self.label_w + 6, top, w, NOTE_H),
                            Qt.AlignmentFlag.AlignVCenter, f"Cannot draw: {exc}")
+
+    def _signal_scale(self, t, vals: np.ndarray) -> tuple[float, float]:
+        """(lowest, highest) of the drawn range: fixed in the track's settings, or
+        fitted to the values in view (always including zero)."""
+        fixed = t.settings.get("range_max")
+        if fixed is not None:
+            return float(t.settings.get("range_min", 0.0)), float(fixed)
+        finite = vals[np.isfinite(vals)] if vals is not None else np.zeros(0)
+        hi = float(finite.max()) if finite.size else 1.0
+        lo = float(finite.min()) if finite.size else 0.0
+        hi, lo = max(hi, 0.0), min(lo, 0.0)
+        if hi == lo:
+            hi = lo + 1.0
+        return lo, hi
+
+    def _paint_signal_track(self, p, t, top, h, bp0, bp1, w) -> None:
+        """bigWig / bedGraph: one bar per pixel column, the highest value under it,
+        from the zero line (up for positive values, down for negative)."""
+        m = self.model
+        x0 = max(float(self.label_w), self.x_of(bp0))
+        x1 = min(float(w), self.x_of(bp1))
+        n = int(x1 - x0)
+        if n <= 0 or h <= 4:
+            return
+        a, b = self.bp_at(x0), max(self.bp_at(x0) + 1, self.bp_at(x1))
+        vals = t.signal(m.ref_id, a, b, n)
+        lo, hi = self._signal_scale(t, vals)
+        self._signal_range = getattr(self, "_signal_range", {})
+        self._signal_range[id(t)] = (lo, hi)
+        pal = self.palette()
+        top_y, bot_y = top + 2, top + h - 1
+        zero_y = bot_y - (0 - lo) / (hi - lo) * (bot_y - top_y)
+        p.setPen(QPen(pal.color(pal.ColorRole.Mid), 1))
+        p.drawLine(QPointF(x0, zero_y), QPointF(x1, zero_y))
+        if vals is None or not len(vals):
+            return
+        v = np.clip(np.nan_to_num(vals, nan=0.0), lo, hi)
+        ys = bot_y - (v - lo) / (hi - lo) * (bot_y - top_y)
+        has = np.isfinite(vals) & (vals != 0)
+        color = QColor(t.settings.get("color", SIGNAL_COLOR))
+        # columns with data in runs, each run one filled step outline
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(color)
+        idx = np.flatnonzero(np.diff(np.concatenate(([0], has.view(np.int8), [0]))))
+        for r0, r1 in zip(idx[::2].tolist(), idx[1::2].tolist()):
+            pts = [QPointF(x0 + r0, zero_y)]
+            for i, y in enumerate(ys[r0:r1].tolist(), start=r0):
+                pts.append(QPointF(x0 + i, y))
+                pts.append(QPointF(x0 + i + 1, y))
+            pts.append(QPointF(x0 + r1, zero_y))
+            p.drawPolygon(QPolygonF(pts))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        small = QFont(p.font())
+        small.setPointSize(7)
+        p.setFont(small)
+        p.setPen(pal.color(pal.ColorRole.Mid))
+        p.drawText(QRectF(x0 + 4, top + 1, 160, 12),
+                   Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                   f"[{_fmt_value(lo)} – {_fmt_value(hi)}]")
+
+    def _link_junctions(self, t) -> None:
+        """A junction track uses the reads of the alignment track of the same file
+        (no second copy of the reads), when that track is open."""
+        src = t.source
+        if src is not None and any(x is src for x in self.tracks):
+            return
+        t.source = next((x for x in self.tracks if x.path == t.path
+                         and x.kind == gt.KIND_ALIGNMENT), src)
+        t._src()
+
+    def _junction_arcs(self, t, bp0, bp1, w):
+        """(junction rows, their arcs as (x0, x1, height, strand, depth)) in view, or
+        the reason (text) nothing is drawn."""
+        m = self.model
+        a = max(0, self.bp_at(self.label_w))
+        b = max(a + 1, self.bp_at(w))
+        if not t.reads_visible(a, b):
+            return f"Zoom in below {gt.BAM_READ_WINDOW // 1000:,} kb to see the junctions"
+        j = t.junctions(m.ref_id, a, b)
+        least = int(t.settings.get("min_junction", 1))
+        depth = j[:, 2:].sum(axis=1) if len(j) else np.zeros(0, dtype=np.int64)
+        keep = depth >= least
+        return j[keep], depth[keep]
+
+    def _paint_junction_track(self, p, t, top, h, bp0, bp1, w) -> None:
+        """Arcs from intron start to end: + strand above the line, - strand below
+        (no strand: above), as high and as thick as the reads that span them."""
+        got = self._junction_arcs(t, bp0, bp1, w)
+        pal = self.palette()
+        mid_y = top + h / 2
+        p.setPen(QPen(pal.color(pal.ColorRole.Mid), 1))
+        p.drawLine(QPointF(self.label_w, mid_y), QPointF(w, mid_y))
+        if isinstance(got, str):
+            p.drawText(QRectF(self.label_w + 6, top, w - self.label_w - 12, NOTE_H),
+                       Qt.AlignmentFlag.AlignVCenter, got)
+            return
+        j, depth = got
+        if not len(j):
+            return
+        peak = max(1, int(depth.max()))
+        self._junction_peak = getattr(self, "_junction_peak", {})
+        self._junction_peak[id(t)] = peak
+        room = h / 2 - 3
+        p.save()
+        p.setClipRect(QRectF(self.label_w, top, w - self.label_w, h))
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        for (s0, e0, plus, minus, _unk), d in zip(j.tolist(), depth.tolist()):
+            strand = 0 if plus >= minus and plus else 1 if minus else 2
+            down = strand == 1
+            x0, x1 = self.x_of(s0), self.x_of(e0)
+            hh = max(4.0, room * (0.3 + 0.7 * d / peak))   # a rare junction stays visible
+            color = QColor(JUNCTION_COLORS[strand])
+            color.setAlpha(200)
+            p.setPen(QPen(color, max(1.0, min(5.0, 1 + 4 * d / peak))))
+            path = QPainterPath(QPointF(x0, mid_y))
+            ctrl = mid_y + (hh if down else -hh) * 4 / 3   # a cubic's apex is 3/4 of it
+            path.cubicTo(QPointF(x0, ctrl), QPointF(x1, ctrl), QPointF(x1, mid_y))
+            p.drawPath(path)
+        p.restore()
+
+    def _junction_hover(self, t, pos: QPointF, dy: float, h: float) -> str | None:
+        w = self.viewport().width()
+        got = self._junction_arcs(t, self.bp_at(self.label_w), self.bp_at(w) + 1, w)
+        if not isinstance(got, tuple):
+            return got
+        j, depth = got
+        if not len(j):
+            return None
+        bp = self.bp_at_pos(pos)
+        below = dy > h / 2
+        best, best_d = None, None
+        for k, (s0, e0, plus, minus, _u) in enumerate(j.tolist()):
+            if not s0 <= bp < e0:
+                continue
+            strand_down = minus > plus
+            if strand_down != below:
+                continue
+            if best_d is None or e0 - s0 < best_d:     # the innermost arc
+                best, best_d = k, e0 - s0
+        if best is None:
+            return None
+        s0, e0, plus, minus, unk = j[best].tolist()
+        strand = "+" if plus >= minus and plus else "-" if minus else "unknown"
+        return (f"Junction {s0 + 1:,}–{e0:,} ({e0 - s0:,} bp intron)\n"
+                f"{int(depth[best]):,} reads · strand {strand}"
+                + (f" (+ {plus}, - {minus}, ? {unk})" if (plus and minus) or unk and
+                   (plus or minus) else ""))
+
+    def _variant_columns(self, t, bp0, bp1, w):
+        """(x0, columns, a, b, items, genotypes, first column, end column) of the
+        variants in view, one column per pixel; None when there is nothing to draw,
+        or the reason (text) when the view is too wide."""
+        m = self.model
+        x0 = max(float(self.label_w), self.x_of(bp0))
+        x1 = min(float(w), self.x_of(bp1))
+        n = int(x1 - x0)
+        if n <= 0:
+            return None
+        a, b = self.bp_at(x0), max(self.bp_at(x0) + 1, self.bp_at(x1))
+        if not t.reads_visible(a, b):
+            return f"Zoom in below {gt.VARIANT_WINDOW // 1000:,} kb to see the variants"
+        items, gts = t.variants(m.ref_id, a, b)
+        if not items:
+            return None
+        span = max(1, b - a)
+        st = np.fromiter((it.start for it in items), dtype=np.int64, count=len(items))
+        en = np.fromiter((it.end for it in items), dtype=np.int64, count=len(items))
+        c0 = np.clip(((st - a) * n) // span, 0, n - 1)
+        c1 = np.clip(-((-(en - a) * n) // span), 0, n)
+        c1 = np.minimum(np.maximum(c1, c0 + 2), n)          # at least 2 px wide
+        return x0, n, a, b, items, gts, c0, c1
+
+    def _paint_variant_track(self, p, t, top, h, bp0, bp1, w) -> None:
+        """VCF: a band of variant bars (the red part is the alternate allele
+        frequency), then one row per sample coloured by genotype: grey hom ref,
+        blue het, cyan hom var, pale no call."""
+        got = self._variant_columns(t, bp0, bp1, w)
+        pal = self.palette()
+        if isinstance(got, str):
+            p.setPen(pal.color(pal.ColorRole.Mid))
+            p.drawText(QRectF(self.label_w + 6, top, w - self.label_w - 12, NOTE_H),
+                       Qt.AlignmentFlag.AlignVCenter, got)
+            return
+        if got is None:
+            return
+        x0, n, _a, _b, items, gts, c0, c1 = got
+        dark = pal.color(pal.ColorRole.Base).lightness() < 128
+        # variant band
+        bar_top, bar_h = top + 3, VAR_SITE_H - 6
+        ref_c, alt_c = QColor("#5b84c8"), QColor("#d0463c")
+        afs = [t.allele_freq(it, gts[i] if len(t.samples) else None)
+               for i, it in enumerate(items)]
+        if len(items) > 2 * n:
+            # zoomed far out: the highest frequency per column
+            col_af = np.full(n, -1.0)
+            np.maximum.at(col_af, c0, np.array([-0.5 if f is None else f for f in afs]))
+            spans = [(int(c), int(c) + 1, None if v == -0.5 else float(v))
+                     for c, v in zip(np.flatnonzero(col_af > -1).tolist(),
+                                     col_af[col_af > -1].tolist())]
+        else:
+            spans = list(zip(c0.tolist(), c1.tolist(), afs))
+        for s0, s1, af in spans:
+            r = QRectF(x0 + s0, bar_top, max(1, s1 - s0 - (1 if s1 - s0 > 3 else 0)), bar_h)
+            p.fillRect(r, ref_c)
+            if af:
+                ah = bar_h * af
+                p.fillRect(QRectF(r.left(), r.bottom() - ah, r.width(), ah), alt_c)
+        # genotype rows
+        rh = self._row_h(t)
+        rows = min(len(t.samples), max(0, (h - VAR_SITE_H - 2) // rh))
+        if rows <= 0 or not len(gts):
+            return
+        g = gts[:, :rows]
+        img = np.zeros((n, rows), dtype=np.uint8)            # column-major, then .T
+        width = c1 - c0
+        narrow = width <= 6
+        for d in range(6):
+            sel = narrow & (width > d)
+            if sel.any():
+                np.maximum.at(img, c0[sel] + d, g[sel])
+        for i in np.flatnonzero(~narrow).tolist():
+            img[c0[i]:c1[i]] = np.maximum(img[c0[i]:c1[i]], g[i])
+        img = img.T
+        if rh >= 6:
+            # a pale line between sample rows
+            img = np.repeat(img, rh, axis=0)
+            img[rh - 1::rh] = 0
+        data = np.ascontiguousarray(img)
+        qimg = QImage(data.data, data.shape[1], data.shape[0], data.strides[0],
+                      QImage.Format.Format_Indexed8)
+        qimg.setColorTable([QColor(c).rgba() for c in _GT_COLORS[dark]])
+        rows_top = top + VAR_SITE_H + 2
+        p.drawImage(QRectF(x0, rows_top, n, rows * rh), qimg)
+
+    def _variant_hover(self, t, pos: QPointF, dy: float) -> str | None:
+        got = self._variant_columns(t, self.bp_at(self.label_w),
+                                    self.bp_at(self.viewport().width()) + 1,
+                                    self.viewport().width())
+        if not isinstance(got, tuple):
+            return got
+        x0, _n, _a, _b, items, gts, c0, c1 = got
+        col = int(pos.x() - x0)
+        under = np.flatnonzero((c0 <= col) & (col < c1)).tolist()
+        if not under:
+            return None
+        i = under[0]
+        it = items[i]
+        ref, alt = it.info.get("REF", ""), it.info.get("ALT", "")
+        head = f"{it.name}  {it.start + 1:,}  {_short(ref, 20)} > {_short(alt, 20)}"
+        rh = self._row_h(t)
+        row = int((dy - VAR_SITE_H - 2) // rh)
+        if dy >= VAR_SITE_H + 2 and 0 <= row < len(t.samples):
+            code = int(gts[i, row]) if gts.shape[1] > row else gt.GT_NOCALL
+            return f"{t.samples[row]}: {gt.GT_NAMES.get(code, '?')}\n{head}"
+        lines = [head, it.kind]
+        af = t.allele_freq(it, gts[i] if len(t.samples) else None)
+        if af is not None:
+            lines.append(f"allele frequency {af:.3g}")
+        for k in ("QUAL", "FILTER", "DP"):
+            if k in it.info:
+                lines.append(f"{k} {it.info[k]}")
+        if len(t.samples):
+            counts = np.bincount(gts[i], minlength=5)
+            lines.append(f"het {counts[gt.GT_HET]:,} · hom var {counts[gt.GT_HOMALT]:,} · "
+                         f"hom ref {counts[gt.GT_HOMREF]:,} · no call {counts[gt.GT_NOCALL]:,}")
+        return "\n".join(lines)
+
+    # ---------------------------------------------------------------- save image
+
+    def page_height(self) -> int:
+        """Height of the whole browser page: ruler, sequence and every track."""
+        return int(self.header_h()) + 4
+
+    def render_page(self, p: QPainter, w: int, h: int) -> None:
+        """The browser view as on screen (same region and zoom), every track at full
+        height and drawn directly, not from cached pictures (for PNG / SVG)."""
+        m = self.model
+        pal = self.palette()
+        p.fillRect(QRectF(0, 0, w, h), pal.color(pal.ColorRole.Base))
+        if m is None:
+            return
+        vw = self.viewport().width()
+        bp0 = max(0, self.bp_at(self.label_w) - 1)
+        bp1 = min(m.length, self.bp_at(vw) + 2)
+        self._exporting = True
+        try:
+            self._paint_page(p, vw, h, bp0, bp1, 0)
+        finally:
+            self._exporting = False
+
+    def save_image(self, path) -> Path:
+        from repeatviewer.widgets.image_export import write_image
+
+        pal = self.palette()
+        return write_image(path, self.viewport().width(), self.page_height(),
+                           self.render_page, pal.color(pal.ColorRole.Base),
+                           self.model.ref_id if self.model is not None else "")
+
+    def _tile_ready_soon(self) -> None:
+        """A BAM tile was decoded (called from its worker thread): draw again, once
+        for a burst of tiles."""
+        sig = getattr(self, "tileReady", None)
+        if sig is not None:
+            sig.emit()
+
+    def _on_tile_ready(self) -> None:
+        if getattr(self, "_tile_redraw_queued", False):
+            return
+        from PySide6.QtCore import QTimer
+
+        self._tile_redraw_queued = True
+
+        def go():
+            self._tile_redraw_queued = False
+            self._tracks_changed_light()
+
+        QTimer.singleShot(15, go)
+
+    def _tracks_changed_light(self) -> None:
+        """Rows may have grown with the new reads: lay out and draw again."""
+        if hasattr(self, "_update_scrollbars"):
+            self._update_scrollbars()
+        self.viewport().update()
+
+    def _paint_aln_track(self, p, t, top, h, bp0, bp1, w, mid) -> None:
+        span = self._reads_span(t, bp0, bp1, w)
+        if isinstance(span, tuple):
+            # coverage and reads come from the tiles, coverage scaled to
+            # the peak of the surrounding region so the tiles stay valid
+            self._tile_peak = self._coverage_peak(t, *span)
+            self._cov_max = getattr(self, "_cov_max", {})
+            if self._cov_max.get(id(t), self._tile_peak) != self._tile_peak:
+                self.viewport().update()     # a new depth scale: shifted pixels are stale
+            self._cov_max[id(t)] = self._tile_peak
+            if not t.grouped and t.tile_complete(self.model.ref_id, *span):
+                self._blit_rects.append((top, h - TRACK_GAP))
+            self._paint_body(p, t, top, h - TRACK_GAP, *span,
+                             extra_key=self._tile_peak)
+            if t.grouped:
+                self._paint_group_heads(p, t, top + ALN_COV_H + 2, h, w)
+        else:
+            self._paint_alignment_head(p, t, top, bp0, bp1, w, mid, note=span)
 
     # Drawn rows are kept as pixmap tiles (TILE_PX wide, per zoom level): panning only
     # draws the tiles that come into view and copies the others.
@@ -496,6 +921,9 @@ class GenomeTracksMixin:
         if not t.reads_visible(a, b):
             return f"Zoom in below {gt.BAM_READ_WINDOW // 1000:,} kb to see the reads"
         n_here = t.count_in(m.ref_id, a, b + 1)
+        loaded = getattr(t, "loaded_near", None)
+        if loaded is not None and not loaded(m.ref_id, a, b + 1):
+            return "Loading reads…"
         if n_here > MAX_DRAWN:
             return f"{n_here:,} alignments here: zoom in to see them"
         return a, b
@@ -517,7 +945,8 @@ class GenomeTracksMixin:
                     extra_key=None) -> None:
         m = self.model
         w = self.viewport().width()
-        if self._wrap_origin is not None or height <= 0:
+        if self._wrap_origin is not None or height <= 0 or getattr(self, "_exporting", False):
+            # wrapped, or saved as an image: drawn directly (an SVG stays vector)
             self._cx0, self._cx1 = float(self.label_w), float(w)
             self._draw_body(p, t, top, bp0, bp1)
             return
@@ -531,16 +960,23 @@ class GenomeTracksMixin:
         tw = self.TILE_PX
         hval = self.horizontalScrollBar().value()
         dpr = self.viewport().devicePixelRatioF()
-        k0 = max(0, int(hval // tw))
-        k1 = int((hval + self._data_w()) // tw)
+        extra = getattr(self, "_extra_tiles", 0)   # idle: the tiles beside the view too
+        k0 = max(0, int(hval // tw) - extra)
+        k1 = int((hval + self._data_w()) // tw) + extra
+        if not extra:
+            self._queue_prerender()
         colors = getattr(self, "type_colors", {}) or {}
         base_key = (id(t), m.ref_id, self.ppb, self._mode(t), self._shown_rows(t), height,
                     repr(self._layout(t)[0]) if t.kind != gt.KIND_ANNOTATION else None,
                     t.layout_version(m.ref_id, bp0, bp1 + 1), dpr,
                     hash(tuple(sorted(colors.items()))), getattr(self, "_tiles_epoch", 0),
                     extra_key)
+        clip = p.clipBoundingRect() if p.hasClipping() else None
         for k in range(k0, k1 + 1):
             x = self.label_w + k * tw - hval
+            if (clip is not None and not extra
+                    and not clip.intersects(QRectF(x, top, tw, height))):
+                continue                     # shifted on screen, not drawn again
             key = (*base_key, k)
             pm = cache.get(key)
             if pm is None:
@@ -570,6 +1006,32 @@ class GenomeTracksMixin:
             pal = self.palette()
             self._paint_annotation_track(p, t, top, bp0, bp1, pal.color(pal.ColorRole.Text),
                                          shapes=False)
+
+    def _queue_prerender(self) -> None:
+        """After the view has been still for a moment, draw the picture tiles just left
+        and right of it, so the next pan step only copies them."""
+        from PySide6.QtCore import QTimer
+
+        timer = getattr(self, "_prerender_timer", None)
+        if timer is None:
+            timer = self._prerender_timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.setInterval(120)
+            timer.timeout.connect(self._prerender)
+        timer.start()
+
+    def _prerender(self) -> None:
+        from PySide6.QtGui import QPixmap
+
+        vp = self.viewport()
+        if not vp.isVisible() or self.model is None or not self.tracks:
+            return
+        self._extra_tiles = 1
+        try:
+            # drawn off screen: only the tiles not in the cache yet cost anything
+            vp.render(QPixmap(vp.size()))
+        finally:
+            self._extra_tiles = 0
 
     def _draw_body(self, p: QPainter, t, top: int, a: int, b: int, labels: bool = True) -> None:
         pal = self.palette()
@@ -828,6 +1290,7 @@ class GenomeTracksMixin:
         fills: dict = {}
         rects: dict = {}      # style -> bars, drawn with one call per colour
         polys: dict = {}      # style -> read ends drawn pointed (strand)
+        tips: dict = {}       # (point length, height, reverse) -> triangle at 0, 0
         later = []            # reads whose mismatches are drawn on top
         clip_marks: list = []
         color_of = self._read_colorer(t)
@@ -883,8 +1346,23 @@ class GenomeTracksMixin:
                 bx0 = x_base + s_ * ppb
                 bw = max(1.0, (e_ - s_) * ppb)
                 if i == end_i and bw > 3:
-                    # pointed end shows the strand, filled and inside the read's span
-                    polys[key].append(_pointed_bar(bx0, bx0 + bw, y, body, rev))
+                    # pointed end shows the strand, filled and inside the read's span:
+                    # the bar as a rectangle (drawn with the others in one call) and
+                    # the point as a small triangle, all in one path per colour
+                    d = min(max(3.0, body * 0.5), bw * 0.5)
+                    tk = (d, body, rev)
+                    tri = tips.get(tk)
+                    if tri is None:
+                        mid_ = body / 2
+                        tri = tips[tk] = QPolygonF(
+                            [QPointF(d, 0), QPointF(0, mid_), QPointF(d, body)] if rev else
+                            [QPointF(0, 0), QPointF(d, mid_), QPointF(0, body)])
+                    if rev:
+                        rc.append(QRectF(bx0 + d, y, bw - d, body))
+                        polys[key].append(tri.translated(bx0, y))
+                    else:
+                        rc.append(QRectF(bx0, y, bw - d, body))
+                        polys[key].append(tri.translated(bx0 + bw - d, y))
                 else:
                     rc.append(QRectF(bx0, y, bw, body))
             if clip_min:
@@ -910,8 +1388,11 @@ class GenomeTracksMixin:
                 p.setBrush(fill)
                 if rects[key]:
                     p.drawRects(rects[key])
-                for poly in polys[key]:
-                    p.drawPolygon(poly)
+                if polys[key]:
+                    path = QPainterPath()
+                    for poly in polys[key]:
+                        path.addPolygon(poly)
+                    p.drawPath(path)
         p.setBrush(Qt.BrushStyle.NoBrush)
         if later:
             self._paint_read_details(p, t, later, a, b, body, font, letters)
@@ -1057,6 +1538,7 @@ class GenomeTracksMixin:
         fm = QFontMetrics(font)
         small = QFont(font)
         small.setPointSize(7)
+        fm_small = QFontMetrics(small)
         last = len(self._extra_spans) - 1
         for k, (t, (top, h)) in enumerate(zip(self.tracks, self._extra_spans)):
             p.setFont(font)
@@ -1065,7 +1547,22 @@ class GenomeTracksMixin:
                        Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
                        fm.elidedText(t.name, Qt.TextElideMode.ElideMiddle, self.label_w - 12))
             note = ""
-            if t.kind != gt.KIND_ANNOTATION:
+            if _is_junction(t):
+                peak = getattr(self, "_junction_peak", {}).get(id(t))
+                note = f"most reads {peak:,}" if peak else "splice junctions"
+                least = int(t.settings.get("min_junction", 1))
+                if least > 1:
+                    note += f" · ≥ {least}"
+            elif _is_variant(t):
+                n_s = len(t.samples)
+                note = f"{n_s:,} samples" if n_s else "sites only"
+                if self.model is not None and t.count(self.model.ref_id):
+                    note += f" · {t.count(self.model.ref_id):,} variants"
+            elif _is_signal(t):
+                note = "bigWig" if t.format == "bigwig" else "bedGraph"
+                if t.settings.get("range_max") is None:
+                    note += " · autoscale"
+            elif t.kind != gt.KIND_ANNOTATION:
                 peak = getattr(self, "_cov_max", {}).get(id(t))
                 if peak:
                     note = f"depth max {peak:,.0f}"
@@ -1080,7 +1577,19 @@ class GenomeTracksMixin:
                 p.setPen(mid)
                 p.drawText(QRectF(6, top + 14, self.label_w - 10, 12),
                            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, note)
-            if t.kind != gt.KIND_ANNOTATION:
+            if _is_variant(t) and t.samples and self._row_h(t) >= 8:
+                # sample names beside their rows
+                p.setFont(small)
+                p.setPen(fg)
+                rh = self._row_h(t)
+                rows = min(len(t.samples), max(0, (h - TRACK_GAP - VAR_SITE_H - 2) // rh))
+                y0 = top + VAR_SITE_H + 2
+                for r in range(rows):
+                    p.drawText(QRectF(14, y0 + r * rh - 1, self.label_w - 18, rh + 1),
+                               Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
+                               fm_small.elidedText(t.samples[r], Qt.TextElideMode.ElideMiddle,
+                                                   self.label_w - 20))
+            if t.kind != gt.KIND_ANNOTATION and not _is_custom(t):
                 self._paint_color_legend(p, t, top + 28, top + h - 4, small, mid)
             if k < last:
                 p.setPen(QPen(self._track_rule_color(), 1))
@@ -1102,6 +1611,20 @@ class GenomeTracksMixin:
         top, _h = self._extra_spans[i]
         bp = self.bp_at_pos(pos)
         slack = max(1, int(3 / max(self.ppb, 1e-9)))
+        if _is_variant(t):
+            return i, [], self._variant_hover(t, pos, y - top)
+        if _is_junction(t):
+            self._link_junctions(t)
+            return i, [], self._junction_hover(t, pos, y - top, _h - TRACK_GAP)
+        if _is_signal(t):
+            # the value under the pointer: the highest in its pixel column
+            a = self.bp_at(pos.x())
+            b = max(a + 1, self.bp_at(pos.x() + 1))
+            got = t.signal(m.ref_id, a, b, 1)
+            if got is None or not len(got) or not np.isfinite(got[0]):
+                return i, [], f"Position {bp + 1:,}: no value"
+            where = f"{a + 1:,}" if b - a <= 1 else f"{a + 1:,}–{b:,}"
+            return i, [], f"Position {where}: {_fmt_value(float(got[0]))}"
         if t.kind == gt.KIND_ANNOTATION:
             row = int((y - top) // self._row_h(t))
             last = self._shown_rows(t) - 1
@@ -1224,6 +1747,9 @@ class GenomeTracksMixin:
             x0, h0, moved = press
             dx = pos.x() - x0
             if moved or abs(dx) > 3:
+                import time
+
+                self._interactive_at = time.monotonic()     # a drag: see _nav_sync_soon
                 if not moved:
                     self.viewport().setCursor(Qt.CursorShape.ClosedHandCursor)
                     self._body_press = (x0, h0, True)
@@ -1318,6 +1844,8 @@ class GenomeTracksMixin:
             self._body_press = None
             if press[2]:
                 self.viewport().unsetCursor()
+                self._interactive_at = 0.0
+                self.viewChanged.emit()         # where the drag stopped, at once
             else:
                 found = self.track_items_at(event.position())
                 if found is not None and found[1]:

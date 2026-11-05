@@ -35,6 +35,19 @@ from PySide6.QtWidgets import (
 BOOKMARK_COLORS = ("#d9534f", "#6f5bd3", "#2a9d8f", "#e08a2c", "#3d7be0")
 MAX_RECENT = 12
 MAX_HISTORY = 100
+SORT_FILE, SORT_NAME, SORT_LENGTH, SORT_DENSITY = "file", "name", "length", "density"
+SORT_CHOICES = (("File order", SORT_FILE), ("Name", SORT_NAME),
+                ("Longest", SORT_LENGTH), ("Most features", SORT_DENSITY))
+FIND_LIMIT = 200          # results listed in the Find section
+
+
+def natural_key(name: str) -> list:
+    """scaffold_2 before scaffold_10: digits compare as numbers."""
+    import re
+
+    return [int(p) if p.isdigit() else p.lower() for p in re.split(r"(\d+)", name)]
+
+
 DEFAULT_JUMP_BP = 20_000      # width shown after a click when the view was a whole sequence
 RAIL_W = 300
 
@@ -587,6 +600,8 @@ class NavigatorRail(QWidget):
     importBookmarksRequested = Signal()
     exportBookmarksRequested = Signal()
     densityTrackChanged = Signal(str)              # a track path, "" for none
+    sortChanged = Signal(str)                      # how the sequence list is ordered
+    findRequested = Signal(str, str)               # track path ("" = all), text
     sectionToggled = Signal(str, bool)             # "genome" / "bookmarks", open
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -646,13 +661,29 @@ class NavigatorRail(QWidget):
         self.map_scroll.setFrameShape(QFrame.Shape.NoFrame)
         self.map_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.genome.content.addWidget(self.map_scroll)
+        # the order of the list, then a filter on the names
+        self.sort = _ChevronCombo(body)
+        self.sort.setObjectName("densityCombo")
+        self.sort.setFixedHeight(18)
+        self.sort.setFont(sf)
+        for label, key in SORT_CHOICES:
+            self.sort.addItem(label, key)
+        self.sort.setToolTip("Order of the sequences: as in the genome file, by name "
+                             "(scaffold_2 before scaffold_10), longest first, or most "
+                             "features of the density track first")
+        self.sort.setFixedWidth(QFontMetrics(sf).horizontalAdvance("Most features") + 34)
+        self.sort.currentIndexChanged.connect(self._sort_picked)
         self.filter = QLineEdit(body)
         self.filter.setPlaceholderText("Filter sequences…")
         self.filter.setFixedHeight(18)
         self.filter.setFont(sf)
         self.filter.setClearButtonEnabled(True)
         self.filter.textChanged.connect(self._apply_filter)
-        self.genome.content.addWidget(self.filter)
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        row.addWidget(self.sort)
+        row.addWidget(self.filter, 1)
+        self.genome.content.addLayout(row)
         self._all_chroms: list[tuple[str, int]] = []
         lay.addWidget(self.genome)
         lay.addWidget(self._rule(body))
@@ -692,6 +723,51 @@ class NavigatorRail(QWidget):
         self.bm_section.content.addWidget(self.bm_empty)
         lay.addWidget(self.bm_section)
         lay.addWidget(self._rule(body))
+
+        # Find: features of one annotation track (or all of them) by name, ID or note
+        self.find_section = _Section("Find", body)
+        self.find_section.toggled.connect(lambda on: self.sectionToggled.emit("find", on))
+        self.find_count = QLabel("", body)
+        self.find_count.setStyleSheet(f"color: {muted};")
+        self.find_section.right.addWidget(self.find_count)
+        frow = QHBoxLayout()
+        frow.setSpacing(6)
+        fl = QLabel("In", body)
+        fl.setStyleSheet(f"color: {muted};")
+        frow.addWidget(fl)
+        self.find_track = _ChevronCombo(body)
+        self.find_track.setObjectName("densityCombo")
+        self.find_track.setFixedHeight(18)
+        self.find_track.setFont(sf)
+        self.find_track.setToolTip("Which annotation track to search (GFF, GTF, BED…); "
+                                   "mapped reads are not searched")
+        self.find_track.currentIndexChanged.connect(lambda _i: self._find_now())
+        frow.addWidget(self.find_track, 1)
+        self.find_section.content.addLayout(frow)
+        self.find_box = QLineEdit(body)
+        self.find_box.setPlaceholderText("Find a gene, ID or note…")
+        self.find_box.setFixedHeight(18)
+        self.find_box.setFont(sf)
+        self.find_box.setClearButtonEnabled(True)
+        from PySide6.QtCore import QTimer
+
+        self._find_timer = QTimer(self)
+        self._find_timer.setSingleShot(True)
+        self._find_timer.setInterval(250)
+        self._find_timer.timeout.connect(self._find_now)
+        self.find_box.textChanged.connect(lambda _t: self._find_timer.start())
+        self.find_box.returnPressed.connect(self._find_now)
+        self.find_section.content.addWidget(self.find_box)
+        self.find_results = QVBoxLayout()
+        self.find_results.setSpacing(2)
+        self.find_section.content.addLayout(self.find_results)
+        self.find_note = QLabel("Add a GFF, GTF or BED track to search its features.", body)
+        self.find_note.setWordWrap(True)
+        self.find_note.setStyleSheet(f"color: {muted};")
+        self.find_section.content.addWidget(self.find_note)
+        self._find_last = ("", "")
+        lay.addWidget(self.find_section)
+        lay.addWidget(self._rule(body))
         lay.addStretch(1)
         # one flat panel background, like the main window's side panels: the
         # sequence list sits on it with no box of its own
@@ -721,11 +797,35 @@ class NavigatorRail(QWidget):
         n = len(chroms)
         self.genome_count.setText(f"{n:,} sequences" if n > 1 else "")
         self.filter.setVisible(n > 12)
+        self.sort.setVisible(n > 1)
         self._apply_filter()
+
+    def set_sort(self, key: str) -> None:
+        k = self.sort.findData(key)
+        self.sort.blockSignals(True)
+        self.sort.setCurrentIndex(max(0, k))
+        self.sort.blockSignals(False)
+        self._apply_filter()
+
+    def _sort_picked(self, _i: int) -> None:
+        self._apply_filter()
+        self.sortChanged.emit(str(self.sort.currentData() or SORT_FILE))
+
+    def _sorted(self, chroms: list[tuple[str, int]]) -> list[tuple[str, int]]:
+        key = self.sort.currentData() or SORT_FILE
+        if key == SORT_NAME:
+            return sorted(chroms, key=lambda c: natural_key(c[0]))
+        if key == SORT_LENGTH:
+            return sorted(chroms, key=lambda c: -c[1])
+        if key == SORT_DENSITY:
+            dens = self.map.density or {}
+            return sorted(chroms, key=lambda c: -sum(dens.get(c[0], ()) or (0,)))
+        return list(chroms)
 
     def _apply_filter(self, *_a) -> None:
         q = self.filter.text().strip().lower()
         chroms = [c for c in self._all_chroms if q in c[0].lower()] if q else self._all_chroms
+        chroms = self._sorted(chroms)
         self.map.set_chroms(chroms)
         self.map_scroll.setFixedHeight(min(self.map.minimumHeight(), 10 * ChromosomeMap.ROW_H + 6))
         self._scroll_to_current()
@@ -747,7 +847,67 @@ class NavigatorRail(QWidget):
 
     def set_density(self, density: dict[str, list[float]]) -> None:
         self.map.density = density
+        if self.sort.currentData() == SORT_DENSITY:
+            self._apply_filter()
         self.map.update()
+
+    # ------------------------------------------------ find
+
+    def set_find_tracks(self, tracks: list[tuple[str, str]]) -> None:
+        """The annotation tracks that can be searched: (path, name)."""
+        combo = self.find_track
+        current = combo.currentData()
+        combo.blockSignals(True)
+        combo.clear()
+        if len(tracks) > 1:
+            combo.addItem("All annotation tracks", "")
+        for path, name in tracks:
+            combo.addItem(name, path)
+        k = combo.findData(current)
+        combo.setCurrentIndex(max(k, 0))
+        combo.blockSignals(False)
+        has = bool(tracks)
+        self.find_track.setEnabled(has)
+        self.find_box.setEnabled(has)
+        if not has:
+            self.set_find_results([], 0)
+            self.find_note.setText("Add a GFF, GTF or BED track to search its features.")
+            self.find_note.setVisible(True)
+
+    def _find_now(self) -> None:
+        self._find_timer.stop()
+        text = self.find_box.text().strip()
+        path = str(self.find_track.currentData() or "")
+        if not text:
+            self._find_last = ("", "")
+            self.set_find_results([], 0)
+            self.find_note.setVisible(False)
+            return
+        if (path, text) == self._find_last:
+            return
+        self._find_last = (path, text)
+        self.findRequested.emit(path, text)
+
+    def set_find_results(self, hits: list, total: int) -> None:
+        """``hits``: (name, chrom, start, end, detail); ``total`` found (more may exist
+        than are listed)."""
+        self._clear(self.find_results)
+        self.find_hits = list(hits)
+        for name, chrom, a, b, detail in hits:
+            row = _ListRow(name, f"{chrom}:{a + 1:,}", detail, parent=self._body)
+            row.setToolTip(f"{name}\n{chrom}:{a + 1:,}-{b:,}\nClick to go there")
+            row.clicked.connect(lambda c=chrom, a_=a, b_=b, n=name:
+                                self.goRequested.emit(c, a_, b_, n))
+            self.find_results.addWidget(row)
+        text = self.find_box.text().strip()
+        if not text:
+            self.find_count.setText("")
+        elif total > len(hits):
+            self.find_count.setText(f"first {len(hits):,} of {total:,}")
+        else:
+            self.find_count.setText(f"{total:,} found" if total else "")
+        self.find_note.setText("Nothing matches." if text and not hits else "")
+        self.find_note.setVisible(bool(text) and not hits)
 
     def set_density_tracks(self, tracks: list[tuple[str, str]], current: str) -> None:
         """The annotation tracks that can shade the bars: (path, name)."""

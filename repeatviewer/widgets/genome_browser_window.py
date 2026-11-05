@@ -109,6 +109,10 @@ class GenomeBrowserWindow(QMainWindow):
         menu.addAction("Open Session…", lambda: self.open_session_file())
         act = menu.addAction("Save Session…", lambda: self.save_session_as())
         act.setShortcut(QKeySequence.StandardKey.SaveAs)
+        menu.addSeparator()
+        act = menu.addAction("Save Image…", lambda: self.panel.save_image())
+        act.setShortcut(QKeySequence("Ctrl+Shift+E"))
+        act.setToolTip("The view as PNG or SVG (vector), every track at full height")
         files = self.panel._files_menu
         files.setTitle("Files")
         if files.actions():

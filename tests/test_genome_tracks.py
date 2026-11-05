@@ -281,3 +281,208 @@ def test_bam_rows_stay_put_while_panning(tmp_path):
     for spans in by_row.values():
         spans.sort()
         assert all(a[1] <= b[0] for a, b in itertools.pairwise(spans))
+
+
+def test_chrom_index_orders_items_without_a_python_sort():
+    items = [_item(30, 40), _item(10, 50), _item(10, 20), _item(5, 9)]
+    ix = gt.ChromIndex(items)
+    assert [(it.start, it.end) for it in ix.items] == [(5, 9), (10, 20), (10, 50), (30, 40)]
+    assert ix.starts.tolist() == [5, 10, 10, 30] and ix.ends.tolist() == [9, 20, 50, 40]
+    in_order = [_item(1, 5), _item(2, 3), _item(2, 4)]
+    same = list(in_order)
+    gt.ChromIndex(in_order)
+    assert all(a is b for a, b in zip(in_order, same))       # left as it was
+
+
+def _many_reads_bam(tmp_path, n=3000, length=60000):
+    pysam = pytest.importorskip("pysam")
+    import random
+
+    rng = random.Random(5)
+    lines = [f"@SQ\tSN:c1\tLN:{length}"]
+    for i, s in enumerate(sorted(rng.randrange(0, length - 200) for _ in range(n))):
+        lines.append(f"r{i}\t0\tc1\t{s + 1}\t60\t100M\t*\t0\t0\t*\t*")
+    sam = tmp_path / "m.sam"
+    sam.write_text("\n".join(lines) + "\n")
+    bam = tmp_path / "m.bam"
+    pysam.sort("-o", str(bam), str(sam))
+    pysam.index(str(bam))
+    return bam
+
+
+def test_bam_never_blocks_while_drawing_and_says_when_a_tile_is_ready(tmp_path, monkeypatch):
+    import threading
+    import time
+
+    t = gt.IndexedBamTrack(_many_reads_bam(tmp_path))
+    real = t._decode_tile
+    gate = threading.Event()
+
+    def slow(bam, key, tile):
+        gate.wait(5)                     # a slow disk
+        return real(bam, key, tile)
+
+    monkeypatch.setattr(t, "_decode_tile", slow)
+    ready = threading.Event()
+    t.on_tile_ready = ready.set
+    t0 = time.monotonic()
+    with t.drawing():
+        assert t.fetch("c1", 30000, 32000) == []           # nothing yet, no waiting
+        assert not t.loaded_near("c1", 30000, 32000)
+    assert time.monotonic() - t0 < 0.5
+    gate.set()
+    assert ready.wait(5)                                    # the view is told
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        with t.drawing():
+            got = t.fetch("c1", 30000, 32000)
+        if got and t.tile_complete("c1", 30000, 32000):
+            break
+        time.sleep(0.02)
+    assert got and t.loaded_near("c1", 30000, 32000)
+    # outside drawing, a fetch waits for its reads as before
+    assert t.fetch("c1", 1000, 3000)
+
+
+def test_coverage_peak_is_remembered_per_region(tmp_path):
+    t = gt.IndexedBamTrack(_many_reads_bam(tmp_path))
+    t.fetch("c1", 10000, 12000)
+    r = t._region
+    calls = []
+    real = r.depth
+    r.depth = lambda a, b: calls.append((a, b)) or real(a, b)
+    p1 = t.coverage_peak("c1", 9000, 13000)
+    p2 = t.coverage_peak("c1", 9000, 13000)
+    assert p1 == p2 > 0 and len(calls) == 1
+
+
+def test_worker_prepares_tile_blocks_and_depth(tmp_path):
+    """A tile read in the background arrives sorted, with its depth worked out, so
+    adding it to the view while panning is cheap; the filter is applied there too."""
+    import time
+
+    t = gt.IndexedBamTrack(_many_reads_bam(tmp_path))
+    t._prefetch("c1", 1)
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and t._cache.get(("c1", 1)) is None:
+        time.sleep(0.01)
+    items, _cut = t._cache.get(("c1", 1))
+    assert items.prepared is not None
+    _blk, (s0, depth) = items.prepared
+    ix = gt.ChromIndex(list(items))
+    assert s0 == t.TILE and (depth == ix.window_depth(s0, s0 + depth.size)).all()
+    t.fetch("c1", t.TILE + 100, t.TILE + 2000)
+    assert t._region.chunks[1]._depth[1] is depth          # used as is
+    # with a read filter, the kept reads are prepared instead
+    keep = lambda it: it.strand == "+"                     # noqa: E731
+    pre = gt._prepare_tile(list(items), t.TILE, t.TILE, keep)
+    assert pre.kept_for is keep and all(it.strand == "+" for it in pre.kept)
+    assert pre.kept.prepared is not None
+
+
+def test_bedgraph_signal_is_the_highest_value_per_column(tmp_path):
+    p = tmp_path / "s.bedgraph"
+    p.write_text("track type=bedGraph\nchr1\t0\t100\t1\nchr1\t100\t200\t5\n"
+                 "chr1\t1000\t5000\t-2\n")
+    t = gt.open_track(p)
+    assert t.kind == gt.KIND_SIGNAL and t.format == "bedgraph"
+    got = t.signal("chr1", 0, 6000, 6)
+    assert got[0] == 5 and (got[1:5] == -2).all() and np.isnan(got[5])
+    assert t.value_at("chr1", 150) == 5 and t.value_at("chr1", 600) is None
+    assert t.fetch("chr1", 0, 100) == [] and t.row_count("chr1") == 0
+
+
+def test_bigwig_signal_uses_the_file_zoom_levels(tmp_path):
+    pyBigWig = pytest.importorskip("pyBigWig")
+    p = tmp_path / "s.bw"
+    bw = pyBigWig.open(str(p), "w")
+    bw.addHeader([("chr1", 10000)])
+    bw.addEntries(["chr1", "chr1"], [100, 5000], ends=[200, 5100], values=[3.0, 8.0])
+    bw.close()
+    t = gt.open_track(p)
+    assert t.kind == gt.KIND_SIGNAL and t.format == "bigwig"
+    got = t.signal("chr1", 0, 10000, 10)
+    assert got[0] == 3 and got[5] == 8 and np.isnan(got[2])
+    assert t.value_at("chr1", 150) == 3
+    # zoomed past one base per column, and a view past the end of the sequence
+    assert (t.signal("chr1", 150, 154, 8) == 3).all()
+    tail = t.signal("chr1", 9000, 11000, 4)
+    assert np.isnan(tail[2:]).all()
+
+
+_VCF = """##fileformat=VCFv4.2
+##contig=<ID=chr1,length=10000>
+##INFO=<ID=AF,Number=A,Type=Float,Description="AF">
+##FORMAT=<ID=GT,Number=1,Type=String,Description="GT">
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\ts1\ts2\ts3
+chr1\t120\t.\tAT\tA\t20\t.\tAF=0.25\tGT\t./.\t0|0\t0|1
+chr1\t150\trs1\tA\tG\t50\tPASS\t.\tGT\t0/1\t1/1\t0/0
+chr1\t500\trs3\tC\tT,G\t.\tq10\t.\tGT\t1/2\t0/0\t.
+"""
+
+
+def test_vcf_variants_and_genotypes(tmp_path):
+    p = tmp_path / "v.vcf"
+    p.write_text(_VCF)
+    t = gt.open_track(p)
+    assert t.kind == gt.KIND_VARIANT and t.samples == ["s1", "s2", "s3"]
+    items, gts = t.variants("chr1", 0, 1000)
+    assert [(it.start, it.end, it.name, it.kind) for it in items] == [
+        (119, 121, "AT>A", "INDEL"), (149, 150, "rs1", "SNP"), (499, 500, "rs3", "SNP")]
+    assert gts.tolist() == [[gt.GT_NOCALL, gt.GT_HOMREF, gt.GT_HET],
+                            [gt.GT_HET, gt.GT_HOMALT, gt.GT_HOMREF],
+                            [gt.GT_HET, gt.GT_HOMREF, gt.GT_NOCALL]]
+    assert t.allele_freq(items[0], gts[0]) == 0.25            # from INFO AF
+    assert t.allele_freq(items[1], gts[1]) == 0.5             # from the genotypes
+    assert items[2].info["FILTER"] == "q10" and t.count("chr1") == 3
+    assert t.search("rs3")[1] == 1
+    assert gt.genotype_code("1") == gt.GT_HOMALT and gt.genotype_code(".") == gt.GT_NOCALL
+
+
+def test_indexed_vcf_is_read_by_window(tmp_path):
+    pysam = pytest.importorskip("pysam")
+    p = tmp_path / "v.vcf"
+    p.write_text(_VCF)
+    pysam.tabix_index(str(p), preset="vcf", force=True)
+    t = gt.open_track(tmp_path / "v.vcf.gz")
+    assert t._vf is not None and t.chrom_names() == ["chr1"]
+    items, gts = t.variants("chr1", 100, 200)
+    assert [it.name for it in items] == ["AT>A", "rs1"]
+    assert gts[1].tolist() == [gt.GT_HET, gt.GT_HOMALT, gt.GT_HOMREF]
+    assert t.variants("chr1", 0, gt.VARIANT_WINDOW + 10)[0] == []    # too wide
+
+
+def _spliced_bam(tmp_path):
+    pysam = pytest.importorskip("pysam")
+    hdr = {"HD": {"VN": "1.6", "SO": "coordinate"}, "SQ": [{"SN": "chr1", "LN": 10000}]}
+    out = tmp_path / "rna.bam"
+    rows = [(100, [(0, 50), (3, 400), (0, 50)], "+")] * 3 + \
+           [(120, [(0, 30), (3, 400), (0, 30), (3, 1000), (0, 40)], "-")] * 2 + \
+           [(2000, [(0, 60)], None)]
+    with pysam.AlignmentFile(str(out), "wb", header=hdr) as f:
+        for k, (pos, cig, xs) in enumerate(sorted(rows, key=lambda r: r[0])):
+            a = pysam.AlignedSegment()
+            a.query_name, a.reference_id, a.reference_start = f"r{k}", 0, pos
+            a.cigartuples = cig
+            a.query_sequence = "A" * sum(n for op, n in cig if op == 0)
+            a.mapping_quality = 60
+            if xs:
+                a.set_tag("XS", xs)
+            f.write(a)
+    pysam.index(str(out))
+    return out
+
+
+def test_splice_junctions_are_counted_per_strand(tmp_path):
+    bam = _spliced_bam(tmp_path)
+    t = gt.open_track(bam)
+    j = t.junctions("chr1", 0, 5000).tolist()
+    assert j == [[150, 550, 3, 2, 0], [580, 1580, 0, 2, 0]]
+    assert t.junctions("chr1", 1600, 5000).tolist() == []
+    # the junction track of the same file, kept in a session as such
+    jt = gt.open_track(bam, settings={"view": "junctions"})
+    assert jt.kind == gt.KIND_JUNCTION and jt.to_json()["settings"]["view"] == "junctions"
+    assert jt.junctions("chr1", 0, 5000).shape == t.junctions("chr1", 0, 5000).shape
+    # a SAM read's blocks give the same junctions (gap >= MIN_INTRON)
+    it = gt.TrackItem(0, 900, blocks=[(0, 50, 0), (450, 500, 50), (505, 900, 100)])
+    assert gt.item_junctions(it) == [(50, 450, 2)]

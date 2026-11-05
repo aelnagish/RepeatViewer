@@ -1184,3 +1184,230 @@ def test_track_height_show_all_fits_every_row(qapp, genome, tmp_path, monkeypatc
     # dragging (or a set height) leaves Show all
     c.set_track_height(0, 90)
     assert "show_all" not in t.settings
+
+
+def test_bam_loads_in_the_background_and_neighbour_tiles_are_drawn_ahead(
+        qapp, genome, tmp_path, monkeypatch):
+    import threading
+
+    _session, panel = _open_bam(qapp, genome, _snp_bam(tmp_path))
+    c = panel.canvas
+    t = c.tracks[0]
+    t._cache = type(t._cache)(size=16)          # nothing decoded yet
+    t._region = None
+    real = t._decode_tile
+    gate = threading.Event()
+    monkeypatch.setattr(t, "_decode_tile",
+                        lambda bam, key, tile: gate.wait(5) and real(bam, key, tile))
+    notes = []
+    head = c._paint_alignment_head
+    monkeypatch.setattr(c, "_paint_alignment_head",
+                        lambda p, t_, top, a, b, w, mid, note=None:
+                        notes.append(note) or head(p, t_, top, a, b, w, mid, note=note))
+    c.show_range(100, 220)
+    t0 = time.monotonic()
+    c.viewport().grab()
+    assert time.monotonic() - t0 < 0.5                     # the window did not wait
+    assert "Loading reads…" in notes
+    gate.set()
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and not t.tile_complete(c.model.ref_id, 100, 220):
+        qapp.processEvents()
+        time.sleep(0.01)
+    qapp.processEvents()
+    time.sleep(0.05)
+    qapp.processEvents()
+    c.viewport().grab()
+    assert c._placed(t, 100, 221)
+    # after a pause the tiles beside the view are drawn into the cache too
+    before = len(c._tile_cache)
+    c._prerender()
+    assert len(c._tile_cache) > before
+    assert c._extra_tiles == 0
+
+
+def test_rail_sorts_sequences_and_finds_features(qapp, genome):
+    from repeatviewer.widgets import genome_navigator as gn
+
+    assert [c for c in sorted(["s10", "s2", "s1"], key=gn.natural_key)] == ["s1", "s2", "s10"]
+    _session, panel = _browser(qapp, genome)
+    r = panel._rail
+    r.set_sort("file")
+    r.set_chroms([("chr10", 50), ("chr2", 900), ("chr1", 300)])
+    r.set_density({"chr1": [0.1, 0.9], "chr2": [0.2], "chr10": [0.0]})
+    order = lambda: [c for c, _n in r.map.chroms]          # noqa: E731
+    assert order() == ["chr10", "chr2", "chr1"]             # file order
+    seen = []
+    r.sortChanged.connect(seen.append)
+    for key, want in (("name", ["chr1", "chr2", "chr10"]),
+                      ("length", ["chr2", "chr1", "chr10"]),
+                      ("density", ["chr1", "chr2", "chr10"])):
+        r.sort.setCurrentIndex(r.sort.findData(key))
+        assert order() == want, key
+    assert seen[-1] == "density"
+    r.sort.setCurrentIndex(0)                   # back to file order (it is remembered)
+    r.set_chroms(panel._nav_chroms())
+    # Find: only the annotation track is offered; mapped reads are not searched
+    names = [r.find_track.itemText(i) for i in range(r.find_track.count())]
+    assert names == ["a.gff3"]
+    r.find_box.setText("genea")
+    r._find_now()
+    assert [h[0] for h in r.find_hits] == ["GeneA"] and r.find_hits[0][1] == "chr1"
+    assert r.find_count.text() == "1 found"
+    r.find_box.setText("nothing-like-this")
+    r._find_now()
+    assert r.find_hits == [] and r.find_note.text() == "Nothing matches."
+    # a result goes there
+    r.find_box.setText("Gypsy")
+    r._find_now()
+    went = []
+    r.goRequested.connect(lambda *a: went.append(a))
+    r.find_results.itemAt(0).widget().clicked.emit()
+    assert went and went[0][0] == "chr1" and went[0][3].startswith("Gypsy")
+
+
+def test_sideways_scroll_redraws_only_the_new_strip_of_read_tracks(qapp, genome, tmp_path):
+    from PySide6.QtGui import QRegion
+
+    _session, panel = _open_bam(qapp, genome, _snp_bam(tmp_path))
+    c = panel.canvas
+    c.show_range(100, 220)
+    c.viewport().grab()
+    assert c._blit_rects                                     # the read track can be shifted
+    areas = []
+    real = c.viewport().update
+    c.viewport().update = lambda *a: areas.append(a) or real(*a)
+    scrolls = []
+    real_scroll = c.viewport().scroll
+    c.viewport().scroll = lambda *a: scrolls.append(a) or real_scroll(*a)
+    c.scrollContentsBy(-5, 0)                                # Qt's default: no full redraw
+    assert areas == []
+    hb = c.horizontalScrollBar()
+    hb.setValue(hb.value() + 10)
+    assert scrolls and scrolls[0][0] == -10
+    assert any(a and isinstance(a[0], QRegion) for a in areas)   # the rest, not everything
+
+
+def test_bigwig_and_bedgraph_tracks_draw_bars_with_a_range(qapp, genome, tmp_path):
+    from PySide6.QtCore import QPointF
+    from PySide6.QtWidgets import QMenu
+
+    bg = tmp_path / "s.bedgraph"
+    bg.write_text("chr1\t100\t400\t2.5\nchr1\t400\t800\t-1\n")
+    session = gt.session_path_for(genome)
+    gt.write_session(session, genome, [{"path": str(genome.parent / "a.gff3")},
+                                       {"path": str(bg)}])
+    panel = cv.ContigViewPanel(session)
+    panel.resize(1000, 600)
+    panel.show()
+    _wait_tracks(qapp, panel, 2)
+    c = panel.canvas
+    t = c.tracks[1]
+    assert t.kind == gt.KIND_SIGNAL
+    c.show_range(0, 1000)
+    c.viewport().grab()
+    assert c._signal_range[id(t)] == (-1.0, 2.5)          # autoscaled, zero included
+    assert c._extra_track_h(t) == 60 + 6
+    top, h = c._extra_spans[1]
+    x = c.x_of(250)
+    v = c.verticalScrollBar().value()
+    tip = c.track_tooltip(QPointF(x + 1, top + 20 - v))
+    assert tip and "2.5" in tip
+    menu = QMenu()
+    panel._fill_track_menu(menu, 1)
+    labels = [a.text() for a in menu.actions()]
+    assert "Data range" in labels and "Expanded" not in labels
+    panel._set_signal_range(1, (0, 10))
+    c.viewport().grab()
+    assert c._signal_range[id(t)] == (0.0, 10.0)
+    assert gt.read_session(session)["tracks"][1]["settings"]["range_max"] == 10
+    panel._set_signal_range(1, None)
+    assert "range_max" not in t.settings
+
+
+def test_vcf_track_draws_sites_and_sample_genotypes(qapp, genome, tmp_path):
+    from PySide6.QtCore import QPointF
+    from PySide6.QtWidgets import QMenu
+
+    from repeatviewer.widgets import genome_tracks_view as gtv
+
+    vcf = tmp_path / "v.vcf"
+    vcf.write_text("##fileformat=VCFv4.2\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\t"
+                   "FORMAT\tsA\tsB\nchr1\t150\trs1\tA\tG\t50\tPASS\t.\tGT\t0/1\t1/1\n")
+    session = gt.session_path_for(genome)
+    gt.write_session(session, genome, [{"path": str(vcf)}])
+    panel = cv.ContigViewPanel(session)
+    panel.resize(1000, 600)
+    panel.show()
+    _wait_tracks(qapp, panel, 1)
+    c = panel.canvas
+    t = c.tracks[0]
+    assert t.kind == gt.KIND_VARIANT
+    assert c._extra_track_h(t) == gtv.VAR_SITE_H + 2 + 2 * gtv.VAR_ROW_H + gtv.TRACK_GAP
+    c.show_range(100, 200)
+    img = c.viewport().grab().toImage()
+    top, _h = c._extra_spans[0]
+    v = c.verticalScrollBar().value()
+    x = c.x_of(149) + 2
+    # sample rows: sA het (blue), sB hom var (cyan)
+    y_a = top + gtv.VAR_SITE_H + 2 + gtv.VAR_ROW_H // 2 - v
+    y_b = y_a + gtv.VAR_ROW_H
+    dpr = img.devicePixelRatio()
+    assert img.pixelColor(int(x * dpr), int(y_a * dpr)).name() == "#2c5fd3"
+    assert img.pixelColor(int(x * dpr), int(y_b * dpr)).name() == "#1fb3c8"
+    tip = c.track_tooltip(QPointF(x, y_b))
+    assert tip and "sB: hom var" in tip and "rs1" in tip
+    tip = c.track_tooltip(QPointF(x, top + 8 - v))
+    assert "allele frequency 0.75" in tip and "het 1" in tip
+    menu = QMenu()
+    panel._fill_track_menu(menu, 0)
+    labels = [a.text() for a in menu.actions()]
+    assert "Squished" in labels and "Collapsed" not in labels and "Colour by" not in labels
+
+
+def test_junction_track_sashimi_and_saving_images(qapp, genome, tmp_path):
+    from PySide6.QtCore import QPointF
+    from PySide6.QtGui import QImage
+    from PySide6.QtWidgets import QMenu
+
+    from tests.test_genome_tracks import _spliced_bam
+
+    bam = _spliced_bam(tmp_path)
+    _session, panel = _open_bam(qapp, genome, bam)
+    c = panel.canvas
+    c.show_range(0, 2000)
+    menu = QMenu()
+    panel._fill_track_menu(menu, 0)
+    labels = [a.text() for a in menu.actions()]
+    assert "Show splice junctions" in labels and "Sashimi plot…" in labels
+    panel._toggle_junction_track(0, True)
+    j = c.tracks[0]
+    assert j.kind == gt.KIND_JUNCTION and j.source is c.tracks[1]     # reads shared
+    c.viewport().grab()
+    assert c._junction_peak[id(j)] == 5
+    top, h = c._extra_spans[0]
+    v = c.verticalScrollBar().value()
+    tip = c.track_tooltip(QPointF(c.x_of(300), top + 10 - v))
+    assert tip and "Junction 151–550" in tip and "5 reads" in tip
+    # sashimi: depth and the arcs with their read counts
+    panel.open_sashimi([1])
+    dlg = panel._sashimi
+    assert dlg.view.tracks == [c.tracks[1]]
+    dlg.min_box.setValue(3)
+    assert dlg.view.min_junction == 3
+    dlg.view.grab()
+    # File > Save Image…: PNG at twice the size, SVG as vector, every track
+    png = panel.save_image(tmp_path / "view.png")
+    img = QImage(str(png))
+    assert img.width() == 2 * c.viewport().width() and img.height() == 2 * c.page_height()
+    svg = panel.save_image(tmp_path / "view.svg")
+    text = svg.read_text()
+    assert text.startswith("<?xml") and "<path" in text
+    assert "<image" not in text                    # drawn as shapes, not pictures
+    from repeatviewer.widgets.image_export import write_image
+
+    out = write_image(tmp_path / "s.svg", 400, 300, dlg.view.render_to)
+    assert "<svg" in out.read_text()
+    panel._toggle_junction_track(1, False)
+    assert all(t.kind != gt.KIND_JUNCTION for t in c.tracks)
+    dlg.close()
