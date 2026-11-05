@@ -15,6 +15,8 @@ from repeatviewer.widgets.preview_controls import (
     ANNOTATION_FIT_BUTTON_RENDERED_WIDTH,
     ANNOTATION_SELECT_BUTTON_RENDERED_WIDTH,
     ANNOTATION_TOOLBAR_RENDERED_HEIGHT,
+    OVERVIEW_SELECT_FIT_HEIGHT,
+    ZOOM_CONTROL_HEIGHT,
     ZOOM_SLIDER_HEIGHT,
     AnnotationZoomBar,
     PreviewHeaderBar,
@@ -33,7 +35,8 @@ def test_overview_zoom_bar_matches_single_seq_sizes(qapp: QApplication) -> None:
     assert bar.height() == ANNOTATION_TOOLBAR_RENDERED_HEIGHT == 26
     assert bar._zoom_slider.height() == ZOOM_SLIDER_HEIGHT == 22
     assert bar._pos_start.width() == _OVERVIEW_POSITION_SPIN_WIDTH == 108
-    assert _ZOOM_BTN_SIDE == ZOOM_SLIDER_HEIGHT
+    # −/+ are as tall as Select / Fit and the Position spins (18 px)
+    assert _ZOOM_BTN_SIDE == ZOOM_CONTROL_HEIGHT == 18
     # Actions lives on the Preview title bar in overview mode (not this bar).
     assert bar._actions_btn.isHidden()
     # Select / Fit / Clean / Cons live in overview host as QPushButtons with fixed height 20.
@@ -94,15 +97,15 @@ def test_msa_toolbar_matches_rendered_single_sequence_control_sizes(
 
         # Shared Select / Fit widths recorded from multi-seq Overview.
         assert single._pos_start.size().width() == 108
-        assert single._pos_start.size().height() == 20
-        assert single_minus.size().width() == 22
-        assert single_minus.size().height() == 22
-        assert single_select.height() == 22
+        assert single._pos_start.size().height() == 18     # as tall as − / + and the buttons
+        assert single_minus.size().width() == 18
+        assert single_minus.size().height() == 18
+        assert single_select.height() == OVERVIEW_SELECT_FIT_HEIGHT
         assert (
             single_select.width()
             == msa._select_btn.width()
             == ANNOTATION_SELECT_BUTTON_RENDERED_WIDTH
-            == 55
+            == 64
         )
         assert (
             single_fit.width()
@@ -127,7 +130,7 @@ def test_msa_toolbar_matches_rendered_single_sequence_control_sizes(
         )
         assert msa_minus.mapTo(overview._toolbar_slot, QPoint(0, 0)) == (
             single_minus.mapTo(single._toolbar, QPoint(0, 0))
-        ) == QPoint(6, 2)
+        ) == QPoint(6, 4)      # the 18 px −/+ sit centred in the 26 px bar
         assert overview._toolbar_slot.palette().color(
             QPalette.ColorRole.Window
         ) == single._toolbar.palette().color(QPalette.ColorRole.Window)

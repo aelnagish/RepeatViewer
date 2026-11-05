@@ -1518,6 +1518,12 @@ class IndexedBamTrack(Track):
         r = self._region
         return len(r.last_end) if r is not None else 0
 
+    def rows_known(self, ref_id: str) -> bool:
+        """Whether reads of this sequence are loaded, so row_count means something
+        (not while another sequence's reads are still in memory, or none yet)."""
+        r = self._region
+        return r is not None and r.key == self.resolve(ref_id)
+
     def count_in(self, ref_id: str, start: int, end: int) -> int:
         r = self._region_for(ref_id, start, end)
         return r.count(start, end) if r is not None else 0

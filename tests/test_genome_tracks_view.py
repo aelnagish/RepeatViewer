@@ -152,16 +152,48 @@ def test_drag_on_ruler_zooms_to_region(qapp, genome):
     QTest.mouseMove(vp, QPoint(x1, 10))
     QTest.mouseRelease(vp, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
                        QPoint(x1, 10))
-    # releasing zooms straight there: no selection chip, no Go
-    assert c.region_sel is None and (c._sel_chip is None or not c._sel_chip.isVisible())
+    # releasing marks the region (no chip, no zoom yet); Select zooms there
+    a, b = c.region_sel
+    assert abs(a - 2000) < 150 and abs(b - 4000) < 150
+    assert c._sel_chip is None or not c._sel_chip.isVisible()
+    assert c.visible_span()[1] - c.visible_span()[0] > 9000
+    panel._select_btn.click()
+    assert c.region_sel is None
     s, e = c.visible_span()
     assert abs(s - 2000) < 150 and abs(e - 4000) < 150
-    # the breadcrumb shows the sequence and the region in view
-    assert panel._crumbs.chrom.text() == "chr1" and panel._crumbs.range.isVisible()
+    # the top bar: the sequence, then the region as chrom:start-end (no "bp", no ›)
+    crumbs = panel._crumbs
+    assert crumbs.chrom.text() == "chr1" and crumbs.range.isVisible()
+    assert "chr1" not in crumbs.range.text() and "bp" not in crumbs.range.text()
+    assert crumbs.range.height() == crumbs.chrom.sizeHint().height()
+    assert not any(sep.isVisible() for sep in crumbs.seps)
+    assert not crumbs.gene.isVisible()          # never a gene name after the position
+    assert not panel._legend_btn.isVisible() and panel._nav_zoom.isVisible()
+    # no search box, Tracks / Files buttons or Zoom to bases in the browser toolbar
+    assert not any(w.isVisible() for w in (panel._goto, panel._tracks_btn, panel._files_btn))
+    assert not any(w.isVisible() for w in panel._old_zoom)
+    assert panel._nav_fit_btn.isVisible()
+    # typing a region in the box goes there
+    crumbs.range.setText("5,001-6,000")
+    crumbs.range.returnPressed.emit()
+    s, e = c.visible_span()
+    assert abs(s - 5000) < 100 and abs(e - 6000) < 100
+    # the slider follows the zoom, and moving it zooms
+    v = panel._zoom_slider.value()
+    assert 0 < v < 100
+    panel._zoom_slider.setValue(0)
+    assert c.visible_span()[1] - c.visible_span()[0] > 9000
     # Esc clears a selection
     c.set_region_selection(100, 200)
     QTest.keyClick(c, Qt.Key.Key_Escape)
     assert c.region_sel is None
+    # S zooms to a marked region, as the Select button does
+    c.fit()
+    c.set_region_selection(3000, 3500)
+    QTest.keyClick(c, Qt.Key.Key_S)
+    assert c.region_sel is None
+    s, e = c.visible_span()
+    assert abs(s - 3000) < 60 and abs(e - 3500) < 60
     # a sideways step is a fixed share of the view, not a few bases
     assert c.horizontalScrollBar().singleStep() >= c._data_w() // 20 - 1
 
@@ -540,6 +572,18 @@ def test_genome_menu_lists_recent_genomes(qapp, genome):
     acts[0].trigger()
     acts[-1].trigger()
     assert asked == [None, session]
+    # the genome is a drop-down chip right after Back / Forward, before the sequence
+    crumbs = win.panel._crumbs
+    assert crumbs.genome.isVisible() and crumbs.genome.menu() is win.genome_menu
+    assert crumbs.genome.text() == "g.fa"          # no ▾: the name is the drop-down
+    lay = crumbs.layout()
+    assert lay.indexOf(crumbs.forward) < lay.indexOf(crumbs.genome) < lay.indexOf(crumbs.chrom)
+    # long names are shortened in the middle at a fixed width
+    long = "scaffold_" + "x" * 80 + "_end"
+    crumbs.set_where(long, 0, 100, "")
+    assert crumbs.chrom.width() == crumbs.CHROM_W or crumbs.chrom.maximumWidth() == crumbs.CHROM_W
+    assert "…" in crumbs.chrom.text() and crumbs.chrom.text().endswith("_end")
+    assert crumbs._chrom_name == long
     win.close()
 
 
@@ -644,7 +688,7 @@ def test_trackpad_scrolls_the_browser_faster(qapp, genome, tmp_path):
                      Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
                      Qt.ScrollPhase.ScrollUpdate, False)
     c.wheelEvent(ev)
-    assert v.maximum() > 30 and v.value() == 30
+    assert v.maximum() > 30 and v.value() == round(10 * cv.TRACKPAD_V_GAIN)
 
 
 def test_added_gene_track_goes_above_the_reads(qapp, genome, tmp_path):
@@ -806,3 +850,337 @@ def test_no_read_hover_when_the_view_is_too_wide_for_reads(qapp, genome, tmp_pat
     t.read_window = 50
     c.viewport().grab()
     assert c.track_items_at(pos)[1] == []
+
+
+def test_clicking_a_sequence_bar_keeps_the_width_in_view(qapp, tmp_path):
+    from PySide6.QtCore import QPointF, Qt
+    from PySide6.QtTest import QTest
+
+    fa = tmp_path / "two.fa"
+    s1, s2 = "ACGT" * 25_000, "TTGA" * 50_000
+    fa.write_text(">c1\n" + s1 + "\n>c2\n" + s2 + "\n")
+    (tmp_path / "a.gff3").write_text("c1\t.\tgene\t101\t900\t.\t+\t.\tID=g1;Name=G\n")
+    session = gt.session_path_for(fa)
+    gt.write_session(session, fa, [{"path": str(tmp_path / "a.gff3")}])
+    panel = cv.ContigViewPanel(session)
+    panel.resize(1100, 600)
+    panel.show()
+    _wait_tracks(qapp, panel, 1)
+    c = panel.canvas
+    c.show_range(10_000, 30_000)
+    for _ in range(3):
+        qapp.processEvents()
+    panel._nav_sync(record=False)
+    mp = panel._rail.map
+    for row, chrom in ((0, "c1"), (1, "c2")):
+        bar = mp._bar(row)
+        QTest.mouseClick(mp, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+                         QPointF(bar.left() + bar.width() * 0.5, bar.center().y()).toPoint())
+        for _ in range(5):
+            qapp.processEvents()
+        s, e = c.visible_span()
+        assert c.model.ref_id == chrom
+        assert abs((e - s) - 20_000) < 2500, (chrom, s, e)
+    # from a view of a whole sequence a click shows 20 kb, not the whole next one
+    c.fit()
+    for _ in range(3):
+        qapp.processEvents()
+    panel._nav_sync(record=False)
+    bar = mp._bar(1)
+    QTest.mouseClick(mp, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+                     QPointF(bar.left() + bar.width() * 0.5, bar.center().y()).toPoint())
+    for _ in range(5):
+        qapp.processEvents()
+    s, e = c.visible_span()
+    assert abs((e - s) - 20_000) < 2500, (s, e)
+
+
+def test_ruler_double_click_zooms_to_bases_and_right_or_shift_click_zooms_out(qapp, genome):
+    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtTest import QTest
+
+    _session, panel = _browser(qapp, genome)
+    c = panel.canvas
+    c.show_range(2000, 6000)
+    qapp.processEvents()
+    vp = c.viewport()
+    x = int(c.x_of(4000))
+    QTest.mouseDClick(vp, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+                      QPoint(x, 10))
+    assert c.letters()
+    s, e = c.visible_span()
+    assert s < 4000 < e
+    w0 = e - s
+    QTest.mouseClick(vp, Qt.MouseButton.RightButton, Qt.KeyboardModifier.NoModifier,
+                     QPoint(x, 10))
+    s, e = c.visible_span()
+    assert e - s > w0 * 1.8
+    w1 = e - s
+    QTest.mouseClick(vp, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.ShiftModifier,
+                     QPoint(x, 10))
+    s, e = c.visible_span()
+    assert e - s > w1 * 1.8
+    # the double-click left that position marked; a click marks another one
+    assert c.region_sel == (c.bp_at(x), c.bp_at(x) + 1) or c.region_sel[1] - c.region_sel[0] == 1
+    xm = c.label_w + (vp.width() - c.label_w) // 3
+    target = c.bp_at(xm)
+    QTest.mouseClick(vp, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+                     QPoint(xm, 10))
+    a, b = c.region_sel
+    assert b - a == 1 and abs(a - target) <= 2
+    # − / + zoom around the marked position: it stays where it was on screen
+    x_before = c.x_of(a)
+    c.zoom(1.5)
+    assert abs(c.x_of(a) - x_before) < 3
+    # hovering the ruler shows a tag there instead of a popup
+    c.set_ruler_hover(300.0)
+    assert c._ruler_hover == 300.0
+    c.set_ruler_hover(None)
+
+
+def test_browser_window_menu_bar_has_file_and_tracks(qapp, genome):
+    from repeatviewer.widgets.genome_browser_window import GenomeBrowserWindow
+
+    session = gt.session_path_for(genome)
+    gt.write_session(session, genome, [{"path": str(genome.parent / "a.gff3")}])
+    win = GenomeBrowserWindow(session, genome)
+    win.open_session()
+    _wait_tracks(qapp, win.panel, 1)
+    titles = [a.text() for a in win.menuBar().actions()]
+    assert titles[:3] == ["&File", "&Tracks", "&Bookmarks"]
+    win._fill_file_menu()
+    texts = [a.text() for a in win.file_menu.actions()]
+    assert texts[0] == "Open genome…" and "Close window" in texts
+    win.panel.fill_tracks_menu(win.tracks_menu)
+    texts = [a.text() for a in win.tracks_menu.actions()]
+    assert texts[0] == "Add track…" and "a.gff3" in texts
+    # a thin line under the top bar separates it from the overview below
+    assert not win.panel._nav_rule.isHidden()
+    assert win.panel._nav_rule.height() == 1
+    # the position box: the chips' font, a little narrower than before
+    cr = win.panel._crumbs
+    cr.set_where("chr1", 0, 5000, "")
+    assert cr.range.font() == cr.genome.font() == cr.chrom.font()
+    # the genome and sequence names start at the left, like the position text
+    win.resize(1100, 300)
+    win.show()
+    qapp.processEvents()
+    for chip in (cr.genome, cr.chrom):
+        img = chip.grab().toImage()
+        y = img.height() // 2
+        xs = [x for x in range(3, img.width() - 3)
+              if img.pixelColor(x, y).lightness() < 120]
+        assert xs and min(xs) < 20, chip.text()
+    # just fits a region on a 1 Gbp chromosome
+    from PySide6.QtGui import QFontMetrics
+    need = QFontMetrics(cr.range.font()).horizontalAdvance("1,000,000,000-1,000,000,000")
+    assert need + 16 <= cr.range.width() <= need + 30
+    cr.range.setText("1,000,000,000-1,000,000,000")
+    cr.range.setCursorPosition(0)
+    assert cr.range.cursorRect().left() >= 0
+    win.close()
+
+
+def test_track_height_is_dragged_from_its_bottom_line_and_saved(qapp, genome):
+    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtTest import QTest
+
+    from repeatviewer.widgets import genome_tracks_view as gtv
+
+    session, panel = _browser(qapp, genome)
+    c = panel.canvas
+    vp = c.viewport()
+    top, h = c._extra_spans[0]
+    edge = int(top + h - gtv.TRACK_GAP / 2)
+    assert c.tracks_hover_cursor(QPointF(300, edge)) == Qt.CursorShape.SizeVerCursor
+    assert c.tracks_hover_cursor(QPointF(300, top + 3)) is None
+    QTest.mousePress(vp, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+                     QPoint(300, edge))
+    QTest.mouseMove(vp, QPoint(300, edge + 40))
+    QTest.mouseRelease(vp, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+                       QPoint(300, edge + 40))
+    assert c._extra_spans[0][1] == h + 40
+    assert [t.name for t in c.tracks] == ["a.gff3", "r.paf"]     # not reordered
+    saved = gt.read_session(session)["tracks"][0]
+    assert saved.get("settings", {}).get("height") == c.tracks[0].settings["height"]
+    # rows below the track's height are not laid out: a short track shows few rows
+    c.set_track_height(1, gtv.MIN_ROWS_H)
+    t = c.tracks[1]
+    assert c._shown_rows(t) == max(1, gtv.MIN_ROWS_H // c._row_h(t))
+    # back to the default from the menu
+    panel._set_track_height(0, None)
+    assert "height" not in c.tracks[0].settings
+    assert c._extra_spans[0][1] == h
+
+
+def test_line_between_tracks_is_clear_across_names_and_data(qapp, genome):
+    _session, panel = _browser(qapp, genome)
+    c = panel.canvas
+    qapp.processEvents()
+    top, h = c._extra_spans[0]
+    img = c.viewport().grab().toImage()
+    y = int(top + h - 2)
+    want = c._track_rule_color().name()
+    assert img.pixelColor(20, y).name() == want                     # name column
+    assert img.pixelColor(c.label_w + 200, y).name() == want        # data area
+    assert img.pixelColor(c.label_w + 200, y - 1).name() != want    # a single line
+
+
+def test_no_position_box_on_hover_in_the_browser(qapp, genome, tmp_path, monkeypatch):
+    shown = []
+    monkeypatch.setattr(cv.QToolTip, "showText", lambda *a, **k: shown.append(a[1]))
+    _session, panel = _open_bam(qapp, genome, _snp_bam(tmp_path))
+    c = panel.canvas
+    c.show_range(5000, 6000)            # no reads here
+    c.viewport().grab()
+    for y in range(40, c.viewport().height() - 10, 15):
+        _mouse(c, "move", c.label_w + 120, y)
+    assert not any("No coverage" in t or t.startswith("Position") for t in shown)
+
+
+def test_view_box_is_centred_on_the_overview_bar(qapp, genome):
+    from PySide6.QtGui import QColor
+
+    _session, panel = _browser(qapp, genome)
+    c = panel.canvas
+    c.show_range(4000, 4400)
+    qapp.processEvents()
+    ov = panel.overview
+    img = ov.grab().toImage()
+    red = QColor("#d6452f")
+
+    def is_red(col):
+        return col.red() > 150 and col.green() < 140 and col.blue() < 120
+
+    x = int(ov._x0() + 4200 * ov._scale())
+    ys = [y for y in range(img.height()) for dx in (-3, -2, -1, 0, 1, 2, 3)
+          if is_red(img.pixelColor(x + dx, y))]
+    assert ys and red.isValid()
+    mid = ov.SLIM_HEIGHT / 2
+    above, below = mid - min(ys), max(ys) + 1 - mid
+    assert abs(above - below) <= 1
+
+
+def test_mark_button_bookmarks_the_view(qapp, genome, monkeypatch):
+    from PySide6.QtWidgets import QDialog
+
+    from repeatviewer.widgets import genome_navigator as gn
+
+    monkeypatch.setattr(gn.BookmarkDialog, "exec", lambda self: QDialog.DialogCode.Accepted)
+    _session, panel = _browser(qapp, genome)
+    c = panel.canvas
+    btn = panel._mark_btn
+    assert btn.isVisible() and btn.text() == "Mark"
+    assert btn.fontMetrics().horizontalAdvance("Mark") + 16 <= btn.width()
+    c.show_range(2000, 3000)
+    a, b = c.visible_span()
+    n = len(panel._bookmarks)
+    btn.click()
+    bm = panel._bookmarks[-1]
+    assert len(panel._bookmarks) == n + 1
+    assert bm.chrom == "chr1" and (bm.start, bm.end) == (max(0, a), min(10_000, b))
+    # a region marked on the ruler is bookmarked instead
+    c.set_region_selection(2200, 2300)
+    btn.click()
+    assert (panel._bookmarks[-1].start, panel._bookmarks[-1].end) == (2200, 2300)
+
+
+def test_mapping_track_is_at_most_320_px_and_smaller_when_reads_need_less(
+        qapp, genome, tmp_path, monkeypatch):
+    from repeatviewer.widgets import genome_tracks_view as gtv
+
+    _session, panel = _open_bam(qapp, genome, _snp_bam(tmp_path))
+    c = panel.canvas
+    c.show_range(100, 220)
+    c.viewport().grab()
+    t = c.tracks[0]
+    rows = t.row_count(c.model.ref_id)
+    rh = c._row_h(t)
+    assert 0 < rows * rh < 320
+    assert c._extra_track_h(t) == gtv.ALN_COV_H + 2 + rows * rh + gtv.TRACK_GAP
+    monkeypatch.setattr(t, "row_count", lambda ref: 10_000)
+    assert c._extra_track_h(t) <= gtv.DEFAULT_ALN_TRACK_H
+    assert c._extra_track_h(t) > gtv.DEFAULT_ALN_TRACK_H - rh
+    # another sequence, its reads not loaded yet: the height stays (no jump)
+    monkeypatch.undo()
+    before = c._extra_track_h(t)
+    assert isinstance(t, gt.IndexedBamTrack)
+    monkeypatch.setattr(t, "rows_known", lambda ref: False)
+    monkeypatch.setattr(t, "row_count", lambda ref: 0)
+    assert c._extra_track_h(t) == before
+    monkeypatch.undo()
+    # resized: exactly that tall, whatever the reads need
+    c.set_track_height(0, 500)
+    assert c._extra_track_h(t) == gtv.ALN_COV_H + 2 + 500 + gtv.TRACK_GAP
+
+
+def test_browser_saves_and_opens_sessions_and_has_a_bookmarks_menu(
+        qapp, genome, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QDialog
+
+    from repeatviewer.widgets import genome_navigator as gn
+    from repeatviewer.widgets import genome_browser_window as gbw
+    from repeatviewer.widgets.genome_browser_window import GenomeBrowserWindow
+
+    monkeypatch.setattr(gn.BookmarkDialog, "exec", lambda self: QDialog.DialogCode.Accepted)
+    warned = []
+    monkeypatch.setattr(gbw.QMessageBox, "warning", lambda *a, **k: warned.append(a[2]))
+    session = gt.session_path_for(genome)
+    gt.write_session(session, genome, [{"path": str(genome.parent / "a.gff3")}])
+    win = GenomeBrowserWindow(session, genome)
+    win.open_session()
+    _wait_tracks(qapp, win.panel, 1)
+    win._fill_file_menu()
+    texts = [a.text() for a in win.file_menu.actions()]
+    assert "Open Session…" in texts and "Save Session…" in texts
+    # Bookmarks menu: add the view, import / export, then the bookmarks
+    win._fill_bookmarks_menu()
+    acts = {a.text(): a for a in win.bookmarks_menu.actions()}
+    assert {"Import BED…", "Export BED…"} <= set(acts)
+    assert not acts["Export BED…"].isEnabled()
+    win.panel.canvas.show_range(2000, 3000)
+    acts["Add bookmark for the view (B)"].trigger()
+    assert len(win.panel._bookmarks) == 1
+    win._fill_bookmarks_menu()
+    assert win.bookmarks_menu.actions()[-1].text() == win.panel._bookmarks[0].name
+    # Save Session…: tracks, heights, the place and the bookmarks in a new file
+    win.panel.canvas.set_track_height(0, 77)
+    out = win.save_session_as(str(tmp_path / "mine"))
+    assert out == tmp_path / "mine.rvgb" and win.session == out
+    data = gt.read_session(out)
+    assert data["reference"] == str(genome)
+    assert data["tracks"][0]["settings"]["height"] == 77
+    assert len(data["bookmarks"]) == 1 and data["locus"]
+    # Open Session…: asks the app for that session
+    asked = []
+    win.genomeRequested.connect(asked.append)
+    win.open_session_file(str(session))
+    assert asked == [session]
+    win.open_session_file(str(tmp_path / "nope.rvgb"))   # not a session: a warning only
+    assert asked == [session] and warned
+    win.close()
+
+
+def test_track_height_show_all_fits_every_row(qapp, genome, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QMenu
+
+    from repeatviewer.widgets import genome_tracks_view as gtv
+
+    _session, panel = _open_bam(qapp, genome, _snp_bam(tmp_path))
+    c = panel.canvas
+    c.show_range(100, 220)
+    c.viewport().grab()
+    t = c.tracks[0]
+    rh = c._row_h(t)
+    monkeypatch.setattr(t, "row_count", lambda ref: 100)      # 100 rows: past 320 px
+    assert c._extra_track_h(t) <= gtv.DEFAULT_ALN_TRACK_H
+    menu = QMenu()
+    panel._fill_track_menu(menu, 0)
+    sub = next(a.menu() for a in menu.actions() if a.text() == "Track height")
+    acts = {a.text(): a for a in sub.actions()}
+    acts["Show all"].trigger()
+    assert t.settings.get("show_all") and "height" not in t.settings
+    assert c._extra_track_h(t) == gtv.ALN_COV_H + 2 + 100 * rh + gtv.TRACK_GAP
+    # dragging (or a set height) leaves Show all
+    c.set_track_height(0, 90)
+    assert "show_all" not in t.settings

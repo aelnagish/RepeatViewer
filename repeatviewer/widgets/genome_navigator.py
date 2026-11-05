@@ -24,6 +24,9 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QScrollArea,
     QSizePolicy,
+    QStyle,
+    QStyleOptionToolButton,
+    QStylePainter,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -32,6 +35,7 @@ from PySide6.QtWidgets import (
 BOOKMARK_COLORS = ("#d9534f", "#6f5bd3", "#2a9d8f", "#e08a2c", "#3d7be0")
 MAX_RECENT = 12
 MAX_HISTORY = 100
+DEFAULT_JUMP_BP = 20_000      # width shown after a click when the view was a whole sequence
 RAIL_W = 300
 
 
@@ -364,7 +368,7 @@ class ChromosomeMap(QWidget):
                     x0, x1 = (x0 + x1) / 2 - 2, (x0 + x1) / 2 + 2
                 p.setPen(QPen(QColor("#d9534f"), 1.5))
                 p.setBrush(Qt.BrushStyle.NoBrush)
-                p.drawRect(QRectF(x0, bar.top() - 3, x1 - x0, bar.height() + 6))
+                p.drawRect(QRectF(x0, bar.top() - 1, x1 - x0, bar.height() + 2))
         p.end()
 
     def _hit(self, pos: QPointF) -> tuple[int, int | None]:
@@ -388,7 +392,7 @@ class ChromosomeMap(QWidget):
         if bp is not None:
             tip += f"\nClick to go to {bp + 1:,}"
         else:
-            tip += "\nClick to show the whole sequence"
+            tip += "\nClick to go to its start"
         self.setToolTip(tip)
 
     def mousePressEvent(self, event) -> None:
@@ -398,12 +402,23 @@ class ChromosomeMap(QWidget):
         if i < 0:
             return
         chrom, n = self.chroms[i]
+        # keep the width in view; a view of a whole sequence (or none yet) becomes
+        # DEFAULT_JUMP_BP, so a click always lands on a readable stretch
+        w = self.view_w or 0
+        if w <= 0 or (self.view is not None and self.view[0] <= 0
+                      and w >= self._length(self.current)):
+            w = DEFAULT_JUMP_BP
+        w = max(100, min(n, w))
         if bp is None:
-            self.goRequested.emit(chrom, 0, n)
-            return
-        half = max(50, (self.view_w or n // 20) // 2)
-        a = max(0, min(n - 2 * half, bp - half))
-        self.goRequested.emit(chrom, a, min(n, a + 2 * half))
+            bp = 0                  # the name: the start of the sequence
+        a = max(0, min(n - w, bp - w // 2))
+        self.goRequested.emit(chrom, a, min(n, a + w))
+
+    def _length(self, chrom: str | None) -> int:
+        for c, n in self.chroms:
+            if c == chrom:
+                return n
+        return 0
 
 
 class _ListRow(QFrame):
@@ -537,7 +552,6 @@ class _Section(QWidget):
         self.head.setText(title)
         tf = QFont(self.font())
         tf.setPointSizeF(tf.pointSizeF() + 1)
-        tf.setBold(True)
         self.head.setFont(tf)
         self._title = title
         self.head.toggled.connect(self._on_toggle)
@@ -885,7 +899,29 @@ QToolButton#navRound {{ border: 1px solid {line}; border-radius: 13px; min-width
                         background: palette(base); }}
 QToolButton#navRound:disabled {{ color: #b5bcc4; }}
 QLabel#navSep {{ color: #9aa3ad; }}
+QLineEdit#navPos {{ border: 1px solid {line}; border-radius: 7px; padding: 0px 8px;
+                   background: palette(base); }}
+QLineEdit#navPos:focus {{ border-color: #3d7be0; }}
 """
+
+
+class _LeftChip(QToolButton):
+    """A chip whose text starts at the left (a tool button always centres it), at the
+    same inset as the text in the position box beside it."""
+
+    TEXT_INSET = 9          # the position box: 1 px border + 8 px padding
+
+    def paintEvent(self, event) -> None:
+        p = QStylePainter(self)
+        opt = QStyleOptionToolButton()
+        self.initStyleOption(opt)
+        text = opt.text
+        opt.text = ""
+        p.drawComplexControl(QStyle.ComplexControl.CC_ToolButton, opt)   # the frame
+        p.setPen(self.palette().color(self.foregroundRole()))
+        p.drawText(self.rect().adjusted(self.TEXT_INSET, 0, -self.TEXT_INSET, 0),
+                   Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, text)
+        p.end()
 
 
 class _ArrowButton(QToolButton):
@@ -924,7 +960,13 @@ class BreadcrumbBar(QWidget):
     forwardRequested = Signal()
     chromRequested = Signal(str)
     rangeClicked = Signal()
+    positionEntered = Signal(str)       # the position box: Enter on chrom:start-end
     geneClicked = Signal()
+
+    GENOME_W = 170
+    CHROM_W = 110
+    POS_W = 190                         # until the font is known (then POS_SAMPLE fits)
+    POS_SAMPLE = "1,000,000,000-1,000,000,000"      # a region on a 1 Gbp chromosome
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -936,11 +978,37 @@ class BreadcrumbBar(QWidget):
         lay.addWidget(self.back)
         lay.addWidget(self.forward)
         lay.addSpacing(4)
-        self.chrom = self._chip("Sequence: pick another one")
+        # the genome (a drop-down the browser window fills), then the sequence: both
+        # at a fixed width, long names shortened in the middle with …
+        self.genome = self._chip("Genome: open another one, or one used before", left=True)
+        self.genome.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.genome.setFixedWidth(self.GENOME_W)
+        self.genome.setStyleSheet("QToolButton::menu-indicator { image: none; width: 0px; }")
+        self.genome.setVisible(False)
+        self.genome_sep = self._sep()
+        self.genome_sep.setVisible(False)       # no › between the parts
+        lay.addWidget(self.genome)
+        lay.addWidget(self.genome_sep)
+        self.chrom = self._chip("Sequence: pick another one", left=True)
+        self.chrom.setFixedWidth(self.CHROM_W)
+        self._chrom_name = ""
+        self._genome_name = ""
         self.chrom.clicked.connect(self._open_picker)
         self.picker: ChromPicker | None = None
-        self.range = self._chip("The region in view: click to type another position")
-        self.range.clicked.connect(self.rangeClicked)
+        # the region in view as chrom:start-end, typed over to go elsewhere; a fixed
+        # width, and a long one keeps its end in sight (the start scrolls out)
+        self.range = QLineEdit(self)
+        self.range.setObjectName("navPos")
+        self.range.setFixedWidth(self.POS_W)
+        self.range.setToolTip("The region in view on this sequence. Type a position, a "
+                              "region (1,710,785-1,710,959, or scaffold_9:… for another "
+                              "sequence) or a gene and press Enter.")
+        self.range.returnPressed.connect(
+            lambda: self.positionEntered.emit(self.range.text().strip()))
+        self.range.editingFinished.connect(self._show_where)
+        # the same font and height as the genome and sequence chips beside it
+        self.range.setFont(self.chrom.font())
+        self._where = ""
         self.gene = self._chip("The feature in the middle of the view: click to zoom to it")
         self.gene.clicked.connect(self.geneClicked)
         self.gene.setProperty("current", True)
@@ -964,8 +1032,8 @@ class BreadcrumbBar(QWidget):
         b.clicked.connect(signal)
         return b
 
-    def _chip(self, tip: str) -> QToolButton:
-        b = QToolButton(self)
+    def _chip(self, tip: str, left: bool = False) -> QToolButton:
+        b = _LeftChip(self) if left else QToolButton(self)
         b.setObjectName("navChip")
         b.setToolTip(tip)
         b.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
@@ -979,22 +1047,71 @@ class BreadcrumbBar(QWidget):
     def set_chroms(self, chroms: list[tuple[str, int]]) -> None:
         self._chroms = list(chroms)
 
+    def _fit(self, button: QToolButton, text: str, width: int, suffix: str = "") -> None:
+        """``text`` (+ suffix) shortened in the middle to fit a chip ``width`` wide."""
+        room = width - 2 * _LeftChip.TEXT_INSET - 4 - \
+            button.fontMetrics().horizontalAdvance(suffix)
+        short = button.fontMetrics().elidedText(text, Qt.TextElideMode.ElideMiddle, room)
+        button.setText(short + suffix)
+
+    def set_genome(self, name: str, menu: QMenu | None = None) -> None:
+        """Show the genome chip (``name``, a drop-down ``menu``) before the sequence."""
+        self._genome_name = name
+        if menu is not None:
+            self.genome.setMenu(menu)
+        self._fit(self.genome, name, self.GENOME_W)
+        self.genome.setToolTip(f"Genome: {name}\nClick to open another one, or one used "
+                               "before")
+        self.genome.setVisible(bool(name))
+
     def _open_picker(self) -> None:
-        self.picker = ChromPicker(self._chroms, self.chrom.text(), self)
+        self.picker = ChromPicker(self._chroms, self._chrom_name, self)
         self.picker.picked.connect(self.chromRequested)
         self.picker.move(self.chrom.mapToGlobal(self.chrom.rect().bottomLeft()))
         self.picker.show()
 
+    def _match_chip_font(self) -> None:
+        """The position box uses the very font of the genome / sequence chips (on macOS a
+        line edit's own font is larger than a tool button's)."""
+        self.chrom.ensurePolished()
+        f = QFont(self.chrom.font())
+        f.setPointSizeF(f.pointSizeF())     # explicit, so the class font cannot win
+        for w in (self.genome, self.chrom, self.range):
+            if w.font() != f or not w.testAttribute(Qt.WidgetAttribute.WA_SetFont):
+                w.setFont(f)
+        # just wide enough for the longest likely region (1 Gbp chromosome), plus the
+        # box's padding (8 px each side) and border; a longer one keeps its end in view
+        width = QFontMetrics(f).horizontalAdvance(self.POS_SAMPLE) + 2 * 8 + 2 + 6
+        if self.range.width() != width:
+            self.range.setFixedWidth(width)
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self._match_chip_font()
+
     def set_where(self, chrom: str, a: int, b: int, gene: str) -> None:
-        self.chrom.setText(chrom or "—")
+        self._chrom_name = chrom
+        self._fit(self.chrom, chrom or "—", self.CHROM_W)
+        self.chrom.setToolTip(f"{chrom}\nClick to pick another sequence" if chrom
+                              else "Sequence: pick another one")
         self.chrom.setVisible(bool(chrom))
         has_range = bool(chrom) and b > a
-        self.range.setText(span_text(a, b) if has_range else "")
+        self._where = f"{a + 1:,}-{b:,}" if has_range else ""
+        self._match_chip_font()
+        self.range.setFixedHeight(self.chrom.sizeHint().height())   # as tall as the chips
+        self._show_where()
         self.range.setVisible(has_range)
-        self.seps[0].setVisible(has_range)
+        for sep in self.seps:
+            sep.setVisible(False)               # no › between the parts
         self.gene.setText(gene)
-        self.gene.setVisible(bool(gene))
-        self.seps[1].setVisible(bool(gene))
+        self.gene.setVisible(False)             # no gene name after the position
+
+    def _show_where(self) -> None:
+        """The region in view, unless it is being typed over; the end stays in sight."""
+        if self.range.hasFocus():
+            return
+        self.range.setText(self._where)
+        self.range.setCursorPosition(len(self._where))
 
     def set_history(self, can_back: bool, can_forward: bool) -> None:
         self.back.setEnabled(can_back)

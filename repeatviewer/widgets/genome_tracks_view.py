@@ -24,7 +24,11 @@ ALN_COLLAPSE_H = 2          # collapsed: 2 px lines, no gap, a density picture
 NOTE_H = 14
 TRACK_GAP = 6
 DEFAULT_ANN_ROWS = 8
-DEFAULT_ALN_ROWS = 20
+DEFAULT_ALN_ROWS = 20       # rows of an alignment track in the old row-count setting
+DEFAULT_ALN_TRACK_H = 320   # a BAM / SAM track is at most this tall unless resized
+SHOW_ALL_MAX_H = 12_000     # Track height > Show all: as tall as the rows need, up to this
+MIN_ROWS_H = 12           # a track dragged shorter still keeps one row
+RESIZE_GRAB = 4           # px either side of a track's bottom line that resize it
 MAX_DRAWN = 30_000        # alignments in view above this: coverage only
 MISMATCH_MIN_PPB = 0.5    # draw mismatches from 2 bp per pixel
 
@@ -119,6 +123,7 @@ class GenomeTracksMixin:
         self.region_sel: tuple[int, int] | None = None   # ruler selection [a, b) in bp
         self._sel_chip = None
         self._track_drag: int | None = None                   # track being moved
+        self._track_resize: tuple[int, float, int] | None = None  # (track, y0, rows_h0)
         self._track_drop: int | None = None                   # where it would land
 
     # ---------------------------------------------------------------- tracks
@@ -183,25 +188,91 @@ class GenomeTracksMixin:
             return ALN_COLLAPSE_H
         return ALN_SQUISH_H if squished else ALN_ROW_H
 
+    def rows_height(self, t) -> int:
+        """Height in pixels of a track's rows (under an alignment track's coverage):
+        the "height" the user dragged the track to, or the default room."""
+        h = t.settings.get("height")
+        if h is not None:
+            return max(MIN_ROWS_H, int(h))
+        if t.settings.get("show_all"):
+            # every row (fitted to the rows used, as the default is), within a bound
+            # that keeps the drawn tiles a sane size for a very deep BAM
+            return SHOW_ALL_MAX_H
+        # default: an annotation track gets a set number of rows (Squished makes it
+        # shorter); a mapping track up to DEFAULT_ALN_TRACK_H with its coverage
+        if t.kind == gt.KIND_ANNOTATION:
+            return int(t.settings.get("max_rows", DEFAULT_ANN_ROWS)) * self._row_h(t)
+        if "max_rows" in t.settings:
+            return int(t.settings["max_rows"]) * self._row_h(t)
+        return DEFAULT_ALN_TRACK_H - ALN_COV_H - 2 - TRACK_GAP
+
     def _max_rows(self, t) -> int:
-        default = DEFAULT_ANN_ROWS if t.kind == gt.KIND_ANNOTATION else DEFAULT_ALN_ROWS
-        n = int(t.settings.get("max_rows", default))
-        mode = self._mode(t)
-        if mode == MODE_COLLAPSED and t.kind != gt.KIND_ANNOTATION:
-            return n * 4
-        return n * 3 if mode == MODE_SQUISHED else n
+        """Rows that fit in the track's height: thinner rows (Squished, Collapsed) fit
+        more; the rows below are not laid out or drawn at all."""
+        return max(1, self.rows_height(t) // max(1, self._row_h(t)))
 
     def _shown_rows(self, t) -> int:
         m = self.model
         if m is None:
             return 1
-        if isinstance(t, gt.IndexedBamTrack):
-            return self._max_rows(t)
-        return max(1, min(self._max_rows(t), t.row_count(m.ref_id)))
+        if "height" in t.settings:
+            return self._max_rows(t)        # resized: exactly that tall
+        # default: smaller when the reads (or features) need fewer rows
+        known = getattr(t, "rows_known", None)
+        if known is not None and not known(m.ref_id):
+            # a BAM whose reads for this sequence are not loaded (yet, or zoomed out
+            # too far): keep the height it had, so the track does not jump when they
+            # arrive; the full default height the first time
+            return min(getattr(t, "_view_rows", None) or self._max_rows(t),
+                       self._max_rows(t))
+        n = max(1, min(self._max_rows(t), t.row_count(m.ref_id)))
+        if known is not None:
+            t._view_rows = n
+        return n
+
+    def set_track_height(self, i: int, rows_h: int | str | None) -> None:
+        """The height of track ``i``'s rows in pixels (None: back to the default;
+        "all": as tall as every row needs)."""
+        if not 0 <= i < len(self.tracks):
+            return
+        t = self.tracks[i]
+        t.settings.pop("show_all", None)
+        if rows_h == "all":
+            t.settings.pop("height", None)
+            t.settings["show_all"] = True
+        elif rows_h is None:
+            t.settings.pop("height", None)
+        else:
+            t.settings["height"] = max(MIN_ROWS_H, int(rows_h))
+        t.settings.pop("max_rows", None)
+        self._tracks_changed()
+
+    def _rows_area_h(self, t) -> int:
+        """The height the track's rows take now (what a bottom-edge drag starts from)."""
+        h = self._extra_track_h(t) - TRACK_GAP
+        if t.kind != gt.KIND_ANNOTATION:
+            h -= ALN_COV_H + 2
+        return max(MIN_ROWS_H, h)
+
+    def resize_edge_at(self, pos: QPointF) -> int:
+        """Index of the track whose bottom line is under ``pos`` (it can be dragged
+        to set the track's height), or -1."""
+        if not self.tracks or self.wrap_active() or not self.in_header(pos):
+            return -1
+        y = self._header_y(pos)
+        if y is None:
+            return -1
+        for i, (top, h) in enumerate(self._extra_spans):
+            if abs(y - (top + h - TRACK_GAP / 2)) <= RESIZE_GRAB:
+                return i
+        return -1
 
     def _extra_track_h(self, t) -> int:
         if t.kind == gt.KIND_ANNOTATION:
-            return self._shown_rows(t) * self._row_h(t) + TRACK_GAP
+            rows = self._shown_rows(t) * self._row_h(t)
+            if "height" in t.settings:
+                rows = self.rows_height(t)      # exactly as tall as dragged
+            return rows + TRACK_GAP
         return ALN_COV_H + 2 + self._layout(t)[1] + TRACK_GAP
 
     # ---------------------------------------------------------------- groups and sorting
@@ -227,13 +298,14 @@ class GenomeTracksMixin:
         self._sync_grouping(t)
         if not t.grouped:
             n = self._shown_rows(t)
-            return [(None, 0, n)], n * rh
+            area = self.rows_height(t) if "height" in t.settings else n * rh
+            return [(None, 0, n)], max(n * rh, area) if "height" not in t.settings else area
         counts = t.group_rows(self.model.ref_id)
         labels = sorted(counts, key=lambda g: (g.startswith(("no ", "unpaired")), g))
         if not labels:
             return [], rh
         cap = max(3, self._max_rows(t) // len(labels))
-        fixed = isinstance(t, gt.IndexedBamTrack)    # rows grow while panning
+        fixed = "height" in t.settings          # resized: the groups share that height
         groups, y = [], 0
         for g in labels:
             shown = cap if fixed else max(1, min(cap, counts[g]))
@@ -283,15 +355,10 @@ class GenomeTracksMixin:
         font.setBold(True)
         fm = QFontMetrics(font)
         p.setFont(font)
-        counts = t.group_rows(self.model.ref_id)
-        for g, top, shown in groups:
+        for g, top, _shown in groups:
             y = rows_top + top
             p.fillRect(QRectF(self.label_w, y, w - self.label_w, GROUP_HEAD_H - 2), band)
-            label = str(g)
-            if counts.get(g, 0) > shown:
-                # reads stack into rows so none overlap; only the first rows are drawn
-                label += (f"  ·  showing {shown:,} of {counts[g]:,} rows of stacked reads"
-                          "  ·  click the track name for more rows")
+            label = str(g)          # just the group's name (forward, reverse, a sample…)
             p.setPen(text)
             p.drawText(QRectF(self.label_w + 6, y, fm.horizontalAdvance(label) + 8,
                               GROUP_HEAD_H - 2),
@@ -370,6 +437,12 @@ class GenomeTracksMixin:
 
     # ---------------------------------------------------------------- painting
 
+    def _track_rule_color(self) -> QColor:
+        """The line between two tracks: one clear grey line across the names and the
+        data (darker than the palette's light rule, which was hard to see)."""
+        dark = self.palette().color(self.palette().ColorRole.Base).lightness() < 128
+        return QColor("#5c636c" if dark else "#a9b1bb")
+
     def _paint_extra_tracks(self, p: QPainter, bp0: int, bp1: int, w: int) -> None:
         m = self.model
         if m is None:
@@ -377,9 +450,16 @@ class GenomeTracksMixin:
         pal = self.palette()
         mid = pal.color(pal.ColorRole.Mid)
         last = len(self._extra_spans) - 1
+        # browser: the page scrolls; tracks wholly above or below the view are skipped
+        vis = None
+        if m.browser and self._wrap_origin is None:
+            v = self.verticalScrollBar().value()
+            vis = (v - 4, v + self.viewport().height() + 4)
         for k, (t, (top, h)) in enumerate(zip(self.tracks, self._extra_spans)):
+            if vis is not None and (top + h < vis[0] or top > vis[1]):
+                continue
             if k < last:     # the last one sits on the header line: no second rule
-                p.setPen(QPen(pal.color(pal.ColorRole.Midlight), 1))
+                p.setPen(QPen(self._track_rule_color(), 1))
                 p.drawLine(QPointF(self.label_w, top + h - 2), QPointF(w, top + h - 2))
             try:
                 if t.kind == gt.KIND_ANNOTATION:
@@ -1003,7 +1083,7 @@ class GenomeTracksMixin:
             if t.kind != gt.KIND_ANNOTATION:
                 self._paint_color_legend(p, t, top + 28, top + h - 4, small, mid)
             if k < last:
-                p.setPen(QPen(mid, 1))
+                p.setPen(QPen(self._track_rule_color(), 1))
                 p.drawLine(QPointF(0, top + h - 2), QPointF(self.label_w, top + h - 2))
         p.setFont(font)
 
@@ -1095,13 +1175,24 @@ class GenomeTracksMixin:
     RULER_ZONE = 24
 
     def tracks_mouse_press(self, event) -> bool:
-        """Left button on the ruler starts a region selection; on a track name, a move."""
-        if event.button() != Qt.MouseButton.LeftButton or self.model is None:
+        """Left button on the ruler starts a region selection; on a track name, a move.
+        Genome browser: right-click or Shift+click on the ruler zooms out there."""
+        if self.model is None:
             return False
         pos = event.position()
+        if self.ruler_zoom_out_click(event):
+            return True
+        if event.button() != Qt.MouseButton.LeftButton:
+            return False
         if self._in_ruler(pos):
             self._ruler_drag = (pos.x(), pos.x())
             self.setFocus(Qt.FocusReason.MouseFocusReason)   # Enter / Esc for the selection
+            return True
+        k = self.resize_edge_at(pos)
+        if k >= 0:
+            # drag a track's bottom line to set its height
+            self._track_resize = (k, pos.y(), self._rows_area_h(self.tracks[k]))
+            self.viewport().setCursor(Qt.CursorShape.SizeVerCursor)
             return True
         if self.tracks and pos.x() >= self.label_w and self.in_header(pos):
             y = self._header_y(pos)
@@ -1122,6 +1213,12 @@ class GenomeTracksMixin:
 
     def tracks_mouse_move(self, event) -> bool:
         pos = event.position()
+        if self._track_resize is not None:
+            i, y0, h0 = self._track_resize
+            new_h = max(MIN_ROWS_H, int(h0 + pos.y() - y0))
+            if self.tracks[i].settings.get("height") != new_h:
+                self.set_track_height(i, new_h)
+            return True
         press = getattr(self, "_body_press", None)
         if press is not None:
             x0, h0, moved = press
@@ -1177,12 +1274,45 @@ class GenomeTracksMixin:
             self._autoscrolling = True
             QTimer.singleShot(30, self._drag_autoscroll)
 
+    def ruler_zoom_out_click(self, event) -> bool:
+        """Right-click, or Shift + click, on the genome browser's ruler: zoom out,
+        keeping the clicked place under the mouse."""
+        m = self.model
+        pos = event.position()
+        if m is None or not m.browser or not self._in_ruler(pos):
+            return False
+        right = event.button() == Qt.MouseButton.RightButton
+        shift = (event.button() == Qt.MouseButton.LeftButton
+                 and event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+        if not (right or shift):
+            return False
+        self.zoom(0.5, pos.x())
+        return True
+
+    def ruler_double_click(self, pos: QPointF) -> bool:
+        """Double-click on the genome browser's ruler: zoom to the bases there."""
+        m = self.model
+        if m is None or not m.browser or not self._in_ruler(pos):
+            return False
+        self._ruler_drag = None
+        bp = max(0, min(m.length - 1, self.bp_at(pos.x())))
+        self.set_region_selection(bp, bp + 1)
+        self.show_base(bp, zoom_to_letters=True)
+        return True
+
     def tracks_hover_cursor(self, pos: QPointF):
-        """Cursor hint: None everywhere, so the arrow stays (the ruler is still dragged
-        to zoom and track names are still dragged to reorder)."""
-        return
+        """Cursor hint: a resize arrow on a track's bottom line; None elsewhere, so the
+        arrow stays (the ruler is still dragged to zoom and names to reorder)."""
+        if self.resize_edge_at(pos) >= 0:
+            return Qt.CursorShape.SizeVerCursor
+        return None
 
     def tracks_mouse_release(self, event) -> bool:
+        if self._track_resize is not None:
+            self._track_resize = None
+            self.viewport().unsetCursor()
+            self.tracksReordered.emit()     # the panel remembers the tracks' settings
+            return True
         press = getattr(self, "_body_press", None)
         if press is not None:
             self._body_press = None
@@ -1198,12 +1328,19 @@ class GenomeTracksMixin:
             x0, x1 = sorted(self._ruler_drag)
             self._ruler_drag = None
             if x1 - x0 >= 4:
-                # zoom straight to the dragged region
                 m = self.model
                 a = max(0, self.bp_at(x0))
                 b = min(m.length, max(a + 1, self.bp_at(x1)))
-                self.set_region_selection(None)
-                self.show_range(a, b)
+                if getattr(self, "sel_chip_off", False):
+                    # genome browser: the region stays marked; Select zooms there
+                    self.set_region_selection(a, b)
+                else:
+                    self.set_region_selection(None)
+                    self.show_range(a, b)
+            elif getattr(self, "sel_chip_off", False) and self.model is not None:
+                # genome browser: a click marks one position; zooming keeps it in place
+                bp = max(0, min(self.model.length - 1, self.bp_at(x0)))
+                self.set_region_selection(bp, bp + 1)
             else:
                 self.set_region_selection(None)
             self.viewport().update()
@@ -1248,7 +1385,7 @@ class GenomeTracksMixin:
 
     def _place_sel_chip(self) -> None:
         sel, m = self.region_sel, self.model
-        if sel is None or m is None or self.wrap_active():
+        if sel is None or m is None or self.wrap_active() or getattr(self, "sel_chip_off", False):
             if self._sel_chip is not None:
                 self._sel_chip.hide()
             return
@@ -1282,6 +1419,10 @@ class GenomeTracksMixin:
             return True
         if event.key() == Qt.Key.Key_Escape and self.region_sel is not None:
             self.set_region_selection(None)
+            return True
+        if event.key() == Qt.Key.Key_S and not event.modifiers() and self.region_sel \
+                and self.model is not None and self.model.browser:
+            self.go_to_selection()          # S: as the Select button
             return True
         if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and self.region_sel:
             self.go_to_selection()
@@ -1352,14 +1493,16 @@ class GenomeTracksMixin:
             if x1 < self.label_w - 200 or x0 > w:
                 continue
             c = QColor(color)
+            # only the ruler is marked: the tracks below stay as they are
+            rz = float(self.RULER_ZONE)
             if x1 - x0 >= 3:
                 band = QColor(c)
-                band.setAlpha(22)
-                p.fillRect(QRectF(x0, 0, x1 - x0, h), band)
+                band.setAlpha(40)
+                p.fillRect(QRectF(x0, 0, x1 - x0, rz), band)
             p.setPen(QPen(c, 1, Qt.PenStyle.DashLine))
-            p.drawLine(QPointF(x0, 0), QPointF(x0, h))
+            p.drawLine(QPointF(x0, 0), QPointF(x0, rz))
             if x1 - x0 >= 3:
-                p.drawLine(QPointF(x1, 0), QPointF(x1, h))
+                p.drawLine(QPointF(x1, 0), QPointF(x1, rz))
             text = fm.elidedText(name, Qt.TextElideMode.ElideRight, 160)
             tw = fm.horizontalAdvance(text) + 16
             from PySide6.QtGui import QPolygonF
@@ -1377,9 +1520,16 @@ class GenomeTracksMixin:
         p.restore()
 
     def _paint_ruler_edges(self, p: QPainter, x0: float, x1: float, a: int, b: int) -> None:
-        """While a region is dragged on the ruler: its first and last position on the
-        ruler's number row, in blue tags just outside the edges, over the tick numbers
-        there."""
+        """A region on the ruler: its first and last position in tags just outside the
+        edges, over the tick numbers there; one position: a single tag on it."""
+        if b <= a:
+            self._paint_ruler_tags(p, [(x0, f"{a:,}", 0)])
+            return
+        self._paint_ruler_tags(p, [(x0, f"{a:,}", -1), (x1, f"{b:,}", 1)])
+
+    def _paint_ruler_tags(self, p: QPainter, tags) -> None:
+        """Position tags on the ruler's number row: blue text on white with a blue
+        edge. Each tag is (x, text, side): -1 ends at x, 1 starts at x, 0 centred."""
         w = self.viewport().width()
         f = QFont(p.font())
         f.setPointSize(8)
@@ -1390,15 +1540,31 @@ class GenomeTracksMixin:
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         p.setFont(f)
         blue = QColor("#1f5fbf")
-        for x, text, right in ((x0, f"{a:,}", True), (x1, f"{b:,}", False)):
+        for x, text, side in tags:
             tw = fm.horizontalAdvance(text) + 10
-            box = QRectF(x - tw if right else x, 2, tw, 15)
-            p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(blue)
-            p.drawRoundedRect(box, 4, 4)
-            p.setPen(QColor("#ffffff"))
+            left = x - tw if side < 0 else x if side > 0 else x - tw / 2
+            box = QRectF(left, 2, tw, 15)
+            p.setPen(QPen(blue, 1))
+            p.setBrush(QColor("#ffffff"))
+            p.drawRoundedRect(box.adjusted(0.5, 0.5, -0.5, -0.5), 4, 4)
+            p.setPen(blue)
             p.drawText(box, Qt.AlignmentFlag.AlignCenter, text)
         p.restore()
+
+    def set_ruler_hover(self, x: float | None) -> None:
+        """Genome browser: the position under the mouse on the ruler, shown as a tag
+        there (None hides it)."""
+        if getattr(self, "_ruler_hover", None) != x:
+            self._ruler_hover = x
+            self.viewport().update()
+
+    def _paint_ruler_hover(self, p: QPainter) -> None:
+        x = getattr(self, "_ruler_hover", None)
+        m = self.model
+        if x is None or m is None or self._ruler_drag is not None:
+            return
+        bp = max(0, min(m.length - 1, self.bp_at(x)))
+        self._paint_ruler_tags(p, [(x, f"{bp + 1:,}", 0)])
 
     def _drop_index(self, y: float) -> int:
         """Insertion slot (0..n) for header y: before the track whose middle is below y."""
@@ -1413,6 +1579,12 @@ class GenomeTracksMixin:
         self._paint_menu_track(p)
         self._paint_bookmarks(p, h)
         self._paint_region_selection(p, h)
+        sel = self.region_sel
+        if sel is not None and self._ruler_drag is None and self.model is not None \
+                and self.model.browser:
+            self._paint_ruler_edges(p, self.x_of(sel[0]), self.x_of(sel[1]), sel[0] + 1,
+                                    sel[1] if sel[1] - sel[0] > 1 else sel[0] + 1)
+        self._paint_ruler_hover(p)
         if self._ruler_drag is not None:
             x0, x1 = sorted(self._ruler_drag)
             p.setClipping(False)

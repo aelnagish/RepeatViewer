@@ -142,7 +142,9 @@ OVERVIEW_TOOLBAR_HEIGHT = 28
 # renders at 26 px (22 px controls plus 2 px top/bottom margins).
 ANNOTATION_TOOLBAR_RENDERED_HEIGHT = 26
 # Shared Select / Fit widths (recorded from multi-seq Overview toolbar).
-ANNOTATION_SELECT_BUTTON_RENDERED_WIDTH = 55
+# 55 clipped "Select" on macOS once the buttons became 18 px tall (the small
+# bezel has wider side insets): 64 leaves room for the text
+ANNOTATION_SELECT_BUTTON_RENDERED_WIDTH = 64
 ANNOTATION_FIT_BUTTON_RENDERED_WIDTH = 37
 ZOOM_CONTROL_HEIGHT = 18
 ZOOM_SPIN_WIDTH = 56
@@ -150,10 +152,35 @@ ZOOM_SPIN_WIDTH = 56
 ZOOM_SLIDER_HEIGHT = 22
 ANNOTATION_ZOOM_SLIDER_WIDTH = 120
 _OVERVIEW_POSITION_SPIN_WIDTH = 108
-_OVERVIEW_SELECT_FIT_HEIGHT = 20
+_OVERVIEW_SELECT_FIT_HEIGHT = 18
 # Public alias for other toolbars (dotplot rail, etc.).
 OVERVIEW_SELECT_FIT_HEIGHT = _OVERVIEW_SELECT_FIT_HEIGHT
-_ZOOM_BTN_SIDE = ZOOM_SLIDER_HEIGHT
+# −/+ as tall as the Select / Fit buttons and the Position spins (was 22)
+_ZOOM_BTN_SIDE = ZOOM_CONTROL_HEIGHT
+
+
+# macOS draws a native push button with its own bezel at least ~21 px tall, whatever
+# fixed height it is given, so toolbar buttons looked taller than the 18 px −/+.
+# A style sheet takes the native bezel away: the button is then exactly its height.
+COMPACT_BUTTON_QSS = (
+    "QPushButton { border: 1px solid palette(mid); border-radius: 4px;"
+    " background: palette(base); padding: 0px 8px; margin: 0px;"
+    " min-height: 16px; max-height: 16px; }"
+    "QPushButton:hover { background: palette(midlight); }"
+    "QPushButton:pressed { background: palette(mid); }"
+    "QPushButton:disabled { color: palette(mid); }"
+)
+
+
+def style_compact_button(btn: QPushButton) -> None:
+    """Toolbar push button (Select, Fit, Clean, …) exactly as tall as the −/+."""
+    btn.setStyleSheet(COMPACT_BUTTON_QSS)
+
+
+def style_compact_spin(spin: QWidget) -> None:
+    """Position spin box exactly as tall as the −/+ (the app style sheet's
+    min-height made it 2 px taller)."""
+    spin.setStyleSheet("QSpinBox { min-height: 16px; max-height: 16px; }")
 
 
 def make_overview_zoom_button(text: str, parent: QWidget) -> QToolButton:
@@ -915,6 +942,7 @@ class AnnotationZoomBar(QWidget):
         self._pos_start.setKeyboardTracking(False)
         self._pos_start.setFixedWidth(self._POSITION_SPIN_WIDTH)
         self._pos_start.setFixedHeight(18)  # same as AnnotationMapToolbar spins
+        style_compact_spin(self._pos_start)
         self._pos_start.setAlignment(Qt.AlignmentFlag.AlignRight)
         self._pos_start.setGroupSeparatorShown(True)
         self._pos_start.setToolTip("1-based start position (column)")
@@ -928,6 +956,7 @@ class AnnotationZoomBar(QWidget):
         self._pos_end.setKeyboardTracking(False)
         self._pos_end.setFixedWidth(self._POSITION_SPIN_WIDTH)
         self._pos_end.setFixedHeight(18)
+        style_compact_spin(self._pos_end)
         self._pos_end.setAlignment(Qt.AlignmentFlag.AlignRight)
         self._pos_end.setGroupSeparatorShown(True)
         self._pos_end.setToolTip("1-based end position (column)")
@@ -937,6 +966,7 @@ class AnnotationZoomBar(QWidget):
         select_btn = QPushButton("Select", self._overview_host)
         select_btn.setFixedWidth(ANNOTATION_SELECT_BUTTON_RENDERED_WIDTH)
         select_btn.setFixedHeight(_OVERVIEW_SELECT_FIT_HEIGHT)
+        style_compact_button(select_btn)
         select_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         select_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         select_btn.setToolTip(
@@ -948,6 +978,7 @@ class AnnotationZoomBar(QWidget):
         fit_btn = QPushButton("Fit", self._overview_host)
         fit_btn.setFixedWidth(ANNOTATION_FIT_BUTTON_RENDERED_WIDTH)
         fit_btn.setFixedHeight(_OVERVIEW_SELECT_FIT_HEIGHT)
+        style_compact_button(fit_btn)
         fit_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         fit_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         fit_btn.setToolTip(
@@ -959,6 +990,7 @@ class AnnotationZoomBar(QWidget):
 
         clean_btn = QPushButton("Clean", self._overview_host)
         clean_btn.setFixedHeight(_OVERVIEW_SELECT_FIT_HEIGHT)
+        style_compact_button(clean_btn)
         clean_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         clean_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         clean_btn.setToolTip(
@@ -969,6 +1001,7 @@ class AnnotationZoomBar(QWidget):
 
         consensus_btn = QPushButton("Cons", self._overview_host)
         consensus_btn.setFixedHeight(_OVERVIEW_SELECT_FIT_HEIGHT)
+        style_compact_button(consensus_btn)
         consensus_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         consensus_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         consensus_btn.setToolTip(
@@ -980,6 +1013,7 @@ class AnnotationZoomBar(QWidget):
 
         coverage_btn = QPushButton("Cov", self._overview_host)
         coverage_btn.setFixedHeight(_OVERVIEW_SELECT_FIT_HEIGHT)
+        style_compact_button(coverage_btn)
         coverage_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         coverage_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         coverage_btn.setToolTip(

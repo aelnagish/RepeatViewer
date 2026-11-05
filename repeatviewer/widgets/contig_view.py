@@ -50,7 +50,7 @@ from repeatviewer.widgets.genome_tracks_view import GenomeTracksMixin
 LABEL_W = 150             # default width of the name column (draggable)
 LABEL_W_MIN = 80
 RULER_H = 24
-TRACKPAD_V_GAIN = 3.0     # genome browser: trackpad up/down speed
+TRACKPAD_V_GAIN = 2.0     # genome browser: trackpad up/down speed (3.0 felt too fast)
 FEATURE_ROW_H = 14
 TRACK_H = 16
 FRAME_H = 13              # one translation frame under the reference (genome browser)
@@ -1151,7 +1151,7 @@ class ContigCanvas(GenomeTracksMixin, QAbstractScrollArea):
         if getattr(m, "browser", False):
             # the browser page is tall (tracks, many read rows): a wheel notch (3 steps)
             # moves about a quarter of the view instead of three rows
-            v.setSingleStep(max(self.read_h() * 3, self.viewport().height() // 12))
+            v.setSingleStep(max(self.read_h() * 2, self.viewport().height() // 16))
         else:
             v.setSingleStep(self.read_h())
 
@@ -1215,6 +1215,12 @@ class ContigCanvas(GenomeTracksMixin, QAbstractScrollArea):
     def zoom(self, factor: float, anchor_x: float | None = None) -> None:
         if self.model is None:
             return
+        sel = getattr(self, "region_sel", None)
+        if anchor_x is None and sel is not None and self.model.browser:
+            # genome browser: − / + / slider zoom around the marked position or region
+            x = self.x_of((sel[0] + sel[1]) / 2)
+            if self.label_w <= x <= self.label_w + self._data_w():
+                anchor_x = x
         anchor_x = self.label_w + self._data_w() / 2 if anchor_x is None else anchor_x
         if self.wrap_active():
             keep = self.view_center_bp()
@@ -1346,7 +1352,7 @@ class ContigCanvas(GenomeTracksMixin, QAbstractScrollArea):
             return
         m = self.model
         if trackpad and m is not None and m.browser and not mods:
-            # browser pages are tall: a trackpad swipe moves 3x its pixel distance
+            # browser pages are tall: a trackpad swipe moves 2x its pixel distance
             px = event.pixelDelta()
             dy = px.y() if not px.isNull() else d.y() / 4
             dx = px.x() if not px.isNull() else d.x() / 4
@@ -1441,6 +1447,7 @@ class ContigCanvas(GenomeTracksMixin, QAbstractScrollArea):
     def leaveEvent(self, event) -> None:  # noqa: N802
         if not self._edge_drag:
             self.viewport().unsetCursor()
+        self.set_ruler_hover(None)
         super().leaveEvent(event)
 
     # ---------------------------------------------------------------- selection
@@ -1513,6 +1520,9 @@ class ContigCanvas(GenomeTracksMixin, QAbstractScrollArea):
 
     def contextMenuEvent(self, event) -> None:  # noqa: N802
         m = self.model
+        if m is not None and m.browser and self._in_ruler(QPointF(event.pos())):
+            event.accept()              # a right-click on the ruler zoomed out instead
+            return
         if m is not None and m.browser and event.pos().x() >= 0:
             y = self._header_y(QPointF(event.pos()))
             ys = self._track_y()
@@ -1571,6 +1581,9 @@ class ContigCanvas(GenomeTracksMixin, QAbstractScrollArea):
             self.fit_label_width()
             event.accept()
             return
+        if self.ruler_double_click(event.position()):
+            event.accept()
+            return
         i = self.read_at(event.position())
         if i < 0:
             self.fit()
@@ -1616,6 +1629,13 @@ class ContigCanvas(GenomeTracksMixin, QAbstractScrollArea):
         else:
             vp.unsetCursor()
         m = self.model
+        if m is not None and m.browser:
+            # the ruler: the position under the mouse as a tag on it, no popup
+            on_ruler = x >= self.label_w and self._in_ruler(event.position())
+            self.set_ruler_hover(x if on_ruler else None)
+            if on_ruler:
+                QToolTip.hideText()
+                return
         if m is not None and x < self.label_w and self.tracks:
             tip = self.track_tooltip(event.position())
             if tip:
@@ -1637,7 +1657,9 @@ class ContigCanvas(GenomeTracksMixin, QAbstractScrollArea):
             QToolTip.showText(event.globalPosition().toPoint(), tip, self)
             return
         bp = self.bp_at_pos(event.position())
-        if not 0 <= bp < m.length:
+        if m.browser or not 0 <= bp < m.length:
+            # genome browser: only the track items have hover text, never the
+            # "Position … · No coverage" box
             QToolTip.hideText()
             return
         lines = [f"Position {bp + 1:,}"]
@@ -2684,7 +2706,11 @@ class ContigOverview(QWidget):
             box = QRectF(left, h / 2 - 6, right - left, 12)   # just taller than the bar
             p.setBrush(QColor(214, 69, 47, 40))
             p.setPen(QPen(QColor("#d6452f"), 1.5))
+            # antialiased, so the outline sits evenly on both sides of the box's edges
+            # (without it Qt shifts the stroke down and right): centred on the bar
+            p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             p.drawRect(box)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
 
     def paintEvent(self, event) -> None:  # noqa: N802
         import math
@@ -3103,6 +3129,14 @@ class ContigViewPanel(QWidget):
         self._crumbs = BreadcrumbBar(bar)
         self._crumbs.hide()
         bl.addWidget(self._crumbs)
+        # genome browser: the Preview's − + and zoom slider, and Select (zoom to the
+        # region dragged on the ruler)
+        self._nav_zoom = self._make_nav_zoom(bar)
+        self._nav_zoom.hide()
+        bl.addWidget(self._nav_zoom)
+        # toolbar items the genome browser does without (its window menu bar has
+        # Tracks and the files; the ruler double-click zooms to bases)
+        self._old_zoom = (zoom_out, zoom_in, fit, bases)
         bl.addWidget(self._contig)
         self._span_label = QLabel(self)
         self._span_label.setToolTip("Width of the region in view")
@@ -3318,6 +3352,15 @@ class ContigViewPanel(QWidget):
         vp.setContentsMargins(0, 0, 0, 0)
         vp.setSpacing(0)
         vp.addWidget(bar)
+        # genome browser: a thin line under the top bar, across the whole window
+        from PySide6.QtWidgets import QFrame
+
+        self._nav_rule = QFrame(self._view_page)
+        self._nav_rule.setObjectName("navRule")
+        self._nav_rule.setFixedHeight(1)
+        self._nav_rule.setStyleSheet("QFrame#navRule { background: #d4d9df; border: none; }")
+        self._nav_rule.hide()
+        vp.addWidget(self._nav_rule)
         vp.addWidget(self._view_split, 1)
 
         # ------------------------------------------------ document tabs
@@ -3488,6 +3531,115 @@ class ContigViewPanel(QWidget):
         self._legend_popup = pop
         pop.popup(btn.mapToGlobal(QPoint(btn.width() - size.width(), btn.height() + 4)))
 
+    ZOOM_STEPS = 100
+
+    def _make_nav_zoom(self, parent: QWidget) -> QWidget:
+        """− + and a zoom slider (as in the Preview panel: same size and style), then
+        Select. The slider runs from the whole sequence (left) to single bases."""
+        from PySide6.QtWidgets import QPushButton, QSizePolicy
+
+        from repeatviewer.widgets.preview_controls import (
+            ANNOTATION_FIT_BUTTON_RENDERED_WIDTH,
+            ANNOTATION_SELECT_BUTTON_RENDERED_WIDTH,
+            ANNOTATION_ZOOM_SLIDER_WIDTH,
+            OVERVIEW_SELECT_FIT_HEIGHT,
+            ZOOM_SLIDER_HEIGHT,
+            apply_annotation_zoom_slider_style,
+            make_overview_zoom_button,
+            style_compact_button,
+        )
+        from repeatviewer.widgets.spin_boxes import NoWheelSlider
+
+        host = QWidget(parent)
+        lay = QHBoxLayout(host)
+        lay.setContentsMargins(6, 0, 0, 0)
+        lay.setSpacing(6)
+        out_ = make_overview_zoom_button("−", host)
+        out_.setToolTip("Zoom out")
+        out_.clicked.connect(lambda: self.canvas.zoom(0.66))
+        in_ = make_overview_zoom_button("+", host)
+        in_.setToolTip("Zoom in")
+        in_.clicked.connect(lambda: self.canvas.zoom(1.5))
+        sl = NoWheelSlider(Qt.Orientation.Horizontal, host)
+        sl.setObjectName("annotationZoomSlider")
+        sl.setRange(0, self.ZOOM_STEPS)
+        sl.setFixedWidth(ANNOTATION_ZOOM_SLIDER_WIDTH)
+        sl.setFixedHeight(ZOOM_SLIDER_HEIGHT)
+        sl.setToolTip("Zoom: left shows the whole sequence, right single bases")
+        apply_annotation_zoom_slider_style(sl)
+        sl.valueChanged.connect(self._nav_zoom_slid)
+        sel = QPushButton("Select", host)
+        sel.setFixedWidth(ANNOTATION_SELECT_BUTTON_RENDERED_WIDTH)
+        sel.setFixedHeight(OVERVIEW_SELECT_FIT_HEIGHT)
+        style_compact_button(sel)
+        sel.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        sel.setToolTip("Zoom to the region dragged on the ruler (S)\n"
+                       "Ruler: double-click zooms to the bases there; right-click or "
+                       "Shift + click zooms out")
+        sel.clicked.connect(self.canvas.go_to_selection)
+        fit = QPushButton("Fit", host)
+        fit.setFixedWidth(ANNOTATION_FIT_BUTTON_RENDERED_WIDTH)
+        fit.setFixedHeight(OVERVIEW_SELECT_FIT_HEIGHT)
+        style_compact_button(fit)
+        fit.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        fit.setToolTip("Show the whole sequence")
+        fit.clicked.connect(self.canvas.fit)
+        mark = QPushButton("Mark", host)
+        # wide enough for its text and the compact style's 8 px side padding
+        mark.setFixedWidth(max(ANNOTATION_FIT_BUTTON_RENDERED_WIDTH,
+                               mark.fontMetrics().horizontalAdvance("Mark") + 20))
+        mark.setFixedHeight(OVERVIEW_SELECT_FIT_HEIGHT)
+        style_compact_button(mark)
+        mark.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        mark.setToolTip("Add a bookmark for the view (or the region marked on the "
+                        "ruler)")
+        mark.clicked.connect(lambda: self._add_bookmark(whole_view=True))
+        for w in (out_, in_, sl, sel, fit, mark):
+            w.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+            lay.addWidget(w)
+        self._zoom_slider = sl
+        self._select_btn = sel
+        self._nav_fit_btn = fit
+        self._mark_btn = mark
+        self.canvas.viewChanged.connect(self._nav_zoom_sync)
+        return host
+
+    def _zoom_range(self) -> tuple[float, float] | None:
+        c, m = self.canvas, self.canvas.model
+        if m is None:
+            return None
+        fit = max(1e-9, (c._data_w() - 12) / max(1, m.length))
+        return fit, max(fit, MAX_PPB)
+
+    def _nav_zoom_sync(self) -> None:
+        r = self._zoom_range()
+        if r is None:
+            return
+        import math
+
+        fit, top = r
+        v = 0 if top <= fit else math.log(max(fit, self.canvas.ppb) / fit) / math.log(top / fit)
+        self._zoom_slider.blockSignals(True)
+        self._zoom_slider.setValue(round(v * self.ZOOM_STEPS))
+        self._zoom_slider.blockSignals(False)
+
+    def _nav_zoom_slid(self, value: int) -> None:
+        r = self._zoom_range()
+        if r is None:
+            return
+        fit, top = r
+        target = fit * (top / fit) ** (value / self.ZOOM_STEPS)
+        self.canvas.zoom(target / max(1e-12, self.canvas.ppb))
+
+    def _nav_position_entered(self, text: str) -> None:
+        """The position box: go to what was typed (a place, a region or a gene)."""
+        if not text:
+            return
+        self._goto.setText(text)
+        self._go_to()
+        self._goto.clear()
+        self.canvas.setFocus()
+
     def _place_locus_box(self, browser: bool) -> None:
         """Genome browser: the breadcrumb (‹ › chromosome › range › gene) shows where
         the view is, the search box on the right goes to a gene or a position, and the
@@ -3495,6 +3647,15 @@ class ContigViewPanel(QWidget):
         goto = self._goto
         self._nav_mode = browser
         self._crumbs.setVisible(browser)
+        self._nav_rule.setVisible(browser)
+        self._legend_btn.setVisible(not browser)    # no "?" legend in the browser
+        self._nav_zoom.setVisible(browser)
+        for wdg in self._old_zoom:
+            wdg.setVisible(not browser)
+        for wdg in (self._goto, self._tracks_btn, self._files_btn):
+            wdg.setVisible(not browser)
+        # a region dragged on the ruler stays marked; Select zooms there
+        self.canvas.sel_chip_off = browser
         self._span_label.hide()
         # the panel icon shows / hides the navigator rail in the browser
         self._side_btn.blockSignals(True)
@@ -4502,7 +4663,13 @@ class ContigViewPanel(QWidget):
     # tracks
 
     def _show_tracks_menu(self) -> None:
-        menu = self._tracks_menu
+        self.fill_tracks_menu(self._tracks_menu)
+        self._tracks_menu.exec(
+            self._tracks_btn.mapToGlobal(self._tracks_btn.rect().bottomLeft()))
+
+    def fill_tracks_menu(self, menu: QMenu) -> None:
+        """Add track…, each track's menu, Remove all (the Tracks ▾ button, and the
+        genome browser window's Tracks menu)."""
         menu.clear()
         self.canvas.track_menu_bp = None          # sorts from here use the view middle
         menu.addAction("Add track…", self._add_track_dialog)
@@ -4518,7 +4685,6 @@ class ContigViewPanel(QWidget):
         if self._data.get("contigs"):
             menu.addSeparator()
             menu.addAction("Save as genome browser session…", self._save_session_as)
-        menu.exec(self._tracks_btn.mapToGlobal(self._tracks_btn.rect().bottomLeft()))
 
     def _fill_track_menu(self, menu: QMenu, i: int) -> None:
         from repeatviewer.widgets.genome_tracks_view import (
@@ -4536,12 +4702,23 @@ class ContigViewPanel(QWidget):
             act = menu.addAction(label, lambda v=value: self._set_track_mode(i, v))
             act.setCheckable(True)
             act.setChecked(mode == value)
-        rows = menu.addMenu("Rows shown")
-        default = 8 if t.kind == gt.KIND_ANNOTATION else 20
-        for n in (4, 8, 20, 50, 100):
-            act = rows.addAction(str(n), lambda n=n: self._set_track_rows(i, n))
+        height = menu.addMenu("Track height")
+        cur = t.settings.get("height")
+        show_all = bool(t.settings.get("show_all"))
+        act = height.addAction("Default", lambda: self._set_track_height(i, None))
+        act.setCheckable(True)
+        act.setChecked(cur is None and not show_all)
+        act = height.addAction("Show all", lambda: self._set_track_height(i, "all"))
+        act.setCheckable(True)
+        act.setChecked(show_all)
+        act.setToolTip("As tall as every row of features or reads needs")
+        for px in (40, 80, 160, 320, 640):
+            act = height.addAction(f"{px} px", lambda px=px: self._set_track_height(i, px))
             act.setCheckable(True)
-            act.setChecked(int(t.settings.get("max_rows", default)) == n)
+            act.setChecked(cur is not None and int(cur) == px)
+        height.addSeparator()
+        hint = height.addAction("Or drag the track's bottom line")
+        hint.setEnabled(False)
         if isinstance(t, gt.BlastTrack):
             side = menu.addMenu("Reference is the BLAST")
             for label, value in (("Subject (sseqid)", "subject"), ("Query (qseqid)", "query")):
@@ -4871,6 +5048,10 @@ class ContigViewPanel(QWidget):
         self.canvas._tracks_changed()
         self._remember_tracks()
 
+    def _set_track_height(self, i: int, px: int | str | None) -> None:
+        self.canvas.set_track_height(i, px)
+        self._remember_tracks()
+
     def _set_blast_side(self, i: int, side: str) -> None:
         old = self.canvas.tracks[i]
         try:
@@ -5028,6 +5209,7 @@ class ContigViewPanel(QWidget):
         c.forwardRequested.connect(self._nav_forward)
         c.chromRequested.connect(lambda chrom: self._nav_go(chrom, 0, 0, chrom))
         c.rangeClicked.connect(self._nav_edit_range)
+        c.positionEntered.connect(self._nav_position_entered)
         c.geneClicked.connect(self._nav_zoom_gene)
         r = self._rail
         r.goRequested.connect(self._nav_go)
@@ -5327,7 +5509,9 @@ class ContigViewPanel(QWidget):
             for b in self._bookmarks if m is not None and b.chrom == m.ref_id]
         self.canvas.viewport().update()
 
-    def _add_bookmark(self) -> None:
+    def _add_bookmark(self, whole_view: bool = False) -> None:
+        """B: bookmark the region marked on the ruler, else the centre of the view.
+        Mark (``whole_view``): the marked region, else the whole view."""
         from repeatviewer.widgets.genome_navigator import (
             BOOKMARK_COLORS,
             Bookmark,
@@ -5341,6 +5525,8 @@ class ContigViewPanel(QWidget):
         sel = self.canvas.region_sel
         if sel:
             a, b = int(sel[0]), int(sel[1])
+        elif whole_view:
+            a, b = max(0, int(span[0])), min(m.length, int(span[1]))
         else:
             a = (span[0] + min(span[1], m.length)) // 2
             b = a + 1

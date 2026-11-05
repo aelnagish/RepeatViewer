@@ -197,8 +197,12 @@ from repeatviewer.widgets.preview_controls import (
     ANNOTATION_FIT_BUTTON_RENDERED_WIDTH,
     ANNOTATION_SELECT_BUTTON_RENDERED_WIDTH,
     ANNOTATION_ZOOM_SLIDER_WIDTH,
+    OVERVIEW_SELECT_FIT_HEIGHT,
+    ZOOM_CONTROL_HEIGHT,
     ZOOM_SLIDER_HEIGHT,
     apply_annotation_zoom_slider_style,
+    style_compact_button,
+    style_compact_spin,
 )
 from repeatviewer.widgets.preview_zoom import (
     load_show_sequence_summary,
@@ -435,7 +439,7 @@ _MIN_NUC_FONT_PT = 2
 _MAX_NUC_FONT_PT = 36
 _DEFAULT_NUC_FONT_PT = 6
 # Square −/+ chrome matching zoom-slider height; glyph keeps default font size.
-_ZOOM_BTN_SIDE = ZOOM_SLIDER_HEIGHT
+_ZOOM_BTN_SIDE = ZOOM_CONTROL_HEIGHT     # −/+ as tall as Select / Fit (was 22)
 _ANNOTATION_SIDE_PANEL_WIDTH = 108
 # Wide enough for "2,000,000" plus spin arrows without clipping.
 _POSITION_SPIN_WIDTH = 108
@@ -4546,12 +4550,15 @@ class SequenceMapWidget(QWidget):
             _configure_position_spin(self._pos_end)
             for spin in (self._pos_start, self._pos_end):
                 spin.setFixedHeight(18)
+                style_compact_spin(spin)
             # Match multi-seq Overview Select / Fit widths.
             select_btn.setFixedWidth(ANNOTATION_SELECT_BUTTON_RENDERED_WIDTH)
-            select_btn.setFixedHeight(20)
+            select_btn.setFixedHeight(OVERVIEW_SELECT_FIT_HEIGHT)
+            style_compact_button(select_btn)
             select_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
             fit_btn.setFixedWidth(ANNOTATION_FIT_BUTTON_RENDERED_WIDTH)
-            fit_btn.setFixedHeight(20)
+            fit_btn.setFixedHeight(OVERVIEW_SELECT_FIT_HEIGHT)
+            style_compact_button(fit_btn)
             fit_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
 
             pos_label = QLabel("Position:", toolbar)
