@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
     QColorDialog,
+    QComboBox,
     QDialog,
     QFrame,
     QGridLayout,
@@ -503,11 +504,19 @@ class KaryotypeCanvas(QWidget):
             if selected and abs(pos.y() - r.bottom()) <= 6:
                 return "end", ci, hi, -1
             f = (pos.y() - r.top()) / max(1.0, r.height())
+            order = list(range(len(view.bands)))
             if selected and 0 <= self.bi < len(view.bands):
-                b = view.bands[self.bi]
+                order.remove(self.bi)
+                order.insert(0, self.bi)
+            best = None
+            for bi in order:
+                b = view.bands[bi]
                 for what, edge in (("edge0", b.start), ("edge1", b.end)):
-                    if abs(pos.y() - (r.top() + edge * r.height())) <= 5:
-                        return what, ci, hi, self.bi
+                    dist = abs(pos.y() - (r.top() + edge * r.height()))
+                    if dist <= 4 and (best is None or dist < best[0]):
+                        best = (dist, what, bi)
+            if best is not None and (view.bands[best[2]].end - view.bands[best[2]].start) * r.height() >= 6:
+                return best[1], ci, hi, best[2]
             for bi in range(len(view.bands) - 1, -1, -1):
                 b = view.bands[bi]
                 if b.start - 0.004 <= f <= b.end + 0.004:
@@ -536,7 +545,7 @@ class KaryotypeCanvas(QWidget):
         if event.button() != Qt.MouseButton.LeftButton:
             return
         if not what:
-            self._select(-1, -1, -1)
+            self._select(self.ci, -1, -1)
             return
         if what == "label":
             self._select(ci, -1, -1)
@@ -698,6 +707,10 @@ def _dot_icon(colour: str = "#2F6FDB") -> QIcon:
 
 COL_HANDLE, COL_NAME, COL_LEN, COL_P, COL_Q, COL_CI, COL_TYPE, COL_COPIES = range(8)
 SHOW_KEY = "cytogenetics/karyotype_show"
+ADD_SPECIES = "Add New Species…"
+NEW_PROBE = "New Probe…"
+OTHER_KIND = "Other Band…"
+ADD_DYE = "Add New Dye…"
 
 
 class KaryotypeDialog(QDialog):
@@ -706,6 +719,8 @@ class KaryotypeDialog(QDialog):
     def __init__(self, folder: Path, name: str = "", parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Edit karyotype")
+        self.setWindowFlag(Qt.WindowType.Tool, True)  # stays above the RepeatViewer windows while it is open
+        self.setAttribute(Qt.WidgetAttribute.WA_MacAlwaysShowToolWindow, True)
         self.setMinimumSize(1220, 720)
         self._folder = Path(folder).expanduser().resolve()
         existing = kt.load_karyotype(self._folder, name) if name else None
@@ -723,11 +738,9 @@ class KaryotypeDialog(QDialog):
         self._name = QLineEdit(self._k.name, self)
         self._name.setFixedWidth(120)
         self._species = NoWheelComboBox(self)
-        self._species.setEditable(True)
-        self._species.addItems([""] + lists_mod.names(self._lists, "species"))
-        self._species.setCurrentText(self._k.species)
         self._species.setFixedWidth(160)
-        self._species.setToolTip("Choose a species or type a new one: it is added to the species list on Save")
+        self._species.setToolTip("Species of this karyotype. Add New Species… adds one to the species list")
+        self._fill_species(self._k.species)
         self._basic = QSpinBox(self)
         self._basic.setRange(1, 60)
         self._basic.setValue(max(1, len(self._k.a_chromosomes()) or self._k.basic_number))
@@ -781,7 +794,7 @@ class KaryotypeDialog(QDialog):
         hh.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         hh.setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         hh.setStretchLastSection(False)
-        for col, w in ((COL_HANDLE, 24), (COL_NAME, 56), (COL_LEN, 82), (COL_P, 50), (COL_Q, 50), (COL_CI, 50),
+        for col, w in ((COL_HANDLE, 30), (COL_NAME, 56), (COL_LEN, 82), (COL_P, 50), (COL_Q, 50), (COL_CI, 50),
                        (COL_TYPE, 44), (COL_COPIES, 54)):
             self._table.setColumnWidth(col, w)
         self._table.setEditTriggers(QTableWidget.EditTrigger.DoubleClicked | QTableWidget.EditTrigger.EditKeyPressed
@@ -848,20 +861,10 @@ class KaryotypeDialog(QDialog):
         bar.addSpacing(10)
         self._swatch_group = QButtonGroup(self)
         self._swatches: list[tuple[QToolButton, str, str]] = []
-        for kind, colour, tip in self._swatch_kinds():
-            sb = QToolButton(self)
-            sb.setCheckable(True)
-            sb.setAutoRaise(True)
-            sb.setIconSize(QSize(18, 18))
-            sb.setIcon(_swatch_icon(self._canvas.band_brush(kt.Band(kind, 0, 1, colour)), 18))
-            sb.setToolTip(tip)
-            sb.clicked.connect(lambda _c=False, k=kind, c=colour: self._on_swatch(k, c))
-            self._swatch_group.addButton(sb)
-            self._swatches.append((sb, kind, colour))
-            bar.addWidget(sb)
-        if self._swatches:
-            self._swatches[0][0].setChecked(True)
-            self._canvas.draw_kind, self._canvas.draw_colour = self._swatches[0][1], self._swatches[0][2]
+        self._swatch_row = QHBoxLayout()
+        self._swatch_row.setSpacing(5)
+        bar.addLayout(self._swatch_row)
+        self._fill_swatches()
         own = QToolButton(self)
         own.setText("+")
         own.setAutoRaise(True)
@@ -983,7 +986,7 @@ class KaryotypeDialog(QDialog):
 
         # ---- signals
         self._name.textEdited.connect(self._on_name)
-        self._species.editTextChanged.connect(lambda t: setattr(self._k, "species", t.strip()))
+        self._species.activated.connect(self._on_species)
         self._basic.valueChanged.connect(lambda _v: self._basic_timer.start())
         self._basic.editingFinished.connect(self._on_basic)
         self._basic_timer.timeout.connect(self._on_basic)
@@ -1010,11 +1013,33 @@ class KaryotypeDialog(QDialog):
                 out[str(e["name"])] = lists_mod.dye_color(self._lists, dye, "#2FB457")
         return out
 
+    def _fill_swatches(self) -> None:
+        current = self._canvas.draw_kind
+        for sb, _k, _c in self._swatches:
+            self._swatch_group.removeButton(sb)
+            sb.deleteLater()
+        self._swatches = []
+        for kind, colour, tip in self._swatch_kinds():
+            sb = QToolButton(self)
+            sb.setCheckable(True)
+            sb.setAutoRaise(True)
+            sb.setIconSize(QSize(18, 18))
+            sb.setIcon(_swatch_icon(self._canvas.band_brush(kt.Band(kind, 0, 1, colour)), 18))
+            sb.setToolTip(tip)
+            sb.clicked.connect(lambda _c=False, k=kind, c=colour: self._on_swatch(k, c))
+            self._swatch_group.addButton(sb)
+            self._swatches.append((sb, kind, colour))
+            self._swatch_row.addWidget(sb)
+        pick = next((t for t in self._swatches if t[1] == current), self._swatches[0] if self._swatches else None)
+        if pick:
+            pick[0].setChecked(True)
+            self._canvas.draw_kind, self._canvas.draw_colour = pick[1], pick[2]
+
     def _swatch_kinds(self) -> list[tuple[str, str, str]]:
         kinds = [("Secondary constriction (NOR)", "", "NOR (secondary constriction), hatched"),
                  ("DAPI+ heterochromatin", "", "DAPI+ heterochromatin"),
                  ("CMA+ band", "", "CMA+ band")]
-        for probe in list(self._canvas.probe_colours)[:4]:
+        for probe in list(self._canvas.probe_colours)[:6]:
             kinds.append((kt.SIGNAL_KIND_PREFIX + probe, "", f"FISH signal of {probe}"))
         return kinds
 
@@ -1103,6 +1128,39 @@ class KaryotypeDialog(QDialog):
 
     def _on_name(self, text: str) -> None:
         self._k.name = text.strip()
+
+    def _fill_species(self, current: str) -> None:
+        sp = self._species
+        sp.blockSignals(True)
+        sp.clear()
+        names = lists_mod.names(self._lists, "species")
+        if current and current.lower() not in {n.lower() for n in names}:
+            names.append(current)
+        sp.addItem("", "")
+        for n in names:
+            sp.addItem(n, n)
+        sp.insertSeparator(sp.count())
+        sp.addItem(ADD_SPECIES, ADD_SPECIES)
+        sp.setCurrentIndex(max(0, sp.findData(current)))
+        sp.blockSignals(False)
+
+    def _on_species(self, index: int) -> None:
+        value = self._species.itemData(index)
+        if value == ADD_SPECIES:
+            name, ok = QInputDialog.getText(self, "Add species", "Species name (for example Crocus sativus):")
+            name = name.strip() if ok else ""
+            if name:
+                lists = load_lists(self._folder)
+                lists_mod.add_entry(lists, "species", name)
+                try:
+                    lists_mod.save_lists(self._folder, lists)
+                except OSError as exc:
+                    QMessageBox.warning(self, "Add species", f"Could not save the species list:\n{exc}")
+                self._lists = load_lists(self._folder)
+                self._k.species = name
+            self._fill_species(self._k.species)
+            return
+        self._k.species = str(value or "")
 
     def _on_hom_names(self, index: int) -> None:
         key = self._hom_names.itemData(index)
@@ -1532,55 +1590,186 @@ class KaryotypeDialog(QDialog):
             if i == self._canvas.bi:
                 row.setStyleSheet("QFrame#bandRow { background:#E3EBF8; border-radius:6px; }")
             lay = QHBoxLayout(row)
-            lay.setContentsMargins(6, 2, 2, 2)
-            lay.setSpacing(8)
-            sw = QLabel(row)
-            sw.setPixmap(_swatch_icon(self._canvas.band_brush(b), 14).pixmap(14, 14))
-            name = QLabel(kt.manual_probe(b.kind) and f"FISH {kt.manual_probe(b.kind)}" or b.kind, row)
-            name.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-            rng = QLineEdit(f"{kt.fraction_to_arm_text(b.start, cf)} to {kt.fraction_to_arm_text(b.end, cf)}", row)
-            rng.setFixedWidth(120)
-            rng.setFrame(False)
-            rng.setToolTip("Where the band sits, for example q 0.41 to 0.59 (0 = centromere, 1 = telomere)")
-            rng.editingFinished.connect(lambda e=rng, n=i: self._on_band_range(n, e.text()))
+            lay.setContentsMargins(4, 2, 2, 2)
+            lay.setSpacing(6)
+            sw = QToolButton(row)
+            sw.setAutoRaise(True)
+            sw.setIconSize(QSize(14, 14))
+            sw.setIcon(_swatch_icon(self._canvas.band_brush(b), 14))
+            sw.setToolTip("Colour of this band")
+            sw.clicked.connect(lambda _c=False, n=i: (self._pick_band(n), self._own_colour()))
+            kind = NoWheelComboBox(row)
+            kind.setFixedWidth(150)
+            self._fill_kind_combo(kind, b)
+            kind.activated.connect(lambda _x, cb=kind, n=i: self._on_kind(n, cb))
+            dye = NoWheelComboBox(row)
+            dye.setFixedWidth(86)
+            probe = kt.manual_probe(b.kind)
+            if probe:
+                self._fill_dye_combo(dye, probe)
+                dye.setToolTip(f"Dye of {probe}; a change applies to the probe everywhere")
+                dye.activated.connect(lambda _x, cb=dye, pr=probe: self._on_dye(pr, cb))
+            else:
+                pol = dye.sizePolicy()
+                pol.setRetainSizeWhenHidden(True)
+                dye.setSizePolicy(pol)
+                dye.setVisible(False)
+            fields = []
+            for frac in (b.start, b.end):
+                e = QLineEdit(kt.fraction_to_arm_text(frac, cf), row)
+                e.setFixedWidth(64)
+                e.setToolTip("p or q and the distance from the centromere: 0 = centromere, 1 = telomere")
+                fields.append(e)
+            fields[0].editingFinished.connect(lambda n=i, f=fields: self._on_band_range(n, f[0].text(), f[1].text()))
+            fields[1].editingFinished.connect(lambda n=i, f=fields: self._on_band_range(n, f[0].text(), f[1].text()))
             x = QToolButton(row)
             x.setText("×")
             x.setAutoRaise(True)
             x.setToolTip("Remove band")
             x.clicked.connect(lambda _c=False, n=i: self._remove_band(n))
             lay.addWidget(sw)
-            lay.addWidget(name, 1)
-            lay.addWidget(rng)
+            lay.addWidget(kind)
+            lay.addWidget(dye)
+            lay.addStretch(1)
+            lay.addWidget(fields[0])
+            lay.addWidget(QLabel("to", row))
+            lay.addWidget(fields[1])
             lay.addWidget(x)
             row.mousePressEvent = lambda _e, n=i: self._pick_band(n)  # noqa: B023
             self._bands_box.addWidget(row)
         self._bands_box.addStretch(1)
+
+    def _fill_kind_combo(self, cb: QComboBox, band: kt.Band) -> None:
+        for k_ in kt.BAND_KINDS:
+            cb.addItem("NOR (secondary constriction)" if k_.startswith("Secondary") else k_, k_)
+        probes = lists_mod.names(self._lists, "probes")
+        if probes:
+            cb.insertSeparator(cb.count())
+        for pr in probes:
+            cb.addItem(f"FISH {pr}", kt.SIGNAL_KIND_PREFIX + pr)
+        if cb.findData(band.kind) < 0:
+            cb.addItem(kt.manual_probe(band.kind) and f"FISH {kt.manual_probe(band.kind)}" or band.kind, band.kind)
+        cb.insertSeparator(cb.count())
+        cb.addItem(NEW_PROBE, NEW_PROBE)
+        cb.addItem(OTHER_KIND, OTHER_KIND)
+        cb.setCurrentIndex(max(0, cb.findData(band.kind)))
+        cb.setToolTip(cb.currentText())
+
+    def _fill_dye_combo(self, cb: QComboBox, probe: str) -> None:
+        current = str((lists_mod.entry(self._lists, "probes", probe) or {}).get("dye") or "")
+        cb.addItem("", "")
+        for d in lists_mod.names(self._lists, "dyes"):
+            cb.addItem(d, d)
+        if current and cb.findData(current) < 0:
+            cb.addItem(current, current)
+        cb.insertSeparator(cb.count())
+        cb.addItem(ADD_DYE, ADD_DYE)
+        cb.setCurrentIndex(max(0, cb.findData(current)))
+
+    def _band_owner(self):
+        c, hi = self._sel()
+        return None if c is None else kt.target(c, hi if self._canvas.every else -1)
+
+    def _ask_dye(self, title: str) -> str:
+        name, ok = QInputDialog.getText(self, title, "Dye name (for example Alexa 488):")
+        name = name.strip() if ok else ""
+        if not name:
+            return ""
+        colour = QColorDialog.getColor(QColor("#2FB457"), self, f"Colour of {name}")
+        lists = load_lists(self._folder)
+        lists_mod.add_entry(lists, "dyes", name, color=colour.name() if colour.isValid() else "#ffffff",
+                            words=name.lower())
+        self._save_lists(lists)
+        return name
+
+    def _save_lists(self, lists) -> None:
+        try:
+            lists_mod.save_lists(self._folder, lists)
+        except OSError as exc:
+            QMessageBox.warning(self, "Lists", f"Could not save the lists:\n{exc}")
+        self._lists = load_lists(self._folder)
+        self._canvas.probe_colours = self._probe_colours()
+        self._fill_swatches()
+
+    def _on_kind(self, i: int, cb: QComboBox) -> None:
+        owner = self._band_owner()
+        if owner is None or not 0 <= i < len(owner.bands):
+            return
+        value = str(cb.currentData() or "")
+        band = owner.bands[i]
+        if value == NEW_PROBE:
+            name, ok = QInputDialog.getText(self, "New probe", "Probe name (for example CroSat2):")
+            name = name.strip() if ok else ""
+            if not name:
+                self._sync_inspector()
+                return
+            dyes = lists_mod.names(self._lists, "dyes") + [ADD_DYE]
+            dye, ok = QInputDialog.getItem(self, "New probe", f"Dye of {name}:", dyes, 0, False)
+            if ok and dye == ADD_DYE:
+                dye = self._ask_dye("New dye")
+            lists = load_lists(self._folder)
+            lists_mod.add_entry(lists, "probes", name, dye=dye if ok else "")
+            self._save_lists(lists)
+            value = kt.SIGNAL_KIND_PREFIX + name
+        elif value == OTHER_KIND:
+            name, ok = QInputDialog.getText(self, "Band", "Kind of band (for example Ag-NOR or C-band):")
+            name = name.strip() if ok else ""
+            if not name:
+                self._sync_inspector()
+                return
+            colour = QColorDialog.getColor(QColor("#8A8D93"), self, f"Colour of {name}")
+            self._checkpoint()
+            band.kind, band.color, band.satellite = name, colour.name() if colour.isValid() else "#8A8D93", False
+            self._after_band_change()
+            return
+        if value == band.kind:
+            return
+        self._checkpoint()
+        band.kind, band.color = value, ""
+        band.satellite = band.satellite and value.startswith("Secondary")
+        self._canvas.bi = i
+        self._after_band_change()
+
+    def _on_dye(self, probe: str, cb: QComboBox) -> None:
+        dye = str(cb.currentData() or "")
+        if dye == ADD_DYE:
+            dye = self._ask_dye("New dye")
+            if not dye:
+                self._sync_inspector()
+                return
+        lists = load_lists(self._folder)
+        entry = lists_mod.entry(lists, "probes", probe) or lists_mod.add_entry(lists, "probes", probe)
+        if dye:
+            entry["dye"] = dye
+        else:
+            entry.pop("dye", None)
+        self._save_lists(lists)
+        self._canvas.update()
+        self._sync_inspector()
 
     def _pick_band(self, i: int) -> None:
         self._canvas.bi = i
         self._canvas.update()
         self._sync_inspector()
 
-    def _on_band_range(self, i: int, text: str) -> None:
+    def _on_band_range(self, i: int, start: str, end: str) -> None:
+        owner = self._band_owner()
+        if owner is None or not 0 <= i < len(owner.bands):
+            return
         c, hi = self._sel()
-        if c is None:
-            return
-        owner = kt.target(c, hi if self._canvas.every else -1)
-        if not 0 <= i < len(owner.bands):
-            return
         cf = kt.homologue_view(c, hi if self._canvas.every else -1).centromere_fraction
-        parts = [s.strip() for s in text.replace("–", " to ").split(" to ")]
-        if len(parts) != 2:
-            return
-        a, z = (kt.arm_text_to_fraction(s, cf) for s in parts)
+        a, z = kt.arm_text_to_fraction(start, cf), kt.arm_text_to_fraction(end, cf)
         if a is None or z is None:
+            self._sync_inspector()
             return
         b = owner.bands[i]
-        if (round(b.start, 4), round(b.end, 4)) == tuple(sorted((round(a, 4), round(z, 4)))):
+        a, z = sorted((a, z))
+        if (round(b.start, 4), round(b.end, 4)) == (round(a, 4), round(z, 4)):
             return
         self._checkpoint()
-        b.start, b.end = sorted((a, z))
+        b.start, b.end = a, z
         self._canvas.update()
+        QTimer.singleShot(0, self._sync_inspector)
 
     def _owner_for_fields(self):
         c, hi = self._sel()
@@ -1672,7 +1861,7 @@ class KaryotypeDialog(QDialog):
     def _save(self) -> None:
         k = self._k
         k.name = self._name.text().strip()
-        k.species = self._species.currentText().strip()
+        k.species = str(self._species.currentData() or "") if self._species.currentData() != ADD_SPECIES else k.species
         if not k.name:
             QMessageBox.information(self, "Karyotype", "Give the karyotype a name.")
             return

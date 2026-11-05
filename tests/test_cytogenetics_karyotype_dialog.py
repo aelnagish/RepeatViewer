@@ -65,3 +65,20 @@ def test_homologue_draw_undo_and_save(app, tmp_path):
     assert saved.chromosomes[-1].b_chromosome
     assert kt.homologue_view(saved.chromosomes[0], 1).length == 21
     assert "Hapazlem bazaza" in names(load_lists(tmp_path), "species")
+
+
+def test_band_edge_without_selection_and_species(app, tmp_path, monkeypatch):
+    from PySide6.QtCore import QPointF
+    from PySide6.QtWidgets import QInputDialog
+
+    d = _dialog(tmp_path)
+    c = d._k.chromosomes[0]
+    c.bands.append(kt.Band("CMA+ band", 0.6, 0.8))
+    d._canvas.refresh()
+    ci, hi, r, _v, _m = d._canvas._items[0]
+    what, *_rest, bi = d._canvas._hit(QPointF(r.center().x(), r.top() + 0.8 * r.height()))
+    assert (what, bi) == ("edge1", 0)
+    monkeypatch.setattr(QInputDialog, "getText", lambda *a, **k: ("Crocus sativus", True))
+    d._on_species(d._species.findData("Add New Species…"))
+    assert d._k.species == "Crocus sativus"
+    assert "Crocus sativus" in names(load_lists(tmp_path), "species")
