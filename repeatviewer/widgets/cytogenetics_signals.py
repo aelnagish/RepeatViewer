@@ -345,9 +345,9 @@ class SignalsTab(QWidget):
         kr.addWidget(self._karyo, 1)
         self._labels_grid = QGridLayout()
         self._labels_grid.setSpacing(4)
-        self._chrom_section.body_layout().addWidget(self._chrom_count)
+        self._chrom_count.setVisible(False)  # the step guide shows n / N
         self._chrom_section.body_layout().addLayout(kr)
-        self._chrom_section.body_layout().addWidget(self._edit_karyo, 0, Qt.AlignmentFlag.AlignLeft)
+        self._edit_karyo.setVisible(False)  # step 1 Karyotype opens the editor
         self._chrom_section.body_layout().addLayout(self._labels_grid)
         side.addWidget(self._chrom_section)
 
@@ -900,11 +900,9 @@ class SignalsTab(QWidget):
             sel = self._selected = None
         if sel and sel[0] == "mark" and s.details.chromosome(sel[1]) is None:
             sel = self._selected = None
+        self._sel_section.setVisible(sel is not None)  # shown only while something is selected
         if sel is None:
             self._sel_section._title.setText("Selected")
-            note = QLabel("Nothing selected. Use Select and click a chromosome or a signal.", self._sel_host)
-            note.setWordWrap(True)
-            self._sel_lay.addWidget(note)
             return
         if sel[0] == "signal":
             sig = s.signal(sel[1])
