@@ -85,6 +85,29 @@ def _type_color(kind: str, custom: dict[str, str]) -> QColor:
     return QColor(_feature_color(kind or "feature"))
 
 
+
+# hover text stays narrow: long attribute values (Dbxref, GO lists…) are cut with "…"
+# and wrapped; the click popup still shows them in full
+TIP_LINE_CHARS = 80
+TIP_VALUE_CHARS = 48
+TIP_INFO_LINES = 3
+
+
+def _short(text: str, n: int) -> str:
+    return text if len(text) <= n else text[:n - 1].rstrip(" ,;") + "…"
+
+
+def _wrap(text: str) -> list[str]:
+    import textwrap
+
+    if not text:
+        return []
+    rows = textwrap.wrap(text, TIP_LINE_CHARS, break_long_words=True)
+    if len(rows) > TIP_INFO_LINES:
+        rows = rows[:TIP_INFO_LINES]
+        rows[-1] = rows[-1][:TIP_LINE_CHARS - 2].rstrip(" ,;") + " …"
+    return rows
+
 class GenomeTracksMixin:
     """Extra tracks stacked under the reference, above the placed sequences."""
 
@@ -118,6 +141,7 @@ class GenomeTracksMixin:
     def remove_track(self, index: int) -> None:
         if 0 <= index < len(self.tracks):
             del self.tracks[index]
+            self.selected_track = None
             self._tracks_changed()
 
     def set_track_mode(self, index: int, mode: str) -> None:
@@ -132,6 +156,8 @@ class GenomeTracksMixin:
             return
         t = self.tracks.pop(src)
         self.tracks.insert(max(0, min(dst, n - 1)), t)
+        # the moved track is the selected one
+        self.selected_track = max(0, min(dst, n - 1))
         self._tracks_changed()
         self.tracksReordered.emit()
 
@@ -265,7 +291,7 @@ class GenomeTracksMixin:
             if counts.get(g, 0) > shown:
                 # reads stack into rows so none overlap; only the first rows are drawn
                 label += (f"  ·  showing {shown:,} of {counts[g]:,} rows of stacked reads"
-                          "  ·  raise Rows in the side panel to see more")
+                          "  ·  click the track name for more rows")
             p.setPen(text)
             p.drawText(QRectF(self.label_w + 6, y, fm.horizontalAdvance(label) + 8,
                               GROUP_HEAD_H - 2),
@@ -350,9 +376,11 @@ class GenomeTracksMixin:
             return
         pal = self.palette()
         mid = pal.color(pal.ColorRole.Mid)
-        for t, (top, h) in zip(self.tracks, self._extra_spans):
-            p.setPen(QPen(pal.color(pal.ColorRole.Midlight), 1))
-            p.drawLine(QPointF(self.label_w, top + h - 2), QPointF(w, top + h - 2))
+        last = len(self._extra_spans) - 1
+        for k, (t, (top, h)) in enumerate(zip(self.tracks, self._extra_spans)):
+            if k < last:     # the last one sits on the header line: no second rule
+                p.setPen(QPen(pal.color(pal.ColorRole.Midlight), 1))
+                p.drawLine(QPointF(self.label_w, top + h - 2), QPointF(w, top + h - 2))
             try:
                 if t.kind == gt.KIND_ANNOTATION:
                     self._paint_body(p, t, top, h - TRACK_GAP, bp0, bp1)
@@ -949,7 +977,8 @@ class GenomeTracksMixin:
         fm = QFontMetrics(font)
         small = QFont(font)
         small.setPointSize(7)
-        for t, (top, h) in zip(self.tracks, self._extra_spans):
+        last = len(self._extra_spans) - 1
+        for k, (t, (top, h)) in enumerate(zip(self.tracks, self._extra_spans)):
             p.setFont(font)
             p.setPen(fg)
             p.drawText(QRectF(6, top, self.label_w - 10, 16),
@@ -973,8 +1002,9 @@ class GenomeTracksMixin:
                            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, note)
             if t.kind != gt.KIND_ANNOTATION:
                 self._paint_color_legend(p, t, top + 28, top + h - 4, small, mid)
-            p.setPen(QPen(mid, 1))
-            p.drawLine(QPointF(0, top + h - 2), QPointF(self.label_w, top + h - 2))
+            if k < last:
+                p.setPen(QPen(mid, 1))
+                p.drawLine(QPointF(0, top + h - 2), QPointF(self.label_w, top + h - 2))
         p.setFont(font)
 
     # ---------------------------------------------------------------- hover
@@ -1003,7 +1033,10 @@ class GenomeTracksMixin:
                 cov = t.coverage(m.ref_id, bp, bp + 1, 1)
                 depth = float(cov[0]) if cov is not None and len(cov) else 0.0
                 return i, [], f"Position {bp + 1:,}: depth {depth:,.0f}"
-            if not t.reads_visible(bp - slack, bp + slack):
+            # the same test as drawing: when the view is too wide for reads (only the
+            # "Zoom in" note is drawn) there is nothing to hover
+            span = self.visible_span()
+            if span is None or not t.reads_visible(span[0], span[1]):
                 return i, [], None
             dy = y - rows_top
             rh = self._row_h(t)
@@ -1043,10 +1076,12 @@ class GenomeTracksMixin:
                 extra.append(f"MAPQ {it.mapq}")
             if it.secondary:
                 extra.append("secondary")
-            info = ", ".join(f"{k} {v}" for k, v in list(it.info.items())[:6]
+            info = ", ".join(f"{k} {_short(str(v), TIP_VALUE_CHARS)}"
+                             for k, v in list(it.info.items())[:6]
                              if k not in ("ID", "Parent", "Name"))
-            lines.append(head + ("\n  " + " · ".join(extra) if extra else "")
-                         + ("\n  " + info if info else ""))
+            lines.append(_short(head, TIP_LINE_CHARS)
+                         + ("\n  " + " · ".join(extra) if extra else "")
+                         + "".join("\n  " + ln for ln in _wrap(info)))
         return "\n".join(lines) + "\nClick for details"
 
     # ---------------------------------------------------------------- mouse: ruler, track order
@@ -1078,7 +1113,8 @@ class GenomeTracksMixin:
         if self.tracks and pos.x() < self.label_w and self.in_header(pos):
             y = self._header_y(pos)
             k = self.track_at_y(y) if y is not None else -1
-            if k >= 0 and len(self.tracks) > 1:
+            if k >= 0:
+                # a drag moves the track; a click without moving opens its menu
                 self._track_drag = k
                 self._track_drop = k        # the arrow stays: the drop line shows where
                 return True
@@ -1142,11 +1178,9 @@ class GenomeTracksMixin:
             QTimer.singleShot(30, self._drag_autoscroll)
 
     def tracks_hover_cursor(self, pos: QPointF):
-        """Cursor hint: a text beam over the ruler (drag to select a region); None
-        elsewhere (track names keep the arrow, and are still dragged to reorder)."""
-        if self._in_ruler(pos):
-            return Qt.CursorShape.IBeamCursor
-        return None
+        """Cursor hint: None everywhere, so the arrow stays (the ruler is still dragged
+        to zoom and track names are still dragged to reorder)."""
+        return
 
     def tracks_mouse_release(self, event) -> bool:
         press = getattr(self, "_body_press", None)
@@ -1164,11 +1198,12 @@ class GenomeTracksMixin:
             x0, x1 = sorted(self._ruler_drag)
             self._ruler_drag = None
             if x1 - x0 >= 4:
-                # the region stays selected; its Go button zooms there
+                # zoom straight to the dragged region
                 m = self.model
                 a = max(0, self.bp_at(x0))
                 b = min(m.length, max(a + 1, self.bp_at(x1)))
-                self.set_region_selection(a, b)
+                self.set_region_selection(None)
+                self.show_range(a, b)
             else:
                 self.set_region_selection(None)
             self.viewport().update()
@@ -1177,6 +1212,11 @@ class GenomeTracksMixin:
             src, dst = self._track_drag, self._track_drop
             self._track_drag = self._track_drop = None
             self.viewport().unsetCursor()
+            if dst is None or dst in (src, src + 1):
+                # a click without moving selects the track (its name is highlighted);
+                # its menu is on right-click
+                self.set_selected_track(src)
+                return True
             if dst is not None:
                 # dst is an insertion slot 0..n; account for the removed track
                 self.move_track(src, dst - 1 if dst > src else dst)
@@ -1232,6 +1272,14 @@ class GenomeTracksMixin:
             chip.raise_()
 
     def tracks_key_press(self, event) -> bool:
+        if event.key() == Qt.Key.Key_B and not event.modifiers() and \
+                self.model is not None and self.model.browser:
+            self.bookmarkRequested.emit()
+            return True
+        if event.key() == Qt.Key.Key_Escape and getattr(self, "selected_track", None) \
+                is not None and self.region_sel is None:
+            self.set_selected_track(None)
+            return True
         if event.key() == Qt.Key.Key_Escape and self.region_sel is not None:
             self.set_region_selection(None)
             return True
@@ -1256,6 +1304,102 @@ class GenomeTracksMixin:
         p.drawLine(QPointF(x0, 0), QPointF(x0, h))
         p.drawLine(QPointF(x1, 0), QPointF(x1, h))
 
+    def set_menu_track(self, index: int | None) -> None:
+        """Highlight the track whose menu is open (None: no highlight)."""
+        if getattr(self, "menu_track", None) != index:
+            self.menu_track = index
+            self.viewport().update()
+
+    def set_selected_track(self, index: int | None) -> None:
+        """The track clicked last (its name highlighted); None clears it."""
+        if getattr(self, "selected_track", None) != index:
+            self.selected_track = index
+            self.viewport().update()
+
+    def _paint_menu_track(self, p: QPainter) -> None:
+        """The selected track and the one whose menu is open: only the name column is
+        tinted, the reads and features stay as they are."""
+        spans = getattr(self, "_extra_spans", [])
+        accent = QColor("#3d7be0")
+        p.save()
+        p.setClipping(False)
+        for k, alpha in ((getattr(self, "selected_track", None), 30),
+                         (getattr(self, "menu_track", None), 45)):
+            if k is None or not 0 <= k < len(spans):
+                continue
+            top, hh = spans[k]
+            fill = QColor(accent)
+            fill.setAlpha(alpha)
+            p.fillRect(QRectF(0, top, self.label_w - 1, hh - 1), fill)
+        p.restore()
+
+    def _paint_bookmarks(self, p: QPainter, h: float) -> None:
+        """Bookmarks of this sequence: a flag with the name on the ruler and a dashed
+        line (a light band for a region) down through the tracks."""
+        flags = getattr(self, "bookmark_flags", None)
+        if not flags or self.model is None:
+            return
+        w = self.viewport().width()
+        f = QFont(p.font())
+        f.setPointSize(8)
+        f.setBold(True)
+        fm = QFontMetrics(f)
+        p.save()
+        p.setClipRect(QRectF(self.label_w, 0, w - self.label_w, h))
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        for a, b, name, color in flags:
+            x0, x1 = self.x_of(a), self.x_of(b)
+            if x1 < self.label_w - 200 or x0 > w:
+                continue
+            c = QColor(color)
+            if x1 - x0 >= 3:
+                band = QColor(c)
+                band.setAlpha(22)
+                p.fillRect(QRectF(x0, 0, x1 - x0, h), band)
+            p.setPen(QPen(c, 1, Qt.PenStyle.DashLine))
+            p.drawLine(QPointF(x0, 0), QPointF(x0, h))
+            if x1 - x0 >= 3:
+                p.drawLine(QPointF(x1, 0), QPointF(x1, h))
+            text = fm.elidedText(name, Qt.TextElideMode.ElideRight, 160)
+            tw = fm.horizontalAdvance(text) + 16
+            from PySide6.QtGui import QPolygonF
+
+            flag = QPolygonF([QPointF(x0, 1), QPointF(x0 + tw, 1), QPointF(x0 + tw - 5, 8.5),
+                              QPointF(x0 + tw, 16), QPointF(x0, 16)])
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(c)
+            p.drawPolygon(flag)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.setPen(QColor("#ffffff"))
+            p.setFont(f)
+            p.drawText(QRectF(x0 + 5, 1, tw - 10, 15),
+                       Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, text)
+        p.restore()
+
+    def _paint_ruler_edges(self, p: QPainter, x0: float, x1: float, a: int, b: int) -> None:
+        """While a region is dragged on the ruler: its first and last position on the
+        ruler's number row, in blue tags just outside the edges, over the tick numbers
+        there."""
+        w = self.viewport().width()
+        f = QFont(p.font())
+        f.setPointSize(8)
+        f.setBold(True)
+        fm = QFontMetrics(f)
+        p.save()
+        p.setClipRect(QRectF(self.label_w, 0, w - self.label_w, self.RULER_ZONE))
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setFont(f)
+        blue = QColor("#1f5fbf")
+        for x, text, right in ((x0, f"{a:,}", True), (x1, f"{b:,}", False)):
+            tw = fm.horizontalAdvance(text) + 10
+            box = QRectF(x - tw if right else x, 2, tw, 15)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(blue)
+            p.drawRoundedRect(box, 4, 4)
+            p.setPen(QColor("#ffffff"))
+            p.drawText(box, Qt.AlignmentFlag.AlignCenter, text)
+        p.restore()
+
     def _drop_index(self, y: float) -> int:
         """Insertion slot (0..n) for header y: before the track whose middle is below y."""
         for i, (top, h) in enumerate(self._extra_spans):
@@ -1266,6 +1410,8 @@ class GenomeTracksMixin:
     def _paint_drag_overlay(self, p: QPainter) -> None:
         """Selected ruler region, or where a dragged track would land."""
         h = self.viewport().height() + self.verticalScrollBar().value()
+        self._paint_menu_track(p)
+        self._paint_bookmarks(p, h)
         self._paint_region_selection(p, h)
         if self._ruler_drag is not None:
             x0, x1 = sorted(self._ruler_drag)
@@ -1276,14 +1422,14 @@ class GenomeTracksMixin:
             p.drawLine(QPointF(x1, 0), QPointF(x1, h))
             if self.model is not None and x1 - x0 >= 4:
                 a, b = max(0, self.bp_at(x0)), self.bp_at(x1)
-                p.drawText(QPointF(x0 + 4, self.RULER_ZONE + 12), f"{a + 1:,}–{b:,} ({b - a:,} bp)")
+                self._paint_ruler_edges(p, x0, x1, a + 1, b)
         if self._track_drag is not None and self._track_drop is not None and self._extra_spans:
             spans = self._extra_spans
             k = self._track_drop
             y = spans[k][0] if k < len(spans) else spans[-1][0] + spans[-1][1]
             top, hh = spans[self._track_drag]
             p.setClipping(False)
-            p.fillRect(QRectF(0, top, self.viewport().width(), hh), QColor(31, 95, 191, 25))
+            p.fillRect(QRectF(0, top, self.label_w - 1, hh - 1), QColor(31, 95, 191, 25))
             p.fillRect(QRectF(0, y - 1.5, self.viewport().width(), 3), QColor("#1f5fbf"))
 
 

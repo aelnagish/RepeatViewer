@@ -152,20 +152,12 @@ def test_drag_on_ruler_zooms_to_region(qapp, genome):
     QTest.mouseMove(vp, QPoint(x1, 10))
     QTest.mouseRelease(vp, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
                        QPoint(x1, 10))
-    # the region is selected, not zoomed to: its Go button zooms there
-    assert c.visible_span()[1] - c.visible_span()[0] > 9000
-    a, b = c.region_sel
-    assert abs(a - 2000) < 150 and abs(b - 4000) < 150
-    chip = c._sel_chip
-    assert chip.isVisible() and "chr1:" in chip.label.text()
-    panel.grab()
-    chip.go.click()
-    assert c.region_sel is None and not chip.isVisible()
+    # releasing zooms straight there: no selection chip, no Go
+    assert c.region_sel is None and (c._sel_chip is None or not c._sel_chip.isVisible())
     s, e = c.visible_span()
     assert abs(s - 2000) < 150 and abs(e - 4000) < 150
-    # the locus box shows the region in view
-    assert panel._goto.text().startswith("chr1:")
-    assert gt.parse_locus(panel._goto.text())[1] == s + 1
+    # the breadcrumb shows the sequence and the region in view
+    assert panel._crumbs.chrom.text() == "chr1" and panel._crumbs.range.isVisible()
     # Esc clears a selection
     c.set_region_selection(100, 200)
     QTest.keyClick(c, Qt.Key.Key_Escape)
@@ -240,25 +232,112 @@ def test_colour_by_settings_are_saved_and_drawn(qapp, genome):
     assert "Colour by" in labels and "Shade MAPQ 0 reads" in labels
 
 
-def test_side_panel_track_options(qapp, genome):
-    from repeatviewer.backends import alignment_style as style
+def test_browser_has_the_navigator_rail_not_the_side_panel(qapp, genome):
+    _session, panel = _browser(qapp, genome)
+    assert panel._rail.isVisible() and not panel._side.isVisible()
+    assert panel._crumbs.isVisible()
+    assert [c for c, _n in panel._rail.map.chroms] == ["chr1"]
+    # a click on a track name (no drag) selects the track, without a menu
+    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtTest import QTest
+
+    c = panel.canvas
+    asked = []
+    c.trackContextMenu.disconnect()
+    c.trackContextMenu.connect(lambda k, _pos: asked.append(k))
+    top0, _h0 = c._extra_spans[0]
+    QTest.mouseClick(c.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+                     QPoint(20, top0 + 5))
+    assert asked == [] and c.selected_track == 0
+    QTest.keyClick(c, Qt.Key.Key_Escape)
+    assert c.selected_track is None
+
+
+def test_rail_folds_hides_and_picks_the_density_track(qapp, genome):
+    _session, panel = _browser(qapp, genome)
+    r = panel._rail
+    # the density comes from the first annotation track unless another is picked
+    combo = r.density_track
+    assert [combo.itemText(i) for i in range(combo.count())] == ["None", "a.gff3"]
+    assert combo.currentText() == "a.gff3" and r.map.density
+    combo.setCurrentIndex(0)
+    assert r.map.density == {}
+    assert gt.read_session(_session)["density_track"] == ""
+    # sections fold, and the panel icon hides the whole rail
+    r.genome.set_open(False)
+    assert not r.genome.body.isVisible() and r.bm_section.body.isVisible()
+    r.genome.set_open(True)
+    panel._side_btn.setChecked(False)
+    assert not r.isVisible() and not panel._side.isVisible()
+    panel._side_btn.setChecked(True)
+    assert r.isVisible()
+
+
+def test_sequence_picker_is_a_short_filtered_list(qapp):
+    from repeatviewer.widgets.genome_navigator import ChromPicker
+
+    chroms = [(f"scaffold_{i}", 1000 + i) for i in range(300)]
+    picked = []
+    pk = ChromPicker(chroms, "scaffold_150")
+    pk.picked.connect(picked.append)
+    pk.show()
+    assert pk.list.height() < 400 and pk.list.count() == 300
+    assert pk.list.currentItem().data(0x0100) == "scaffold_150"
+    pk.filter.setText("_29")
+    pk._pick_first()
+    assert picked == ["scaffold_29"]
+
+
+def test_back_forward_recent_and_gene_chip(qapp, genome):
+    session, panel = _browser(qapp, genome)
+    c = panel.canvas
+    panel._nav_go("chr1", 1000, 2000, "first")
+    panel._nav_go("chr1", 5000, 6000, "second")
+    assert [p_.label for p_ in panel._recent][:2] == ["second", "first"]
+    assert panel._crumbs.back.isEnabled() and not panel._crumbs.forward.isEnabled()
+    panel._nav_back()
+    s, _e = c.visible_span()
+    assert abs(s - 1000) < 100
+    assert panel._crumbs.forward.isEnabled()
+    panel._nav_forward()
+    assert abs(c.visible_span()[0] - 5000) < 100
+    # the recent places are kept in the session
+    saved = gt.read_session(session)
+    assert [r["label"] for r in saved["recent"]][:2] == ["second", "first"]
+    # typing a feature name goes there and names the gene chip
+    panel._goto.setText("Gypsy")
+    panel._go_to()
+    assert panel._goto.text() == ""
+    assert panel._recent[0].label.startswith("Gypsy")
+
+
+def test_bookmarks_are_flagged_and_saved(qapp, genome, monkeypatch):
+    from repeatviewer.widgets import genome_navigator as nav
 
     session, panel = _browser(qapp, genome)
-    insp = panel._track_inspector
-    assert panel._sections["tracks"].isVisible()
-    assert not panel._sections["display"].isVisible()
-    assert insp.track.count() == 2
-    assert panel.canvas.tracks[insp.current()].name == "r.paf"   # alignment track first
-    insp.color.setCurrentIndex(insp.color.findData(style.COLOR_TAG))
-    assert insp.tag.isVisible()
-    t = panel.canvas.tracks[insp.current()]
-    assert t.settings["color_by"] == style.COLOR_TAG and t.settings["color_tag"] == "HP"
-    insp.rows.setCurrentIndex(insp.rows.findData(50))
-    assert t.settings["max_rows"] == 50
-    insp.track.setCurrentIndex(0)                                  # the annotation track
-    assert not insp.color.isVisible() and insp.mode.isVisible()
-    saved = gt.read_session(session)["tracks"]
-    assert next(s for s in saved if s["path"].endswith("r.paf"))["settings"]["max_rows"] == 50
+    c = panel.canvas
+    c.show_range(2000, 3000)
+    monkeypatch.setattr(nav.BookmarkDialog, "exec", lambda self: 1)
+    c.set_region_selection(2100, 2200)
+    panel._add_bookmark()
+    assert len(panel._bookmarks) == 1
+    bm = panel._bookmarks[0]
+    assert (bm.chrom, bm.start, bm.end) == ("chr1", 2100, 2200)
+    assert c.bookmark_flags and c.bookmark_flags[0][:2] == (2100, 2200)
+    c.viewport().grab()                       # the flag and its band draw
+    saved = gt.read_session(session)
+    assert saved["bookmarks"][0]["start"] == 2100
+    # rewriting the tracks keeps the bookmarks
+    panel._remember_tracks()
+    assert gt.read_session(session)["bookmarks"][0]["start"] == 2100
+    panel._delete_bookmark(0)
+    assert gt.read_session(session)["bookmarks"] == [] and not c.bookmark_flags
+    # B adds one at the middle of the view
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    QTest.keyClick(c, Qt.Key.Key_B)
+    assert len(panel._bookmarks) == 1 and panel._bookmarks[0].end - panel._bookmarks[0].start == 1
 
 
 def test_mismatch_details_draw(qapp, genome, tmp_path):
@@ -597,3 +676,133 @@ def test_dragging_a_track_near_the_bottom_scrolls(qapp, genome, tmp_path):
     assert v.value() > 0
     QTest.mouseRelease(vp, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
                        QPoint(20, vp.height() - 5))
+
+
+def test_track_is_highlighted_while_its_menu_is_open(qapp, genome, monkeypatch):
+    from PySide6.QtCore import QPoint
+    from PySide6.QtWidgets import QMenu
+
+    _session, panel = _browser(qapp, genome)
+    c = panel.canvas
+    seen = []
+
+    class _Menu(QMenu):
+        def exec(self, *_a):
+            seen.append(c.menu_track)
+
+    monkeypatch.setattr(cv, "QMenu", _Menu)
+    panel._track_menu(1, QPoint(0, 0))
+    assert seen == [1] and c.menu_track is None
+    c.set_menu_track(0)
+    c.viewport().grab()                       # the highlight draws
+    c.set_menu_track(None)
+
+
+def test_frame_codons_on_both_strands():
+    from repeatviewer.widgets.contig_view import frame_codons
+
+    ref = "CCATGAAATAGCC"
+    assert frame_codons(ref, "+", 2, 0, 13) == [(2, "M"), (5, "K"), (8, "*")]
+    # reverse complement GGCTATTTCATGG read from the end: G Y F M
+    assert frame_codons(ref, "−", 0, 0, 13) == [(1, "M"), (4, "F"), (7, "Y"), (10, "G")]
+
+
+def test_reference_menu_adds_reverse_complement_and_translation(qapp, genome):
+    _session, panel = _browser(qapp, genome)
+    c = panel.canvas
+    before = c._track_y()["reads"]
+    panel._set_sequence_rows(revcomp=True, frames="all")
+    ys = c._track_y()
+    assert "revcomp" in ys and "frames" in ys and len(c.translation_frames()) == 6
+    assert ys["reads"] > before
+    c.show_range(100, 160)                    # letters and amino acids draw
+    c.viewport().grab()
+    c.show_range(0, 9000)                     # small boxes for starts / stops only
+    c.viewport().grab()
+    assert c.complement_seq()[:4] == c.model.reference[:4].translate(
+        str.maketrans("ACGT", "TGCA"))
+    panel._set_sequence_rows(revcomp=False, frames="off")
+    assert c._track_y()["reads"] == before
+
+
+def test_hover_text_stays_narrow():
+    from repeatviewer.widgets import genome_tracks_view as gtv
+
+    long = ",".join(f"InterPro:IPR{i:06d}" for i in range(40))
+    info = f"geneID BLGH_02691, Dbxref {gtv._short(long, gtv.TIP_VALUE_CHARS)}, Ontology {long}"
+    rows = gtv._wrap(info)
+    assert len(rows) <= gtv.TIP_INFO_LINES
+    assert all(len(r) <= gtv.TIP_LINE_CHARS for r in rows)
+    assert rows[-1].endswith("…")
+    assert gtv._short("short", 10) == "short"
+
+
+def test_bookmarks_from_bed_and_back():
+    from repeatviewer.widgets.genome_navigator import (
+        Bookmark,
+        bookmarks_from_bed,
+        bookmarks_to_bed,
+    )
+
+    text = (
+        "track name=x itemRgb=On\n"
+        "# comment\n"
+        "chr1\t99\t200\n"                                   # BED3: no name -> locus
+        "chr1\t10\t20\tTE1\t0\t+\t10\t20\t0,128,255\n"       # BED9 colour
+        "chr1\t30\t40\tLTR\tGypsy element near gene\n"         # description in col 5
+        "chrX\t1\t5\tnope\n"                                  # not in this genome
+        "chr1 500 20000 tail\n"                                 # spaces; end clipped
+        "bad line\n")
+    bms, skipped = bookmarks_from_bed(text, {"chr1": 10000})
+    assert [b.name for b in bms] == ["chr1:100-200", "TE1", "LTR", "tail"]
+    assert (bms[0].start, bms[0].end) == (99, 200)
+    assert bms[1].color == "#0080ff"
+    assert bms[2].note == "Gypsy element near gene"
+    assert bms[3].end == 10000
+    assert len(skipped) == 2 and "chrX" in skipped[0]
+    out = bookmarks_to_bed(bms + [Bookmark("p", "chr1", 5, 6, note="a\tb")])
+    again, sk = bookmarks_from_bed(out)
+    assert not sk
+    assert [(b.chrom, b.start, b.end, b.name) for b in again] == [
+        (b.chrom, b.start, b.end, b.name) for b in bms] + [("chr1", 5, 6, "p")]
+    assert again[1].color == "#0080ff" and again[2].note == "Gypsy element near gene"
+    assert again[-1].note == "a b"
+
+
+def test_import_bookmarks_from_bed_file(qapp, genome, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: None)
+    _s, panel = _browser(qapp, genome)
+    bed = tmp_path / "marks.bed"
+    bed.write_text("chr1\t100\t300\tmyTE\t0\t-\t100\t300\t255,0,0\n")
+    panel._import_bookmarks(str(bed))
+    assert [b.name for b in panel._bookmarks] == ["myTE"]
+    assert panel._rail.bookmarks[0].color == "#ff0000"
+    panel._import_bookmarks(str(bed))           # the same line twice: not duplicated
+    assert len(panel._bookmarks) == 1
+    out = tmp_path / "out.bed"
+    panel._export_bookmarks(str(out))
+    assert "chr1\t100\t300\tmyTE" in out.read_text()
+
+
+
+def test_no_read_hover_when_the_view_is_too_wide_for_reads(qapp, genome, tmp_path):
+    from PySide6.QtCore import QPointF
+
+    from repeatviewer.widgets import genome_tracks_view as gtv
+
+    _session, panel = _open_bam(qapp, genome, _snp_bam(tmp_path))
+    c = panel.canvas
+    t = c.tracks[0]
+    c.show_range(100, 220)
+    c.viewport().grab()
+    top, _h = c._extra_spans[0]
+    yoff = next(y for _it, y in c._placed(t, 150, 151) if y is not None)
+    y = top + gtv.ALN_COV_H + 2 + yoff + 1 - c.verticalScrollBar().value()
+    pos = QPointF(c.x_of(150) + 1, y)
+    assert c.track_items_at(pos)[1]
+    # the view is wider than the read window: only "Zoom in" is drawn, no hover
+    t.read_window = 50
+    c.viewport().grab()
+    assert c.track_items_at(pos)[1] == []

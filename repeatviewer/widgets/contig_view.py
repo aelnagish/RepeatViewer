@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QAbstractScrollArea,
     QApplication,
     QComboBox,
+    QDialog,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -52,6 +53,8 @@ RULER_H = 24
 TRACKPAD_V_GAIN = 3.0     # genome browser: trackpad up/down speed
 FEATURE_ROW_H = 14
 TRACK_H = 16
+FRAME_H = 13              # one translation frame under the reference (genome browser)
+TRANSLATION_MAX_BP = 60_000   # wider views: no translation (zoom in)
 COVERAGE_H = 30
 IDENTITY_H = 6
 LOGO_H = 34
@@ -537,6 +540,42 @@ class ContigModel:
 # --------------------------------------------------------------------------
 
 
+_CODONS = {
+    a + b + c: aa for (a, b, c), aa in zip(
+        ((x, y, z) for x in "TCAG" for y in "TCAG" for z in "TCAG"),
+        "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG", strict=True)}
+_COMPLEMENT = str.maketrans("ACGTUNacgtunRYKMSWBDHVrykmswbdhv",
+                            "TGCAANtgcaanYRMKSWVHDByrmkswvhdb")
+
+
+def translate_codons(seq: str) -> str:
+    """Amino acids (one letter, * for stop, X for unknown) of seq read in threes."""
+    seq = seq.upper()
+    get = _CODONS.get
+    return "".join(get(seq[i:i + 3], "X") for i in range(0, len(seq) - 2, 3))
+
+
+def frame_codons(ref: str, strand: str, k: int, bp0: int, bp1: int) -> list[tuple[int, str]]:
+    """(start of the codon on the forward strand, amino acid) of frame k (0-2) on
+    strand "+" or "−", for the codons touching [bp0, bp1). Frame +k starts at base k;
+    frame −k starts k bases from the end, reading the reverse complement."""
+    n = len(ref)
+    if strand == "+":
+        first = k + max(0, (bp0 - k) // 3) * 3
+        last = min(n, bp1 + 3)
+        last = first + ((last - first) // 3) * 3
+        aas = translate_codons(ref[first:last])
+        return list(zip(range(first, last, 3), aas, strict=False))
+    end0 = n - k                         # codons end at n - k, n - k - 3, …
+    hi = end0 - max(0, (end0 - min(n, bp1 + 3)) // 3) * 3
+    lo = max(0, bp0 - 3)
+    lo = hi - ((hi - lo) // 3) * 3
+    if hi - lo < 3:
+        return []
+    aas = translate_codons(ref[lo:hi].translate(_COMPLEMENT)[::-1])[::-1]
+    return list(zip(range(lo, hi, 3), aas, strict=False))
+
+
 def _mono(size: int) -> QFont:
     font = QFont()
     font.setFamilies(["Menlo", "Monaco", "Consolas", "Courier New", "monospace"])
@@ -569,9 +608,11 @@ class ContigCanvas(GenomeTracksMixin, QAbstractScrollArea):
     labelWidthChanged = Signal(int)   # the name column was resized by the user
     readContextMenu = Signal(int, object)  # sequence index (-1: none), global QPoint
     trackContextMenu = Signal(int, object)  # extra track index, global QPoint
+    sequenceContextMenu = Signal(int, object)  # bp clicked on the reference rows, global QPoint
     tracksReordered = Signal()              # a track was dragged to a new place
     trackItemClicked = Signal(int, object, object)  # track index, item, global QPoint
     regionSelectionChanged = Signal()       # a region was selected on the ruler, or cleared
+    bookmarkRequested = Signal()            # B pressed in the genome browser
 
     HIGHLIGHT_DIFF = "diff"
     HIGHLIGHT_ALL = "all"
@@ -606,6 +647,10 @@ class ContigCanvas(GenomeTracksMixin, QAbstractScrollArea):
         self.wrap = False
         self._wrap_origin: int | None = None      # first base of the block being painted
         self.one_per_row = True
+        # genome browser: rows under the reference
+        self.seq_revcomp = False
+        self.seq_frames = "off"            # off / forward / reverse / all
+        self._comp_cache: tuple[int, str] | None = None
         self.selected = -1
         self.mark_bp: int | None = None     # current difference column (0-based)
         self.sort_key = SORT_START
@@ -947,6 +992,75 @@ class ContigCanvas(GenomeTracksMixin, QAbstractScrollArea):
 
     # ---------------------------------------------------------------- geometry
 
+    # ---------------------------------------------------------------- reference rows
+
+    def translation_frames(self) -> list[tuple[str, int]]:
+        """[(strand, frame)] shown under the reference: + frames 0..2, − frames 0..2."""
+        m = self.model
+        if m is None or not m.browser or not m.reference:
+            return []
+        fwd = [("+", k) for k in range(3)]
+        rev = [("−", k) for k in range(3)]
+        return {"forward": fwd, "reverse": rev, "all": fwd + rev}.get(self.seq_frames, [])
+
+    def set_sequence_rows(self, revcomp: bool | None = None, frames: str | None = None) -> None:
+        if revcomp is not None:
+            self.seq_revcomp = bool(revcomp)
+        if frames is not None:
+            self.seq_frames = frames
+        self._update_scrollbars()
+        self.viewport().update()
+        self.viewChanged.emit()
+
+    def complement_seq(self) -> str:
+        """The reference's complement base by base (read right to left it is the
+        reverse complement), cached for the sequence in view."""
+        m = self.model
+        ref = m.reference if m is not None else ""
+        key = id(ref)
+        if self._comp_cache is None or self._comp_cache[0] != key:
+            self._comp_cache = (key, ref.translate(_COMPLEMENT))
+        return self._comp_cache[1]
+
+    def _paint_translation(self, p: QPainter, y: int, bp0: int, bp1: int, fg: QColor) -> None:
+        """Amino acids of each frame as boxes three bases wide: M green, stops red, the
+        others in two alternating greys; letters when there is room. Frame +k starts
+        at base k of the sequence, frame −k reads the reverse strand from its end."""
+        m = self.model
+        ref = m.reference
+        frames = self.translation_frames()
+        if bp1 - bp0 > TRANSLATION_MAX_BP:
+            p.setPen(QColor("#9aa3ad"))
+            f = QFont(p.font())
+            f.setPointSize(8)
+            p.setFont(f)
+            p.drawText(QRectF(self.x_of(bp0) + 8, y, 600, FRAME_H * len(frames)),
+                       Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                       f"Zoom in below {TRANSLATION_MAX_BP // 1000} kb to see the translation")
+            return
+        cw = 3 * self.ppb
+        letters = cw >= 8
+        font = _mono(int(min(10, max(7, cw * 0.45))))
+        p.setFont(font)
+        green, red = QColor("#4caf50"), QColor("#d9534f")
+        greys = (QColor("#e6eaef"), QColor("#d6dce4"))
+        dark = QColor("#3a3f47")
+        for row, (strand, k) in enumerate(frames):
+            top = y + row * FRAME_H
+
+            for s0, aa in frame_codons(ref, strand, k, bp0, bp1):
+                x = self.x_of(s0)
+                color = green if aa == "M" else red if aa == "*" else greys[(s0 // 3) % 2]
+                if not letters and aa not in "M*":
+                    if cw < 1.0:
+                        continue            # too small: only starts and stops
+                p.fillRect(QRectF(x, top + 1, max(1.0, cw - (0.5 if cw > 3 else 0)),
+                                  FRAME_H - 2), color)
+                if letters:
+                    p.setPen(QColor("#ffffff") if aa in "M*" else dark)
+                    p.drawText(QRectF(x, top, cw, FRAME_H), Qt.AlignmentFlag.AlignCenter, aa)
+        del fg
+
     def letters(self) -> bool:
         m = self.model
         return self.ppb >= LETTER_PPB and bool(m and (m.detailed or (m.browser and m.reference)))
@@ -986,6 +1100,16 @@ class ContigCanvas(GenomeTracksMixin, QAbstractScrollArea):
         if detailed or (m and m.browser and m.reference):
             out["reference"] = y
             y += TRACK_H
+            if m.browser and not detailed:
+                # optional rows under the reference: its reverse complement and the
+                # amino-acid translation in 3 or 6 frames (right-click the sequence)
+                if self.seq_revcomp:
+                    out["revcomp"] = y
+                    y += TRACK_H
+                frames = self.translation_frames()
+                if frames:
+                    out["frames"] = y
+                    y += FRAME_H * len(frames) + 2
         # genome-browser tracks (annotation / alignment files added by the user)
         spans = []
         y += 2
@@ -1388,6 +1512,20 @@ class ContigCanvas(GenomeTracksMixin, QAbstractScrollArea):
         return sum(1 for r in self.model.reads if r.user_hidden) if self.model else 0
 
     def contextMenuEvent(self, event) -> None:  # noqa: N802
+        m = self.model
+        if m is not None and m.browser and event.pos().x() >= 0:
+            y = self._header_y(QPointF(event.pos()))
+            ys = self._track_y()
+            if y is not None and "reference" in ys:
+                end = ys.get("frames", ys.get("revcomp", ys["reference"]))
+                end += (FRAME_H * len(self.translation_frames()) + 2 if "frames" in ys
+                        else TRACK_H)
+                if ys["reference"] <= y < end:
+                    bp = self.bp_at_pos(QPointF(event.pos())) \
+                        if event.pos().x() >= self.label_w else -1
+                    self.sequenceContextMenu.emit(bp, event.globalPos())
+                    event.accept()
+                    return
         if self.tracks:
             y = self._header_y(QPointF(event.pos()))
             k = self.track_at_y(y) if y is not None else -1
@@ -1712,6 +1850,11 @@ class ContigCanvas(GenomeTracksMixin, QAbstractScrollArea):
         elif "reference" in ys:
             self._paint_sequence_track(p, ys["reference"], m.reference, bp0, bp1, letters,
                                        compare="", fg=fg, consensus_track=False)
+            if "revcomp" in ys:
+                self._paint_sequence_track(p, ys["revcomp"], self.complement_seq(), bp0, bp1,
+                                           letters, compare="", fg=fg, consensus_track=False)
+            if "frames" in ys:
+                self._paint_translation(p, ys["frames"], bp0, bp1, fg)
         self._paint_extra_tracks(p, bp0, bp1, w)
         if "logo" in ys:
             self._paint_logo(p, ys["logo"], bp0, bp1, fg)
@@ -1774,6 +1917,19 @@ class ContigCanvas(GenomeTracksMixin, QAbstractScrollArea):
             ref_text = m.ref_id if m.browser else f"Sequence · {m.ref_id}"
             label(ys["reference"], fm_ref.elidedText(ref_text,
                                                      Qt.TextElideMode.ElideMiddle, self.label_w - 12))
+            if "revcomp" in ys:
+                label(ys["revcomp"], "reverse complement")
+            if "frames" in ys:
+                small = QFont(label_font)
+                small.setPointSize(8)
+                p.setFont(small)
+                for k, (strand, frame) in enumerate(self.translation_frames()):
+                    p.setPen(mid)
+                    p.drawText(QRectF(6, ys["frames"] + k * FRAME_H, self.label_w - 10, FRAME_H),
+                               Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                               f"translation {strand}{frame + 1}")
+                p.setFont(label_font)
+                p.setPen(fg)
         self._paint_extra_labels(p, fg, mid)
         p.setFont(label_font)
         if "logo" in ys:
@@ -2492,7 +2648,7 @@ class ContigOverview(QWidget):
         m = self.canvas.model
         return self._track_w() / max(1, m.length if m else 1)
 
-    SLIM_HEIGHT = 18     # genome browser: just the sequence and where the view is
+    SLIM_HEIGHT = 26     # genome browser: just the sequence and where the view is
 
     def sync_height(self) -> None:
         m = self.canvas.model
@@ -2514,18 +2670,18 @@ class ContigOverview(QWidget):
                    f"{m.ref_id} · {text}")
         x0, sc = self._x0(), self._scale()
         full = m.length * sc
-        p.fillRect(QRectF(x0, h / 2 - 2, full, 4), pal.color(pal.ColorRole.Mid).lighter(130))
+        p.fillRect(QRectF(x0, h / 2 - 4, full, 8), QColor("#c9d1da"))
         c = self.canvas
         sel = getattr(c, "region_sel", None)
         if sel is not None:
             a, b = x0 + sel[0] * sc, x0 + sel[1] * sc
-            p.fillRect(QRectF(a, 2, max(2.0, b - a), h - 4), QColor(31, 95, 191, 60))
+            p.fillRect(QRectF(a, h / 2 - 6, max(2.0, b - a), 12), QColor(31, 95, 191, 60))
         if c.ppb > 0:
             vis0, vis1 = c.visible_span() or (0, m.length)
             left = x0 + vis0 * sc
             right = max(left + 3.0, x0 + vis1 * sc)
             left, right = max(x0, min(left, x0 + full - 3.0)), min(x0 + full, right)
-            box = QRectF(left, 2.5, right - left, h - 5)
+            box = QRectF(left, h / 2 - 6, right - left, 12)   # just taller than the bar
             p.setBrush(QColor(214, 69, 47, 40))
             p.setPen(QPen(QColor("#d6452f"), 1.5))
             p.drawRect(box)
@@ -2941,6 +3097,12 @@ class ContigViewPanel(QWidget):
         bl = QHBoxLayout(bar)
         bl.setContentsMargins(6, 3, 6, 3)
         bl.setSpacing(4)
+        from repeatviewer.widgets.genome_navigator import BreadcrumbBar
+
+        # genome browser: ‹ › chromosome › range › gene (instead of the picker)
+        self._crumbs = BreadcrumbBar(bar)
+        self._crumbs.hide()
+        bl.addWidget(self._crumbs)
         bl.addWidget(self._contig)
         self._span_label = QLabel(self)
         self._span_label.setToolTip("Width of the region in view")
@@ -3137,8 +3299,15 @@ class ContigViewPanel(QWidget):
         self._view_split = QSplitter(Qt.Orientation.Horizontal, self)
         self._view_split.addWidget(view_area)
         self._view_split.addWidget(self._side)
+        from repeatviewer.widgets.genome_navigator import NavigatorRail
+
+        # genome browser: chromosomes, bookmarks and recent places instead of options
+        self._rail = NavigatorRail(self)
+        self._rail.hide()
+        self._view_split.addWidget(self._rail)
         self._view_split.setStretchFactor(0, 1)
         self._view_split.setStretchFactor(1, 0)
+        self._view_split.setStretchFactor(2, 0)
         self._view_split.setCollapsible(0, False)
         self._view_split.setChildrenCollapsible(False)
         self._view_split.splitterMoved.connect(self._queue_nav_sync)
@@ -3193,6 +3362,7 @@ class ContigViewPanel(QWidget):
         self.canvas.set_wrap(self._wrap.isChecked())
         self._on_highlight()
         self._apply_annotations()
+        self._setup_navigator()
         if path is not None:
             self.load(path)
 
@@ -3319,32 +3489,45 @@ class ContigViewPanel(QWidget):
         pop.popup(btn.mapToGlobal(QPoint(btn.width() - size.width(), btn.height() + 4)))
 
     def _place_locus_box(self, browser: bool) -> None:
-        """Genome browser: the Go to box sits next to the sequence picker and always
-        shows the region in view (IGV's locus box); type a region or a name to go."""
-        bl = self._nav_bar.layout()
-        nr = self._nav_right.layout()
+        """Genome browser: the breadcrumb (‹ › chromosome › range › gene) shows where
+        the view is, the search box on the right goes to a gene or a position, and the
+        navigator rail replaces the options panel."""
         goto = self._goto
-        if browser and getattr(self, "_locus_mode", False) is False:
-            nr.removeWidget(goto)
-            bl.insertWidget(1, goto)
+        self._nav_mode = browser
+        self._crumbs.setVisible(browser)
+        self._span_label.hide()
+        # the panel icon shows / hides the navigator rail in the browser
+        self._side_btn.blockSignals(True)
+        self._side_btn.setChecked(_read_bool("rail_panel", True) if browser
+                                  else _read_bool("side_panel", True))
+        self._side_btn.blockSignals(False)
+        self._side_btn.setToolTip("Show or hide the navigator (genome and bookmarks)"
+                                  if browser else "Show or hide the options panel")
+        self._rail.setVisible(browser and self._side_btn.isChecked())
+        if browser:
+            self._side.setVisible(False)
             goto.setFixedWidth(300)
-            goto.setPlaceholderText("Region or name, e.g. chr1:10,000-20,000 or a gene")
-            goto.setToolTip("The region in view. Type a region (chr1:10,000-20,000), a "
-                            "position or a feature name and press Enter to go there.")
-            self._span_label.show()
-            self._locus_mode = True
-        elif not browser and getattr(self, "_locus_mode", False):
-            bl.removeWidget(goto)
-            nr.insertWidget(0, goto, 1)
+            goto.setPlaceholderText("Go to gene or position…")
+            goto.setToolTip("Type a gene or feature name, a position (1,204,800) or a region "
+                            "(chr4:2,100,000-2,180,000) and press Enter.")
+            sizes = self._view_split.sizes()
+            if len(sizes) == 3 and sizes[2] < 200:
+                from repeatviewer.widgets.genome_navigator import RAIL_W
+
+                total = sum(sizes) or self.width()
+                self._view_split.setSizes([max(0, total - RAIL_W), 0, RAIL_W])
+        else:
             goto.setMinimumWidth(80)
             goto.setMaximumWidth(16777215)
             goto.setPlaceholderText("Go to, e.g. 90-130 or a feature name")
-            self._span_label.hide()
-            self._locus_mode = False
-        self._contig.setVisible(browser or self._contig.count() > 1)
+            self._side.setVisible(self._side_btn.isChecked())
+        self._contig.setVisible(not browser and self._contig.count() > 1)
         self._sync_locus()
 
     def _sync_locus(self, *_args) -> None:
+        if getattr(self, "_nav_mode", False):
+            self._nav_sync()
+            return
         if not getattr(self, "_locus_mode", False):
             return
         m = self.canvas.model
@@ -3364,6 +3547,10 @@ class ContigViewPanel(QWidget):
         """Line Go to up with the options panel: its left edge at the section titles,
         the group ending at the bar's right margin. Without the panel: natural size."""
         right = self._nav_right
+        if getattr(self, "_nav_mode", False):
+            right.setMinimumWidth(0)
+            right.setMaximumWidth(16777215)
+            return
         locus = getattr(self, "_locus_mode", False)     # the box is on the left then
         if not self._side.isVisible() or self._side.width() <= 0:
             right.setMinimumWidth(0)
@@ -3394,6 +3581,11 @@ class ContigViewPanel(QWidget):
         self._queue_nav_sync()
 
     def _set_side_visible(self, on: bool) -> None:
+        if getattr(self, "_nav_mode", False):
+            self._side.setVisible(False)       # the genome browser has the rail instead
+            self._rail.setVisible(on)
+            _write("rail_panel", bool(on))
+            return
         self._side.setVisible(on)
         _write("side_panel", bool(on))
         if on:
@@ -3796,7 +3988,9 @@ class ContigViewPanel(QWidget):
             return
         self._show_view()
         self.canvas.show_range(start - 1, min(end, m.length))
-        if getattr(self, "_locus_mode", False):
+        if getattr(self, "_nav_mode", False):
+            self._nav_arrived(text)
+        elif getattr(self, "_locus_mode", False):
             self.canvas.setFocus()            # the box then shows the region in view
             self._sync_locus()
         self._sync_difference_label()
@@ -4271,6 +4465,7 @@ class ContigViewPanel(QWidget):
         self._build_files_menu()
         self._fill_unused()
         self._set_browser_tabs(True)
+        self._nav_load_session(session)
         if self._tabs.currentWidget() is not self._view_page:
             self._tabs.setCurrentWidget(self._view_page)
         self.canvas.set_tracks([])
@@ -4316,6 +4511,8 @@ class ContigViewPanel(QWidget):
             for i, t in enumerate(self.canvas.tracks):
                 sub = menu.addMenu(t.name)
                 self._fill_track_menu(sub, i)
+                sub.aboutToShow.connect(lambda k=i: self.canvas.set_menu_track(k))
+                sub.aboutToHide.connect(lambda: self.canvas.set_menu_track(None))
             menu.addSeparator()
             menu.addAction("Remove all tracks", self._remove_all_tracks)
         if self._data.get("contigs"):
@@ -4599,7 +4796,12 @@ class ContigViewPanel(QWidget):
     def _track_menu(self, i: int, global_pos) -> None:
         menu = QMenu(self)
         self._fill_track_menu(menu, i)
-        menu.exec(global_pos)
+        # the track the menu is for stays highlighted while it is open
+        self.canvas.set_menu_track(i)
+        try:
+            menu.exec(global_pos)
+        finally:
+            self.canvas.set_menu_track(None)
 
     def _add_track_dialog(self) -> None:
         from PySide6.QtWidgets import QFileDialog
@@ -4793,13 +4995,459 @@ class ContigViewPanel(QWidget):
                 pad = max(20, (it.end - it.start) // 10)
                 self.canvas.show_range(max(0, it.start - pad), min(m.length, it.end + pad))
                 self._goto.setToolTip(f"{it.name}: {chrom}:{it.start + 1:,}-{it.end:,}")
-                if getattr(self, "_locus_mode", False):
+                if getattr(self, "_nav_mode", False):
+                    self._nav_arrived(it.name or text)
+                elif getattr(self, "_locus_mode", False):
                     self.canvas.setFocus()
                     self._sync_locus()
                 return True
         self._goto.setToolTip(f"No position or feature named \"{text}\".")
         self._goto.selectAll()
         return True
+
+    # ---------------------------------------------------------------- genome browser navigation
+
+    def _setup_navigator(self) -> None:
+        from PySide6.QtCore import QTimer
+        from PySide6.QtGui import QKeySequence, QShortcut
+
+        from repeatviewer.widgets.genome_navigator import History
+
+        self._nav_history = History()
+        self._nav_applying = False
+        self._bookmarks: list = []
+        self._recent: list = []
+        self._nav_density_key = None
+        # the view has to rest a moment before it is a stop for Back
+        self._nav_timer = QTimer(self)
+        self._nav_timer.setSingleShot(True)
+        self._nav_timer.setInterval(700)
+        self._nav_timer.timeout.connect(self._nav_record)
+        c = self._crumbs
+        c.backRequested.connect(self._nav_back)
+        c.forwardRequested.connect(self._nav_forward)
+        c.chromRequested.connect(lambda chrom: self._nav_go(chrom, 0, 0, chrom))
+        c.rangeClicked.connect(self._nav_edit_range)
+        c.geneClicked.connect(self._nav_zoom_gene)
+        r = self._rail
+        r.goRequested.connect(self._nav_go)
+        r.addBookmarkRequested.connect(self._add_bookmark)
+        r.editBookmarkRequested.connect(self._edit_bookmark)
+        r.deleteBookmarkRequested.connect(self._delete_bookmark)
+        r.importBookmarksRequested.connect(self._import_bookmarks)
+        r.exportBookmarksRequested.connect(self._export_bookmarks)
+        r.densityTrackChanged.connect(self._set_density_track)
+        r.sectionToggled.connect(lambda key, on: _write(f"rail_{key}", bool(on)))
+        r.genome.set_open(_read_bool("rail_genome", True))
+        r.bm_section.set_open(_read_bool("rail_bookmarks", True))
+        self._density_track = None             # None: the first annotation track
+        self.canvas.bookmarkRequested.connect(self._add_bookmark)
+        self.canvas.sequenceContextMenu.connect(self._sequence_menu)
+        self.canvas.seq_revcomp = _read_bool("seq_revcomp", False)
+        frames = _read_text("seq_frames", "off")
+        self.canvas.seq_frames = frames if frames in ("off", "forward", "reverse", "all") \
+            else "off"
+        for keys, slot in ((("Ctrl+[", QKeySequence.StandardKey.Back), self._nav_back),
+                           (("Ctrl+]", QKeySequence.StandardKey.Forward), self._nav_forward)):
+            for k in keys:
+                sc = QShortcut(QKeySequence(k), self)
+                sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+                sc.activated.connect(lambda s_=slot: s_() if self._nav_mode_on() else None)
+
+    def _sequence_menu(self, bp: int, global_pos) -> None:
+        """Right-click on the reference: its reverse complement and translation rows,
+        and copying the bases in view (or of the selected region)."""
+        c = self.canvas
+        m = c.model
+        if m is None:
+            return
+        menu = QMenu(self)
+        rc = menu.addAction("Show reverse complement",
+                            lambda on: self._set_sequence_rows(revcomp=on))
+        rc.setCheckable(True)
+        rc.setChecked(c.seq_revcomp)
+        tr = menu.addMenu("Show translation")
+        for label, key in (("Off", "off"), ("Forward frames (+1, +2, +3)", "forward"),
+                           ("Reverse frames (−1, −2, −3)", "reverse"),
+                           ("All six frames", "all")):
+            act = tr.addAction(label, lambda k=key: self._set_sequence_rows(frames=k))
+            act.setCheckable(True)
+            act.setChecked(c.seq_frames == key)
+        menu.addSeparator()
+        sel = c.region_sel
+        span = c.visible_span()
+        if sel:
+            a, b, what = int(sel[0]), int(sel[1]), "selected region"
+        elif span is not None:
+            a, b, what = span[0], min(span[1], m.length), "view"
+        else:
+            a = b = 0
+            what = ""
+        ref = m.reference or ""
+        if ref and b > a:
+            where = f"{m.ref_id}:{a + 1}-{b}"
+            menu.addAction(f"Copy sequence of the {what} ({b - a:,} bp)",
+                           lambda: QApplication.clipboard().setText(
+                               f">{where}\n{ref[a:b]}\n"))
+            from repeatviewer.backends.alignment_style import reverse_complement
+
+            menu.addAction(f"Copy reverse complement of the {what}",
+                           lambda: QApplication.clipboard().setText(
+                               f">{where}(-)\n{reverse_complement(ref[a:b])}\n"))
+        if bp >= 0:
+            menu.addSeparator()
+            act = menu.addAction(f"Position {bp + 1:,}")
+            act.setEnabled(False)
+        menu.exec(global_pos)
+
+    def _set_sequence_rows(self, revcomp: bool | None = None, frames: str | None = None) -> None:
+        self.canvas.set_sequence_rows(revcomp=revcomp, frames=frames)
+        if revcomp is not None:
+            _write("seq_revcomp", bool(revcomp))
+        if frames is not None:
+            _write("seq_frames", frames)
+
+    def _nav_mode_on(self) -> bool:
+        return bool(getattr(self, "_nav_mode", False))
+
+    def _nav_chroms(self) -> list[tuple[str, int]]:
+        out = []
+        for i in range(self._contig.count()):
+            name = str(self._contig.itemData(i))
+            e = (self._fai or {}).get(name)
+            out.append((name, int(e.length) if e is not None else 0))
+        return out
+
+    def _nav_load_session(self, session: dict) -> None:
+        from repeatviewer.widgets.genome_navigator import Bookmark, History, Place
+
+        self._bookmarks = [b for b in (Bookmark.from_json(d) for d in
+                                       session.get("bookmarks", []) or []) if b is not None]
+        self._recent = [p_ for p_ in (Place.from_json(d) for d in
+                                      session.get("recent", []) or []) if p_ is not None]
+        self._nav_history = History()
+        self._nav_density_key = None
+        dt = session.get("density_track")
+        self._density_track = dt if isinstance(dt, str) else None
+        chroms = self._nav_chroms()
+        self._rail.set_chroms(chroms)
+        self._rail.set_density({})
+        self._crumbs.set_chroms(chroms)
+        self._rail.set_bookmarks(self._bookmarks)
+        self._rail.set_recent(self._recent)
+        self._nav_flags()
+
+    def _nav_select_chrom(self, chrom: str) -> bool:
+        if self.canvas.model is not None and self.canvas.model.ref_id == chrom:
+            return True
+        for i in range(self._contig.count()):
+            if str(self._contig.itemData(i)) == chrom:
+                self._contig.setCurrentIndex(i)
+                return True
+        return False
+
+    def _nav_go(self, chrom: str, a: int, b: int, label: str = "") -> None:
+        """Go to chrom:[a, b) (b <= a: the whole sequence) and list it under Recent."""
+        if not self._nav_select_chrom(chrom):
+            return
+        m = self.canvas.model
+        if m is None:
+            return
+        if b <= a:
+            a, b = 0, m.length
+        self._show_view()
+        self.canvas.show_range(max(0, a), min(m.length, b))
+        self._nav_arrived(label)
+
+    def _nav_arrived(self, label: str = "") -> None:
+        """After a deliberate jump: the box empties, the place goes to Recent and is a
+        stop for Back straight away."""
+        from repeatviewer.widgets.genome_navigator import MAX_RECENT, Place
+
+        self.canvas.setFocus()
+        self._goto.clear()
+        m = self.canvas.model
+        span = self.canvas.visible_span() if m is not None else None
+        if m is not None and span is not None:
+            a, b = span[0], min(span[1], m.length)
+            label = (label or "").strip() or f"{m.ref_id}:{(a + b) // 2 + 1:,}"
+            self._recent = [Place(label, m.ref_id, a, b)] + [
+                p_ for p_ in self._recent if p_.label != label][:MAX_RECENT - 1]
+            self._rail.set_recent(self._recent)
+            self._save_nav()
+        self._nav_record()
+        self._nav_sync()
+
+    def _nav_record(self) -> None:
+        self._nav_timer.stop()
+        m = self.canvas.model
+        span = self.canvas.visible_span() if m is not None else None
+        if m is None or span is None or self._nav_applying:
+            return
+        self._nav_history.record(m.ref_id, span[0], min(span[1], m.length))
+        h = self._nav_history
+        self._crumbs.set_history(h.can_back(), h.can_forward())
+
+    def _nav_apply(self, stop) -> None:
+        if stop is None:
+            return
+        chrom, a, b = stop
+        self._nav_applying = True
+        try:
+            if self._nav_select_chrom(chrom) and self.canvas.model is not None:
+                self.canvas.show_range(a, b)
+        finally:
+            self._nav_applying = False
+        self._nav_timer.stop()
+        h = self._nav_history
+        self._crumbs.set_history(h.can_back(), h.can_forward())
+        self._nav_sync(record=False)
+
+    def _nav_back(self) -> None:
+        if self._nav_timer.isActive():
+            self._nav_record()          # the place in view now is where Forward returns
+        self._nav_apply(self._nav_history.back())
+
+    def _nav_forward(self) -> None:
+        self._nav_apply(self._nav_history.forward())
+
+    def _gene_at_centre(self):
+        """(name, start, end) of the named feature in the middle of the view (genes
+        before transcripts before anything else), or None."""
+        m = self.canvas.model
+        span = self.canvas.visible_span() if m is not None else None
+        if m is None or span is None:
+            return None
+        c = (span[0] + min(span[1], m.length)) // 2
+        best = None
+        rank = {"gene": 0, "mrna": 1, "transcript": 1}
+        for t in self.canvas.tracks:
+            if t.kind != gt.KIND_ANNOTATION:
+                continue
+            try:
+                hits = t.fetch(m.ref_id, c, c + 1)
+            except (gt.TrackError, OSError, ValueError, KeyError):
+                hits = []           # a track that cannot answer has no gene here
+            for it, _row in hits:
+                if not it.name or not (it.start <= c < it.end):
+                    continue
+                r = rank.get((it.kind or "").lower(), 2)
+                if best is None or r < best[0]:
+                    best = (r, it.name, it.start, it.end)
+        return None if best is None else best[1:]
+
+    def _nav_sync(self, record: bool = True) -> None:
+        m = self.canvas.model
+        span = self.canvas.visible_span() if m is not None else None
+        if m is None or span is None:
+            self._crumbs.set_where("", 0, 0, "")
+            return
+        a, b = span[0], min(span[1], m.length)
+        gene = self._gene_at_centre()
+        self._crumbs.set_where(m.ref_id, a, b, gene[0] if gene else "")
+        self._rail.set_view(m.ref_id, a, b)
+        self._nav_flags()
+        self._nav_density()
+        if record and not self._nav_applying:
+            self._nav_timer.start()
+
+    def _nav_edit_range(self) -> None:
+        self._goto.setText(self._current_locus())
+        self._goto.setFocus()
+        self._goto.selectAll()
+
+    def _nav_zoom_gene(self) -> None:
+        gene = self._gene_at_centre()
+        m = self.canvas.model
+        if gene is None or m is None:
+            return
+        name, a, b = gene
+        pad = max(20, (b - a) // 10)
+        self._nav_go(m.ref_id, max(0, a - pad), min(m.length, b + pad), name)
+
+    def _density_tracks(self) -> list:
+        return [t for t in self.canvas.tracks if t.kind == gt.KIND_ANNOTATION]
+
+    def _set_density_track(self, path: str) -> None:
+        self._density_track = path            # "" : no shading
+        self._nav_density_key = None
+        self._nav_density()
+        if self._session is not None and self._path is not None:
+            try:
+                gt.update_session_extras(self._path, {"density_track": path})
+            except OSError:
+                pass
+
+    def _nav_density(self) -> None:
+        """Feature density of the chosen annotation track (the first one unless
+        another is picked) along every sequence, for the Genome list."""
+        tracks = self._density_tracks()
+        choice = self._density_track
+        if choice is None:
+            src = tracks[:1]
+        else:
+            src = [t for t in tracks if str(t.path) == choice]
+        key = (tuple(str(t.path) for t in tracks), tuple(id(t) for t in src))
+        if key == self._nav_density_key:
+            return
+        self._nav_density_key = key
+        self._rail.set_density_tracks([(str(t.path), t.name) for t in tracks],
+                                      str(src[0].path) if src else "")
+        chroms = self._nav_chroms()
+        if not src or len(chroms) > 5000:
+            self._rail.set_density({})
+            return
+        t = src[0]
+        bins = 60
+        counts: dict[str, list[float]] = {}
+        peak = 0.0
+        for chrom, n in chroms:
+            if n <= 0:
+                continue
+            row = [0.0] * bins
+            try:
+                items = t.fetch(chrom, 0, n) if t.resolve(chrom) is not None else []
+            except (gt.TrackError, OSError, ValueError, KeyError):
+                items = []
+            for it, _r in items:
+                row[min(bins - 1, int(it.start * bins / n))] += 1
+            if any(row):
+                counts[chrom] = row
+                peak = max(peak, max(row))
+        if peak > 0:
+            counts = {c: [v / peak for v in row] for c, row in counts.items()}
+        self._rail.set_density(counts)
+
+    # bookmarks
+
+    def _nav_flags(self) -> None:
+        m = self.canvas.model
+        self.canvas.bookmark_flags = [
+            (b.start, b.end, b.name or b.locus(), b.color)
+            for b in self._bookmarks if m is not None and b.chrom == m.ref_id]
+        self.canvas.viewport().update()
+
+    def _add_bookmark(self) -> None:
+        from repeatviewer.widgets.genome_navigator import (
+            BOOKMARK_COLORS,
+            Bookmark,
+            BookmarkDialog,
+        )
+
+        m = self.canvas.model
+        span = self.canvas.visible_span() if m is not None else None
+        if m is None or span is None or not self._nav_mode_on():
+            return
+        sel = self.canvas.region_sel
+        if sel:
+            a, b = int(sel[0]), int(sel[1])
+        else:
+            a = (span[0] + min(span[1], m.length)) // 2
+            b = a + 1
+        gene = self._gene_at_centre()
+        color = BOOKMARK_COLORS[len(self._bookmarks) % len(BOOKMARK_COLORS)]
+        bm = Bookmark(name=gene[0] if gene else "", chrom=m.ref_id, start=a, end=b,
+                      color=color)
+        if not bm.name:
+            bm.name = bm.locus()
+        dlg = BookmarkDialog(bm, self, "Add bookmark")
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._bookmarks.append(dlg.result_bookmark())
+        self.canvas.set_region_selection(None)
+        self._nav_bookmarks_changed()
+
+    def _edit_bookmark(self, i: int) -> None:
+        from repeatviewer.widgets.genome_navigator import BookmarkDialog
+
+        if not 0 <= i < len(self._bookmarks):
+            return
+        dlg = BookmarkDialog(self._bookmarks[i], self, "Edit bookmark")
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._bookmarks[i] = dlg.result_bookmark()
+        self._nav_bookmarks_changed()
+
+    def _delete_bookmark(self, i: int) -> None:
+        if 0 <= i < len(self._bookmarks):
+            del self._bookmarks[i]
+            self._nav_bookmarks_changed()
+
+    def _import_bookmarks(self, path: str | None = None) -> None:
+        """Bookmarks from a BED file: chrom / start / end, the name, itemRgb as the
+        colour and a description column as the note (see ``bookmarks_from_bed``)."""
+        import gzip
+
+        from PySide6.QtWidgets import QFileDialog, QMessageBox
+
+        from repeatviewer.widgets.genome_navigator import bookmarks_from_bed
+
+        if not path:
+            path, _f = QFileDialog.getOpenFileName(
+                self, "Import bookmarks from BED", "",
+                "BED files (*.bed *.bed.gz *.bed3 *.bed6 *.bed12 *.txt *.tsv);;All files (*)")
+        if not path:
+            return
+        try:
+            if path.endswith(".gz"):
+                with gzip.open(path, "rt", encoding="utf-8", errors="replace") as fh:
+                    text = fh.read()
+            else:
+                with open(path, encoding="utf-8", errors="replace") as fh:
+                    text = fh.read()
+        except OSError as exc:
+            QMessageBox.warning(self, "Import bookmarks", f"Could not read the file:\n{exc}")
+            return
+        chroms = dict(self._nav_chroms())
+        new, skipped = bookmarks_from_bed(text, chroms or None,
+                                          first_color=len(self._bookmarks))
+        have = {(b.chrom, b.start, b.end, b.name) for b in self._bookmarks}
+        added = [b for b in new if (b.chrom, b.start, b.end, b.name) not in have]
+        dup = len(new) - len(added)
+        self._bookmarks.extend(added)
+        if added:
+            self._rail.bm_section.set_open(True)
+            self._nav_bookmarks_changed()
+        msg = f"Added {len(added):,} bookmark{'s' if len(added) != 1 else ''}."
+        if dup:
+            msg += f"\n{dup:,} already in the list."
+        if skipped:
+            msg += f"\n{len(skipped):,} line{'s' if len(skipped) != 1 else ''} skipped:\n  "
+            msg += "\n  ".join(skipped[:8]) + ("\n  …" if len(skipped) > 8 else "")
+        QMessageBox.information(self, "Import bookmarks", msg)
+
+    def _export_bookmarks(self, path: str | None = None) -> None:
+        from PySide6.QtWidgets import QFileDialog, QMessageBox
+
+        from repeatviewer.widgets.genome_navigator import bookmarks_to_bed
+
+        if not self._bookmarks:
+            return
+        if not path:
+            path, _f = QFileDialog.getSaveFileName(
+                self, "Export bookmarks as BED", "bookmarks.bed", "BED files (*.bed)")
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(bookmarks_to_bed(self._bookmarks))
+        except OSError as exc:
+            QMessageBox.warning(self, "Export bookmarks", f"Could not write the file:\n{exc}")
+
+    def _nav_bookmarks_changed(self) -> None:
+        self._rail.set_bookmarks(self._bookmarks)
+        self._nav_flags()
+        self._save_nav()
+
+    def _save_nav(self) -> None:
+        if self._session is None or self._path is None:
+            return
+        try:
+            gt.update_session_extras(self._path, {
+                "bookmarks": [b.to_json() for b in self._bookmarks],
+                "recent": [p_.to_json() for p_ in self._recent]})
+        except OSError:
+            pass
 
     def _set_browser_tabs(self, browser: bool) -> None:
         """A reference opened on its own has no placed sequences: only its view is shown."""

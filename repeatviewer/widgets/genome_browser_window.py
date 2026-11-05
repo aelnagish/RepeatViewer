@@ -68,7 +68,9 @@ class GenomeBrowserWindow(QMainWindow):
         self.genome_menu.aboutToShow.connect(self._fill_genome_menu)
         self.genome_btn.clicked.connect(lambda: self.genome_menu.exec(
             self.genome_btn.mapToGlobal(self.genome_btn.rect().bottomLeft())))
-        self.panel._nav_right.layout().insertWidget(0, self.genome_btn)
+        nr = self.panel._nav_right.layout()
+        # after the search box: Genome ▾ · Tracks ▾ · Files ▾
+        nr.insertWidget(nr.indexOf(self.panel._tracks_btn), self.genome_btn)
         bar_menu = self.menuBar().addMenu("&Genome")
         bar_menu.aboutToShow.connect(lambda: self._fill_genome_menu(bar_menu))
         self._fill_genome_menu(bar_menu)

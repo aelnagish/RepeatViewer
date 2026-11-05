@@ -1914,13 +1914,43 @@ def open_track(path: Path, *, reference_names: Iterable[str] = (),
     return track
 
 
+SESSION_EXTRAS = ("bookmarks", "recent", "density_track")     # kept when only the tracks are rewritten
+
+
 def write_session(path: Path, reference: Path, tracks: list[Track] | list[dict],
-                  locus: str = "") -> Path:
+                  locus: str = "", extras: dict | None = None) -> Path:
+    """Write a session. ``extras`` (bookmarks, recent places) replace the file's own;
+    those not given are kept from the file as it is."""
     data = {"format": SESSION_FORMAT, "version": 1, "reference": str(reference),
             "tracks": [t.to_json() if isinstance(t, Track) else t for t in tracks],
             "locus": locus}
+    old: dict = {}
+    if Path(path).is_file():
+        try:
+            old = json.loads(Path(path).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            old = {}
+    for key in SESSION_EXTRAS:
+        if extras is not None and key in extras:
+            data[key] = extras[key]
+        elif isinstance(old, dict) and key in old:
+            data[key] = old[key]
     Path(path).write_text(json.dumps(data, indent=1), encoding="utf-8")
     return Path(path)
+
+
+def update_session_extras(path: Path, extras: dict) -> None:
+    """Rewrite only the bookmarks / recent places of a session file."""
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if not isinstance(data, dict) or data.get("format") != SESSION_FORMAT:
+        return
+    for key in SESSION_EXTRAS:
+        if key in extras:
+            data[key] = extras[key]
+    Path(path).write_text(json.dumps(data, indent=1), encoding="utf-8")
 
 
 def read_session(path: Path) -> dict:
