@@ -7,6 +7,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QSettings, Qt, QTimer
 from PySide6.QtWidgets import (
+    QGridLayout,
     QInputDialog,
     QMessageBox,
     QCheckBox,
@@ -68,9 +69,6 @@ HELP_OPTIONS = (
 
 def _settings() -> QSettings:
     return QSettings()
-
-
-FIELD_W = 170  # slide fields: two equal columns
 
 
 def _get(key: str, default: str = "") -> str:
@@ -243,33 +241,41 @@ class CytoImportDialog(PanelPathFields, QDialog):
         self._counterstain = _combo(page, ls.names(lists, "counterstains"), _get("counterstain", "DAPI"), key="counterstains", folder=self._folder, lists=lists)
         self._stage = _combo(page, ls.names(lists, "stages"), _get("stage", "Mitotic metaphase"), key="stages", folder=self._folder, lists=lists)
         lay.addLayout(form)
-        # Slide: two equal columns side by side; probe rows go to the shorter column
-        self._slide_forms = (form_layout(), form_layout())
-        rows = ((("Name", self._slide_name), ("Date", self._slide_date), ("Species", self._species),
-                 ("Accession / line", self._accession)),
-                (("Technique", self._technique), ("Counterstain", self._counterstain), ("Cell stage", self._stage)))
-        label_w = max(page.fontMetrics().horizontalAdvance(t) for col in rows for t, _w in col) + 4
-        label_w = max(label_w, page.fontMetrics().horizontalAdvance("Probe in Alexa 594") + 4)
-        self._slide_label_w = label_w
-        for f, col in zip(self._slide_forms, rows):
-            for text, w in col:
-                w.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-                w.setFixedWidth(FIELD_W)
-                f.addRow(self._slide_label(text, page), w)
-        self._slide_base = [len(rows[0]), len(rows[1])]
-        cols = QHBoxLayout()
-        cols.setSpacing(24)
-        for f in self._slide_forms:
-            cols.addLayout(f)
-        cols.addStretch(1)
-        lay.addLayout(cols)
+        # Slide: a 3 x 3 grid, small label above each field, every cell the same width; probe menus fill the next cells
+        self._slide_grid = QGridLayout()
+        self._slide_grid.setContentsMargins(0, 2, 0, 0)
+        self._slide_grid.setHorizontalSpacing(16)
+        self._slide_grid.setVerticalSpacing(10)
+        for c in range(3):
+            self._slide_grid.setColumnStretch(c, 1)
+        self._slide_cells: list[QWidget] = []
+        for text, w in (("Name", self._slide_name), ("Date", self._slide_date), ("Accession / line", self._accession),
+                        ("Species", self._species), ("Technique", self._technique), ("Counterstain", self._counterstain),
+                        ("Cell stage", self._stage)):
+            self._add_slide_cell(text, w, page)
+        self._slide_base = len(self._slide_cells)
+        lay.addLayout(self._slide_grid)
         return page
 
-    def _slide_label(self, text: str, parent: QWidget) -> QLabel:
-        label = QLabel(text, parent)
-        label.setFixedWidth(self._slide_label_w)
-        label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        return label
+    def _add_slide_cell(self, text: str, field: QWidget, parent: QWidget) -> None:
+        cell = QWidget(parent)
+        v = QVBoxLayout(cell)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(4)
+        label = QLabel(text, cell)
+        f = label.font()
+        f.setPointSizeF(f.pointSizeF() - 2)
+        label.setFont(f)
+        label.setStyleSheet("color: gray;")
+        field.setParent(cell)
+        field.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        field.setMinimumWidth(0)
+        field.setMaximumWidth(16777215)
+        v.addWidget(label)
+        v.addWidget(field)
+        n = len(self._slide_cells)
+        self._slide_grid.addWidget(cell, n // 3, n % 3)
+        self._slide_cells.append(cell)
 
     def _build_options_tab(self) -> QWidget:
         page = QWidget(self)
@@ -368,9 +374,10 @@ class CytoImportDialog(PanelPathFields, QDialog):
     def _fill_probe_form(self) -> None:
         dyes = sorted({d for g in self._groups for d in g.dyes if d})
         current = {d: b.currentText() for d, b in self._probe_boxes.items()}
-        for f, base in zip(self._slide_forms, self._slide_base):
-            while f.rowCount() > base:
-                f.removeRow(base)
+        while len(self._slide_cells) > self._slide_base:
+            cell = self._slide_cells.pop()
+            self._slide_grid.removeWidget(cell)
+            cell.deleteLater()
         self._probe_boxes = {}
         probes = ls.names(self._lists, "probes")
         for dye in dyes:
@@ -379,11 +386,8 @@ class CytoImportDialog(PanelPathFields, QDialog):
             default = next((str(e["name"]) for e in self._lists.get("probes", []) if e.get("dye") == dye), "")
             box = _combo(self, probes, current.get(dye) or self._saved_probes.get(dye, "") or default,
                          key="probes", folder=self._folder, lists=self._lists, dye=dye)
-            box.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
             self._probe_boxes[dye] = box
-            box.setFixedWidth(FIELD_W)
-            target = min(self._slide_forms, key=lambda f: f.rowCount())
-            target.addRow(self._slide_label(f"Probe in {dye}", self), box)
+            self._add_slide_cell(f"Probe in {dye}", box, self)
 
     # ------------------------------------------------------------------ result
 
