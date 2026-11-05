@@ -262,24 +262,25 @@ class CytogeneticsWorkspace(QWidget):
         self._title.setText("Cytogenetics")
         self._title.setToolTip(str(self._folder))
         self._set_crumb(ws.breadcrumb(self._folder, self._current_image))
+        saved = _read(self._last_image_key(), "")  # read before the Library picks its first image
         self.refresh()
         _write("last_folder", str(self._folder))
-        self._restore_last_image()
+        self._restore_last_image(saved)
 
     def _last_image_key(self) -> str:
         import hashlib
 
         return "last_image_" + hashlib.md5(str(self._folder).encode("utf-8")).hexdigest()[:12]
 
-    def _restore_last_image(self) -> None:
+    def _restore_last_image(self, image_id: str) -> None:
         """Back on the cell that was open when this folder's workspace was last closed."""
-        if self._folder is None or self._current_image:
-            return
-        image_id = _read(self._last_image_key(), "")
         from repeatviewer.backends import cyto_images as ci
 
-        if not image_id or not any(i.id == image_id for i in ci.load_images(self._folder)):
+        if self._folder is None or not image_id or not any(i.id == image_id for i in ci.load_images(self._folder)):
             return
+        lib = self._pages["Library"]
+        if image_id in getattr(lib, "_thumbs", {}):
+            lib._on_clicked(image_id)  # selects it in the Library too
         for name in ("Image", "Signals"):
             self._pages[name].follow(image_id)
         self._on_image_shown(image_id, "")

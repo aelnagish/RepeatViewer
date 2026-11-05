@@ -6,7 +6,8 @@ import copy
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QObject, QPointF, QRectF, QSettings, QSize, Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QBrush, QColor, QFont, QIcon, QKeySequence, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtGui import (QBrush, QColor, QFont, QIcon, QKeySequence, QPainter, QPainterPath, QPen, QPixmap,
+                           QStandardItem, QStandardItemModel)
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -59,7 +60,8 @@ HELP = (
     "Lengths from Assembly reads a sizes file, .fai, BED, GFF or FASTA and matches Chr1, Chr01 … to chromosome 1.<br>"
     "<b>Preview</b>: click a homologue to edit it below. Drag the round centromere handle, the bottom end (length), "
     "a band (move) or its top or bottom edge (resize). <b>Draw band</b>: drag along a chromosome; the colour boxes "
-    "choose the kind (NOR, DAPI+, CMA+, FISH probes) or, with a band selected, change it; + picks an own colour. "
+    "choose the kind (NOR, DAPI+, CMA+, FISH probes) or, with a band selected, change it; <b>+</b> adds a new probe, "
+    "draws with any other probe or picks an own colour. In a band row, the Kind list also has New Probe…. "
     "Backspace removes the selected band.<br>"
     "<b>Same as the other homologues</b> (ticked by default): edits apply to every copy. Untick it to give one "
     "homologue its own length, centromere and bands, for example a heteromorphic pair.<br>"
@@ -868,8 +870,11 @@ class KaryotypeDialog(QDialog):
         own = QToolButton(self)
         own.setText("+")
         own.setAutoRaise(True)
-        own.setToolTip("Own colour for the selected band or the next band you draw")
-        own.clicked.connect(self._own_colour)
+        own.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        own.setToolTip("New probe, other probes or an own colour")
+        self._plus_menu = QMenu(own)
+        self._plus_menu.aboutToShow.connect(self._fill_plus_menu)
+        own.setMenu(self._plus_menu)
         bar.addWidget(own)
         self._presets_btn = QPushButton("Presets", self)
         self._presets_menu = QMenu(self._presets_btn)
@@ -1380,6 +1385,51 @@ class KaryotypeDialog(QDialog):
             band.satellite = band.satellite and kind.startswith("Secondary")
             self._after_band_change()
 
+    def _fill_plus_menu(self) -> None:
+        m = self._plus_menu
+        m.clear()
+        m.addAction("New Probe…", self._new_probe_for_drawing)
+        m.addAction("Own Colour…", self._own_colour)
+        probes = lists_mod.names(self._lists, "probes")
+        if probes:
+            m.addSeparator()
+            sub = m.addMenu("Draw with Probe")
+            for pr in probes:
+                a = sub.addAction(_swatch_icon(self._canvas.band_brush(kt.Band(kt.SIGNAL_KIND_PREFIX + pr, 0, 1)), 14), pr)
+                a.triggered.connect(lambda _c=False, name=pr: self._draw_with(kt.SIGNAL_KIND_PREFIX + name))
+
+    def _draw_with(self, kind: str) -> None:
+        self._canvas.draw_kind, self._canvas.draw_colour = kind, ""
+        for sb, k_, _c in self._swatches:
+            sb.setChecked(k_ == kind)
+        for b in self._tool_group.buttons():
+            b.setChecked(b.text() == "Draw band")
+        self._set_tool("draw")
+
+    def _new_probe(self) -> str:
+        """Ask a probe name and its dye, add it to the lists. Returns the name ('' when cancelled)."""
+        name, ok = QInputDialog.getText(self, "New probe", "Probe name (for example CroSat2):")
+        name = name.strip() if ok else ""
+        if not name:
+            return ""
+        dyes = lists_mod.names(self._lists, "dyes") + [ADD_DYE]
+        dye, ok = QInputDialog.getItem(self, "New probe", f"Dye of {name}:", dyes, 0, False)
+        if ok and dye == ADD_DYE:
+            dye = self._ask_dye("New dye")
+        lists = load_lists(self._folder)
+        lists_mod.add_entry(lists, "probes", name, dye=dye if ok else "")
+        self._save_lists(lists)
+        return name
+
+    def _new_probe_for_drawing(self) -> None:
+        name = self._new_probe()
+        if name:
+            band = self._selected_band()
+            if band is not None:
+                self._on_swatch(kt.SIGNAL_KIND_PREFIX + name, "")
+            self._draw_with(kt.SIGNAL_KIND_PREFIX + name)
+            self._sync_inspector()
+
     def _own_colour(self) -> None:
         band = self._selected_band()
         start = QColor(band.color) if band is not None and band.color else QColor("#E8A33D")
@@ -1640,20 +1690,48 @@ class KaryotypeDialog(QDialog):
         self._bands_box.addStretch(1)
 
     def _fill_kind_combo(self, cb: QComboBox, band: kt.Band) -> None:
+        """Grouped list: Bands, FISH probes, Add. Headers cannot be chosen; every entry shows its colour."""
+        model = QStandardItemModel(cb)
+        bold = QFont(cb.font())
+        bold.setBold(True)
+
+        def header(text: str) -> None:
+            item = QStandardItem(text)
+            item.setFont(bold)
+            item.setFlags(Qt.ItemFlag.NoItemFlags)
+            model.appendRow(item)
+
+        def entry(text: str, kind: str, icon: QIcon | None = None, tip: str = "") -> None:
+            item = QStandardItem(text)
+            item.setData(kind, Qt.ItemDataRole.UserRole)
+            if icon is not None:
+                item.setIcon(icon)
+            if tip:
+                item.setToolTip(tip)
+            model.appendRow(item)
+
+        def swatch(kind: str, colour: str = "") -> QIcon:
+            return _swatch_icon(self._canvas.band_brush(kt.Band(kind, 0, 1, colour)), 14)
+
+        header("Bands")
+        names = {kt.BAND_KINDS[0]: "NOR", kt.BAND_KINDS[1]: "DAPI+", kt.BAND_KINDS[2]: "CMA+"}
         for k_ in kt.BAND_KINDS:
-            cb.addItem("NOR (secondary constriction)" if k_.startswith("Secondary") else k_, k_)
+            entry(names.get(k_, k_), k_, swatch(k_), k_)
         probes = lists_mod.names(self._lists, "probes")
-        if probes:
-            cb.insertSeparator(cb.count())
+        if not kt.manual_probe(band.kind) and band.kind not in kt.BAND_KINDS:
+            entry(band.kind, band.kind, swatch(band.kind, band.color))
+        header("FISH probes")
         for pr in probes:
-            cb.addItem(f"FISH {pr}", kt.SIGNAL_KIND_PREFIX + pr)
-        if cb.findData(band.kind) < 0:
-            cb.addItem(kt.manual_probe(band.kind) and f"FISH {kt.manual_probe(band.kind)}" or band.kind, band.kind)
-        cb.insertSeparator(cb.count())
-        cb.addItem(NEW_PROBE, NEW_PROBE)
-        cb.addItem(OTHER_KIND, OTHER_KIND)
+            dye = str((lists_mod.entry(self._lists, "probes", pr) or {}).get("dye") or "")
+            entry(pr, kt.SIGNAL_KIND_PREFIX + pr, swatch(kt.SIGNAL_KIND_PREFIX + pr), f"{pr} ({dye})" if dye else pr)
+        if kt.manual_probe(band.kind) and kt.manual_probe(band.kind) not in probes:
+            entry(kt.manual_probe(band.kind), band.kind, swatch(band.kind))
+        header("Add")
+        entry("New Probe…", NEW_PROBE)
+        entry("Other Band…", OTHER_KIND)
+        cb.setModel(model)
         cb.setCurrentIndex(max(0, cb.findData(band.kind)))
-        cb.setToolTip(cb.currentText())
+        cb.setToolTip(band.kind)
 
     def _fill_dye_combo(self, cb: QComboBox, probe: str) -> None:
         current = str((lists_mod.entry(self._lists, "probes", probe) or {}).get("dye") or "")
@@ -1698,18 +1776,10 @@ class KaryotypeDialog(QDialog):
         value = str(cb.currentData() or "")
         band = owner.bands[i]
         if value == NEW_PROBE:
-            name, ok = QInputDialog.getText(self, "New probe", "Probe name (for example CroSat2):")
-            name = name.strip() if ok else ""
+            name = self._new_probe()
             if not name:
                 self._sync_inspector()
                 return
-            dyes = lists_mod.names(self._lists, "dyes") + [ADD_DYE]
-            dye, ok = QInputDialog.getItem(self, "New probe", f"Dye of {name}:", dyes, 0, False)
-            if ok and dye == ADD_DYE:
-                dye = self._ask_dye("New dye")
-            lists = load_lists(self._folder)
-            lists_mod.add_entry(lists, "probes", name, dye=dye if ok else "")
-            self._save_lists(lists)
             value = kt.SIGNAL_KIND_PREFIX + name
         elif value == OTHER_KIND:
             name, ok = QInputDialog.getText(self, "Band", "Kind of band (for example Ag-NOR or C-band):")

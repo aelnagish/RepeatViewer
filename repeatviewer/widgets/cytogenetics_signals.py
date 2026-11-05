@@ -413,7 +413,7 @@ class SignalsTab(QWidget):
         self._save_timer.setSingleShot(True)
         self._save_timer.setInterval(SAVE_DELAY_MS)
         self._save_timer.timeout.connect(self.flush)
-        self._set_tool("number")
+        self._set_tool(self._tool)  # the step used last time
         self._show_empty()
 
     # ------------------------------------------------------------------ loading
