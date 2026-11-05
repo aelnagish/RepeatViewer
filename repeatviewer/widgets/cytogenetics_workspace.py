@@ -142,7 +142,10 @@ class CytogeneticsWorkspace(QWidget):
         cl.addWidget(self._help, 0, Qt.AlignmentFlag.AlignVCenter)
         self._tabs.setCornerWidget(corner, Qt.Corner.TopRightCorner)
         self._tabs.tabBar().setDrawBase(False)  # no line running above the "?" button
-        corner.setFixedHeight(max(self._tabs.tabBar().sizeHint().height(), self._help.sizeHint().height()))
+        # the tab row is made tall enough for the "?" so the button never hangs over the line below the tabs
+        tab_h = max(self._tabs.tabBar().sizeHint().height(), self._help.sizeHint().height() + 8)
+        self._tabs.tabBar().setMinimumHeight(tab_h)
+        corner.setFixedHeight(tab_h)
         self._pages: dict[str, QWidget] = {}
         for name in ws.TAB_NAMES:
             page = {"Library": LibraryTab, "Image": ImageTab, "Signals": SignalsTab, "Idiogram": IdiogramTab, "Figure": FigureTab}.get(name, None)
