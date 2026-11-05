@@ -20,6 +20,8 @@ class PsLayer:
     visible: bool
     text: bool  # a type layer (chromosome numbers, labels)
     rgb: np.ndarray  # H x W x 3 on the full canvas
+    coverage: float = 1.0  # share of the canvas the layer's box covers (cut-out chromosomes are small)
+    box: tuple[int, int, int, int] = (0, 0, 0, 0)  # top, left, bottom, right on the canvas
 
     @property
     def empty(self) -> bool:
@@ -27,8 +29,28 @@ class PsLayer:
 
 
 def picture_layers(layers: list[PsLayer]) -> list[PsLayer]:
-    """The layers that are channels: visible pixel layers with something in them, no text."""
-    return [layer for layer in layers if layer.visible and not layer.text and not layer.empty]
+    """The layers that are channels: visible pixel layers with something in them, no text.
+
+    The channels are the largest layers; layers less than half their size are cut-out chromosomes, arrows or
+    labels. When the channels fill only part of the canvas (a karyotype figure), they are cropped to that part.
+    """
+    shown = [layer for layer in layers if layer.visible and not layer.text and not layer.empty]
+    if not shown:
+        return []
+    biggest = max(layer.coverage for layer in shown)
+    kept = [layer for layer in shown if layer.coverage >= MIN_SHARE_OF_BIGGEST * biggest]
+    top = min(layer.box[0] for layer in kept)
+    left = min(layer.box[1] for layer in kept)
+    bottom = max(layer.box[2] for layer in kept)
+    right = max(layer.box[3] for layer in kept)
+    h, w = kept[0].rgb.shape[:2]
+    if bottom > top and right > left and (bottom - top) * (right - left) < 0.9 * h * w:
+        kept = [PsLayer(layer.name, layer.visible, layer.text, layer.rgb[top:bottom, left:right].copy(),
+                        layer.coverage, layer.box) for layer in kept]
+    return kept
+
+
+MIN_SHARE_OF_BIGGEST = 0.5
 
 
 def _packbits(data, size):
@@ -124,5 +146,7 @@ def _parse_layers(block, at, e, u, depth, W, H):
         for cid in range(3):
             p = planes.get(cid, planes.get(0))
             img[y0:y1, x0:x1, cid] = p[y0 - top:y1 - top, x0 - left:x1 - left]
-        out.append(PsLayer(name=r["name"], visible=r["visible"], text=r["text"], rgb=img))
+        cover = max(0, y1 - y0) * max(0, x1 - x0) / float(W * H) if W and H else 0.0
+        out.append(PsLayer(name=r["name"], visible=r["visible"], text=r["text"], rgb=img, coverage=cover,
+                           box=(y0, x0, max(y0, y1), max(x0, x1))))
     return out
