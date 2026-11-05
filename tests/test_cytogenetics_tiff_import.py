@@ -207,3 +207,29 @@ def test_overexposed_tinted_channel_is_not_a_merge():
     cyan = np.stack([np.clip(spots - 255, 0, 255) * 0.6, np.clip(spots, 0, 255), np.clip(spots, 0, 255)], -1)
     cyan = cyan.round().astype(np.uint8)
     assert ch.colour_of(cyan) == "#00ffff"
+
+
+def test_channel_plan_sets_dye_and_probe_for_the_whole_slide(tmp_path):
+    from repeatviewer.backends.cytogenetics.importer import channel_rows
+
+    src = tmp_path / "slide"
+    for cell in ("cell1", "cell2"):
+        (src / cell).mkdir(parents=True)
+        for n, rgb in enumerate(((0, 0, 1), (0, 1, 0), (1, 0, 0)), start=1):
+            plane = _spots(30, 30, [(10 + n, 12)], 200)
+            tifffile.imwrite(str(src / cell / f"{n}.tif"), np.stack([plane * k for k in rgb], -1).round().astype(np.uint8),
+                             photometric="rgb")
+    lists = ls.load_lists(tmp_path)
+    cells, _notes = plan_cells(scan_tiffs(src, recursive=True), lists)
+    rows = channel_rows(cells, lists)
+    assert [r.found_as for r in rows] == ["1.tif", "2.tif", "3.tif"]
+    assert rows[0].colour == "#0000ff" and rows[2].colour == "#ff0000"
+    work = tmp_path / "data"
+    work.mkdir()
+    plan = [{"dye": "DAPI", "probe": ""}, {"dye": "FITC", "probe": "CroSat2"}, {"dye": "Cy3", "probe": "45S"}]
+    _slide, images, errors = run_request(ImportRequest(folder=work, source=src, recursive=True, slide_name="S",
+                                                       channel_plan=plan))
+    assert not errors and len(images) == 2
+    chans = md.image_details(images[0]).channels
+    assert [(c.dye, c.probe) for c in chans] == [("DAPI", ""), ("FITC", "CroSat2"), ("Cy3", "45S")]
+    assert {"CroSat2", "45S"} <= set(ls.names(ls.load_lists(work), "probes"))

@@ -9,12 +9,13 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import QSize, Qt, QTimer
-from PySide6.QtGui import QColor, QIcon, QPixmap
+from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QFormLayout,
     QColorDialog,
     QDialog,
+    QFrame,
     QHBoxLayout,
     QHeaderView,
     QInputDialog,
@@ -26,6 +27,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSizePolicy,
     QTableWidgetItem,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -41,22 +43,24 @@ from repeatviewer.widgets.path_browse import PathBrowseRow
 
 HELP = (
     "<b>Lists</b> hold the values offered when you import, in the Library filters and in the image details.<br>"
-    "<b>Edit</b>: select a row and change it in the form under the table. Names, numbers and words can also be "
-    "edited in the table: double-click a cell, or select it and press Enter.<br>"
+    "<b>Edit</b>: select an entry and change it on the right. Double-click a name to rename it in the list.<br>"
     "<b>Rename</b>: every image that uses the entry is updated when you click Save.<br>"
     "<b>+</b> adds an entry, <b>−</b> removes the selected ones (only while no image uses them).<br>"
     "<b>Merge…</b>: select two or more rows; the images move to the entry you keep.<br>"
     "<b>Order</b>: drag a row by its name. The order is the order of the menus everywhere.<br>"
-    "<b>Columns</b>: drag a column edge to make it wider or narrower (never narrower than its title).<br>"
-    "<b>Dyes</b>: excitation and emission maxima in nm, the words that identify the dye in file names "
-    "(comma separated) and the colour it is shown in.<br>"
+    "<b>Search</b>: shows only the entries whose name contains the text.<br>"
+    "<b>Dyes</b>: excitation and emission maxima in nm and the colour the dye is shown in.<br>"
     "<b>Probes</b>: the sequence a probe comes from links its images to that FASTA file. Click the file in the "
     "Files panel, or Browse. The dye is the one it is usually detected with; <i>Add a dye…</i> adds one on the spot."
 )
 
 ADD_DYE = "Add a dye…"
 NO_DYE = "None"
-FIELD_W = 220  # every field of the entry form has this width
+FIELD_W = 220  # every field and menu of the inspector has this width
+NUM_W = FIELD_W  # excitation and emission (with "nm" after them)
+SEQ_W = FIELD_W  # sequence path with its Browse button
+NAV_W = 170  # sidebar, and the list title above it
+LIST_W = 260  # the list of entries
 
 # (header, field, kind) per list; Name comes first and "Used in" last
 _COLUMNS = {
@@ -78,6 +82,18 @@ _DESCRIPTIONS = {
 }
 _INLINE = ("text", "number")  # kinds edited in the table cell itself
 ROW_H = 26
+
+
+def _dot_icon(colour: str) -> QIcon:
+    pix = QPixmap(12, 12)
+    pix.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pix)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setPen(QColor("#b0b0b5") if QColor(colour).lightness() > 220 else Qt.PenStyle.NoPen)
+    p.setBrush(QColor(colour))
+    p.drawEllipse(1, 1, 10, 10)
+    p.end()
+    return QIcon(pix)
 
 
 def _swatch(colour: str) -> QIcon:
@@ -107,126 +123,173 @@ class CytoListsDialog(PanelPathFields, QDialog):
         super().__init__(parent)
         self.setWindowTitle("Edit lists")
         self.setWindowModality(Qt.WindowModality.NonModal)
-        self.setMinimumSize(760, 500)
+        self.setMinimumSize(640, 400)
         self._folder = Path(folder).expanduser().resolve()
         self._editor = ls.ListsEditor(self._folder)
         ls.ensure_used_values(self._folder, self._editor.lists)
         self._key = start if start in ls.EDIT_ORDER else "dyes"
         self._loading = False
 
-        self._nav = QListWidget(self)
-        self._nav.setSpacing(1)
-        self._nav.currentRowChanged.connect(self._on_nav)
-        nav_box = rounded_box(self._nav, self, margin=4)
-        nav_box.setFixedWidth(200)
-
+        # ---- top row: list title over the sidebar, search, "?"
         self._title = QLabel(self)
         f = self._title.font()
         f.setBold(True)
         f.setPointSizeF(f.pointSizeF() + 2)
         self._title.setFont(f)
-        self._desc = QLabel(self)
-        self._desc.setWordWrap(True)
-        self._desc.setStyleSheet("color: gray;")
+        self._title.setFixedWidth(NAV_W)
+        self._search = QLineEdit(self)
+        self._search.setPlaceholderText("Search")
+        self._search.setClearButtonEnabled(True)
+        self._search.textChanged.connect(self._apply_search)
+        head = QHBoxLayout()
+        head.setSpacing(10)
+        head.addWidget(self._title)
+        head.addWidget(self._search, 1)
+        head.addWidget(make_help_button(self, "Edit lists", HELP))
 
-        self._table = _ReorderTable(0, 0, self)
+        # ---- sidebar
+        self._nav = QListWidget(self)
+        self._nav.setSpacing(1)
+        self._nav.currentRowChanged.connect(self._on_nav)
+        nav_box = rounded_box(self._nav, self, margin=4)
+        nav_box.setFixedWidth(NAV_W)
+
+        # ---- list: colour dot, name, used in; + − Merge joined to its bottom edge
+        self._table = _ReorderTable(0, 3, self)
+        self._table.setHorizontalHeaderLabels(["", "Name", "Used in"])
         self._table.setSelectionMode(_ReorderTable.SelectionMode.ExtendedSelection)
-        self._table.setEditTriggers(_ReorderTable.EditTrigger.DoubleClicked | _ReorderTable.EditTrigger.EditKeyPressed
-                                    | _ReorderTable.EditTrigger.SelectedClicked)
+        self._table.setEditTriggers(_ReorderTable.EditTrigger.DoubleClicked | _ReorderTable.EditTrigger.EditKeyPressed)
         self._table.verticalHeader().setVisible(False)
         self._table.verticalHeader().setDefaultSectionSize(ROW_H)
         self._table.setShowGrid(False)
         self._table.setAlternatingRowColors(True)
         self._table.setWordWrap(False)
+        self._table.setFrameShape(QFrame.Shape.NoFrame)
         self._table.itemChanged.connect(self._on_item_changed)
         self._table.rowMoved.connect(self._on_row_moved)
         self._table.itemSelectionChanged.connect(self._fill_form)
         header = self._table.horizontalHeader()
-        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)  # columns stay resizable
         header.setStretchLastSection(True)
-        header.sectionResized.connect(self._on_column_resized)
-        self._sizing = False
-        self._user_widths: dict[str, dict[int, int]] = {}
-        table_box = rounded_box(self._table, self)
-
-        add = QPushButton("+", self)
-        remove = QPushButton("−", self)
-        for b, tip in ((add, "Add an entry"), (remove, "Remove the selected entries")):
-            b.setFixedWidth(32)
+        header.setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)  # all columns left
+        self._table.setColumnWidth(0, 30)
+        self._table.setColumnWidth(1, 170)
+        add = QToolButton(self)
+        add.setText("+")
+        remove = QToolButton(self)
+        remove.setText("−")
+        merge = QToolButton(self)
+        merge.setText("Merge…")
+        for b, tip in ((add, "Add an entry"), (remove, "Remove the selected entries"),
+                       (merge, "Merge the selected entries into one")):
+            b.setAutoRaise(True)
             b.setToolTip(tip)
-        merge = QPushButton("Merge…", self)
-        merge.setToolTip("Merge the selected entries into one")
+            b.setFixedHeight(24)
+        add.setFixedWidth(30)
+        remove.setFixedWidth(30)
         add.clicked.connect(self._add)
         remove.clicked.connect(self._remove)
         merge.clicked.connect(self._merge)
-        under = QHBoxLayout()
-        under.setSpacing(4)
-        under.addWidget(add)
-        under.addWidget(remove)
-        under.addSpacing(8)
-        under.addWidget(merge)
-        under.addStretch(1)
-        hint = QLabel("Double-click a cell to edit it, or change the selected entry below.", self)
-        hint.setStyleSheet("color: gray;")
-        under.addWidget(hint)
+        bottom = QWidget(self)
+        bl = QHBoxLayout(bottom)
+        bl.setContentsMargins(2, 0, 2, 0)
+        bl.setSpacing(0)
+        for b in (add, remove, merge):
+            bl.addWidget(b)
+        bl.addStretch(1)
+        list_host = QWidget(self)
+        lh = QVBoxLayout(list_host)
+        lh.setContentsMargins(0, 0, 0, 0)
+        lh.setSpacing(0)
+        lh.addWidget(self._table, 1)
+        rule = QFrame(self)
+        rule.setFrameShape(QFrame.Shape.HLine)
+        rule.setStyleSheet("color: palette(midlight);")
+        lh.addWidget(rule)
+        lh.addWidget(bottom)
+        list_box = rounded_box(list_host, self)
+        list_box.setFixedWidth(LIST_W)
 
-        # ---- form for the selected entry
+        # ---- inspector of the selected entry
+        self._swatch = QLabel(self)
+        self._swatch.setFixedSize(44, 44)
+        self._big_name = QLabel(self)
+        bf = self._big_name.font()
+        bf.setBold(True)
+        bf.setPointSizeF(bf.pointSizeF() + 4)
+        self._big_name.setFont(bf)
+        self._sub = QLabel(self)
+        self._sub.setStyleSheet("color: gray;")
+        names_col = QVBoxLayout()
+        names_col.setSpacing(2)
+        names_col.addWidget(self._big_name)
+        names_col.addWidget(self._sub)
+        top_insp = QHBoxLayout()
+        top_insp.setSpacing(12)
+        top_insp.addWidget(self._swatch)
+        top_insp.addLayout(names_col, 1)
+
         self._form_host = QWidget(self)
         self._form = form_layout(self._form_host)
+        self._form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
         self._f_name = QLineEdit(self)
         self._f_name.editingFinished.connect(self._on_form_name)
         self._f_ex = QLineEdit(self)
         self._f_em = QLineEdit(self)
-        self._f_words = QLineEdit(self)
-        self._f_words.setPlaceholderText("dapi, 405, blue")
-        for w, field in ((self._f_ex, "excitation"), (self._f_em, "emission"), (self._f_words, "words")):
+        for w, field in ((self._f_ex, "excitation"), (self._f_em, "emission")):
             w.editingFinished.connect(lambda w=w, fld=field: self._set_selected(fld, w.text()))
-        for w in (self._f_ex, self._f_em):
-            w.setPlaceholderText("nm")
+            w.setFixedWidth(NUM_W)
         self._f_colour = QPushButton(self)
-        self._f_colour.setText("Choose…")
         self._f_colour.setIconSize(QSize(28, 14))
         self._f_colour.clicked.connect(self._pick_colour)
-        self._f_seq = PathBrowseRow(self, placeholder="Click a FASTA file in the Files panel, or Browse",
+        self._f_seq = PathBrowseRow(self, placeholder="Click a FASTA in the Files panel",
                                     browse_title="Sequence of the probe", start_dir=str(self._folder),
                                     file_filter="FASTA (*.fa *.fasta *.fna *.fas);;All files (*)", elide_middle=True)
         self._f_seq.panel_suffixes = (".fa", ".fasta", ".fna", ".fas")
         self._f_seq.path_changed.connect(self._on_form_sequence)
+        self._f_seq.setFixedWidth(SEQ_W)
         self._f_dye = NoWheelComboBox(self)
-        self._f_dye.setSizeAdjustPolicy(NoWheelComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         self._f_dye.activated.connect(self._on_form_dye)
         self._f_marks = NoWheelComboBox(self)
         self._f_marks.addItems(list(ls.STAGE_MARKS))
         self._f_marks.activated.connect(lambda _i: self._set_selected("marks", self._f_marks.currentText()))
-        self._rows = {}
-        for label, w in (("Name", self._f_name), ("Excitation", self._f_ex), ("Emission", self._f_em),
-                         ("Words in file names", self._f_words), ("Colour", self._f_colour),
-                         ("Sequence", self._f_seq), ("Dye", self._f_dye), ("Signals are marked on", self._f_marks)):
-            lab = QLabel(label, self._form_host)
-            self._form.addRow(lab, w)
-            self._rows[w] = lab
-        for w in (self._f_name, self._f_ex, self._f_em, self._f_words, self._f_colour, self._f_seq, self._f_dye,
-                  self._f_marks):
-            w.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        for w in (self._f_name, self._f_colour, self._f_dye, self._f_marks):
             w.setFixedWidth(FIELD_W)
-        self._form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
 
-        head = QHBoxLayout()
-        head.addWidget(self._title, 1)
-        head.addWidget(make_help_button(self, "Edit lists", HELP))
-        right = QVBoxLayout()
-        right.setSpacing(6)
-        right.addLayout(head)
-        right.addWidget(self._desc)
-        right.addWidget(table_box, 1)
-        right.addLayout(under)
-        right.addSpacing(4)
-        right.addWidget(self._form_host)
+        def _with_unit(field: QWidget, unit: str) -> QWidget:
+            host = QWidget(self._form_host)
+            hl = QHBoxLayout(host)
+            hl.setContentsMargins(0, 0, 0, 0)
+            hl.setSpacing(6)
+            hl.addWidget(field)
+            u = QLabel(unit, host)
+            u.setStyleSheet("color: gray;")
+            hl.addWidget(u)
+            hl.addStretch(1)
+            return host
+
+        self._rows = {}
+        self._hosts = {}
+        for label, w, host in (("Name", self._f_name, None), ("Excitation", self._f_ex, _with_unit(self._f_ex, "nm")),
+                               ("Emission", self._f_em, _with_unit(self._f_em, "nm")), ("Colour", self._f_colour, None),
+                               ("Sequence", self._f_seq, None), ("Dye", self._f_dye, None),
+                               ("Signals are marked on", self._f_marks, None)):
+            lab = QLabel(label, self._form_host)
+            self._form.addRow(lab, host or w)
+            self._rows[w] = lab
+            self._hosts[w] = host or w
+
+        inspector = QVBoxLayout()
+        inspector.setSpacing(10)
+        inspector.addLayout(top_insp)
+        inspector.addWidget(self._form_host)
+        inspector.addStretch(1)
 
         body = QHBoxLayout()
-        body.setSpacing(14)
+        body.setSpacing(10)
         body.addWidget(nav_box)
-        body.addLayout(right, 1)
+        body.addWidget(list_box)
+        body.addLayout(inspector, 1)
 
         cancel = QPushButton("Cancel", self)
         save = QPushButton("Save", self)
@@ -239,8 +302,9 @@ class CytoListsDialog(PanelPathFields, QDialog):
         buttons.addWidget(save)
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(16, 16, 16, 14)
-        root.setSpacing(12)
+        root.setContentsMargins(12, 10, 12, 10)
+        root.setSpacing(8)
+        root.addLayout(head)
         root.addLayout(body, 1)
         root.addLayout(buttons)
 
@@ -248,7 +312,8 @@ class CytoListsDialog(PanelPathFields, QDialog):
         self._fill_nav()
         self._nav.setCurrentRow(ls.EDIT_ORDER.index(self._key))
         self._fill_table()
-        self.resize(900, 600)
+        # as wide as sidebar, list and inspector need: no empty band on the right
+        self.resize(self.sizeHint().width(), 500)
 
     # ------------------------------------------------------------------ navigation
 
@@ -285,94 +350,52 @@ class CytoListsDialog(PanelPathFields, QDialog):
     def _fill_table(self, select: str = "") -> None:
         self._loading = True
         key = self._key
-        cols = _COLUMNS[key]
         self._title.setText(ls.LIST_TITLES[key])
-        self._desc.setText(_DESCRIPTIONS.get(key, ""))
-        self._table.clear()
-        self._table.setColumnCount(len(cols) + 2)
-        heads = ["Name", *[c[0] for c in cols], "Used in"]
-        self._table.setHorizontalHeaderLabels(heads)
+        self._table.clearContents()
         entries = self._editor.lists.get(key, [])
         self._table.setRowCount(len(entries))
         for r, e in enumerate(entries):
             name = str(e["name"])
+            colour = self._entry_colour(e)
+            dot = QTableWidgetItem()
+            if colour:
+                dot.setIcon(_dot_icon(colour))
+            dot.setFlags(dot.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            self._table.setItem(r, 0, dot)
             item = QTableWidgetItem(name)
             item.setData(Qt.ItemDataRole.UserRole, name)
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsDragEnabled | Qt.ItemFlag.ItemIsEditable)
-            self._table.setItem(r, 0, item)
-            for c, (_h, field, kind) in enumerate(cols, start=1):
-                value = str(e.get(field, ""))
-                cell = QTableWidgetItem()
-                cell.setData(Qt.ItemDataRole.UserRole + 1, field)
-                if kind == "color":
-                    cell.setIcon(_swatch(value))
-                    cell.setToolTip(value)
-                elif kind == "sequence":
-                    cell.setText(value)
-                    cell.setToolTip(value)
-                elif kind == "marks":
-                    cell.setText(value or "chromosomes")
-                else:
-                    cell.setText(value)
-                if kind == "number":
-                    cell.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-                flags = cell.flags()
-                cell.setFlags(flags | Qt.ItemFlag.ItemIsEditable if kind in _INLINE else flags & ~Qt.ItemFlag.ItemIsEditable)
-                self._table.setItem(r, c, cell)
+            self._table.setItem(r, 1, item)
             n = self._editor.used_by(key, name)
             used = QTableWidgetItem(f"{n} image{'s' if n != 1 else ''}" if n else "")
             used.setFlags(used.flags() & ~Qt.ItemFlag.ItemIsEditable)
             used.setForeground(QColor("gray"))
-            self._table.setItem(r, len(cols) + 1, used)
-        self._table.setIconSize(QSize(28, 14))
-        self._size_columns()
-        QTimer.singleShot(0, self._size_columns)  # again once the layout has settled (the form rows change)
+            self._table.setItem(r, 2, used)
+        self._table.setIconSize(QSize(12, 12))
         self._loading = False
+        self._apply_search()
         row = next((r for r, e in enumerate(entries) if str(e["name"]) == select), 0 if entries else -1)
         if row >= 0:
             self._table.selectRow(row)
         self._fill_form()
 
-    def _size_columns(self) -> None:
-        """Columns start wide enough for header and content and share the free width; the user can drag them,
-        and dragged widths are kept for that list while the window is open."""
-        key = self._key
-        cols = _COLUMNS[key]
-        header = self._table.horizontalHeader()
-        metrics = header.fontMetrics()
-        self._sizing = True
-        try:
-            self._table.resizeColumnsToContents()
-            n = self._table.columnCount()
-            widths = []
-            for c in range(n):
-                head = self._table.horizontalHeaderItem(c).text() if self._table.horizontalHeaderItem(c) else ""
-                widths.append(max(self._table.columnWidth(c) + 12, metrics.horizontalAdvance(head) + 24))
-            free = self._table.viewport().width() - sum(widths)
-            grow = [c for c in range(n) if not (0 < c <= len(cols) and cols[c - 1][2] in ("number", "color"))]
-            if free > 0 and grow:
-                for c in grow:
-                    widths[c] += free // len(grow)
-            for c, w in self._user_widths.get(key, {}).items():
-                if c < n:
-                    widths[c] = w
-            for c, w in enumerate(widths):
-                self._table.setColumnWidth(c, w)
-        finally:
-            self._sizing = False
+    def _entry_colour(self, e: dict) -> str:
+        """The dot of a row: a dye's own colour, a probe's dye colour; nothing for the other lists."""
+        if self._key == "dyes":
+            return str(e.get("color", "")) or "#ffffff"
+        if self._key == "probes" and e.get("dye"):
+            return ls.dye_color(self._editor.lists, str(e.get("dye")), "")
+        return ""
 
-    def _on_column_resized(self, col: int, _old: int, new: int) -> None:
-        dragging = QApplication.mouseButtons() != Qt.MouseButton.NoButton  # only the user's own drags are kept
-        if not self._sizing and dragging and col < self._table.columnCount() - 1:
-            self._user_widths.setdefault(self._key, {})[col] = new
-
-    def showEvent(self, event) -> None:  # noqa: N802 (Qt API)
-        super().showEvent(event)
-        QTimer.singleShot(0, self._size_columns)
+    def _apply_search(self, *_args) -> None:
+        text = self._search.text().strip().lower()
+        for r in range(self._table.rowCount()):
+            item = self._table.item(r, 1)
+            self._table.setRowHidden(r, bool(text) and (item is None or text not in item.text().lower()))
 
     def _selected_names(self) -> list[str]:
         rows = sorted({i.row() for i in self._table.selectedIndexes()})
-        return [self._table.item(r, 0).data(Qt.ItemDataRole.UserRole) for r in rows if self._table.item(r, 0)]
+        return [self._table.item(r, 1).data(Qt.ItemDataRole.UserRole) for r in rows if self._table.item(r, 1)]
 
     def _current_name(self) -> str:
         names = self._selected_names()
@@ -382,8 +405,8 @@ class CytoListsDialog(PanelPathFields, QDialog):
         if self._loading:
             return
         row, col = item.row(), item.column()
-        old = self._table.item(row, 0).data(Qt.ItemDataRole.UserRole)
-        if col == 0:
+        old = self._table.item(row, 1).data(Qt.ItemDataRole.UserRole)
+        if col == 1:
             self._rename(old, item.text())
         else:
             field = item.data(Qt.ItemDataRole.UserRole + 1)
@@ -403,7 +426,7 @@ class CytoListsDialog(PanelPathFields, QDialog):
         QTimer.singleShot(0, lambda n=new: self._fill_table(select=n))
 
     def _on_row_moved(self, src: int, dst: int) -> None:
-        name = self._table.item(src, 0).data(Qt.ItemDataRole.UserRole)
+        name = self._table.item(src, 1).data(Qt.ItemDataRole.UserRole)
         self._editor.move(self._key, src, dst)
         QTimer.singleShot(0, lambda: self._fill_table(select=name))
 
@@ -415,21 +438,39 @@ class CytoListsDialog(PanelPathFields, QDialog):
         kinds = {kind for _h, _f, kind in _COLUMNS[self._key]}
         shown = {
             self._f_name: True,
-            self._f_ex: "number" in kinds, self._f_em: "number" in kinds,
-            self._f_words: "text" in kinds, self._f_colour: "color" in kinds,
+            self._f_ex: "number" in kinds, self._f_em: "number" in kinds, self._f_colour: "color" in kinds,
             self._f_seq: "sequence" in kinds, self._f_dye: "dye" in kinds, self._f_marks: "marks" in kinds,
         }
         for w, on in shown.items():
-            w.setVisible(on)
+            self._hosts[w].setVisible(on)
             self._rows[w].setVisible(on)
         self._form_host.setEnabled(bool(name))
+        colour = self._entry_colour(e) if e else ""
+        if colour:
+            pix = QPixmap(44, 44)
+            pix.fill(Qt.GlobalColor.transparent)
+            p = QPainter(pix)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(colour))
+            p.drawRoundedRect(0, 0, 44, 44, 10, 10)
+            p.end()
+            self._swatch.setPixmap(pix)
+        self._swatch.setVisible(bool(colour))
+        self._big_name.setText(name or ("Several selected" if self._selected_names() else ""))
+        n = self._editor.used_by(self._key, name) if name else 0
+        extra = []
+        if self._key == "probes" and e.get("dye"):
+            extra.append(str(e.get("dye")))
+        if self._key == "dyes" and name.lower() in {c.lower() for c in self._editor.names("counterstains")}:
+            extra.append("counterstain")
+        sub = (f"Used in {n} image{'s' if n != 1 else ''}" if n else "Not used yet") if name else ""
+        self._sub.setText(" · ".join([sub, *extra]) if sub else "")
         self._f_name.setText(name)
         self._f_ex.setText(str(e.get("excitation", "")))
         self._f_em.setText(str(e.get("emission", "")))
-        self._f_words.setText(str(e.get("words", "")))
-        colour = str(e.get("color", "")) or "#ffffff"
-        self._f_colour.setIcon(_swatch(colour))
-        self._f_colour.setText(colour)
+        self._f_colour.setIcon(_swatch(str(e.get("color", "")) or "#ffffff"))
+        self._f_colour.setText(str(e.get("color", "")) or "#ffffff")
         self._f_seq.set_text(str(e.get("sequence", "")), emit=False)
         self._f_dye.blockSignals(True)
         self._f_dye.clear()
