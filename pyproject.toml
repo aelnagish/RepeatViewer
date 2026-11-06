@@ -26,18 +26,12 @@ dependencies = [
   "flexidot @ git+https://github.com/qjiangzhao/flexidot.git@Jiangzhao",
   "pytrf>=1.4",
   "scikit-learn>=1.3",
-  # Cytogenetics: chromosome and signal detection (comes with scikit-learn, listed for clarity)
-  "scipy>=1.10",
   # ORF detection (auto annotation / protein similarity) and HMM search (Dfam, etc.)
   "orfipy>=0.0.4",
   "pyahocorasick>=2.0",
   "pyhmmer>=0.10",
   # Tools > Primers: Tm, hairpins, dimers and primer design (Primer3)
   "primer3-py>=2.0",
-  # Cytogenetics: 16-bit channel TIFFs and their pixel size
-  "tifffile>=2023.1",
-  # Cytogenetics: LZW and other compressed TIFFs from microscope software
-  "imagecodecs>=2023.1",
 ]
 
 [project.optional-dependencies]

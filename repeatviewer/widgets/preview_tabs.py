@@ -187,8 +187,6 @@ def _preview_kind(path: Path) -> str:
     suffix = path.suffix.lower()
     if suffix == _CONTIG_PREVIEW_SUFFIX:
         return "contig"
-    if suffix == _CYTO_WORKSPACE_SUFFIX:
-        return "cytogenetics"
     if suffix in _DOTPLOT_PREVIEW_SUFFIXES:
         return "dotplot"
     if _is_tree_path(path):
@@ -280,8 +278,6 @@ _DOTPLOT_PREVIEW_SUFFIXES = frozenset({".paf", ".1aln"})
 from repeatviewer.backends.tree_layout import is_tree_file as _is_tree_path  # noqa: E402
 # Map to Reference results (.rvmap) open in the contig view.
 _CONTIG_PREVIEW_SUFFIX = ".rvmap"
-# Cytogenetics workspace marker (Tools > Cytogenetics) opens the workspace page.
-_CYTO_WORKSPACE_SUFFIX = ".rvcyto"
 
 
 def is_previewable_file(path: Path) -> bool:
@@ -291,7 +287,7 @@ def is_previewable_file(path: Path) -> bool:
     name = resolved.name.lower()
     if suffix in _DOTPLOT_PREVIEW_SUFFIXES or _is_tree_path(resolved):
         return True
-    if suffix in (_CONTIG_PREVIEW_SUFFIX, _CYTO_WORKSPACE_SUFFIX):
+    if suffix == _CONTIG_PREVIEW_SUFFIX:
         return True
     if is_bismark_cov_file(resolved):
         return True
@@ -316,7 +312,7 @@ def preview_path_priority(path: Path) -> int:
         return 1
     if suffix in _DOTPLOT_PREVIEW_SUFFIXES or _is_tree_path(path):
         return 2
-    if suffix in (_CONTIG_PREVIEW_SUFFIX, _CYTO_WORKSPACE_SUFFIX):
+    if suffix == _CONTIG_PREVIEW_SUFFIX:
         return 2
     if suffix == ".pdf":
         return 3
@@ -1083,7 +1079,6 @@ class FilePreviewPage(QWidget):
             or self.is_dotplot_preview_active()
             or self.is_tree_preview_active()
             or self.is_contig_preview_active()
-            or self.is_cyto_workspace_active()
         ):
             return PreviewZoomKind.TEXT
         if not self._single_fasta_mode:
@@ -1563,33 +1558,6 @@ class FilePreviewPage(QWidget):
             self._stack.addWidget(self._contig_panel)
         self._stack.setCurrentWidget(self._contig_panel)
         self._contig_panel.load(path)
-
-    def _show_cyto_workspace(self, path: Path) -> None:
-        """Open the Cytogenetics workspace (Tools > Cytogenetics) of a folder."""
-        from repeatviewer.widgets.cytogenetics_workspace import CytogeneticsWorkspace
-
-        if getattr(self, "_cyto_workspace", None) is None:
-            self._cyto_workspace = CytogeneticsWorkspace(None, self)
-            self._cyto_workspace.setSizePolicy(
-                QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
-            )
-            self._cyto_workspace.openRequested.connect(self.openFileRequested.emit)
-            self._cyto_workspace.fileWritten.connect(self.fileWritten.emit)
-            self._stack.addWidget(self._cyto_workspace)
-        self._stack.setCurrentWidget(self._cyto_workspace)
-        self._cyto_workspace.load(path)
-
-    def cyto_workspace_panel(self):
-        """The Cytogenetics workspace of this page, if it was ever shown (else None)."""
-        return getattr(self, "_cyto_workspace", None)
-
-    def is_cyto_workspace_active(self) -> bool:
-        panel = getattr(self, "_cyto_workspace", None)
-        return (
-            not self._single_fasta_mode
-            and panel is not None
-            and self._stack.currentWidget() is panel
-        )
 
     def contig_panel(self):
         """The contig view of this page, if it was ever shown (else None)."""
@@ -2539,9 +2507,6 @@ class FilePreviewPage(QWidget):
         if suffix == _CONTIG_PREVIEW_SUFFIX:
             self._show_contig(path)
             return
-        if suffix == _CYTO_WORKSPACE_SUFFIX:
-            self._show_cyto_workspace(path)
-            return
         if suffix == ".pdf":
             status = self._pdf.load_file(path)
             if status == QPdfDocument.Error.None_:
@@ -3467,7 +3432,6 @@ class PreviewTabWidget(QTabWidget):
                 widget.is_dotplot_preview_active()
                 or widget.is_tree_preview_active()
                 or widget.is_contig_preview_active()
-                or widget.is_cyto_workspace_active()
             )
             is_cyto = widget.is_cyto_preview_active()
             zoom_kind = widget.preview_zoom_kind()
