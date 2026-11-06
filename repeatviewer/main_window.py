@@ -3075,8 +3075,6 @@ class MainWindow(
             return
         if self._find_dialog is not None:
             self._find_dialog.save_settings()
-        for win in getattr(self, "_browser_windows", []):
-            win.close()                       # Genome Browser windows go with the app
         # Save the layout first: tearing down web previews below can crash on some
         # systems, and then nothing after it would run.
         self._save_window_layout(force=True)
@@ -5058,89 +5056,6 @@ class MainWindow(
             lambda: self._open_map_dialog(require_selection=False),
         )
 
-    def _open_genome_browser(self) -> None:
-        """Tools → Genome Browser: reopens the genome used last (its tracks and place);
-        the first time, or when that genome is gone, asks for a reference FASTA.
-        Genome ▾ in the browser window opens another one. A small
-        ``<reference>_browser.rvgb`` session next to the FASTA keeps the view."""
-        from repeatviewer.widgets.genome_browser_window import (
-            recent_sessions,
-            session_reference,
-        )
-
-        for session in recent_sessions():
-            reference = session_reference(session)
-            if reference is not None:
-                self._show_genome_browser(session, reference)
-                return
-        self._pick_genome_for_browser()
-
-    def _pick_genome_for_browser(self, replace_window=None) -> None:
-        """Ask for a reference FASTA and open it in the Genome Browser."""
-        start = str(self._map_options.reference_fasta or "")
-        name, _f = QFileDialog.getOpenFileName(
-            replace_window or self, "Genome for the genome browser", start,
-            "FASTA (*.fa *.fasta *.fna *.fas *.fsa);;All files (*)")
-        if name:
-            self._open_genome_reference(Path(name), replace_window)
-
-    def _open_genome_reference(self, reference: Path, replace_window=None) -> None:
-        from repeatviewer.backends import genome_tracks as gt
-
-        try:
-            gt.fasta_index(reference)
-            # reopen the existing session of this reference (its tracks), else start one
-            session = reference.with_name(reference.name + "_browser" + gt.SESSION_SUFFIX)
-            if not session.is_file():
-                gt.write_session(session, reference, [])
-        except (gt.TrackError, OSError) as exc:
-            QMessageBox.warning(replace_window or self, "Genome Browser",
-                                f"Cannot open {reference.name}:\n{exc}")
-            return
-        self._show_genome_browser(session, reference, replace_window)
-
-    def _on_browser_genome_requested(self, win, session) -> None:
-        """Genome ▾ in a browser window: another genome replaces that window's."""
-        if session is None:
-            self._pick_genome_for_browser(win)
-            return
-        from repeatviewer.widgets.genome_browser_window import session_reference
-
-        reference = session_reference(session)
-        if reference is not None and Path(session) != win.session:
-            self._show_genome_browser(Path(session), reference, win)
-
-    def _show_genome_browser(self, session: Path, reference: Path,
-                             replace_window=None) -> None:
-        """One window per session: opening the same reference again brings it forward.
-        ``replace_window``: the browser window the new genome takes the place of."""
-        from repeatviewer.widgets.genome_browser_window import GenomeBrowserWindow
-
-        windows = [w for w in getattr(self, "_browser_windows", []) if w.isVisible()]
-        for w in windows:
-            if w.session == session:
-                w.raise_()
-                w.activateWindow()
-                self._browser_windows = windows
-                return
-        if replace_window is not None:
-            replace_window.close()          # saves its size, which the new one reuses
-            windows = [w for w in windows if w is not replace_window]
-        # no parent: an ordinary window of its own, which the main window can cover
-        # (a parented window stays in front of it on macOS); closed with ours
-        win = GenomeBrowserWindow(session, reference, None)
-        # the main window's style sheet (thin rounded scrollbars, buttons) is not
-        # inherited by a window without a parent
-        win.setStyleSheet(self.styleSheet())
-        win.openRequested.connect(self._on_preview_open_requested)
-        win.blastRequested.connect(self._on_preview_blast_requested)
-        win.fileWritten.connect(self._on_preview_file_written)
-        win.genomeRequested.connect(lambda s_, w_=win: self._on_browser_genome_requested(w_, s_))
-        windows.append(win)
-        self._browser_windows = windows
-        win.open_session()
-        self._sync_sidecar_in_file_list(session, select=False)
-
     def _map_candidate_files(self) -> list[Path]:
         """Selected FASTA / FASTQ files (gzipped too), without the reference. No UI."""
         reference = str(self._map_options.reference_fasta or "")
@@ -6077,7 +5992,6 @@ class MainWindow(
         self._populate_align_menu(tools_menu.addMenu("&Align"))
         self._populate_tree_menu(tools_menu.addMenu("T&ree"))
         self._populate_map_menu(tools_menu.addMenu("&Mapping"))
-        tools_menu.addAction("&Genome Browser", self._open_genome_browser)
         self._populate_primers_menu(tools_menu.addMenu("&Primers and Probes"))
         self._populate_cytogenetics_menu(tools_menu.addMenu("&Cytogenetics"))
         self._populate_extend_menu(tools_menu.addMenu("MSA &Extend"))
@@ -7096,9 +7010,6 @@ class MainWindow(
                 accent=load_accent_color(),
             )
         )
-        # Genome Browser windows have no parent: give them the same look (thin scrollbars…)
-        for win in getattr(self, "_browser_windows", []):
-            win.setStyleSheet(self.styleSheet())
         if hasattr(self, "_preview_zoom_bar"):
             self._preview_zoom_bar.refresh_slider_style()
         if hasattr(self, "_annotation_zoom_bar"):

@@ -29,7 +29,6 @@ from PySide6.QtWidgets import (
     QAbstractScrollArea,
     QApplication,
     QComboBox,
-    QDialog,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -43,18 +42,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from repeatviewer.backends import genome_tracks as gt
 from repeatviewer.backends import map_reference as mr
-from repeatviewer.widgets.genome_tracks_view import GenomeTracksMixin
 
 LABEL_W = 150             # default width of the name column (draggable)
 LABEL_W_MIN = 80
 RULER_H = 24
-TRACKPAD_V_GAIN = 2.0     # genome browser: trackpad up/down speed (3.0 felt too fast)
 FEATURE_ROW_H = 14
 TRACK_H = 16
-FRAME_H = 13              # one translation frame under the reference (genome browser)
-TRANSLATION_MAX_BP = 60_000   # wider views: no translation (zoom in)
 COVERAGE_H = 30
 IDENTITY_H = 6
 LOGO_H = 34
@@ -466,7 +460,6 @@ class ContigModel:
     diff_count: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.int32))
     diff_pos: list[int] = field(default_factory=list)
     cache: dict = field(default_factory=dict, repr=False)
-    browser: bool = False    # a reference opened on its own (genome browser, no mapping)
 
     def counts(self) -> np.ndarray:
         if "counts" not in self.cache:
@@ -522,14 +515,6 @@ class ContigModel:
             diff_count=difference_profile(reads, length),
             diff_pos=difference_positions(variants))
 
-    @classmethod
-    def for_reference(cls, ref_id: str, length: int, reference: str = "") -> "ContigModel":
-        """A reference opened in the genome browser: no placed sequences, only tracks."""
-        return cls(ref_id=ref_id, length=int(length), detailed=False, reference=reference,
-                   consensus="", cons_on_ref="", coverage=np.zeros(0, dtype=np.float32),
-                   bin_size=1, features=[], reads=[], variants=[], feature_summary=[],
-                   n_reads=0, browser=True)
-
     def coverage_at(self, bp: int) -> float:
         i = bp // max(1, self.bin_size)
         return float(self.coverage[i]) if 0 <= i < len(self.coverage) else 0.0
@@ -538,42 +523,6 @@ class ContigModel:
 # --------------------------------------------------------------------------
 # Canvas
 # --------------------------------------------------------------------------
-
-
-_CODONS = {
-    a + b + c: aa for (a, b, c), aa in zip(
-        ((x, y, z) for x in "TCAG" for y in "TCAG" for z in "TCAG"),
-        "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG", strict=True)}
-_COMPLEMENT = str.maketrans("ACGTUNacgtunRYKMSWBDHVrykmswbdhv",
-                            "TGCAANtgcaanYRMKSWVHDByrmkswvhdb")
-
-
-def translate_codons(seq: str) -> str:
-    """Amino acids (one letter, * for stop, X for unknown) of seq read in threes."""
-    seq = seq.upper()
-    get = _CODONS.get
-    return "".join(get(seq[i:i + 3], "X") for i in range(0, len(seq) - 2, 3))
-
-
-def frame_codons(ref: str, strand: str, k: int, bp0: int, bp1: int) -> list[tuple[int, str]]:
-    """(start of the codon on the forward strand, amino acid) of frame k (0-2) on
-    strand "+" or "−", for the codons touching [bp0, bp1). Frame +k starts at base k;
-    frame −k starts k bases from the end, reading the reverse complement."""
-    n = len(ref)
-    if strand == "+":
-        first = k + max(0, (bp0 - k) // 3) * 3
-        last = min(n, bp1 + 3)
-        last = first + ((last - first) // 3) * 3
-        aas = translate_codons(ref[first:last])
-        return list(zip(range(first, last, 3), aas, strict=False))
-    end0 = n - k                         # codons end at n - k, n - k - 3, …
-    hi = end0 - max(0, (end0 - min(n, bp1 + 3)) // 3) * 3
-    lo = max(0, bp0 - 3)
-    lo = hi - ((hi - lo) // 3) * 3
-    if hi - lo < 3:
-        return []
-    aas = translate_codons(ref[lo:hi].translate(_COMPLEMENT)[::-1])[::-1]
-    return list(zip(range(lo, hi, 3), aas, strict=False))
 
 
 def _mono(size: int) -> QFont:
@@ -600,20 +549,13 @@ def _base_colors() -> dict[str, tuple[QColor, QColor]]:
 _FALLBACK = (QColor("#dddddd"), QColor("#000000"))
 
 
-class ContigCanvas(GenomeTracksMixin, QAbstractScrollArea):
+class ContigCanvas(QAbstractScrollArea):
     INFO_H = 48          # details of the selected sequence, foot of the name column
     readClicked = Signal(int)
     readDoubleClicked = Signal(int)
     viewChanged = Signal()       # zoom or scroll (the overview strip follows)
     labelWidthChanged = Signal(int)   # the name column was resized by the user
     readContextMenu = Signal(int, object)  # sequence index (-1: none), global QPoint
-    trackContextMenu = Signal(int, object)  # extra track index, global QPoint
-    sequenceContextMenu = Signal(int, object)  # bp clicked on the reference rows, global QPoint
-    tracksReordered = Signal()              # a track was dragged to a new place
-    trackItemClicked = Signal(int, object, object)  # track index, item, global QPoint
-    regionSelectionChanged = Signal()       # a region was selected on the ruler, or cleared
-    bookmarkRequested = Signal()            # B pressed in the genome browser
-    tileReady = Signal()                    # a BAM tile was decoded in the background
 
     HIGHLIGHT_DIFF = "diff"
     HIGHLIGHT_ALL = "all"
@@ -634,9 +576,6 @@ class ContigCanvas(GenomeTracksMixin, QAbstractScrollArea):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self._init_tracks()
-        # emitted from a decoding thread, so it arrives queued in this (GUI) thread
-        self.tileReady.connect(self._on_tile_ready)
         self.model: ContigModel | None = None
         self.label_w = LABEL_W          # name column width; drag its edge to change
         self._edge_drag = False
@@ -650,10 +589,6 @@ class ContigCanvas(GenomeTracksMixin, QAbstractScrollArea):
         self.wrap = False
         self._wrap_origin: int | None = None      # first base of the block being painted
         self.one_per_row = True
-        # genome browser: rows under the reference
-        self.seq_revcomp = False
-        self.seq_frames = "off"            # off / forward / reverse / all
-        self._comp_cache: tuple[int, str] | None = None
         self.selected = -1
         self.mark_bp: int | None = None     # current difference column (0-based)
         self.sort_key = SORT_START
@@ -682,7 +617,7 @@ class ContigCanvas(GenomeTracksMixin, QAbstractScrollArea):
         self.viewport().grabGesture(Qt.GestureType.PinchGesture)
         self.viewport().setAttribute(Qt.WidgetAttribute.WA_AcceptTouchEvents, True)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
-        self.horizontalScrollBar().valueChanged.connect(self._on_hscroll)
+        self.horizontalScrollBar().valueChanged.connect(self.viewport().update)
         self.horizontalScrollBar().valueChanged.connect(lambda _v: self.viewChanged.emit())
         self.horizontalScrollBar().rangeChanged.connect(lambda _a, _b: self.viewChanged.emit())
         self.verticalScrollBar().valueChanged.connect(self.viewport().update)
@@ -995,78 +930,8 @@ class ContigCanvas(GenomeTracksMixin, QAbstractScrollArea):
 
     # ---------------------------------------------------------------- geometry
 
-    # ---------------------------------------------------------------- reference rows
-
-    def translation_frames(self) -> list[tuple[str, int]]:
-        """[(strand, frame)] shown under the reference: + frames 0..2, − frames 0..2."""
-        m = self.model
-        if m is None or not m.browser or not m.reference:
-            return []
-        fwd = [("+", k) for k in range(3)]
-        rev = [("−", k) for k in range(3)]
-        return {"forward": fwd, "reverse": rev, "all": fwd + rev}.get(self.seq_frames, [])
-
-    def set_sequence_rows(self, revcomp: bool | None = None, frames: str | None = None) -> None:
-        if revcomp is not None:
-            self.seq_revcomp = bool(revcomp)
-        if frames is not None:
-            self.seq_frames = frames
-        self._update_scrollbars()
-        self.viewport().update()
-        self.viewChanged.emit()
-
-    def complement_seq(self) -> str:
-        """The reference's complement base by base (read right to left it is the
-        reverse complement), cached for the sequence in view."""
-        m = self.model
-        ref = m.reference if m is not None else ""
-        key = id(ref)
-        if self._comp_cache is None or self._comp_cache[0] != key:
-            self._comp_cache = (key, ref.translate(_COMPLEMENT))
-        return self._comp_cache[1]
-
-    def _paint_translation(self, p: QPainter, y: int, bp0: int, bp1: int, fg: QColor) -> None:
-        """Amino acids of each frame as boxes three bases wide: M green, stops red, the
-        others in two alternating greys; letters when there is room. Frame +k starts
-        at base k of the sequence, frame −k reads the reverse strand from its end."""
-        m = self.model
-        ref = m.reference
-        frames = self.translation_frames()
-        if bp1 - bp0 > TRANSLATION_MAX_BP:
-            p.setPen(QColor("#9aa3ad"))
-            f = QFont(p.font())
-            f.setPointSize(8)
-            p.setFont(f)
-            p.drawText(QRectF(self.x_of(bp0) + 8, y, 600, FRAME_H * len(frames)),
-                       Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
-                       f"Zoom in below {TRANSLATION_MAX_BP // 1000} kb to see the translation")
-            return
-        cw = 3 * self.ppb
-        letters = cw >= 8
-        font = _mono(int(min(10, max(7, cw * 0.45))))
-        p.setFont(font)
-        green, red = QColor("#4caf50"), QColor("#d9534f")
-        greys = (QColor("#e6eaef"), QColor("#d6dce4"))
-        dark = QColor("#3a3f47")
-        for row, (strand, k) in enumerate(frames):
-            top = y + row * FRAME_H
-
-            for s0, aa in frame_codons(ref, strand, k, bp0, bp1):
-                x = self.x_of(s0)
-                color = green if aa == "M" else red if aa == "*" else greys[(s0 // 3) % 2]
-                if not letters and aa not in "M*":
-                    if cw < 1.0:
-                        continue            # too small: only starts and stops
-                p.fillRect(QRectF(x, top + 1, max(1.0, cw - (0.5 if cw > 3 else 0)),
-                                  FRAME_H - 2), color)
-                if letters:
-                    p.setPen(QColor("#ffffff") if aa in "M*" else dark)
-                    p.drawText(QRectF(x, top, cw, FRAME_H), Qt.AlignmentFlag.AlignCenter, aa)
-        del fg
-
     def letters(self) -> bool:
-        m = self.model
-        return self.ppb >= LETTER_PPB and bool(m and (m.detailed or (m.browser and m.reference)))
+        return self.ppb >= LETTER_PPB and bool(self.model and self.model.detailed)
 
     def read_base_h(self) -> int:
         """Height of the sequence bar itself."""
@@ -1078,49 +943,29 @@ class ContigCanvas(GenomeTracksMixin, QAbstractScrollArea):
         return self.read_base_h() + extra
 
     def header_h(self) -> int:
-        return self._track_y()["reads"]
+        detailed = bool(self.model and self.model.detailed)
+        n_tracks = 2 if detailed else 0   # consensus + reference
+        return (RULER_H + max(1, self._feature_row_count) * self.feature_row_h() + 6
+                + n_tracks * TRACK_H + (IDENTITY_H + 3 if detailed else 0) + COVERAGE_H + 8
+                + (LOGO_H + 4 if self.logo_on() else 0))
 
     def _track_y(self) -> dict[str, int]:
-        m = self.model
-        detailed = bool(m and m.detailed)
         y = RULER_H
         out = {"features": y}
-        if m is not None and m.browser and not m.features:
-            y += 2              # browser: no empty annotation band under the ruler
-        else:
-            y += max(1, self._feature_row_count) * self.feature_row_h() + 6
-        if detailed:
+        y += max(1, self._feature_row_count) * self.feature_row_h() + 6
+        if self.model and self.model.detailed:
             out["consensus"] = y
             y += TRACK_H
             out["identity"] = y + 1
             y += IDENTITY_H + 3
-        if not (m and m.browser):
-            out["coverage"] = y
-            y += COVERAGE_H + 4
+        out["coverage"] = y
+        y += COVERAGE_H + 4
         if self.logo_on():
             out["logo"] = y
             y += LOGO_H + 4
-        if detailed or (m and m.browser and m.reference):
+        if self.model and self.model.detailed:
             out["reference"] = y
             y += TRACK_H
-            if m.browser and not detailed:
-                # optional rows under the reference: its reverse complement and the
-                # amino-acid translation in 3 or 6 frames (right-click the sequence)
-                if self.seq_revcomp:
-                    out["revcomp"] = y
-                    y += TRACK_H
-                frames = self.translation_frames()
-                if frames:
-                    out["frames"] = y
-                    y += FRAME_H * len(frames) + 2
-        # genome-browser tracks (annotation / alignment files added by the user)
-        spans = []
-        y += 2
-        for t in self.tracks:
-            h = self._extra_track_h(t)
-            spans.append((y, h))
-            y += h
-        self._extra_spans = spans
         out["reads"] = y + 4
         return out
 
@@ -1145,30 +990,16 @@ class ContigCanvas(GenomeTracksMixin, QAbstractScrollArea):
         h = self.horizontalScrollBar()
         h.setRange(0, max(0, content - self._data_w()))
         h.setPageStep(self._data_w())
-        # one wheel / arrow step moves a twentieth of the view, whatever the zoom
-        h.setSingleStep(max(1, self._data_w() // 20))
+        h.setSingleStep(max(1, int(10 * self.ppb)))
         reads_h = self._lane_count * self.read_h() + 10 + self.INFO_H
         v = self.verticalScrollBar()
         v.setRange(0, max(0, reads_h - (self.viewport().height() - self.header_h())))
         v.setPageStep(max(1, self.viewport().height() - self.header_h()))
-        if getattr(m, "browser", False):
-            # the browser page is tall (tracks, many read rows): a wheel notch (3 steps)
-            # moves about a quarter of the view instead of three rows
-            v.setSingleStep(max(self.read_h() * 2, self.viewport().height() // 16))
-        else:
-            v.setSingleStep(self.read_h())
+        v.setSingleStep(self.read_h())
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
-        m = self.model
-        # a view showing the whole sequence keeps doing so when the window is resized
-        # (it is first fitted before the window has its final size)
-        if m is not None and not self.wrap_active() and (
-                getattr(self, "_fit_ppb", None) == self.ppb
-                or m.length * self.ppb < self._data_w() - 13):
-            self.fit()
-        else:
-            self._update_scrollbars()
+        self._update_scrollbars()
         self._frame_if_ready()
 
     def showEvent(self, event) -> None:  # noqa: N802
@@ -1209,7 +1040,6 @@ class ContigCanvas(GenomeTracksMixin, QAbstractScrollArea):
         if self.model is None:
             return
         self.ppb = max(1e-6, (self._data_w() - 12) / max(1, self.model.length))
-        self._fit_ppb = self.ppb
         self._update_scrollbars()
         self.horizontalScrollBar().setValue(0)
         self.viewport().update()
@@ -1218,12 +1048,6 @@ class ContigCanvas(GenomeTracksMixin, QAbstractScrollArea):
     def zoom(self, factor: float, anchor_x: float | None = None) -> None:
         if self.model is None:
             return
-        sel = getattr(self, "region_sel", None)
-        if anchor_x is None and sel is not None and self.model.browser:
-            # genome browser: − / + / slider zoom around the marked position or region
-            x = self.x_of((sel[0] + sel[1]) / 2)
-            if self.label_w <= x <= self.label_w + self._data_w():
-                anchor_x = x
         anchor_x = self.label_w + self._data_w() / 2 if anchor_x is None else anchor_x
         if self.wrap_active():
             keep = self.view_center_bp()
@@ -1336,9 +1160,6 @@ class ContigCanvas(GenomeTracksMixin, QAbstractScrollArea):
         """Mouse wheel: zoom around the mouse (Shift: up/down through the sequences,
         Option/Alt: along the sequence). A trackpad scrolls as usual (two fingers up/down
         and sideways) and zooms with a pinch or Cmd/Ctrl."""
-        import time
-
-        self._interactive_at = time.monotonic()   # scrolling: see _nav_sync_soon
         mods = event.modifiers()
         d = event.angleDelta()
         step = d.y() or d.x()           # macOS turns Shift + wheel into a sideways delta
@@ -1353,24 +1174,12 @@ class ContigCanvas(GenomeTracksMixin, QAbstractScrollArea):
             return
         if not trackpad and mods & Qt.KeyboardModifier.ShiftModifier:
             v = self.verticalScrollBar()
-            v.setValue(v.value() - int(step / 120.0 * 3 * v.singleStep()))
+            v.setValue(v.value() - step)
             event.accept()
             return
-        m = self.model
-        if trackpad and m is not None and m.browser and not mods:
-            # browser pages are tall: a trackpad swipe moves 2x its pixel distance
-            px = event.pixelDelta()
-            dy = px.y() if not px.isNull() else d.y() / 4
-            dx = px.x() if not px.isNull() else d.x() / 4
-            if abs(dy) >= abs(dx) and dy:
-                v = self.verticalScrollBar()
-                v.setValue(v.value() - int(round(dy * TRACKPAD_V_GAIN)))
-                event.accept()
-                return
         if not trackpad and mods & Qt.KeyboardModifier.AltModifier:
-            # one notch moves a tenth of the view, so zoomed out it covers more bases
             h = self.horizontalScrollBar()
-            h.setValue(h.value() - int(step / 120.0 * max(10, self._data_w() / 10)))
+            h.setValue(h.value() - step)
             event.accept()
             return
         super().wheelEvent(event)
@@ -1433,16 +1242,7 @@ class ContigCanvas(GenomeTracksMixin, QAbstractScrollArea):
                      + [fm.horizontalAdvance("Coverage (max 10,000)") + 16, LABEL_W_MIN])
         self.set_label_width(widest, notify=True)
 
-    def keyPressEvent(self, event) -> None:  # noqa: N802
-        if self.tracks_key_press(event):
-            event.accept()
-            return
-        super().keyPressEvent(event)
-
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
-        if self.tracks_mouse_release(event):
-            event.accept()
-            return
         if self._edge_drag:
             self._edge_drag = False
             self.labelWidthChanged.emit(self.label_w)
@@ -1453,7 +1253,6 @@ class ContigCanvas(GenomeTracksMixin, QAbstractScrollArea):
     def leaveEvent(self, event) -> None:  # noqa: N802
         if not self._edge_drag:
             self.viewport().unsetCursor()
-        self.set_ruler_hover(None)
         super().leaveEvent(event)
 
     # ---------------------------------------------------------------- selection
@@ -1525,33 +1324,6 @@ class ContigCanvas(GenomeTracksMixin, QAbstractScrollArea):
         return sum(1 for r in self.model.reads if r.user_hidden) if self.model else 0
 
     def contextMenuEvent(self, event) -> None:  # noqa: N802
-        m = self.model
-        if m is not None and m.browser and self._in_ruler(QPointF(event.pos())):
-            event.accept()              # a right-click on the ruler zoomed out instead
-            return
-        if m is not None and m.browser and event.pos().x() >= 0:
-            y = self._header_y(QPointF(event.pos()))
-            ys = self._track_y()
-            if y is not None and "reference" in ys:
-                end = ys.get("frames", ys.get("revcomp", ys["reference"]))
-                end += (FRAME_H * len(self.translation_frames()) + 2 if "frames" in ys
-                        else TRACK_H)
-                if ys["reference"] <= y < end:
-                    bp = self.bp_at_pos(QPointF(event.pos())) \
-                        if event.pos().x() >= self.label_w else -1
-                    self.sequenceContextMenu.emit(bp, event.globalPos())
-                    event.accept()
-                    return
-        if self.tracks:
-            y = self._header_y(QPointF(event.pos()))
-            k = self.track_at_y(y) if y is not None else -1
-            if k >= 0 and self.in_header(QPointF(event.pos())):
-                # the reference position clicked: "Sort reads here" sorts there
-                self.track_menu_bp = self.bp_at_pos(QPointF(event.pos())) \
-                    if event.pos().x() >= self.label_w else None
-                self.trackContextMenu.emit(k, event.globalPos())
-                event.accept()
-                return
         i = self.read_at(QPointF(event.pos()))
         if i >= 0 and i not in self.selection:
             self.selected = i
@@ -1564,13 +1336,6 @@ class ContigCanvas(GenomeTracksMixin, QAbstractScrollArea):
             self._edge_drag = True
             event.accept()
             return
-        if self.tracks_mouse_press(event):
-            event.accept()
-            return
-        if (self.model is not None and self.model.browser
-                and event.button() == Qt.MouseButton.LeftButton
-                and event.position().x() >= self.label_w and self.region_sel is not None):
-            self.set_region_selection(None)      # a click below the tracks clears it too
         i = self.read_at(event.position())
         mods = event.modifiers()
         if i >= 0:
@@ -1591,33 +1356,12 @@ class ContigCanvas(GenomeTracksMixin, QAbstractScrollArea):
             self.fit_label_width()
             event.accept()
             return
-        if self.ruler_double_click(event.position()):
-            event.accept()
-            return
-        if self.model is not None and self.model.browser:
-            # genome browser: zoom in 2x around the spot (never Fit, which would
-            # throw away the place in view); the names column does nothing
-            x = event.position().x()
-            if x >= self.label_w and event.button() == Qt.MouseButton.LeftButton:
-                self.zoom_in_at(x)
-            event.accept()
-            return
         i = self.read_at(event.position())
         if i < 0:
             self.fit()
         else:
             self.readDoubleClicked.emit(i)
         super().mouseDoubleClickEvent(event)
-
-    def zoom_in_at(self, x: float, factor: float = 2.0) -> None:
-        """Zoom in ``factor`` times with the base at ``x`` moved to the middle."""
-        m = self.model
-        if m is None:
-            return
-        bp = max(0.0, min(m.length - 1.0, (x - self.label_w + self.horizontalScrollBar().value())
-                          / self.ppb)) if not self.wrap_active() else float(self.bp_at(x))
-        half = self._data_w() / (self.ppb * factor) / 2
-        self.show_range(int(bp - half), int(bp + half))
 
     def show_range(self, start0: int, end0: int) -> None:
         """Zoom so [start0, end0) fills the view (a single position: zoom to bases)."""
@@ -1641,9 +1385,6 @@ class ContigCanvas(GenomeTracksMixin, QAbstractScrollArea):
         if self._edge_drag:
             self.set_label_width(int(x))
             return
-        if self.tracks_mouse_move(event):
-            QToolTip.hideText()
-            return
         vp = self.viewport()
         if self._on_edge(x):
             vp.setCursor(Qt.CursorShape.SplitHCursor)
@@ -1651,24 +1392,8 @@ class ContigCanvas(GenomeTracksMixin, QAbstractScrollArea):
                               "Drag to resize the names; double-click to fit the longest",
                               self)
             return
-        hint = self.tracks_hover_cursor(event.position())
-        if hint is not None:
-            vp.setCursor(hint)
-        else:
-            vp.unsetCursor()
+        vp.unsetCursor()
         m = self.model
-        if m is not None and m.browser:
-            # the ruler: the position under the mouse as a tag on it, no popup
-            on_ruler = x >= self.label_w and self._in_ruler(event.position())
-            self.set_ruler_hover(x if on_ruler else None)
-            if on_ruler:
-                QToolTip.hideText()
-                return
-        if m is not None and x < self.label_w and self.tracks:
-            tip = self.track_tooltip(event.position())
-            if tip:
-                QToolTip.showText(event.globalPosition().toPoint(), tip, self)
-                return
         if m is not None and x < self.label_w:
             # the name column: the full name of the sequence under the mouse
             i = self.read_at(event.position())
@@ -1680,14 +1405,8 @@ class ContigCanvas(GenomeTracksMixin, QAbstractScrollArea):
         if m is None:
             QToolTip.hideText()
             return
-        tip = self.track_tooltip(event.position()) if self.tracks else None
-        if tip:
-            QToolTip.showText(event.globalPosition().toPoint(), tip, self)
-            return
         bp = self.bp_at_pos(event.position())
-        if m.browser or not 0 <= bp < m.length:
-            # genome browser: only the track items have hover text, never the
-            # "Position … · No coverage" box
+        if not 0 <= bp < m.length:
             QToolTip.hideText()
             return
         lines = [f"Position {bp + 1:,}"]
@@ -1758,49 +1477,6 @@ class ContigCanvas(GenomeTracksMixin, QAbstractScrollArea):
 
     # ---------------------------------------------------------------- painting
 
-    def scrollContentsBy(self, dx: int, dy: int) -> None:  # noqa: N802
-        """Qt's default redraws the whole view on every scroll step. Both scroll
-        bars already ask for exactly the redraw they need (_on_hscroll for
-        sideways, a full update for up and down), so nothing more is done here."""
-
-    def _on_hscroll(self, value: int) -> None:
-        """Sideways scroll. Genome browser: the read tracks' pixels are shifted (the
-        screen copies them) and only the strip that comes into view is drawn; the
-        ruler, sequence, names and labels are drawn again as usual."""
-        from PySide6.QtCore import QRect
-        from PySide6.QtGui import QRegion
-
-        vp = self.viewport()
-        old = getattr(self, "_hscroll_last", value)
-        self._hscroll_last = value
-        dx = old - value
-        m = self.model
-        rects = getattr(self, "_blit_rects", [])
-        w = vp.width()
-        if m is not None and m.browser and rects:
-            self._track_y()
-            if tuple(self._extra_spans) != getattr(self, "_spans_sig", None):
-                rects = []             # a track's height changed with the view: redraw all
-        if (not dx or m is None or not m.browser or self.wrap_active() or not rects
-                or abs(dx) >= (w - self.label_w) // 2 or self._ruler_drag is not None):
-            vp.update()
-            return
-        v = self.verticalScrollBar().value()
-        rest = QRegion(vp.rect())
-        below = vp.rect()
-        if v > 0:
-            # tracks pass under the pinned ruler rows: never shift those pixels
-            pin = self.browser_pinned_h()
-            below = QRect(0, pin, w, max(0, vp.height() - pin))
-        for top, hh in rects:
-            r = QRect(self.label_w, int(top - v), w - self.label_w, int(hh))
-            r = r.intersected(below)
-            if r.isEmpty():
-                continue
-            vp.scroll(dx, 0, r)              # shifts the pixels, asks for the new strip
-            rest = rest.subtracted(QRegion(r))
-        vp.update(rest)
-
     def paintEvent(self, event) -> None:  # noqa: N802
         p = QPainter(self.viewport())
         pal = self.palette()
@@ -1818,63 +1494,8 @@ class ContigCanvas(GenomeTracksMixin, QAbstractScrollArea):
         else:
             bp0 = max(0, self.bp_at(self.label_w) - 1)
             bp1 = min(m.length, self.bp_at(w) + 2)
-            if m.browser:
-                # no placed sequences: the tracks themselves scroll up and down,
-                # under the ruler and sequence rows, which stay pinned at the top
-                v = self.verticalScrollBar().value()
-                pin = self.browser_pinned_h() if v > 0 else 0
-                from PySide6.QtCore import QRect
-                from PySide6.QtGui import QRegion
-
-                # only the part being redrawn (after a sideways shift, a strip)
-                p.setClipRegion(QRegion(event.region()).intersected(
-                    QRect(0, pin, w, max(0, h - pin))))
-                p.translate(0, -v)
-                self._paint_page(p, w, h + v, bp0, bp1, 0)
-                self._paint_drag_overlay(p)
-                p.resetTransform()
-                if pin:
-                    self._paint_pinned(p, w, pin, bp0, bp1, bg)
-                self._place_sel_chip()
-                self._spans_sig = tuple(self._extra_spans)
-                page = self.header_h()
-                if page != getattr(self, "_page_h_seen", page):
-                    # tracks fit what is in view: the page grew or shrank
-                    from PySide6.QtCore import QTimer
-
-                    QTimer.singleShot(0, self._update_scrollbars)
-                self._page_h_seen = page
-                return
             self._paint_page(p, w, h, bp0, bp1, self.verticalScrollBar().value())
-            self._paint_drag_overlay(p)
-            self._place_sel_chip()
         self._paint_info(p, h)
-
-    def browser_pinned_h(self) -> int:
-        """Genome browser: height of the ruler and sequence rows kept at the top of
-        the view while the tracks under them scroll."""
-        ys = self._track_y()
-        if self._extra_spans:
-            return int(self._extra_spans[0][0]) - 2
-        return int(ys["reads"])
-
-    def _paint_pinned(self, p: QPainter, w: int, pin: int, bp0: int, bp1: int,
-                      bg: QColor) -> None:
-        """The pinned rows, drawn over the scrolled page (tracks are skipped)."""
-        from PySide6.QtCore import QRect
-
-        p.setClipRect(QRect(0, 0, w, pin))
-        p.fillRect(QRect(0, 0, w, pin), bg)
-        self._pinned_pass = True
-        try:
-            self._paint_page(p, w, pin, bp0, bp1, 0)
-            self._paint_drag_overlay(p)
-        finally:
-            self._pinned_pass = False
-        p.setClipping(False)
-        # a rule under the pinned rows, so scrolled tracks clearly pass beneath it
-        p.setPen(QPen(self._track_rule_color(), 1))
-        p.drawLine(0, pin - 1, w, pin - 1)
 
     def info_lines(self) -> tuple[str, str, str]:
         """Three short lines for the foot of the name column: the selected sequence, or
@@ -1969,10 +1590,7 @@ class ContigCanvas(GenomeTracksMixin, QAbstractScrollArea):
         font.setPointSize(8)
         p.setFont(font)
         header = self.header_h()
-        # within the part being redrawn (the tracks skip pictures outside it)
-        p.setClipRect(QRectF(self.label_w, 0, w - self.label_w, header),
-                      Qt.ClipOperation.IntersectClip if p.hasClipping()
-                      else Qt.ClipOperation.ReplaceClip)
+        p.setClipRect(QRectF(self.label_w, 0, w - self.label_w, header))
         self._paint_ruler(p, bp0, bp1, fg, mid)
         self._paint_features(p, ys["features"], bp0, bp1)
         if m.detailed:
@@ -1985,17 +1603,7 @@ class ContigCanvas(GenomeTracksMixin, QAbstractScrollArea):
             self._paint_sequence_track(p, ys["reference"], m.reference, bp0, bp1, letters,
                                        compare=cons if to_cons else "", fg=fg,
                                        consensus_track=False)
-        if "coverage" in ys:
-            self._paint_coverage(p, ys["coverage"], bp0, bp1, w)
-        elif "reference" in ys:
-            self._paint_sequence_track(p, ys["reference"], m.reference, bp0, bp1, letters,
-                                       compare="", fg=fg, consensus_track=False)
-            if "revcomp" in ys:
-                self._paint_sequence_track(p, ys["revcomp"], self.complement_seq(), bp0, bp1,
-                                           letters, compare="", fg=fg, consensus_track=False)
-            if "frames" in ys:
-                self._paint_translation(p, ys["frames"], bp0, bp1, fg)
-        self._paint_extra_tracks(p, bp0, bp1, w)
+        self._paint_coverage(p, ys["coverage"], bp0, bp1, w)
         if "logo" in ys:
             self._paint_logo(p, ys["logo"], bp0, bp1, fg)
         p.setClipRect(QRectF(self.label_w, header, w - self.label_w, h - header))
@@ -2015,9 +1623,7 @@ class ContigCanvas(GenomeTracksMixin, QAbstractScrollArea):
         p.drawLine(self.label_w - 1, 0, self.label_w - 1, h)
         p.drawLine(0, header - 2, w, header - 2)
         p.setPen(fg)
-        # from the view's font, not whatever the tracks above left on the painter
-        # (the sequence letters are monospaced)
-        label_font = QFont(font)
+        label_font = QFont(p.font())
         label_font.setPointSize(9)
         p.setFont(label_font)
 
@@ -2027,14 +1633,9 @@ class ContigCanvas(GenomeTracksMixin, QAbstractScrollArea):
 
         if self._wrap_origin is not None:
             label(0, f"{bp0 + 1:,}–{bp1:,}", RULER_H)
-        elif m.browser and self.visible_span() is not None:
-            # the browser: the width of the region in view (the length is in the strip)
-            a, b = self.visible_span()
-            label(0, f"{max(0, min(b, m.length) - a):,} bp in view", RULER_H)
         else:
             label(0, f"{m.length:,} bp", RULER_H)
-        label(ys["features"], "Annotations" if m.features else
-              ("" if m.browser else "No annotations"),
+        label(ys["features"], "Annotations" if m.features else "No annotations",
               self.feature_row_h())
         if m.detailed:
             label(ys["consensus"], "Consensus")
@@ -2047,31 +1648,9 @@ class ContigCanvas(GenomeTracksMixin, QAbstractScrollArea):
             fm_ref = QFontMetrics(label_font)
             label(ys["reference"], fm_ref.elidedText(f"Reference · {m.ref_id}",
                                                      Qt.TextElideMode.ElideMiddle, self.label_w - 12))
-        if "coverage" in ys:
-            top = max(1.0, float(m.coverage[max(0, bp0 // m.bin_size):
-                                             max(1, bp1 // m.bin_size + 1)].max(initial=0)))
-            label(ys["coverage"], f"Coverage (max {top:.0f})", COVERAGE_H)
-        elif "reference" in ys:
-            fm_ref = QFontMetrics(label_font)
-            # the browser: just the sequence name
-            ref_text = m.ref_id if m.browser else f"Sequence · {m.ref_id}"
-            label(ys["reference"], fm_ref.elidedText(ref_text,
-                                                     Qt.TextElideMode.ElideMiddle, self.label_w - 12))
-            if "revcomp" in ys:
-                label(ys["revcomp"], "reverse complement")
-            if "frames" in ys:
-                small = QFont(label_font)
-                small.setPointSize(8)
-                p.setFont(small)
-                for k, (strand, frame) in enumerate(self.translation_frames()):
-                    p.setPen(mid)
-                    p.drawText(QRectF(6, ys["frames"] + k * FRAME_H, self.label_w - 10, FRAME_H),
-                               Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
-                               f"translation {strand}{frame + 1}")
-                p.setFont(label_font)
-                p.setPen(fg)
-        self._paint_extra_labels(p, fg, mid)
-        p.setFont(label_font)
+        top = max(1.0, float(m.coverage[max(0, bp0 // m.bin_size):
+                                         max(1, bp1 // m.bin_size + 1)].max(initial=0)))
+        label(ys["coverage"], f"Coverage (max {top:.0f})", COVERAGE_H)
         if "logo" in ys:
             label(ys["logo"], "Logo", LOGO_H)
         if self.one_per_row:
@@ -2771,7 +2350,6 @@ class ContigOverview(QWidget):
         self.setMouseTracking(True)
         self.setToolTip("Whole reference. Click or drag to move the view.")
         canvas.viewChanged.connect(self.update)
-        canvas.regionSelectionChanged.connect(self.update)
 
     def _x0(self) -> float:
         # where the view's data area starts (its label column ends)
@@ -2788,48 +2366,6 @@ class ContigOverview(QWidget):
         m = self.canvas.model
         return self._track_w() / max(1, m.length if m else 1)
 
-    SLIM_HEIGHT = 26     # genome browser: just the sequence and where the view is
-
-    def sync_height(self) -> None:
-        m = self.canvas.model
-        self.setFixedHeight(self.SLIM_HEIGHT if m is not None and m.browser else self.HEIGHT)
-
-    def _paint_slim(self, p: QPainter, m) -> None:
-        """Genome browser: a thin bar for the whole sequence, a square box for the part
-        in view and the ruler selection in a lighter shade."""
-        pal = self.palette()
-        h = self.SLIM_HEIGHT
-        f = QFont(p.font())
-        f.setPointSize(8)
-        p.setFont(f)
-        p.setPen(pal.color(pal.ColorRole.PlaceholderText))
-        size = m.length
-        text = f"{size / 1e6:,.2f} Mb" if size >= 1e6 else f"{size:,} bp"
-        p.drawText(QRectF(6, 0, self.canvas.label_w - 10, h),
-                   Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
-                   f"{m.ref_id} · {text}")
-        x0, sc = self._x0(), self._scale()
-        full = m.length * sc
-        p.fillRect(QRectF(x0, h / 2 - 4, full, 8), QColor("#c9d1da"))
-        c = self.canvas
-        sel = getattr(c, "region_sel", None)
-        if sel is not None:
-            a, b = x0 + sel[0] * sc, x0 + sel[1] * sc
-            p.fillRect(QRectF(a, h / 2 - 6, max(2.0, b - a), 12), QColor(31, 95, 191, 60))
-        if c.ppb > 0:
-            vis0, vis1 = c.visible_span() or (0, m.length)
-            left = x0 + vis0 * sc
-            right = max(left + 3.0, x0 + vis1 * sc)
-            left, right = max(x0, min(left, x0 + full - 3.0)), min(x0 + full, right)
-            box = QRectF(left, h / 2 - 6, right - left, 12)   # just taller than the bar
-            p.setBrush(QColor(214, 69, 47, 40))
-            p.setPen(QPen(QColor("#d6452f"), 1.5))
-            # antialiased, so the outline sits evenly on both sides of the box's edges
-            # (without it Qt shifts the stroke down and right): centred on the bar
-            p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-            p.drawRect(box)
-            p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
-
     def paintEvent(self, event) -> None:  # noqa: N802
         import math
 
@@ -2838,10 +2374,6 @@ class ContigOverview(QWidget):
         p.fillRect(self.rect(), pal.color(pal.ColorRole.Window))
         m = self.canvas.model
         if m is None:
-            return
-        if m.browser:
-            self._paint_slim(p, m)
-            p.end()
             return
         p.setPen(pal.color(pal.ColorRole.Text))
         f = QFont(p.font())
@@ -2889,9 +2421,9 @@ class ContigOverview(QWidget):
             left = max(x0 + 1.0, x0 + vis0 * sc)
             right = min(x0 + m.length * sc - 1.0, max(left + 4.0, x0 + vis1 * sc))
             box = QRectF(left, 2, right - left, self.HEIGHT - 4)
-            p.setPen(QPen(_MARK_EDGE, 1.5))
+            p.setPen(QPen(_MARK_EDGE, 2))
             p.setBrush(QColor(31, 95, 191, 26))
-            p.drawRect(box)
+            p.drawRoundedRect(box, 3, 3)
         p.end()
 
     def _jump(self, x: float) -> None:
@@ -3122,8 +2654,6 @@ def _sidebar_icon(widget: QWidget):
     return icon
 
 
-DENSITY_RUN_BP = 5000       # Genome list: shortest odd-depth stretch that shows
-
 class ContigViewPanel(QWidget):
     """A Map to Reference result (``.rvmap``), laid out like Geneious: document tabs along
     the top (Contig view and its tables), a thin navigation bar, the view, and the display
@@ -3149,8 +2679,6 @@ class ContigViewPanel(QWidget):
         self._data: dict = {}
         self._contig_models: dict[str, ContigModel] = {}
         self._report_loaded: Path | None = None
-        self._session: dict | None = None    # set for a genome browser session (.rvgb)
-        self._fai: dict = {}
         self.canvas = ContigCanvas(self)
         self.overview = ContigOverview(self.canvas, self)
         # name column width: dragged by the user, remembered between sessions
@@ -3195,13 +2723,12 @@ class ContigViewPanel(QWidget):
         self._diff_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._diff_label.setMinimumWidth(140)
         self._goto = QLineEdit(self)
-        self._goto.setPlaceholderText("Go to, e.g. 90-130 or a feature name")
+        self._goto.setPlaceholderText("Go to, e.g. 90-130")
         self._goto.setMinimumWidth(120)
         self._goto.setClearButtonEnabled(True)
         self._goto.setToolTip("Go to a position or a range on the reference "
                               "(e.g. 103, 90-130, or CroSat2:90-130). Enter to go.")
         self._goto.returnPressed.connect(self._go_to)
-        self._goto.editingFinished.connect(self._sync_locus)
         # Files ▾: the arrow is part of the label (Qt's own menu arrow sits low on macOS),
         # and the menu opens under the button.
         self._files_btn = QToolButton(self)
@@ -3213,21 +2740,6 @@ class ContigViewPanel(QWidget):
         self._files_btn.clicked.connect(
             lambda: self._files_menu.exec(
                 self._files_btn.mapToGlobal(self._files_btn.rect().bottomLeft())))
-        # Tracks ▾: genome-browser tracks (annotation / alignment files) on the reference
-        self._tracks_btn = QToolButton(self)
-        self._tracks_btn.setText("Tracks ▾")
-        self._tracks_btn.setAutoRaise(True)
-        self._tracks_btn.setToolTip("Add annotation (GFF, GTF, BED, VCF) or alignment tracks "
-                                    "(minimap2 PAF, SAM, BAM, BLAST tabular) to the reference")
-        self._tracks_menu = QMenu(self._tracks_btn)
-        self._tracks_btn.clicked.connect(self._show_tracks_menu)
-        self._track_loader = None
-        self.setAcceptDrops(True)          # track files dropped from the file panel
-        self.canvas.trackContextMenu.connect(self._track_menu)
-        self.canvas.tracksReordered.connect(self._remember_tracks)
-        self.canvas.trackItemClicked.connect(self._show_track_item)
-        self.canvas.viewChanged.connect(self._sync_track_inspector)
-        self.canvas.viewChanged.connect(self._sync_locus)
         # panel toggle: sidebar icon, highlighted while the options panel is open
         self._side_btn = QToolButton(self)
         self._side_btn.setCheckable(True)
@@ -3243,28 +2755,7 @@ class ContigViewPanel(QWidget):
         bl = QHBoxLayout(bar)
         bl.setContentsMargins(6, 3, 6, 3)
         bl.setSpacing(4)
-        from repeatviewer.widgets.genome_navigator import BreadcrumbBar
-
-        # genome browser: ‹ › chromosome › range › gene (instead of the picker)
-        self._crumbs = BreadcrumbBar(bar)
-        self._crumbs.hide()
-        bl.addWidget(self._crumbs)
-        # genome browser: the Preview's − + and zoom slider, and Select (zoom to the
-        # region dragged on the ruler)
-        self._nav_zoom = self._make_nav_zoom(bar)
-        self._nav_zoom.hide()
-        bl.addWidget(self._nav_zoom)
-        # toolbar items the genome browser does without (its window menu bar has
-        # Tracks and the files; the ruler double-click zooms to bases)
-        self._old_zoom = (zoom_out, zoom_in, fit, bases)
         bl.addWidget(self._contig)
-        self._span_label = QLabel(self)
-        self._span_label.setToolTip("Width of the region in view")
-        self._span_label.setMinimumWidth(56)
-        self._span_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._span_label.setEnabled(False)
-        self._span_label.hide()
-        bl.addWidget(self._span_label)
         for wdg in (zoom_out, zoom_in, fit, bases):
             bl.addWidget(wdg)
         bl.addStretch(1)
@@ -3279,7 +2770,6 @@ class ContigViewPanel(QWidget):
         nr.setSpacing(4)
         nr.addWidget(self._goto, 1)
         nr.addSpacing(2)
-        nr.addWidget(self._tracks_btn)
         nr.addWidget(self._files_btn)
         nr.addWidget(self._side_btn)
         # legend: the app's shared round "?"; click shows the key as a popup
@@ -3453,15 +2943,8 @@ class ContigViewPanel(QWidget):
         self._view_split = QSplitter(Qt.Orientation.Horizontal, self)
         self._view_split.addWidget(view_area)
         self._view_split.addWidget(self._side)
-        from repeatviewer.widgets.genome_navigator import NavigatorRail
-
-        # genome browser: chromosomes, bookmarks and recent places instead of options
-        self._rail = NavigatorRail(self)
-        self._rail.hide()
-        self._view_split.addWidget(self._rail)
         self._view_split.setStretchFactor(0, 1)
         self._view_split.setStretchFactor(1, 0)
-        self._view_split.setStretchFactor(2, 0)
         self._view_split.setCollapsible(0, False)
         self._view_split.setChildrenCollapsible(False)
         self._view_split.splitterMoved.connect(self._queue_nav_sync)
@@ -3472,15 +2955,6 @@ class ContigViewPanel(QWidget):
         vp.setContentsMargins(0, 0, 0, 0)
         vp.setSpacing(0)
         vp.addWidget(bar)
-        # genome browser: a thin line under the top bar, across the whole window
-        from PySide6.QtWidgets import QFrame
-
-        self._nav_rule = QFrame(self._view_page)
-        self._nav_rule.setObjectName("navRule")
-        self._nav_rule.setFixedHeight(1)
-        self._nav_rule.setStyleSheet("QFrame#navRule { background: #d4d9df; border: none; }")
-        self._nav_rule.hide()
-        vp.addWidget(self._nav_rule)
         vp.addWidget(self._view_split, 1)
 
         # ------------------------------------------------ document tabs
@@ -3525,7 +2999,6 @@ class ContigViewPanel(QWidget):
         self.canvas.set_wrap(self._wrap.isChecked())
         self._on_highlight()
         self._apply_annotations()
-        self._setup_navigator()
         if path is not None:
             self.load(path)
 
@@ -3563,13 +3036,6 @@ class ContigViewPanel(QWidget):
 
         labels: list[QLabel] = []
 
-        from repeatviewer.widgets.track_inspector import TrackInspector
-
-        self._track_inspector = TrackInspector(body)
-        self._track_inspector.settingChanged.connect(self._set_track_setting)
-        s = section("tracks", "Tracks")
-        s.add_widget(self._track_inspector)
-        labels.extend(self._track_inspector.label_widgets())
         s = section("display", "Display")
         s.add_layout(form(("Layout", self._layout_mode), ("Sort by", self._sort),
                           ("Colour by", self._color_by)))
@@ -3651,205 +3117,22 @@ class ContigViewPanel(QWidget):
         self._legend_popup = pop
         pop.popup(btn.mapToGlobal(QPoint(btn.width() - size.width(), btn.height() + 4)))
 
-    ZOOM_STEPS = 100
-
-    def _make_nav_zoom(self, parent: QWidget) -> QWidget:
-        """− + and a zoom slider (as in the Preview panel: same size and style), then
-        Select. The slider runs from the whole sequence (left) to single bases."""
-        from PySide6.QtWidgets import QPushButton, QSizePolicy
-
-        from repeatviewer.widgets.preview_controls import (
-            ANNOTATION_FIT_BUTTON_RENDERED_WIDTH,
-            ANNOTATION_SELECT_BUTTON_RENDERED_WIDTH,
-            ANNOTATION_ZOOM_SLIDER_WIDTH,
-            OVERVIEW_SELECT_FIT_HEIGHT,
-            ZOOM_SLIDER_HEIGHT,
-            apply_annotation_zoom_slider_style,
-            make_overview_zoom_button,
-            style_compact_button,
-        )
-        from repeatviewer.widgets.spin_boxes import NoWheelSlider
-
-        host = QWidget(parent)
-        lay = QHBoxLayout(host)
-        lay.setContentsMargins(6, 0, 0, 0)
-        lay.setSpacing(6)
-        out_ = make_overview_zoom_button("−", host)
-        out_.setToolTip("Zoom out")
-        out_.clicked.connect(lambda: self.canvas.zoom(0.66))
-        in_ = make_overview_zoom_button("+", host)
-        in_.setToolTip("Zoom in")
-        in_.clicked.connect(lambda: self.canvas.zoom(1.5))
-        sl = NoWheelSlider(Qt.Orientation.Horizontal, host)
-        sl.setObjectName("annotationZoomSlider")
-        sl.setRange(0, self.ZOOM_STEPS)
-        sl.setFixedWidth(ANNOTATION_ZOOM_SLIDER_WIDTH)
-        sl.setFixedHeight(ZOOM_SLIDER_HEIGHT)
-        sl.setToolTip("Zoom: left shows the whole sequence, right single bases")
-        apply_annotation_zoom_slider_style(sl)
-        sl.valueChanged.connect(self._nav_zoom_slid)
-        sel = QPushButton("Select", host)
-        sel.setFixedWidth(ANNOTATION_SELECT_BUTTON_RENDERED_WIDTH)
-        sel.setFixedHeight(OVERVIEW_SELECT_FIT_HEIGHT)
-        style_compact_button(sel)
-        sel.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        sel.setToolTip("Zoom to the region dragged on the ruler (S)\n"
-                       "Ruler: double-click zooms to the bases there; right-click or "
-                       "Shift + click zooms out")
-        sel.clicked.connect(self.canvas.go_to_selection)
-        fit = QPushButton("Fit", host)
-        fit.setFixedWidth(ANNOTATION_FIT_BUTTON_RENDERED_WIDTH)
-        fit.setFixedHeight(OVERVIEW_SELECT_FIT_HEIGHT)
-        style_compact_button(fit)
-        fit.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        fit.setToolTip("Show the whole sequence")
-        fit.clicked.connect(self.canvas.fit)
-        mark = QPushButton("Mark", host)
-        # wide enough for its text and the compact style's 8 px side padding
-        mark.setFixedWidth(max(ANNOTATION_FIT_BUTTON_RENDERED_WIDTH,
-                               mark.fontMetrics().horizontalAdvance("Mark") + 20))
-        mark.setFixedHeight(OVERVIEW_SELECT_FIT_HEIGHT)
-        style_compact_button(mark)
-        mark.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        mark.setToolTip("Add a bookmark for the view (or the region marked on the "
-                        "ruler)")
-        mark.clicked.connect(lambda: self._add_bookmark(whole_view=True))
-        for w in (out_, in_, sl, sel, fit, mark):
-            w.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-            lay.addWidget(w)
-        self._zoom_slider = sl
-        self._select_btn = sel
-        self._nav_fit_btn = fit
-        self._mark_btn = mark
-        self.canvas.viewChanged.connect(self._nav_zoom_sync)
-        return host
-
-    def _zoom_range(self) -> tuple[float, float] | None:
-        c, m = self.canvas, self.canvas.model
-        if m is None:
-            return None
-        fit = max(1e-9, (c._data_w() - 12) / max(1, m.length))
-        return fit, max(fit, MAX_PPB)
-
-    def _nav_zoom_sync(self) -> None:
-        r = self._zoom_range()
-        if r is None:
-            return
-        import math
-
-        fit, top = r
-        v = 0 if top <= fit else math.log(max(fit, self.canvas.ppb) / fit) / math.log(top / fit)
-        self._zoom_slider.blockSignals(True)
-        self._zoom_slider.setValue(round(v * self.ZOOM_STEPS))
-        self._zoom_slider.blockSignals(False)
-
-    def _nav_zoom_slid(self, value: int) -> None:
-        r = self._zoom_range()
-        if r is None:
-            return
-        fit, top = r
-        target = fit * (top / fit) ** (value / self.ZOOM_STEPS)
-        self.canvas.zoom(target / max(1e-12, self.canvas.ppb))
-
-    def _nav_position_entered(self, text: str) -> None:
-        """The position box: go to what was typed (a place, a region or a gene)."""
-        if not text:
-            return
-        self._goto.setText(text)
-        self._go_to()
-        self._goto.clear()
-        self.canvas.setFocus()
-
-    def _place_locus_box(self, browser: bool) -> None:
-        """Genome browser: the breadcrumb (‹ › chromosome › range › gene) shows where
-        the view is, the search box on the right goes to a gene or a position, and the
-        navigator rail replaces the options panel."""
-        goto = self._goto
-        self._nav_mode = browser
-        self._crumbs.setVisible(browser)
-        self._nav_rule.setVisible(browser)
-        self._legend_btn.setVisible(not browser)    # no "?" legend in the browser
-        self._nav_zoom.setVisible(browser)
-        for wdg in self._old_zoom:
-            wdg.setVisible(not browser)
-        for wdg in (self._goto, self._tracks_btn, self._files_btn):
-            wdg.setVisible(not browser)
-        # a region dragged on the ruler stays marked; Select zooms there
-        self.canvas.sel_chip_off = browser
-        self._span_label.hide()
-        # the panel icon shows / hides the navigator rail in the browser
-        self._side_btn.blockSignals(True)
-        self._side_btn.setChecked(_read_bool("rail_panel", True) if browser
-                                  else _read_bool("side_panel", True))
-        self._side_btn.blockSignals(False)
-        self._side_btn.setToolTip("Show or hide the navigator (genome and bookmarks)"
-                                  if browser else "Show or hide the options panel")
-        self._rail.setVisible(browser and self._side_btn.isChecked())
-        if browser:
-            self._side.setVisible(False)
-            goto.setFixedWidth(300)
-            goto.setPlaceholderText("Go to gene or position…")
-            goto.setToolTip("Type a gene or feature name, a position (1,204,800) or a region "
-                            "(chr4:2,100,000-2,180,000) and press Enter.")
-            sizes = self._view_split.sizes()
-            if len(sizes) == 3 and sizes[2] < 200:
-                from repeatviewer.widgets.genome_navigator import RAIL_W
-
-                total = sum(sizes) or self.width()
-                self._view_split.setSizes([max(0, total - RAIL_W), 0, RAIL_W])
-        else:
-            goto.setMinimumWidth(80)
-            goto.setMaximumWidth(16777215)
-            goto.setPlaceholderText("Go to, e.g. 90-130 or a feature name")
-            self._side.setVisible(self._side_btn.isChecked())
-        self._contig.setVisible(not browser and self._contig.count() > 1)
-        self._sync_locus()
-
-    NAV_SYNC_MS = 100     # the top bar, sidebar box and history follow a moving view
-                          # at most this often (the tracks themselves every frame)
-
-    def _sync_locus(self, *_args) -> None:
-        if getattr(self, "_nav_mode", False):
-            self._nav_sync_soon()
-            return
-        if not getattr(self, "_locus_mode", False):
-            return
-        m = self.canvas.model
-        span = self.canvas.visible_span() if m is not None else None
-        if m is None or span is None:
-            return
-        a, b = span
-        b = min(b, m.length)
-        n = b - a
-        self._span_label.setText(f"{n / 1e6:.2f} Mb" if n >= 1e6 else
-                                 f"{n / 1e3:.1f} kb" if n >= 1e3 else f"{n} bp")
-        if not self._goto.hasFocus():
-            self._goto.setText(f"{m.ref_id}:{a + 1:,}-{b:,}")
-            self._goto.setCursorPosition(0)
-
     def _sync_nav_right(self) -> None:
         """Line Go to up with the options panel: its left edge at the section titles,
         the group ending at the bar's right margin. Without the panel: natural size."""
         right = self._nav_right
-        if getattr(self, "_nav_mode", False):
-            right.setMinimumWidth(0)
-            right.setMaximumWidth(16777215)
-            return
-        locus = getattr(self, "_locus_mode", False)     # the box is on the left then
         if not self._side.isVisible() or self._side.width() <= 0:
             right.setMinimumWidth(0)
             right.setMaximumWidth(16777215)
-            if not locus:
-                self._goto.setFixedWidth(190)
+            self._goto.setFixedWidth(190)
             return
-        if not locus:
-            self._goto.setMinimumWidth(80)
-            self._goto.setMaximumWidth(16777215)
+        self._goto.setMinimumWidth(120)
+        self._goto.setMaximumWidth(16777215)
         bar = self._nav_bar
         start = bar.mapFromGlobal(self._side.mapToGlobal(QPoint(0, 0))).x() + self.SIDE_PAD
         end = bar.width() - bar.layout().contentsMargins().right()
         if end - start > 160:
-            right.setFixedWidth(max(end - start, right.minimumSizeHint().width()))
+            right.setFixedWidth(end - start)
 
     def _queue_nav_sync(self, *_args) -> None:
         from PySide6.QtCore import QTimer
@@ -3865,11 +3148,6 @@ class ContigViewPanel(QWidget):
         self._queue_nav_sync()
 
     def _set_side_visible(self, on: bool) -> None:
-        if getattr(self, "_nav_mode", False):
-            self._side.setVisible(False)       # the genome browser has the rail instead
-            self._rail.setVisible(on)
-            _write("rail_panel", bool(on))
-            return
         self._side.setVisible(on)
         _write("side_panel", bool(on))
         if on:
@@ -3887,10 +3165,6 @@ class ContigViewPanel(QWidget):
     def load(self, path: Path) -> None:
         self._path = Path(path)
         self._report_loaded = None
-        self._session = None
-        if self._path.suffix.lower() == gt.SESSION_SUFFIX:
-            self._load_session(self._path)
-            return
         try:
             self._data = mr.load_rvmap(self._path)
         except (OSError, ValueError, mr.MapReferenceError) as exc:
@@ -3919,11 +3193,9 @@ class ContigViewPanel(QWidget):
         self._build_files_menu()
         self._fill_unused()
         report = self._report_path()
-        self._set_browser_tabs(False)
         self._tabs.setTabEnabled(self._tabs.indexOf(self._report_view), report is not None)
         if self._tabs.currentWidget() is self._report_view:
             self._tabs.setCurrentWidget(self._view_page)
-        self._restore_tracks()
         if self._contig.count():
             self._on_contig_changed(0)
         else:
@@ -3967,15 +3239,9 @@ class ContigViewPanel(QWidget):
             return
         model = self._contig_models.get(ref_id)
         if model is None:
-            if entry.get("browser"):
-                model = self._browser_model(entry)
-                self._contig_models.clear()     # one chromosome sequence in memory at a time
-            else:
-                model = ContigModel.from_json(entry)
+            model = ContigModel.from_json(entry)
             self._contig_models[ref_id] = model
         self.canvas.set_model(model)
-        self.canvas.set_region_selection(None)
-        self.overview.sync_height()
         self._apply_filters()
         self._layout_mode.blockSignals(True)
         self._layout_mode.setCurrentIndex(0 if self.canvas.one_per_row else 1)
@@ -4247,12 +3513,6 @@ class ContigViewPanel(QWidget):
 
         text = self._goto.text().strip()
         parsed = parse_position(text)
-        locus = gt.parse_locus(text)
-        if parsed is None and locus is not None:
-            parsed = locus
-        if parsed is None and text and self.canvas.tracks:
-            if self._go_to_feature(text):
-                return
         if parsed is None:
             self._goto.setToolTip(f"\"{text}\" is not a position. Type e.g. 103 or 90-130.")
             self._goto.selectAll()
@@ -4272,11 +3532,6 @@ class ContigViewPanel(QWidget):
             return
         self._show_view()
         self.canvas.show_range(start - 1, min(end, m.length))
-        if getattr(self, "_nav_mode", False):
-            self._nav_arrived(text)
-        elif getattr(self, "_locus_mode", False):
-            self.canvas.setFocus()            # the box then shows the region in view
-            self._sync_locus()
         self._sync_difference_label()
 
     def _open_read_in_rows(self, read_idx: int) -> None:
@@ -4706,1464 +3961,3 @@ class ContigViewPanel(QWidget):
         t = self._threshold_value
         tag = "" if t is None else ("_majority" if t == 0 else f"_{round(t * 100)}pct")
         QApplication.clipboard().setText(f">{m.ref_id}_consensus{tag}\n{seq}\n")
-
-    # ---------------------------------------------------------------- genome browser
-
-    def _reference_names(self) -> list[str]:
-        return [str(c["id"]) for c in self._data.get("contigs", [])]
-
-    def _reference_fasta(self) -> Path | None:
-        ref = self._data.get("browser_reference") or self._data.get("reference")
-        if not ref:
-            return None
-        p = Path(ref)
-        if not p.is_absolute() and self._path is not None:
-            p = self._path.parent / p
-        return p if p.is_file() else None
-
-    def _load_session(self, path: Path) -> None:
-        """A genome browser session (``.rvgb``): a reference FASTA plus tracks."""
-        try:
-            session = gt.read_session(path)
-            ref = Path(session["reference"])
-            index = gt.fasta_index(ref)
-        except (gt.TrackError, OSError, ValueError) as exc:
-            self._data = {}
-            self._title.setText(f"Cannot open {path.name}: {exc}")
-            self.canvas.set_model(None)
-            return
-        self._session = session
-        self._fai = index
-        self._data = {"title": ref.name, "browser_reference": str(ref),
-                      "contigs": [{"id": e.name, "length": e.length, "n_reads": 0,
-                                   "browser": True} for e in index.values()]}
-        self._title.setText(f"<b>{ref.name}</b> · genome browser")
-        self._title.setToolTip(f"{path}\nReference: {ref}")
-        self._contig_models.clear()
-        self._contig.blockSignals(True)
-        self._contig.clear()
-        for e in index.values():
-            self._contig.addItem(f"{e.name} ({e.length:,} bp)", e.name)
-        self._contig.blockSignals(False)
-        self._contig.setVisible(self._contig.count() > 1)
-        self._build_files_menu()
-        self._fill_unused()
-        self._set_browser_tabs(True)
-        self._nav_load_session(session)
-        if self._tabs.currentWidget() is not self._view_page:
-            self._tabs.setCurrentWidget(self._view_page)
-        self.canvas.set_tracks([])
-        self._load_tracks([Path(t["path"]) for t in session.get("tracks", [])],
-                          [t.get("settings", {}) for t in session.get("tracks", [])],
-                          remember=False)
-        if self._contig.count():
-            self._on_contig_changed(0)
-            locus = gt.parse_locus(session.get("locus", "") or "")
-            if locus:
-                self._goto.setText(session["locus"])
-                self._go_to()
-        else:
-            self.canvas.set_model(None)
-
-    # one chromosome is held in memory; longer ones are drawn without bases
-    BROWSER_SEQ_LIMIT = 400_000_000
-
-    def _browser_model(self, entry: dict) -> ContigModel:
-        seq = ""
-        ref = self._reference_fasta()
-        fai = getattr(self, "_fai", {}) or {}
-        e = fai.get(entry["id"])
-        if ref is not None and e is not None and e.length <= self.BROWSER_SEQ_LIMIT:
-            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-            try:
-                seq = gt.fetch_sequence(ref, e)
-            except OSError:
-                seq = ""
-            finally:
-                QApplication.restoreOverrideCursor()
-        return ContigModel.for_reference(entry["id"], int(entry["length"]), seq)
-
-    # tracks
-
-    def _show_tracks_menu(self) -> None:
-        self.fill_tracks_menu(self._tracks_menu)
-        self._tracks_menu.exec(
-            self._tracks_btn.mapToGlobal(self._tracks_btn.rect().bottomLeft()))
-
-    def fill_tracks_menu(self, menu: QMenu) -> None:
-        """Add track…, each track's menu, Remove all (the Tracks ▾ button, and the
-        genome browser window's Tracks menu)."""
-        menu.clear()
-        self.canvas.track_menu_bp = None          # sorts from here use the view middle
-        menu.addAction("Add track…", self._add_track_dialog)
-        if self.canvas.tracks:
-            menu.addSeparator()
-            for i, t in enumerate(self.canvas.tracks):
-                sub = menu.addMenu(t.name)
-                self._fill_track_menu(sub, i)
-                sub.aboutToShow.connect(lambda k=i: self.canvas.set_menu_track(k))
-                sub.aboutToHide.connect(lambda: self.canvas.set_menu_track(None))
-            aln = [i for i, t in enumerate(self.canvas.tracks) if t.kind == gt.KIND_ALIGNMENT]
-            if aln:
-                menu.addSeparator()
-                menu.addAction("Sashimi plot of the view…", lambda: self.open_sashimi(aln))
-            menu.addSeparator()
-            menu.addAction("Remove all tracks", self._remove_all_tracks)
-        if self._data.get("contigs"):
-            menu.addSeparator()
-            menu.addAction("Save as genome browser session…", self._save_session_as)
-
-    def _fill_track_menu(self, menu: QMenu, i: int) -> None:
-        from repeatviewer.widgets.genome_tracks_view import (
-            MODE_COLLAPSED,
-            MODE_EXPANDED,
-            MODE_SQUISHED,
-        )
-
-        t = self.canvas.tracks[i]
-        signal = t.kind == gt.KIND_SIGNAL
-        mode = t.settings.get("mode", MODE_EXPANDED)
-        modes = [("Expanded", MODE_EXPANDED), ("Squished", MODE_SQUISHED)]
-        if t.kind not in (gt.KIND_ANNOTATION, gt.KIND_VARIANT):
-            modes.append(("Collapsed", MODE_COLLAPSED))
-        if signal:
-            modes = []                      # bars, not rows
-            self._fill_signal_menu(menu, i)
-        if t.kind == gt.KIND_JUNCTION:
-            modes = []
-            signal = True                   # no read options either
-            self._fill_junction_menu(menu, i)
-        for label, value in modes:
-            act = menu.addAction(label, lambda v=value: self._set_track_mode(i, v))
-            act.setCheckable(True)
-            act.setChecked(mode == value)
-        height = menu.addMenu("Track height")
-        cur = t.settings.get("height")
-        show_all = bool(t.settings.get("show_all"))
-        act = height.addAction("Default", lambda: self._set_track_height(i, None))
-        act.setCheckable(True)
-        act.setChecked(cur is None and not show_all)
-        if not signal:
-            act = height.addAction("Show all rows",
-                                   lambda: self._set_track_height(i, "all"))
-            act.setCheckable(True)
-            act.setChecked(show_all)
-            act.setToolTip("As tall as every row of features, reads or samples needs")
-        for px in (40, 80, 160, 320, 640):
-            act = height.addAction(f"{px} px", lambda px=px: self._set_track_height(i, px))
-            act.setCheckable(True)
-            act.setChecked(cur is not None and int(cur) == px)
-        height.addSeparator()
-        hint = height.addAction("Or drag the track's bottom line · ⋯ marks rows "
-                                "that do not fit" if not signal else
-                                "Or drag the track's bottom line")
-        hint.setEnabled(False)
-        if isinstance(t, gt.BlastTrack):
-            side = menu.addMenu("Reference is the BLAST")
-            for label, value in (("Subject (sseqid)", "subject"), ("Query (qseqid)", "query")):
-                act = side.addAction(label, lambda v=value: self._set_blast_side(i, v))
-                act.setCheckable(True)
-                act.setChecked(t.genome_side == value)
-        if t.kind not in (gt.KIND_ANNOTATION, gt.KIND_VARIANT) and not signal:
-            self._fill_color_menu(menu.addMenu("Colour by"), i)
-            self._fill_group_menu(menu.addMenu("Group by"), i)
-            bp = getattr(self.canvas, "track_menu_bp", None)
-            if bp is None:
-                bp = self._view_centre()
-            sort = menu.addMenu(f"Sort reads at {bp + 1:,} by")
-            self._fill_sort_menu(sort, i, bp)
-            act = menu.addAction("View as pairs",
-                                 lambda on: self._set_track_setting(i, "pairs", on))
-            act.setCheckable(True)
-            act.setChecked(bool(t.settings.get("pairs", False)))
-            self._fill_filter_menu(menu.addMenu("Hide reads"), i)
-            has_j = any(x.kind == gt.KIND_JUNCTION and x.path == t.path
-                        for x in self.canvas.tracks)
-            act = menu.addAction("Show splice junctions",
-                                 lambda on: self._toggle_junction_track(i, on))
-            act.setCheckable(True)
-            act.setChecked(has_j)
-            menu.addAction("Sashimi plot…", lambda: self.open_sashimi([i]))
-            for label, key in (("Shade MAPQ 0 reads", "shade_mapq"),
-                               ("Fade low-quality bases", "shade_quality"),
-                               ("Mark soft clips ≥ 20 bp", "flag_clips")):
-                act = menu.addAction(label,
-                                     lambda on, k=key: self._set_track_setting(i, k, on))
-                act.setCheckable(True)
-                act.setChecked(bool(t.settings.get(key, True)))
-        if isinstance(t, gt.IndexedBamTrack):
-            menu.addAction("Compute whole-genome coverage", lambda: self._build_coverage(i))
-        menu.addSeparator()
-        n = len(self.canvas.tracks)
-        for label, dst, ok in (("Move up", i - 1, i > 0), ("Move down", i + 1, i < n - 1),
-                               ("Move to top", 0, i > 0), ("Move to bottom", n - 1, i < n - 1)):
-            act = menu.addAction(label, lambda d=dst: self.canvas.move_track(i, d))
-            act.setEnabled(ok)
-        menu.addSeparator()
-        menu.addAction("Open the file", lambda: self.openRequested.emit(t.path))
-        menu.addAction("Remove track", lambda: self._remove_track(i))
-        for w in t.warnings:
-            act = menu.addAction(w)
-            act.setEnabled(False)
-
-    def _fill_color_menu(self, menu: QMenu, i: int) -> None:
-        from PySide6.QtGui import QActionGroup
-
-        from repeatviewer.backends import alignment_style as style
-
-        t = self.canvas.tracks[i]
-        current = t.settings.get("color_by", style.COLOR_STRAND)
-        group = QActionGroup(menu)
-        by_rg = {style.COLOR_READ_GROUP, style.COLOR_SAMPLE, style.COLOR_LIBRARY}
-        for value, label in style.COLOR_MODES:
-            if value in (style.COLOR_FIRST_STRAND, style.COLOR_MAPQ, style.COLOR_READ_GROUP,
-                         style.COLOR_TAG):
-                menu.addSeparator()
-            if value == style.COLOR_TAG:
-                tag_name = t.settings.get("color_tag", "")
-                label = f"Tag ({tag_name})…" if tag_name else "Tag…"
-                act = menu.addAction(label, lambda: self._ask_color_tag(i))
-            else:
-                act = menu.addAction(label,
-                                     lambda v=value: self._set_track_setting(i, "color_by", v))
-            act.setCheckable(True)
-            act.setChecked(current == value)
-            group.addAction(act)
-            if value in by_rg and not getattr(t, "read_groups", None):
-                act.setToolTip("The file header has no read groups (@RG)")
-        menu.setToolTipsVisible(True)
-
-    def _fill_filter_menu(self, menu: QMenu, i: int) -> None:
-        from repeatviewer.backends import alignment_style as style
-
-        t = self.canvas.tracks[i]
-        for label, key in (("Duplicates", "hide_duplicates"), ("QC-failed", "hide_qcfail"),
-                           ("Secondary", "hide_secondary"),
-                           ("Supplementary", "hide_supplementary")):
-            act = menu.addAction(label, lambda on, k=key: self._set_track_setting(i, k, on))
-            act.setCheckable(True)
-            act.setChecked(bool(t.settings.get(key, style.FILTER_DEFAULTS[key])))
-        menu.addSeparator()
-        mq = int(t.settings.get("min_mapq", 0) or 0)
-        menu.addAction(f"Below MAPQ {mq}…" if mq else "Below a MAPQ…",
-                       lambda: self._ask_min_mapq(i))
-
-    def _ask_min_mapq(self, i: int) -> None:
-        from PySide6.QtWidgets import QInputDialog
-
-        t = self.canvas.tracks[i]
-        value, ok = QInputDialog.getInt(self, "Hide reads", "Hide reads with MAPQ below:",
-                                        int(t.settings.get("min_mapq", 0) or 0), 0, 255)
-        if ok:
-            self._set_track_setting(i, "min_mapq", value)
-
-    def _view_centre(self) -> int:
-        span = self.canvas.visible_span()
-        return (span[0] + span[1]) // 2 if span else 0
-
-    def _fill_group_menu(self, menu: QMenu, i: int) -> None:
-        from PySide6.QtGui import QActionGroup
-
-        from repeatviewer.backends import alignment_style as style
-
-        t = self.canvas.tracks[i]
-        current = t.settings.get("group_by", style.GROUP_NONE)
-        group = QActionGroup(menu)
-        for value, label in style.GROUP_MODES:
-            if value in (style.COLOR_STRAND, style.COLOR_MAPQ, style.COLOR_TAG):
-                menu.addSeparator()
-            if value == style.COLOR_TAG:
-                name = t.settings.get("group_tag", "")
-                label = f"Tag ({name})…" if name else "Tag…"
-                act = menu.addAction(label, lambda: self._ask_tag(i, "group_tag", "group_by"))
-            else:
-                act = menu.addAction(label,
-                                     lambda v=value: self._set_track_setting(i, "group_by", v))
-            act.setCheckable(True)
-            act.setChecked(current == value)
-            group.addAction(act)
-
-    def _fill_sort_menu(self, menu: QMenu, i: int, bp: int) -> None:
-        from repeatviewer.backends import alignment_style as style
-
-        t = self.canvas.tracks[i]
-        for value, label in style.SORT_MODES:
-            if value == style.COLOR_TAG:
-                menu.addAction(label, lambda: self._ask_sort_tag(i, bp))
-            else:
-                menu.addAction(label, lambda v=value: self.sort_track(i, v, bp))
-        if t.settings.get("sort"):
-            menu.addSeparator()
-            menu.addAction("Clear the sort", lambda: self._set_track_setting(i, "sort", None))
-
-    def sort_track(self, i: int, by: str, bp: int | None = None, tag_name: str = "") -> None:
-        """Sort the rows of track i by the reads over reference position bp (IGV's
-        "Sort alignments by"); bp defaults to the middle of the view."""
-        m = self.canvas.model
-        if m is None:
-            return
-        spec = {"by": by, "pos": int(self._view_centre() if bp is None else bp),
-                "ref": m.ref_id}
-        if tag_name:
-            spec["tag"] = tag_name
-        self._set_track_setting(i, "sort", spec)
-
-    def _ask_sort_tag(self, i: int, bp: int) -> None:
-        name = self._ask_tag_name("Sort by tag",
-                                  self.canvas.tracks[i].settings.get("color_tag", "HP"))
-        if name:
-            self.sort_track(i, "tag", bp, name)
-
-    def _ask_tag_name(self, title: str, default: str) -> str:
-        from PySide6.QtWidgets import QInputDialog
-
-        name, ok = QInputDialog.getText(self, title, "Two-letter SAM tag (e.g. HP, CB, XS):",
-                                        text=default)
-        name = name.strip()
-        return name if ok and len(name) == 2 else ""
-
-    def _ask_tag(self, i: int, tag_key: str, mode_key: str) -> None:
-        t = self.canvas.tracks[i]
-        name = self._ask_tag_name("Group by tag" if mode_key == "group_by" else "Colour by tag",
-                                  t.settings.get(tag_key, "HP"))
-        if name:
-            t.settings[tag_key] = name
-            self._set_track_setting(i, mode_key, "tag")
-
-    def _ask_color_tag(self, i: int) -> None:
-        self._ask_tag(i, "color_tag", "color_by")
-
-    def _set_track_setting(self, i: int, key: str, value) -> None:
-        if not 0 <= i < len(self.canvas.tracks):
-            return
-        if key == "sort_by":                # from the side panel: sort at the view middle
-            if value:
-                self.sort_track(i, value, tag_name=self.canvas.tracks[i].settings.get(
-                    "color_tag", "") if value == "tag" else "")
-            else:
-                self._set_track_setting(i, "sort", None)
-            return
-        if value is None:
-            self.canvas.tracks[i].settings.pop(key, None)
-            self.canvas._tracks_changed()
-            self._remember_tracks()
-            return
-        self.canvas.tracks[i].settings[key] = value
-        self.canvas._tracks_changed()
-        self._remember_tracks()
-
-    def _sync_track_inspector(self) -> None:
-        insp = getattr(self, "_track_inspector", None)
-        if insp is None:
-            return
-        insp.set_tracks(self.canvas.tracks)
-        m = self.canvas.model
-        browser = bool(m is not None and m.browser)
-        self._sections["tracks"].setVisible(browser or bool(self.canvas.tracks))
-
-    def _show_track_item(self, i: int, item, global_pos) -> None:
-        from repeatviewer.widgets.track_item_popup import TrackItemPopup
-
-        t = self.canvas.tracks[i]
-        m = self.canvas.model
-        popup = TrackItemPopup(item, track_name=t.name, chrom=m.ref_id if m else "",
-                               fetch=self._reference_fetcher(), parent=self)
-        popup.show_at(global_pos)
-        self._item_popup = popup
-
-    def _reference_fetcher(self):
-        """fetch(start, end) -> bases of the shown reference, or None when there are
-        none (from the loaded sequence, else from the FASTA through its .fai)."""
-        m = self.canvas.model
-        if m is None:
-            return None
-        ref = m.reference or ""
-        if len(ref) >= m.length > 0:
-            return lambda s, e: ref[max(0, s):max(0, e)]
-        entry = (getattr(self, "_fai", {}) or {}).get(m.ref_id)
-        path = self._reference_fasta()
-        if entry is None or path is None:
-            return None
-        return lambda s, e: gt.fetch_sequence(path, entry, max(0, s), max(0, e))
-
-    # drag files from the file panel (or Finder) onto the view to add them as tracks
-
-    def _dropped_tracks(self, mime) -> list[Path]:
-        if not mime.hasUrls() or self.canvas.model is None or not self._data.get("contigs"):
-            return []
-        paths = [Path(u.toLocalFile()) for u in mime.urls() if u.isLocalFile()]
-        have = {t.path for t in self.canvas.tracks}
-        return [p for p in paths if p.is_file() and p not in have
-                and gt.track_kind_for(p) is not None]
-
-    def dragEnterEvent(self, event) -> None:  # noqa: N802
-        if self._dropped_tracks(event.mimeData()):
-            event.acceptProposedAction()
-        else:
-            super().dragEnterEvent(event)
-
-    def dragMoveEvent(self, event) -> None:  # noqa: N802
-        if self._dropped_tracks(event.mimeData()):
-            event.acceptProposedAction()
-        else:
-            super().dragMoveEvent(event)
-
-    def dropEvent(self, event) -> None:  # noqa: N802
-        paths = self._dropped_tracks(event.mimeData())
-        if paths:
-            event.acceptProposedAction()
-            self._load_tracks(paths)
-            return
-        super().dropEvent(event)
-
-    def _track_menu(self, i: int, global_pos) -> None:
-        menu = QMenu(self)
-        self._fill_track_menu(menu, i)
-        # the track the menu is for stays highlighted while it is open
-        self.canvas.set_menu_track(i)
-        try:
-            menu.exec(global_pos)
-        finally:
-            self.canvas.set_menu_track(None)
-
-    def _add_track_dialog(self) -> None:
-        from PySide6.QtWidgets import QFileDialog
-
-        start = str(self._path.parent) if self._path else ""
-        files, _f = QFileDialog.getOpenFileNames(
-            self, "Add tracks", start,
-            "Track files (*.gff *.gff3 *.gtf *.bed *.vcf *.gz *.paf *.sam *.bam *.cram "
-            "*.bw *.bigwig *.bedgraph *.bdg "
-            "*.outfmt6 *.m8 *.blast *.blastn *.tsv *.txt *.tab);;All files (*)")
-        if files:
-            self._load_tracks([Path(f) for f in files])
-
-    def _load_tracks(self, paths: list[Path], settings: list[dict] | None = None, *,
-                     remember: bool = True) -> None:
-        """Read track files off the UI thread (a large PAF / SAM takes seconds)."""
-        if not paths:
-            return
-        from PySide6.QtCore import QThread
-
-        names = self._reference_names()
-        ref = self._reference_fasta()
-        settings = settings or [{} for _ in paths]
-
-        class _Loader(QThread):
-            done = Signal(list, list)
-
-            def run(self_inner) -> None:
-                ok, errors = [], []
-                for pth, st in zip(paths, settings):
-                    try:
-                        ok.append(gt.open_track(pth, reference_names=names, reference_fasta=ref,
-                                                settings=st))
-                    except (gt.TrackError, OSError, ValueError) as exc:
-                        errors.append(f"{pth.name}: {exc}")
-                self_inner.done.emit(ok, errors)
-
-        loader = _Loader(self)
-        self._track_loader = loader
-        self._tracks_btn.setText("Loading…")
-        self._tracks_btn.setEnabled(False)
-
-        def finished(ok: list, errors: list) -> None:
-            self._tracks_btn.setText("Tracks ▾")
-            self._tracks_btn.setEnabled(True)
-            for t in ok:
-                self.canvas.add_track(t, above_reads=remember)
-                custom = t.kind in (gt.KIND_SIGNAL, gt.KIND_VARIANT, gt.KIND_JUNCTION)
-                if self.canvas.model is not None and (
-                        t.resolve(self.canvas.model.ref_id) is None if custom
-                        else not t.count(self.canvas.model.ref_id)):
-                    t.warnings.append(f"Nothing on {self.canvas.model.ref_id} (the file names: "
-                                      + ", ".join(t.chrom_names()[:5]) + ")")
-            if remember:
-                self._remember_tracks()
-            if errors:
-                from PySide6.QtWidgets import QMessageBox
-
-                QMessageBox.warning(self, "Add tracks", "\n\n".join(errors))
-
-        loader.done.connect(finished)
-        loader.finished.connect(loader.deleteLater)
-        loader.start()
-
-    def _set_track_mode(self, i: int, mode: str) -> None:
-        self.canvas.set_track_mode(i, mode)
-        self._remember_tracks()
-
-    def _set_track_rows(self, i: int, n: int) -> None:
-        self.canvas.tracks[i].settings["max_rows"] = n
-        self.canvas._tracks_changed()
-        self._remember_tracks()
-
-    def save_image(self, path: str | Path | None = None) -> Path | None:
-        """File > Save Image…: the browser view as PNG or SVG."""
-        from repeatviewer.widgets.image_export import ask_image_path
-
-        c = self.canvas
-        if c.model is None:
-            return None
-        if path is None:
-            span = c.visible_span() or (0, 0)
-            path = ask_image_path(self, f"{c.model.ref_id}_{span[0] + 1}-{span[1]}")
-            if path is None:
-                return None
-        try:
-            return c.save_image(Path(path))
-        except OSError as exc:
-            from PySide6.QtWidgets import QMessageBox
-
-            QMessageBox.warning(self, "Save image", str(exc))
-            return None
-
-    def _fill_junction_menu(self, menu: QMenu, i: int) -> None:
-        t = self.canvas.tracks[i]
-        least = menu.addMenu("Junctions with at least")
-        cur = int(t.settings.get("min_junction", 1))
-        for n in (1, 2, 5, 10, 20, 50):
-            act = least.addAction(f"{n} read{'s' if n > 1 else ''}",
-                                  lambda n=n: self._set_track_setting(i, "min_junction", n))
-            act.setCheckable(True)
-            act.setChecked(cur == n)
-        menu.addAction("Sashimi plot…", lambda: self.open_sashimi([i]))
-        menu.addSeparator()
-
-    def _toggle_junction_track(self, i: int, on: bool) -> None:
-        """Add (just above the alignment track) or remove its splice junction track."""
-        t = self.canvas.tracks[i]
-        have = [k for k, x in enumerate(self.canvas.tracks)
-                if x.kind == gt.KIND_JUNCTION and x.path == t.path]
-        if on and not have:
-            j = gt.JunctionTrack(t.path, source=t)
-            self.canvas.tracks.insert(i, j)
-            self.canvas._tracks_changed()
-        elif not on and have:
-            for k in reversed(have):
-                del self.canvas.tracks[k]
-            self.canvas._tracks_changed()
-        self._remember_tracks()
-
-    def open_sashimi(self, indices: list[int]) -> None:
-        """Sashimi plot of the view: read depth and junction arcs with their read
-        counts, one panel per alignment track, over the genes in view."""
-        from repeatviewer.widgets.sashimi import SashimiDialog
-
-        m = self.canvas.model
-        span = self.canvas.visible_span()
-        if m is None or span is None:
-            return
-        tracks = []
-        for i in indices:
-            t = self.canvas.tracks[i]
-            if t.kind == gt.KIND_JUNCTION:
-                self.canvas._link_junctions(t)
-                t = t._src()
-            if t not in tracks:
-                tracks.append(t)
-        others = [x for x in self.canvas.tracks if x.kind == gt.KIND_ALIGNMENT
-                  and x not in tracks]
-        genes = [x for x in self.canvas.tracks if x.kind == gt.KIND_ANNOTATION]
-        dlg = SashimiDialog(self, m.ref_id, int(span[0]), int(min(span[1], m.length)),
-                            tracks, others, genes,
-                            min_junction=int(self.canvas.tracks[indices[0]].settings.get(
-                                "min_junction", 1)))
-        self._sashimi = dlg
-        dlg.show()
-
-    def _fill_signal_menu(self, menu: QMenu, i: int) -> None:
-        """bigWig / bedGraph: the data range (fitted to the view, or fixed) and colour."""
-        t = self.canvas.tracks[i]
-        rng = menu.addMenu("Data range")
-        act = rng.addAction("Autoscale to the view",
-                            lambda: self._set_signal_range(i, None))
-        act.setCheckable(True)
-        act.setChecked(t.settings.get("range_max") is None)
-        act = rng.addAction("Set range…", lambda: self._ask_signal_range(i))
-        act.setCheckable(True)
-        act.setChecked(t.settings.get("range_max") is not None)
-        menu.addAction("Colour…", lambda: self._ask_signal_color(i))
-        menu.addSeparator()
-
-    def _set_signal_range(self, i: int, rng: tuple[float, float] | None) -> None:
-        t = self.canvas.tracks[i]
-        if rng is None:
-            t.settings.pop("range_min", None)
-            t.settings.pop("range_max", None)
-        else:
-            t.settings["range_min"], t.settings["range_max"] = float(rng[0]), float(rng[1])
-        self.canvas._tracks_changed()
-        self._remember_tracks()
-
-    def _ask_signal_range(self, i: int) -> None:
-        from PySide6.QtWidgets import QInputDialog
-
-        t = self.canvas.tracks[i]
-        lo, hi = getattr(self.canvas, "_signal_range", {}).get(id(t), (0.0, 1.0))
-        hi, ok = QInputDialog.getDouble(self, "Data range", f"{t.name}: highest value",
-                                        float(t.settings.get("range_max", hi)),
-                                        -1e12, 1e12, 3)
-        if not ok:
-            return
-        lo, ok = QInputDialog.getDouble(self, "Data range", f"{t.name}: lowest value",
-                                        float(t.settings.get("range_min", min(0.0, lo))),
-                                        -1e12, 1e12, 3)
-        if ok and hi > lo:
-            self._set_signal_range(i, (lo, hi))
-
-    def _ask_signal_color(self, i: int) -> None:
-        from PySide6.QtGui import QColor
-        from PySide6.QtWidgets import QColorDialog
-
-        from repeatviewer.widgets.genome_tracks_view import SIGNAL_COLOR
-
-        t = self.canvas.tracks[i]
-        c = QColorDialog.getColor(QColor(t.settings.get("color", SIGNAL_COLOR)), self,
-                                  f"Colour of {t.name}")
-        if c.isValid():
-            self._set_track_setting(i, "color", c.name())
-
-    def _set_track_height(self, i: int, px: int | str | None) -> None:
-        self.canvas.set_track_height(i, px)
-        self._remember_tracks()
-
-    def _set_blast_side(self, i: int, side: str) -> None:
-        old = self.canvas.tracks[i]
-        try:
-            new = gt.BlastTrack(old.path, genome_side=side)
-        except gt.TrackError as exc:
-            QToolTip.showText(self.mapToGlobal(self.rect().center()), str(exc), self)
-            return
-        new.settings = dict(old.settings, genome_side=side)
-        self.canvas.tracks[i] = new
-        self.canvas._tracks_changed()
-        self._remember_tracks()
-
-    def _remove_track(self, i: int) -> None:
-        self.canvas.remove_track(i)
-        self._remember_tracks()
-
-    def _remove_all_tracks(self) -> None:
-        self.canvas.set_tracks([])
-        self._remember_tracks()
-
-    def _build_coverage(self, i: int) -> None:
-        from PySide6.QtCore import QThread
-
-        t = self.canvas.tracks[i]
-
-        class _Cov(QThread):
-            done = Signal(str)
-
-            def run(self_inner) -> None:
-                try:
-                    gt.build_bam_coverage(t.path)
-                    self_inner.done.emit("")
-                except (gt.TrackError, OSError, ValueError) as exc:
-                    self_inner.done.emit(str(exc))
-
-        job = _Cov(self)
-        self._cov_job = job
-        t.warnings.append("Computing whole-genome coverage…")
-
-        def finished(err: str) -> None:
-            t.warnings[:] = [w for w in t.warnings if not w.startswith("Computing")]
-            if err:
-                t.warnings.append(f"Coverage failed: {err}")
-            elif isinstance(t, gt.IndexedBamTrack):
-                t.reload_coverage()
-            self.canvas.viewport().update()
-            # the Genome list shades by this BAM's coverage: now it can
-            self._rail_density_note("" if not err else f"Read coverage failed: {err}")
-            self._nav_density_key = None
-            self._nav_density()
-
-        job.done.connect(finished)
-        job.finished.connect(job.deleteLater)
-        job.start()
-
-    def _remember_tracks(self) -> None:
-        """Tracks of an .rvmap are remembered per file; a session file is rewritten."""
-        if self._path is None:
-            return
-        tracks = [t.to_json() for t in self.canvas.tracks]
-        if self._session is not None:
-            try:
-                gt.write_session(self._path, Path(self._session["reference"]), tracks,
-                                 self._current_locus())
-            except OSError:
-                pass
-            return
-        saved = _read_json("tracks_by_file", {})
-        if not isinstance(saved, dict):
-            saved = {}
-        key = str(self._path)
-        if tracks:
-            saved[key] = tracks
-        else:
-            saved.pop(key, None)
-        _write_json("tracks_by_file", saved)
-
-    def _restore_tracks(self) -> None:
-        self.canvas.set_tracks([])
-        saved = _read_json("tracks_by_file", {})
-        entries = saved.get(str(self._path), []) if isinstance(saved, dict) else []
-        paths = [Path(e["path"]) for e in entries if Path(e.get("path", "")).is_file()]
-        if paths:
-            self._load_tracks(paths, [e.get("settings", {}) for e in entries
-                                      if Path(e.get("path", "")).is_file()], remember=False)
-
-    def _current_locus(self) -> str:
-        m = self.canvas.model
-        span = self.canvas.visible_span() if m is not None else None
-        if m is None or span is None:
-            return ""
-        return f"{m.ref_id}:{span[0] + 1}-{span[1]}"
-
-    def _save_session_as(self) -> None:
-        from PySide6.QtWidgets import QFileDialog
-
-        ref = self._reference_fasta()
-        if ref is None:
-            from PySide6.QtWidgets import QMessageBox
-
-            QMessageBox.information(self, "Genome browser session",
-                                    "The reference FASTA of this result was not found.")
-            return
-        target, _f = QFileDialog.getSaveFileName(
-            self, "Save genome browser session", str(gt.session_path_for(ref)),
-            "Genome browser session (*.rvgb)")
-        if not target:
-            return
-        if not target.endswith(gt.SESSION_SUFFIX):
-            target += gt.SESSION_SUFFIX
-        gt.write_session(Path(target), ref, self.canvas.tracks, self._current_locus())
-        self.fileWritten.emit(Path(target))
-
-    def _go_to_feature(self, text: str) -> bool:
-        """Jump to the first track feature whose name contains ``text``."""
-        for t in self.canvas.tracks:
-            for chrom, it in t.find(text, limit=1):
-                for i in range(self._contig.count()):
-                    if gt.match_chrom([chrom], str(self._contig.itemData(i))) == chrom:
-                        self._contig.setCurrentIndex(i)
-                        break
-                m = self.canvas.model
-                if m is None:
-                    return False
-                self._show_view()
-                pad = max(20, (it.end - it.start) // 10)
-                self.canvas.show_range(max(0, it.start - pad), min(m.length, it.end + pad))
-                self._goto.setToolTip(f"{it.name}: {chrom}:{it.start + 1:,}-{it.end:,}")
-                if getattr(self, "_nav_mode", False):
-                    self._nav_arrived(it.name or text)
-                elif getattr(self, "_locus_mode", False):
-                    self.canvas.setFocus()
-                    self._sync_locus()
-                return True
-        self._goto.setToolTip(f"No position or feature named \"{text}\".")
-        self._goto.selectAll()
-        return True
-
-    # ---------------------------------------------------------------- genome browser navigation
-
-    def _setup_navigator(self) -> None:
-        from PySide6.QtCore import QTimer
-        from PySide6.QtGui import QKeySequence, QShortcut
-
-        from repeatviewer.widgets.genome_navigator import History
-
-        self._nav_history = History()
-        self._nav_applying = False
-        self._bookmarks: list = []
-        self._recent: list = []
-        self._nav_density_key = None
-        # the view has to rest a moment before it is a stop for Back
-        self._nav_timer = QTimer(self)
-        self._nav_timer.setSingleShot(True)
-        self._nav_timer.setInterval(700)
-        self._nav_timer.timeout.connect(self._nav_record)
-        c = self._crumbs
-        c.backRequested.connect(self._nav_back)
-        c.forwardRequested.connect(self._nav_forward)
-        c.chromRequested.connect(lambda chrom: self._nav_go(chrom, 0, 0, chrom))
-        c.rangeClicked.connect(self._nav_edit_range)
-        c.positionEntered.connect(self._nav_position_entered)
-        c.geneClicked.connect(self._nav_zoom_gene)
-        r = self._rail
-        r.goRequested.connect(self._nav_go)
-        r.addBookmarkRequested.connect(self._add_bookmark)
-        r.editBookmarkRequested.connect(self._edit_bookmark)
-        r.deleteBookmarkRequested.connect(self._delete_bookmark)
-        r.importBookmarksRequested.connect(self._import_bookmarks)
-        r.exportBookmarksRequested.connect(self._export_bookmarks)
-        r.densityTrackChanged.connect(self._set_density_track)
-        r.sectionToggled.connect(lambda key, on: _write(f"rail_{key}", bool(on)))
-        r.genome.set_open(_read_bool("rail_genome", True))
-        r.tracks_section.set_open(_read_bool("rail_tracks", True))
-        r.trackShown.connect(self._show_track)
-        r.trackMoved.connect(self._move_track)
-        r.bm_section.set_open(_read_bool("rail_bookmarks", True))
-        r.find_section.set_open(_read_bool("rail_find", True))
-        r.set_sort(_read_text("rail_sort", "file"))
-        r.sortChanged.connect(lambda key: _write("rail_sort", key))
-        r.findRequested.connect(self._nav_find)
-        self._density_track = None             # None: the first annotation track
-        self.canvas.bookmarkRequested.connect(self._add_bookmark)
-        self.canvas.sequenceContextMenu.connect(self._sequence_menu)
-        self.canvas.seq_revcomp = _read_bool("seq_revcomp", False)
-        frames = _read_text("seq_frames", "off")
-        self.canvas.seq_frames = frames if frames in ("off", "forward", "reverse", "all") \
-            else "off"
-        for keys, slot in ((("Ctrl+[", QKeySequence.StandardKey.Back), self._nav_back),
-                           (("Ctrl+]", QKeySequence.StandardKey.Forward), self._nav_forward)):
-            for k in keys:
-                sc = QShortcut(QKeySequence(k), self)
-                sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
-                sc.activated.connect(lambda s_=slot: s_() if self._nav_mode_on() else None)
-
-    def _sequence_menu(self, bp: int, global_pos) -> None:
-        """Right-click on the reference: its reverse complement and translation rows,
-        and copying the bases in view (or of the selected region)."""
-        c = self.canvas
-        m = c.model
-        if m is None:
-            return
-        menu = QMenu(self)
-        rc = menu.addAction("Show reverse complement",
-                            lambda on: self._set_sequence_rows(revcomp=on))
-        rc.setCheckable(True)
-        rc.setChecked(c.seq_revcomp)
-        tr = menu.addMenu("Show translation")
-        for label, key in (("Off", "off"), ("Forward frames (+1, +2, +3)", "forward"),
-                           ("Reverse frames (−1, −2, −3)", "reverse"),
-                           ("All six frames", "all")):
-            act = tr.addAction(label, lambda k=key: self._set_sequence_rows(frames=k))
-            act.setCheckable(True)
-            act.setChecked(c.seq_frames == key)
-        menu.addSeparator()
-        sel = c.region_sel
-        span = c.visible_span()
-        if sel:
-            a, b, what = int(sel[0]), int(sel[1]), "selected region"
-        elif span is not None:
-            a, b, what = span[0], min(span[1], m.length), "view"
-        else:
-            a = b = 0
-            what = ""
-        ref = m.reference or ""
-        if ref and b > a:
-            where = f"{m.ref_id}:{a + 1}-{b}"
-            menu.addAction(f"Copy sequence of the {what} ({b - a:,} bp)",
-                           lambda: QApplication.clipboard().setText(
-                               f">{where}\n{ref[a:b]}\n"))
-            from repeatviewer.backends.alignment_style import reverse_complement
-
-            menu.addAction(f"Copy reverse complement of the {what}",
-                           lambda: QApplication.clipboard().setText(
-                               f">{where}(-)\n{reverse_complement(ref[a:b])}\n"))
-        if bp >= 0:
-            menu.addSeparator()
-            act = menu.addAction(f"Position {bp + 1:,}")
-            act.setEnabled(False)
-        menu.exec(global_pos)
-
-    def _set_sequence_rows(self, revcomp: bool | None = None, frames: str | None = None) -> None:
-        self.canvas.set_sequence_rows(revcomp=revcomp, frames=frames)
-        if revcomp is not None:
-            _write("seq_revcomp", bool(revcomp))
-        if frames is not None:
-            _write("seq_frames", frames)
-
-    def _nav_mode_on(self) -> bool:
-        return bool(getattr(self, "_nav_mode", False))
-
-    def _nav_chroms(self) -> list[tuple[str, int]]:
-        out = []
-        for i in range(self._contig.count()):
-            name = str(self._contig.itemData(i))
-            e = (self._fai or {}).get(name)
-            out.append((name, int(e.length) if e is not None else 0))
-        return out
-
-    def _nav_load_session(self, session: dict) -> None:
-        from repeatviewer.widgets.genome_navigator import Bookmark, History, Place
-
-        self._bookmarks = [b for b in (Bookmark.from_json(d) for d in
-                                       session.get("bookmarks", []) or []) if b is not None]
-        self._recent = [p_ for p_ in (Place.from_json(d) for d in
-                                      session.get("recent", []) or []) if p_ is not None]
-        self._nav_history = History()
-        self._nav_density_key = None
-        dt = session.get("density_track")
-        self._density_track = dt if isinstance(dt, str) else None
-        chroms = self._nav_chroms()
-        self._rail.set_chroms(chroms)
-        self._rail.set_density({})
-        self._crumbs.set_chroms(chroms)
-        self._rail.set_bookmarks(self._bookmarks)
-        self._rail.set_recent(self._recent)
-        self._nav_flags()
-
-    def _nav_select_chrom(self, chrom: str) -> bool:
-        if self.canvas.model is not None and self.canvas.model.ref_id == chrom:
-            return True
-        for i in range(self._contig.count()):
-            if str(self._contig.itemData(i)) == chrom:
-                self._contig.setCurrentIndex(i)
-                return True
-        return False
-
-    def _nav_go(self, chrom: str, a: int, b: int, label: str = "") -> None:
-        """Go to chrom:[a, b) (b <= a: the whole sequence) and list it under Recent."""
-        if not self._nav_select_chrom(chrom):
-            return
-        m = self.canvas.model
-        if m is None:
-            return
-        if b <= a:
-            a, b = 0, m.length
-        self._show_view()
-        self.canvas.show_range(max(0, a), min(m.length, b))
-        self._nav_arrived(label)
-
-    def _nav_arrived(self, label: str = "") -> None:
-        """After a deliberate jump: the box empties, the place goes to Recent and is a
-        stop for Back straight away."""
-        from repeatviewer.widgets.genome_navigator import MAX_RECENT, Place
-
-        self.canvas.setFocus()
-        self._goto.clear()
-        m = self.canvas.model
-        span = self.canvas.visible_span() if m is not None else None
-        if m is not None and span is not None:
-            a, b = span[0], min(span[1], m.length)
-            label = (label or "").strip() or f"{m.ref_id}:{(a + b) // 2 + 1:,}"
-            self._recent = [Place(label, m.ref_id, a, b)] + [
-                p_ for p_ in self._recent if p_.label != label][:MAX_RECENT - 1]
-            self._rail.set_recent(self._recent)
-            self._save_nav()
-        self._nav_record()
-        self._nav_sync()
-
-    def _nav_record(self) -> None:
-        self._nav_timer.stop()
-        m = self.canvas.model
-        span = self.canvas.visible_span() if m is not None else None
-        if m is None or span is None or self._nav_applying:
-            return
-        self._nav_history.record(m.ref_id, span[0], min(span[1], m.length))
-        h = self._nav_history
-        self._crumbs.set_history(h.can_back(), h.can_forward())
-
-    def _nav_apply(self, stop) -> None:
-        if stop is None:
-            return
-        chrom, a, b = stop
-        self._nav_applying = True
-        try:
-            if self._nav_select_chrom(chrom) and self.canvas.model is not None:
-                self.canvas.show_range(a, b)
-        finally:
-            self._nav_applying = False
-        self._nav_timer.stop()
-        h = self._nav_history
-        self._crumbs.set_history(h.can_back(), h.can_forward())
-        self._nav_sync(record=False)
-
-    def _nav_back(self) -> None:
-        if self._nav_timer.isActive():
-            self._nav_record()          # the place in view now is where Forward returns
-        self._nav_apply(self._nav_history.back())
-
-    def _nav_forward(self) -> None:
-        self._nav_apply(self._nav_history.forward())
-
-    def _gene_at_centre(self):
-        """(name, start, end) of the named feature in the middle of the view (genes
-        before transcripts before anything else), or None."""
-        m = self.canvas.model
-        span = self.canvas.visible_span() if m is not None else None
-        if m is None or span is None:
-            return None
-        c = (span[0] + min(span[1], m.length)) // 2
-        best = None
-        rank = {"gene": 0, "mrna": 1, "transcript": 1}
-        for t in self.canvas.tracks:
-            if t.kind != gt.KIND_ANNOTATION:
-                continue
-            try:
-                hits = t.fetch(m.ref_id, c, c + 1)
-            except (gt.TrackError, OSError, ValueError, KeyError):
-                hits = []           # a track that cannot answer has no gene here
-            for it, _row in hits:
-                if not it.name or not (it.start <= c < it.end):
-                    continue
-                r = rank.get((it.kind or "").lower(), 2)
-                if best is None or r < best[0]:
-                    best = (r, it.name, it.start, it.end)
-        return None if best is None else best[1:]
-
-    def _nav_sync_soon(self) -> None:
-        """While the view moves (a drag, a trackpad swipe) the position box, the
-        sidebar's box and the history are brought up to date ten times a second
-        and once when it stops, instead of on every frame."""
-        import time
-
-        from PySide6.QtCore import QTimer
-
-        timer = getattr(self, "_nav_sync_timer", None)
-        if timer is None:
-            timer = self._nav_sync_timer = QTimer(self)
-            timer.setSingleShot(True)
-            timer.timeout.connect(self._nav_sync_due)
-            self._nav_sync_at = 0.0
-        now = time.monotonic()
-        moving = now - getattr(self.canvas, "_interactive_at", 0.0) < 0.25
-        if not moving:
-            timer.stop()
-            self._nav_sync_at = now
-            self._nav_sync()
-        elif now - self._nav_sync_at >= self.NAV_SYNC_MS / 1000 and not timer.isActive():
-            self._nav_sync_at = now
-            self._nav_sync()
-        elif not timer.isActive():
-            timer.start(self.NAV_SYNC_MS)
-
-    def _nav_sync_due(self) -> None:
-        import time
-
-        self._nav_sync_at = time.monotonic()
-        self._nav_sync()
-
-    def _nav_sync(self, record: bool = True) -> None:
-        m = self.canvas.model
-        span = self.canvas.visible_span() if m is not None else None
-        if m is None or span is None:
-            self._crumbs.set_where("", 0, 0, "")
-            return
-        a, b = span[0], min(span[1], m.length)
-        gene = self._gene_at_centre()
-        self._crumbs.set_where(m.ref_id, a, b, gene[0] if gene else "")
-        self._rail.set_view(m.ref_id, a, b)
-        self._nav_flags()
-        self._nav_density()
-        self._nav_tracks()
-        if record and not self._nav_applying:
-            self._nav_timer.start()
-
-    def _nav_edit_range(self) -> None:
-        self._goto.setText(self._current_locus())
-        self._goto.setFocus()
-        self._goto.selectAll()
-
-    def _nav_zoom_gene(self) -> None:
-        gene = self._gene_at_centre()
-        m = self.canvas.model
-        if gene is None or m is None:
-            return
-        name, a, b = gene
-        pad = max(20, (b - a) // 10)
-        self._nav_go(m.ref_id, max(0, a - pad), min(m.length, b + pad), name)
-
-    def _density_tracks(self) -> list:
-        """Tracks the Genome list can shade by: features (count), mappings (read
-        coverage) and signal files (bigWig / bedGraph values)."""
-        kinds = (gt.KIND_ANNOTATION, gt.KIND_ALIGNMENT, gt.KIND_SIGNAL)
-        return [t for t in self.canvas.tracks if t.kind in kinds]
-
-    def _density_row(self, t, chrom: str, n: int, bins: int) -> list[float] | None:
-        """One sequence's shading values (``bins`` of them), or None when the track
-        has nothing there. Features: how many start in each bin; reads: the mean
-        depth (from the BAM's whole-genome coverage, worked out once in the
-        background); signal: the highest value."""
-        if t.resolve(chrom) is None:
-            return None
-        if t.kind == gt.KIND_ANNOTATION:
-            row = [0.0] * bins
-            for it, _r in t.fetch(chrom, 0, n):
-                row[min(bins - 1, int(it.start * bins / n))] += 1
-            return row
-        if t.kind == gt.KIND_SIGNAL:
-            vals = t.signal(chrom, 0, n, bins)
-            if vals is None:
-                return None
-            return [max(0.0, float(v)) for v in np.nan_to_num(vals, nan=0.0)]
-        # reads: see _coverage_rows
-        prof, _bin = self._coverage_profile(t, chrom)
-        if prof is None or not len(prof):
-            return None
-        edges = np.linspace(0, len(prof), bins + 1).astype(int)
-        return [float(prof[a:max(a + 1, b)].mean()) if a < len(prof) else 0.0
-                for a, b in zip(edges[:-1], edges[1:])]
-
-    def _coverage_profile(self, t, chrom: str):
-        """(mean depth per bin, bp per bin) of one sequence for a mapping track, or
-        (None, 0): a BAM's comes from its whole-genome coverage (worked out once in
-        the background), a PAF / SAM's from its reads in memory."""
-        if t.resolve(chrom) is None:
-            return None, 0
-        if isinstance(t, gt.IndexedBamTrack):
-            cache = t._cov_cache
-            if cache is None:
-                self._coverage_for_density(t)
-                return None, 0
-            prof = cache.get(t.resolve(chrom))
-            return (None, 0) if prof is None else (np.asarray(prof, dtype=float),
-                                                   int(cache.get("__bin__", 1000)))
-        ix = t.index(chrom)
-        if ix is None:
-            return None, 0
-        return np.asarray(ix.coverage_profile(), dtype=float), gt.COV_BIN
-
-    def _coverage_rows(self, t, chroms, bins: int):
-        """Read depth along every sequence, relative to the genome's usual depth.
-
-        Returns (rows, depths, median): ``rows[chrom]`` holds ``bins`` ratios of
-        depth to the genome-wide median depth (median of the covered bins, so
-        unplaced or empty stretches do not drag it down); ``depths`` the depth
-        behind each ratio. Each ratio is the bin's mean depth, unless the bin holds
-        a stretch of DENSITY_RUN_BP or more at 2x the median or more (shown: its
-        highest) or, failing that, one at a quarter of it or less (shown: its
-        lowest). So a collapsed repeat or a gap a few kb long still shows on a
-        bar that stands for megabases, where a plain mean would hide it."""
-        from numpy.lib.stride_tricks import sliding_window_view
-
-        profs = {}
-        for chrom, n in chroms:
-            if n <= 0:
-                continue
-            try:
-                prof, step = self._coverage_profile(t, chrom)
-            except (gt.TrackError, OSError, ValueError, KeyError):
-                prof = None
-            if prof is not None and len(prof) and prof.any():
-                profs[chrom] = (prof, step)
-        if not profs:
-            return {}, {}, 0.0
-        covered = np.concatenate([p[p > 0] for p, _s in profs.values()])
-        median = float(np.median(covered)) if len(covered) else 0.0
-        if median <= 0:
-            return {}, {}, 0.0
-        rows: dict[str, list[float]] = {}
-        depths: dict[str, list[float]] = {}
-        for chrom, (prof, step) in profs.items():
-            w = max(1, min(len(prof), round(DENSITY_RUN_BP / max(1, step))))
-            # a run's depth: the median over DENSITY_RUN_BP, so one odd bin is not one
-            run = (np.median(sliding_window_view(prof, w), axis=1) if w > 1 else prof)
-            edges = np.linspace(0, len(prof), bins + 1).astype(int)
-            row, dep = [], []
-            for a, b in zip(edges[:-1], edges[1:]):
-                b = max(a + 1, b)
-                if a >= len(prof):
-                    row.append(0.0)
-                    dep.append(0.0)
-                    continue
-                d = float(prof[a:b].mean())
-                seg = run[a:max(a, b - w + 1)]          # the runs wholly in the bin
-                if len(seg):
-                    hi, lo = float(seg.max()), float(seg.min())
-                    if hi >= 2 * median:
-                        d = hi
-                    elif lo <= median / 4:
-                        d = lo
-                dep.append(d)
-                row.append(d / median)
-            rows[chrom] = row
-            depths[chrom] = dep
-        return rows, depths, median
-
-    def _coverage_for_density(self, t) -> None:
-        """A BAM with no whole-genome coverage yet: work it out once (saved next to
-        the BAM as .rvcov.npz), then shade the Genome list."""
-        if getattr(t, "_density_cov_started", False):
-            return
-        t._density_cov_started = True
-        i = next((k for k, x in enumerate(self.canvas.tracks) if x is t), None)
-        if i is not None:
-            self._build_coverage(i)
-            self._rail_density_note("Working out read coverage of every sequence…")
-
-    def _nav_tracks(self) -> None:
-        """The side panel's Tracks list: every track in drawing order, ticked when
-        shown."""
-        what = {gt.KIND_ANNOTATION: "features", gt.KIND_ALIGNMENT: "alignments",
-                gt.KIND_SIGNAL: "signal", gt.KIND_VARIANT: "variants",
-                gt.KIND_JUNCTION: "splice junctions"}
-        self._rail.set_tracks([(t.name, not t.settings.get("hidden"),
-                                f"{what.get(t.kind, t.kind)} · {t.path}")
-                               for t in self.canvas.tracks])
-
-    def _show_track(self, i: int, shown: bool) -> None:
-        """Tick / untick a track in the side panel: it is drawn or left out (kept
-        loaded, and saved with the session)."""
-        if not 0 <= i < len(self.canvas.tracks):
-            return
-        t = self.canvas.tracks[i]
-        if shown:
-            t.settings.pop("hidden", None)
-        else:
-            t.settings["hidden"] = True
-        self.canvas._tracks_changed()
-        self._remember_tracks()
-        self._nav_tracks()
-
-    def _move_track(self, src: int, dst: int) -> None:
-        """A name dragged in the side panel's Tracks list: the track moves there
-        (and is saved, as when its name is dragged in the view)."""
-        self.canvas.move_track(src, dst)
-        self._nav_tracks()
-
-    def _rail_density_note(self, text: str) -> None:
-        note = getattr(self._rail, "density_note", None)
-        if note is not None:
-            note.setText(text)
-            note.setVisible(bool(text))
-
-    def _set_density_track(self, path: str) -> None:
-        self._density_track = path            # "" : no shading
-        self._nav_density_key = None
-        self._nav_density()
-        if self._session is not None and self._path is not None:
-            try:
-                gt.update_session_extras(self._path, {"density_track": path})
-            except OSError:
-                pass
-
-    def _nav_density(self) -> None:
-        """Feature density of the chosen annotation track (the first one unless
-        another is picked) along every sequence, for the Genome list."""
-        tracks = self._density_tracks()
-        choice = self._density_track
-        if choice is None:
-            # by default the first feature track (a BAM's coverage takes a pass over
-            # the whole file, so only when picked)
-            src = ([t for t in tracks if t.kind == gt.KIND_ANNOTATION]
-                   or [t for t in tracks if t.kind == gt.KIND_SIGNAL])[:1]
-        else:
-            src = [t for t in tracks if str(t.path) == choice]
-        key = (tuple(str(t.path) for t in tracks), tuple(id(t) for t in src))
-        if key == self._nav_density_key:
-            return
-        self._nav_density_key = key
-        what = {gt.KIND_ALIGNMENT: " · coverage", gt.KIND_SIGNAL: " · signal"}
-        self._rail.set_density_tracks([(str(t.path), t.name + what.get(t.kind, ""))
-                                       for t in tracks], str(src[0].path) if src else "")
-        self._rail.set_find_tracks([(str(t.path), t.name) for t in tracks
-                                    if t.kind == gt.KIND_ANNOTATION])
-        chroms = self._nav_chroms()
-        if not src or len(chroms) > 5000:
-            self._rail.set_density({})
-            return
-        t = src[0]
-        bins = 60
-        if t.kind != gt.KIND_ALIGNMENT or getattr(t, "_cov_cache", True) is not None:
-            self._rail_density_note("")
-        if t.kind == gt.KIND_ALIGNMENT:
-            rows, depths, median = self._coverage_rows(t, chroms, bins)
-            self._rail.set_density(rows, mode="depth", detail=depths, median=median)
-            if rows:
-                self._rail_density_note(self._rail.depth_legend(median))
-            return
-        counts: dict[str, list[float]] = {}
-        for chrom, n in chroms:
-            if n <= 0:
-                continue
-            try:
-                row = self._density_row(t, chrom, n, bins)
-            except (gt.TrackError, OSError, ValueError, KeyError):
-                row = None
-            if row is None:
-                continue
-            if any(row):
-                counts[chrom] = row
-        if counts:
-            # scale to the 99th percentile, not the single highest bin, so one
-            # outlier (a gene cluster, a spike in a bigWig) does not pale the rest
-            vals = np.array([v for row in counts.values() for v in row if v > 0])
-            top = float(np.percentile(vals, 99, method="higher")) if len(vals) else 0.0
-            if top > 0:
-                counts = {c: [min(1.0, v / top) for v in row] for c, row in counts.items()}
-        self._rail.set_density(counts)
-
-    def _nav_find(self, path: str, text: str) -> None:
-        """Find in the rail: features of one annotation track (or all) whose name,
-        type or attributes hold ``text``; listed with the reference's sequence names."""
-        from repeatviewer.widgets.genome_navigator import FIND_LIMIT
-
-        tracks = [t for t in self.canvas.tracks if t.kind == gt.KIND_ANNOTATION
-                  and (not path or str(t.path) == path)]
-        to_ref: dict[str, str] = {}
-        for chrom, _n in self._nav_chroms():
-            for t in tracks:
-                own = t.resolve(chrom)
-                if own is not None:
-                    to_ref.setdefault(own, chrom)
-        hits, total = [], 0
-        for t in tracks:
-            found, n = t.search(text, FIND_LIMIT)
-            total += n
-            for chrom, it in found:
-                ref = to_ref.get(chrom)
-                if ref is None:
-                    total -= 1          # on a sequence this genome does not have
-                    continue
-                detail = it.kind or ""
-                if len(tracks) > 1:
-                    detail = f"{detail} · {t.name}" if detail else t.name
-                hits.append((it.name or it.kind or "feature", ref, it.start, it.end, detail))
-        self._rail.set_find_results(hits[:FIND_LIMIT], max(total, len(hits[:FIND_LIMIT])))
-
-    # bookmarks
-
-    def _nav_flags(self) -> None:
-        m = self.canvas.model
-        self.canvas.bookmark_flags = [
-            (b.start, b.end, b.name or b.locus(), b.color)
-            for b in self._bookmarks if m is not None and b.chrom == m.ref_id]
-        self.canvas.viewport().update()
-
-    def _add_bookmark(self, whole_view: bool = False) -> None:
-        """B: bookmark the region marked on the ruler, else the centre of the view.
-        Mark (``whole_view``): the marked region, else the whole view."""
-        from repeatviewer.widgets.genome_navigator import (
-            BOOKMARK_COLORS,
-            Bookmark,
-            BookmarkDialog,
-        )
-
-        m = self.canvas.model
-        span = self.canvas.visible_span() if m is not None else None
-        if m is None or span is None or not self._nav_mode_on():
-            return
-        sel = self.canvas.region_sel
-        if sel:
-            a, b = int(sel[0]), int(sel[1])
-        elif whole_view:
-            a, b = max(0, int(span[0])), min(m.length, int(span[1]))
-        else:
-            a = (span[0] + min(span[1], m.length)) // 2
-            b = a + 1
-        gene = self._gene_at_centre()
-        color = BOOKMARK_COLORS[len(self._bookmarks) % len(BOOKMARK_COLORS)]
-        bm = Bookmark(name=gene[0] if gene else "", chrom=m.ref_id, start=a, end=b,
-                      color=color)
-        if not bm.name:
-            bm.name = bm.locus()
-        dlg = BookmarkDialog(bm, self, "Add bookmark")
-        if dlg.exec() != QDialog.DialogCode.Accepted:
-            return
-        self._bookmarks.append(dlg.result_bookmark())
-        self.canvas.set_region_selection(None)
-        self._nav_bookmarks_changed()
-
-    def _edit_bookmark(self, i: int) -> None:
-        from repeatviewer.widgets.genome_navigator import BookmarkDialog
-
-        if not 0 <= i < len(self._bookmarks):
-            return
-        dlg = BookmarkDialog(self._bookmarks[i], self, "Edit bookmark")
-        if dlg.exec() != QDialog.DialogCode.Accepted:
-            return
-        self._bookmarks[i] = dlg.result_bookmark()
-        self._nav_bookmarks_changed()
-
-    def _delete_bookmark(self, i: int) -> None:
-        if 0 <= i < len(self._bookmarks):
-            del self._bookmarks[i]
-            self._nav_bookmarks_changed()
-
-    def _import_bookmarks(self, path: str | None = None) -> None:
-        """Bookmarks from a BED file: chrom / start / end, the name, itemRgb as the
-        colour and a description column as the note (see ``bookmarks_from_bed``)."""
-        import gzip
-
-        from PySide6.QtWidgets import QFileDialog, QMessageBox
-
-        from repeatviewer.widgets.genome_navigator import bookmarks_from_bed
-
-        if not path:
-            path, _f = QFileDialog.getOpenFileName(
-                self, "Import bookmarks from BED", "",
-                "BED files (*.bed *.bed.gz *.bed3 *.bed6 *.bed12 *.txt *.tsv);;All files (*)")
-        if not path:
-            return
-        try:
-            if path.endswith(".gz"):
-                with gzip.open(path, "rt", encoding="utf-8", errors="replace") as fh:
-                    text = fh.read()
-            else:
-                with open(path, encoding="utf-8", errors="replace") as fh:
-                    text = fh.read()
-        except OSError as exc:
-            QMessageBox.warning(self, "Import bookmarks", f"Could not read the file:\n{exc}")
-            return
-        chroms = dict(self._nav_chroms())
-        new, skipped = bookmarks_from_bed(text, chroms or None,
-                                          first_color=len(self._bookmarks))
-        have = {(b.chrom, b.start, b.end, b.name) for b in self._bookmarks}
-        added = [b for b in new if (b.chrom, b.start, b.end, b.name) not in have]
-        dup = len(new) - len(added)
-        self._bookmarks.extend(added)
-        if added:
-            self._rail.bm_section.set_open(True)
-            self._nav_bookmarks_changed()
-        msg = f"Added {len(added):,} bookmark{'s' if len(added) != 1 else ''}."
-        if dup:
-            msg += f"\n{dup:,} already in the list."
-        if skipped:
-            msg += f"\n{len(skipped):,} line{'s' if len(skipped) != 1 else ''} skipped:\n  "
-            msg += "\n  ".join(skipped[:8]) + ("\n  …" if len(skipped) > 8 else "")
-        QMessageBox.information(self, "Import bookmarks", msg)
-
-    def _export_bookmarks(self, path: str | None = None) -> None:
-        from PySide6.QtWidgets import QFileDialog, QMessageBox
-
-        from repeatviewer.widgets.genome_navigator import bookmarks_to_bed
-
-        if not self._bookmarks:
-            return
-        if not path:
-            path, _f = QFileDialog.getSaveFileName(
-                self, "Export bookmarks as BED", "bookmarks.bed", "BED files (*.bed)")
-        if not path:
-            return
-        try:
-            with open(path, "w", encoding="utf-8") as fh:
-                fh.write(bookmarks_to_bed(self._bookmarks))
-        except OSError as exc:
-            QMessageBox.warning(self, "Export bookmarks", f"Could not write the file:\n{exc}")
-
-    def _nav_bookmarks_changed(self) -> None:
-        self._rail.set_bookmarks(self._bookmarks)
-        self._nav_flags()
-        self._save_nav()
-
-    def _save_nav(self) -> None:
-        if self._session is None or self._path is None:
-            return
-        try:
-            gt.update_session_extras(self._path, {
-                "bookmarks": [b.to_json() for b in self._bookmarks],
-                "recent": [p_.to_json() for p_ in self._recent]})
-        except OSError:
-            pass
-
-    def _set_browser_tabs(self, browser: bool) -> None:
-        """A reference opened on its own has no placed sequences: only its view is shown."""
-        # no title line or tab bar (only one page): the browser starts at its toolbar
-        self._title.setVisible(not browser)
-        self._tabs.tabBar().setVisible(not browser)
-        self._place_locus_box(browser)
-        # the options for placed sequences do nothing there; the track options stay
-        for key, sec in getattr(self, "_sections", {}).items():
-            if key != "tracks":
-                sec.setVisible(not browser)
-        self._sync_track_inspector()
-        for page in (self._reads_view, self._features_page, self._variants_view,
-                     self._unused_view, self._stats_view, self._report_view):
-            self._tabs.setTabVisible(self._tabs.indexOf(page), not browser)
-        self._prev_diff.setVisible(not browser)
-        self._next_diff.setVisible(not browser)
-        self._diff_label.setVisible(not browser)
