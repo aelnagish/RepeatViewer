@@ -290,7 +290,9 @@ def test_rail_folds_hides_and_picks_the_density_track(qapp, genome):
     r = panel._rail
     # the density comes from the first annotation track unless another is picked
     combo = r.density_track
-    assert [combo.itemText(i) for i in range(combo.count())] == ["None", "a.gff3"]
+    # (a mapping file, like the PAF here, can shade by its coverage)
+    assert [combo.itemText(i) for i in range(combo.count())] == [
+        "None", "a.gff3", "r.paf · coverage"]
     assert combo.currentText() == "a.gff3" and r.map.density
     combo.setCurrentIndex(0)
     assert r.map.density == {}
@@ -496,8 +498,10 @@ def test_collapsed_pairs_and_filters_in_the_view(qapp, genome, tmp_path):
     c.show_range(100, 220)
     t = c.tracks[0]
     expanded = c._extra_track_h(t)
+    rows = c._max_rows(t)
     panel._set_track_mode(0, MODE_COLLAPSED)
-    assert c._extra_track_h(t) < expanded
+    # the track keeps its height; thinner rows fit more of them
+    assert c._extra_track_h(t) == expanded and c._max_rows(t) > rows
     # collapsed: thin touching rows (2 px), not one row
     ys = {y for _it, y in c._placed(t, 100, 220) if y is not None}
     assert c._row_h(t) == 2 and len(ys) > 1 and all(y % 2 == 0 for y in ys)
@@ -999,7 +1003,7 @@ def test_track_height_is_dragged_from_its_bottom_line_and_saved(qapp, genome):
     QTest.mouseMove(vp, QPoint(300, edge + 40))
     QTest.mouseRelease(vp, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
                        QPoint(300, edge + 40))
-    assert c._extra_spans[0][1] == h + 40
+    assert c._extra_spans[0][1] == h + 40          # exactly as tall as dragged
     assert [t.name for t in c.tracks] == ["a.gff3", "r.paf"]     # not reordered
     saved = gt.read_session(session)["tracks"][0]
     assert saved.get("settings", {}).get("height") == c.tracks[0].settings["height"]
@@ -1085,7 +1089,7 @@ def test_mark_button_bookmarks_the_view(qapp, genome, monkeypatch):
     assert (panel._bookmarks[-1].start, panel._bookmarks[-1].end) == (2200, 2300)
 
 
-def test_mapping_track_is_at_most_320_px_and_smaller_when_reads_need_less(
+def test_mapping_track_has_a_fixed_height_and_marks_hidden_rows(
         qapp, genome, tmp_path, monkeypatch):
     from repeatviewer.widgets import genome_tracks_view as gtv
 
@@ -1094,25 +1098,25 @@ def test_mapping_track_is_at_most_320_px_and_smaller_when_reads_need_less(
     c.show_range(100, 220)
     c.viewport().grab()
     t = c.tracks[0]
-    rows = t.row_count(c.model.ref_id)
     rh = c._row_h(t)
-    assert 0 < rows * rh < 320
-    assert c._extra_track_h(t) == gtv.ALN_COV_H + 2 + rows * rh + gtv.TRACK_GAP
-    monkeypatch.setattr(t, "row_count", lambda ref: 10_000)
-    assert c._extra_track_h(t) <= gtv.DEFAULT_ALN_TRACK_H
-    assert c._extra_track_h(t) > gtv.DEFAULT_ALN_TRACK_H - rh
-    # another sequence, its reads not loaded yet: the height stays (no jump)
-    monkeypatch.undo()
-    before = c._extra_track_h(t)
-    assert isinstance(t, gt.IndexedBamTrack)
-    monkeypatch.setattr(t, "rows_known", lambda ref: False)
-    monkeypatch.setattr(t, "row_count", lambda ref: 0)
-    assert c._extra_track_h(t) == before
-    monkeypatch.undo()
-    # resized: exactly that tall, whatever the reads need
-    c.set_track_height(0, 500)
-    assert c._extra_track_h(t) == gtv.ALN_COV_H + 2 + 500 + gtv.TRACK_GAP
-
+    # the default height, whatever the reads need
+    assert c._extra_track_h(t) == gtv.DEFAULT_ALN_TRACK_H
+    assert c._hidden_rows(t) == 0
+    # a set height is kept exactly; rows that do not fit are counted for the mark
+    rows = t.row_count(c.model.ref_id)
+    c.set_track_height(0, 2 * rh)
+    assert c._extra_track_h(t) == gtv.ALN_COV_H + 2 + 2 * rh + gtv.TRACK_GAP
+    assert c._hidden_rows(t) == rows - 2
+    marks = []
+    real = c._paint_more_mark
+    monkeypatch.setattr(c, "_paint_more_mark",
+                        lambda p, t_, top, h, w: marks.append(c._hidden_rows(t_)) or
+                        real(p, t_, top, h, w))
+    c.viewport().grab()
+    assert marks == [rows - 2]
+    # the mark's strip is never shifted sideways with the reads
+    top, h = c._extra_spans[0]
+    assert c._blit_rects == [(top, h - gtv.TRACK_GAP - gtv.GenomeTracksMixin.MORE_H)]
 
 def test_browser_saves_and_opens_sessions_and_has_a_bookmarks_menu(
         qapp, genome, tmp_path, monkeypatch):
@@ -1178,7 +1182,8 @@ def test_track_height_show_all_fits_every_row(qapp, genome, tmp_path, monkeypatc
     panel._fill_track_menu(menu, 0)
     sub = next(a.menu() for a in menu.actions() if a.text() == "Track height")
     acts = {a.text(): a for a in sub.actions()}
-    acts["Show all"].trigger()
+    assert "320 px" in acts and "Default" in acts
+    acts["Show all rows"].trigger()
     assert t.settings.get("show_all") and "height" not in t.settings
     assert c._extra_track_h(t) == gtv.ALN_COV_H + 2 + 100 * rh + gtv.TRACK_GAP
     # dragging (or a set height) leaves Show all
@@ -1411,3 +1416,263 @@ def test_junction_track_sashimi_and_saving_images(qapp, genome, tmp_path):
     panel._toggle_junction_track(1, False)
     assert all(t.kind != gt.KIND_JUNCTION for t in c.tracks)
     dlg.close()
+
+
+def test_ruler_and_sequence_stay_pinned_while_tracks_scroll(qapp, genome, tmp_path):
+    from PySide6.QtCore import QPointF
+
+    _session, panel = _open_bam(qapp, genome, _snp_bam(tmp_path))
+    c = panel.canvas
+    panel.resize(1000, 300)
+    c.tracks[0].settings["height"] = 600
+    c._tracks_changed()
+    c.show_range(100, 220)
+    c.viewport().grab()
+    pin = c.browser_pinned_h()
+    top0 = c._extra_spans[0][0]
+    assert 0 < pin <= top0
+    sb = c.verticalScrollBar()
+    sb.setValue(min(sb.maximum(), 200))
+    v = sb.value()
+    assert v > 0
+    img = c.viewport().grab().toImage()
+    dpr = img.devicePixelRatio()
+    # the ruler is still at the top: a mouse there is on the ruler, not a track
+    x = c.x_of(150)
+    assert c._in_ruler(QPointF(x, 10))
+    assert c._header_y(QPointF(x, pin - 2)) == pin - 2
+    # just under the pinned rows: the scrolled track
+    assert c._header_y(QPointF(x, pin + 5)) == pin + 5 + v
+    assert c.track_at_y(c._header_y(QPointF(x, pin + 5))) == 0
+    # the ruler's tick labels are drawn in the pinned strip (not the page's
+    # background there)
+    bg = c.palette().color(c.palette().ColorRole.Base)
+    row = [img.pixelColor(int(px * dpr), int(12 * dpr)) for px in range(c.label_w + 2, 900)]
+    assert any(col != bg for col in row)
+
+
+def test_annotation_track_keeps_its_height_and_marks_rows_out_of_room(
+        qapp, genome, tmp_path):
+    bed = tmp_path / "o.bed"
+    bed.write_text("chr1\t100\t500\tA\nchr1\t200\t600\tB\nchr1\t300\t700\tC\n"
+                   "chr1\t5000\t5400\tD\n")
+    session = gt.session_path_for(genome)
+    gt.write_session(session, genome, [{"path": str(bed)}])
+    panel = cv.ContigViewPanel(session)
+    panel.resize(1000, 600)
+    panel.show()
+    _wait_tracks(qapp, panel, 1)
+    c = panel.canvas
+    t = c.tracks[0]
+    rh = c._row_h(t)
+    c.show_range(50, 800)
+    h = c._extra_track_h(t)
+    c.show_range(4800, 5600)                     # one feature here: same height
+    assert c._extra_track_h(t) == h
+    c.set_track_height(0, 2 * rh)
+    assert c._extra_track_h(t) == 2 * rh + 6
+    assert c._hidden_rows(t) == 0                # one row in view
+    c.show_range(50, 800)
+    assert c._shown_rows(t) == 2 and c._hidden_rows(t) == 1
+
+def test_genome_list_can_be_shaded_by_bam_coverage(qapp, genome, tmp_path):
+    bam = _snp_bam(tmp_path)
+    bg = tmp_path / "s.bedgraph"
+    bg.write_text("chr1\t0\t5000\t1\nchr1\t5000\t10000\t4\n")
+    session = gt.session_path_for(genome)
+    gt.write_session(session, genome, [{"path": str(genome.parent / "a.gff3")},
+                                       {"path": str(bam)}, {"path": str(bg)}])
+    panel = cv.ContigViewPanel(session)
+    panel.resize(1000, 600)
+    panel.show()
+    _wait_tracks(qapp, panel, 3)
+    r = panel._rail
+    combo = r.density_track
+    names = [combo.itemText(k) for k in range(combo.count())]
+    assert names == ["None", "a.gff3", "s.bam · coverage", "s.bedgraph · signal"]
+    assert combo.currentData() == str(genome.parent / "a.gff3")       # the default
+    # find stays with feature tracks
+    assert [r.find_track.itemText(k) for k in range(r.find_track.count())] == ["a.gff3"]
+    # BAM: its whole-genome coverage is worked out in the background, then shades
+    panel._set_density_track(str(bam))
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and not r.map.density:
+        qapp.processEvents()
+        time.sleep(0.02)
+    row = r.map.density["chr1"]
+    # depth over the genome's median depth: the reads near 100–200 are the usual
+    assert r.map.density_mode == "depth"
+    assert row[0] == 1.0 and row[-1] == 0
+    assert r.map.density_median > 0 and r.map.density_detail["chr1"][0] > 0
+    assert "median" in r.density_note.text()                       # the colour key
+    # bedGraph: its values
+    panel._set_density_track(str(bg))
+    row = r.map.density["chr1"]
+    assert row[-1] == 1.0 and abs(row[0] - 0.25) < 1e-6
+    assert r.map.density_mode == "count"
+
+
+def test_read_depth_shading_shows_a_short_collapsed_repeat_and_gap(qapp, genome):
+    """A 6 kb stretch at 4x depth, and one with no reads, still show on a bar of
+    60 bins for 1.2 Mb, where a bin's plain mean would hide them."""
+    import numpy as np
+    from repeatviewer.widgets import genome_navigator as gn
+
+    session, panel = _browser(qapp, genome)
+    prof = np.full(1200, 30.0)                   # 1 kb bins: 30x everywhere
+    prof[100:106] = 120.0                        # 6 kb collapsed repeat
+    prof[700:706] = 0.0                          # 6 kb with no reads
+
+    class T:
+        kind = gt.KIND_ALIGNMENT
+        def resolve(self, chrom):
+            return chrom
+
+    panel._coverage_profile = lambda t, chrom: (prof, 1000)
+    rows, depths, median = panel._coverage_rows(T(), [("chr1", 1_200_000)], 60)
+    row = rows["chr1"]
+    assert median == 30.0
+    assert row[5] == 4.0 and depths["chr1"][5] == 120.0      # bin 5: 100–120 kb
+    assert row[35] == 0.0                                     # bin 35: 700–720 kb
+    assert row[20] == 1.0
+    # mean alone would be 1.9x and 0.7x
+    assert gn.depth_color(row[5]).name() == gn.DEPTH_HIGH.name()
+    assert gn.depth_color(row[35]).name() == gn.DEPTH_NONE.name()
+    assert gn.depth_color(1.0).name() == "#3d7be0"
+    assert gn.depth_color(0.1).name() == gn.DEPTH_LOW.name()
+
+
+def test_side_panel_lists_tracks_with_ticks_to_show_or_hide(qapp, genome):
+    session, panel = _browser(qapp, genome)
+    qapp.processEvents()
+    panel._nav_sync()
+    r = panel._rail
+    c = panel.canvas
+    assert [b.full_text() for b in r.track_boxes] == ["a.gff3", "r.paf"]   # drawing order
+    assert all(b.isChecked() for b in r.track_boxes)
+    h_paf = c._extra_spans[1][1]
+    r.track_boxes[0].setChecked(False)                 # hide the annotation track
+    assert c.tracks[0].settings["hidden"] and c._extra_spans[0][1] == 0
+    assert c._extra_spans[1][1] == h_paf and c._extra_spans[1][0] < 60   # moved up
+    assert gt.read_session(session)["tracks"][0]["settings"]["hidden"] is True
+    assert r.tracks_count.text() == "1 of 2 shown"
+    assert c.track_at_y(c._extra_spans[1][0] + 1) == 1
+    # a reorder is followed by the list
+    c.tracks.reverse()
+    c._tracks_changed()
+    panel._nav_sync()
+    assert [b.full_text() for b in r.track_boxes] == ["r.paf", "a.gff3"]
+    assert not r.track_boxes[1].isChecked()
+    r.track_boxes[1].setChecked(True)
+    assert "hidden" not in c.tracks[1].settings and c._extra_spans[1][1] > 0
+
+
+def test_side_panel_is_narrow_and_long_names_give_way(qapp):
+    """The rail opens about 290 px wide whatever the track names; when narrow, the
+    Density picker keeps its chevron, track names lose their middle to "…", and
+    the Bookmarks buttons stay in sight."""
+    from repeatviewer.widgets import genome_navigator as gn
+
+    r = gn.NavigatorRail()
+    long = "X204SC20113153_18__strand_unique_max_intron_1000_filte_mapped.bam"
+    r.set_density_tracks([("/a/" + long, long + " · coverage")], "/a/" + long)
+    r.set_tracks([("bgh_dh14_v4.gff", True, ""), (long, True, "")])
+    assert r.sizeHint().width() == gn.RAIL_W
+    r.resize(240, 700)
+    r.show()
+    qapp.processEvents()
+    body = r._body
+    assert body.width() <= 240                       # nothing wider than the rail
+    combo = r.density_track
+    assert combo.geometry().right() <= body.width()
+    box = r.track_boxes[1]
+    assert box.full_text() == long and "…" in box.text()
+    assert box.text().startswith("X204") and box.text().endswith(".bam")
+    assert r.track_boxes[0].text() == "bgh_dh14_v4.gff"
+    for b in (r.add_btn, r.bm_more):
+        right = b.mapTo(body, b.rect().topRight()).x()
+        assert 0 < right <= body.width()
+    r.close()
+
+
+def test_double_click_in_the_tracks_zooms_in_there_not_fit(qapp, genome):
+    from PySide6.QtCore import QPointF, Qt
+    from PySide6.QtGui import QMouseEvent
+
+    session, panel = _browser(qapp, genome)
+    c = panel.canvas
+    c.show_range(1000, 9000)
+    qapp.processEvents()
+    a0, b0 = c.bp_at(c.label_w), c.bp_at(c.label_w + c._data_w())
+    x = c.label_w + c._data_w() * 0.75                   # three quarters along
+    spot = c.bp_at(x)
+    y = c.viewport().height() - 20                       # in the tracks, below the ruler
+    ev = QMouseEvent(QMouseEvent.Type.MouseButtonDblClick, QPointF(x, y), QPointF(x, y),
+                     Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton,
+                     Qt.KeyboardModifier.NoModifier)
+    c.mouseDoubleClickEvent(ev)
+    a1, b1 = c.bp_at(c.label_w), c.bp_at(c.label_w + c._data_w())
+    assert abs((b1 - a1) - (b0 - a0) / 2) < (b0 - a0) * 0.05      # 2x in, not Fit
+    assert abs((a1 + b1) / 2 - spot) < (b0 - a0) * 0.02           # around the spot
+
+
+def test_a_click_clears_the_marked_region(qapp, genome):
+    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtTest import QTest
+
+    session, panel = _browser(qapp, genome)
+    c = panel.canvas
+    c.show_range(1000, 9000)
+    qapp.processEvents()
+    vp = c.viewport()
+    x = int(c.label_w + c._data_w() * 0.3)
+    # in a track
+    c.set_region_selection(2000, 4000)
+    y = int(c._extra_spans[0][0] + 6)
+    QTest.mouseClick(vp, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(x, y))
+    assert c.region_sel is None
+    # below the tracks
+    c.set_region_selection(2000, 4000)
+    QTest.mouseClick(vp, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+                     QPoint(x, vp.height() - 3))
+    assert c.region_sel is None
+    # on the ruler: clears a region; with none, marks one position
+    c.set_region_selection(2000, 4000)
+    yr = 8
+    while yr < 60 and not c._in_ruler(QPointF(x, yr)):
+        yr += 2
+    QTest.mouseClick(vp, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(x, yr))
+    assert c.region_sel is None
+    QTest.mouseClick(vp, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(x, yr))
+    assert c.region_sel is not None and c.region_sel[1] - c.region_sel[0] == 1
+
+
+def test_drag_a_name_in_the_tracks_list_to_reorder(qapp, genome):
+    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtTest import QTest
+
+    session, panel = _browser(qapp, genome)
+    panel._nav_sync()
+    r, c = panel._rail, panel.canvas
+    assert [b.full_text() for b in r.track_boxes] == ["a.gff3", "r.paf"]
+    box = r.track_boxes[0]
+    start = QPoint(30, box.height() // 2)                         # on the name
+    below = r.track_boxes[1]
+    end_g = below.mapToGlobal(QPoint(10, below.height() - 2))     # under the 2nd name
+    end = box.mapFromGlobal(end_g)
+    QTest.mousePress(box, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, start)
+    QTest.mouseMove(box, QPoint(start.x(), start.y() + 8))
+    QTest.mouseMove(box, end)
+    assert r._track_line.isVisible()                              # where it will go
+    QTest.mouseRelease(box, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, end)
+    qapp.processEvents()
+    assert [t.name for t in c.tracks] == ["r.paf", "a.gff3"]
+    assert [b.full_text() for b in r.track_boxes] == ["r.paf", "a.gff3"]
+    assert all(b.isChecked() for b in r.track_boxes)              # no tick changed
+    assert [t["path"].rsplit("/", 1)[-1] for t in gt.read_session(session)["tracks"]] \
+        == ["r.paf", "a.gff3"]                                    # saved
+    # a plain click still ticks
+    b0 = r.track_boxes[0]
+    QTest.mouseClick(b0, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+                     QPoint(8, b0.height() // 2))
+    assert not r.track_boxes[0].isChecked()

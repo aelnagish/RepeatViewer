@@ -6,12 +6,14 @@ The rail and the bar only show and ask; ContigViewPanel moves the view."""
 
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import asdict, dataclass, field
 
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -25,6 +27,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QStyle,
+    QStyleOptionComboBox,
     QStyleOptionToolButton,
     QStylePainter,
     QToolButton,
@@ -49,7 +52,8 @@ def natural_key(name: str) -> list:
 
 
 DEFAULT_JUMP_BP = 20_000      # width shown after a click when the view was a whole sequence
-RAIL_W = 300
+RAIL_W = 290            # the rail's default width
+RAIL_MIN_W = 200        # and never narrower than this
 
 
 @dataclass
@@ -288,6 +292,32 @@ def _palette_colors(w: QWidget) -> tuple[QColor, QColor, QColor, QColor]:
 # ---------------------------------------------------------------- the rail
 
 
+DEPTH_HIGH = QColor("#e8590c")      # well above the usual read depth
+DEPTH_LOW = QColor("#8c8c8c")       # well below it
+DEPTH_NONE = QColor("#3a3a3a")      # no reads
+
+
+def depth_color(ratio: float) -> QColor:
+    """Colour for read depth ``ratio`` times the genome's median: blue near the
+    median (½–1.5×), orange getting stronger from 1.5× to 4× and up, grey getting
+    stronger from ½× down to none, and near-black where there are no reads."""
+    if ratio <= 0:
+        c = QColor(DEPTH_NONE)
+        c.setAlpha(210)
+        return c
+    l2 = math.log2(ratio)
+    if l2 > math.log2(1.5):
+        c = QColor(DEPTH_HIGH)
+        c.setAlpha(int(90 + 160 * min(1.0, (l2 - math.log2(1.5)) / (2 - math.log2(1.5)))))
+    elif l2 < -1:
+        c = QColor(DEPTH_LOW)
+        c.setAlpha(int(90 + 140 * min(1.0, (-l2 - 1) / 2)))
+    else:
+        c = QColor("#3d7be0")
+        c.setAlpha(120)
+    return c
+
+
 class ChromosomeMap(QWidget):
     """Every chromosome as a bar (length to scale, feature density as ticks); the one
     in view in bold with a red box where the view is, bookmarks as dots. Click a bar
@@ -301,6 +331,10 @@ class ChromosomeMap(QWidget):
         super().__init__(parent)
         self.chroms: list[tuple[str, int]] = []
         self.density: dict[str, list[float]] = {}
+        # "count": 0–1 shades; "depth": read depth / the genome's median depth
+        self.density_mode = "count"
+        self.density_detail: dict[str, list[float]] = {}     # depth behind each ratio
+        self.density_median = 0.0
         self.current = ""
         self.view: tuple[int, int] | None = None
         self.view_w = 0                            # current width in bp (for clicks)
@@ -361,10 +395,13 @@ class ChromosomeMap(QWidget):
             dens = self.density.get(chrom)
             if dens:
                 step = bar.width() / len(dens)
+                depth = self.density_mode == "depth"
                 for k, v in enumerate(dens):
-                    if v > 0:
+                    c = depth_color(v) if depth else None
+                    if not depth and v > 0:
                         c = QColor(tick)
                         c.setAlpha(int(60 + 170 * min(1.0, v)))
+                    if c is not None:
                         p.fillRect(QRectF(bar.left() + k * step, bar.top() + 1,
                                           max(1.0, step - 0.3), bar.height() - 2), c)
             for c_, pos, color in self.marks:
@@ -402,6 +439,12 @@ class ChromosomeMap(QWidget):
             return
         chrom, n = self.chroms[i]
         tip = f"{chrom} · {n:,} bp"
+        dens = self.density_detail.get(chrom) if self.density_mode == "depth" else None
+        if bp is not None and dens and n and self.density_median > 0:
+            d = dens[min(len(dens) - 1, int(bp * len(dens) / n))]
+            tip += (f"\nRead depth here ≈ {d:,.1f}× "
+                    f"({d / self.density_median:.2f}× the genome's median "
+                    f"{self.density_median:,.1f}×)")
         if bp is not None:
             tip += f"\nClick to go to {bp + 1:,}"
         else:
@@ -457,7 +500,7 @@ class _ListRow(QFrame):
             dot.setFixedSize(10, 10)
             dot.setStyleSheet(f"background: {color}; border-radius: 5px;")
             head.addWidget(dot, 0, Qt.AlignmentFlag.AlignVCenter)
-        self.title = QLabel(title, self)
+        self.title = _ElidedLabel(title, self)
         tf = QFont(self.font())
         if mono_title:
             tf.setFamily("Menlo")
@@ -515,12 +558,124 @@ QComboBox#densityCombo::down-arrow { image: none; width: 0px; height: 0px; }
 """
 
 
+class _ElidedLabel(QLabel):
+    """A one-line label that may be narrower than its text: the middle of the text
+    gives way to "…" (the whole text in the tooltip unless one is set)."""
+
+    def __init__(self, text: str = "", parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._full = ""
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.setText(text)
+
+    def setText(self, text: str) -> None:          # noqa: N802 (Qt name)
+        self._full = text
+        self._elide()
+
+    def full_text(self) -> str:
+        return self._full
+
+    def minimumSizeHint(self) -> QSize:
+        return QSize(20, super().minimumSizeHint().height())
+
+    def sizeHint(self) -> QSize:
+        return QSize(self.fontMetrics().horizontalAdvance(self._full) + 2,
+                     super().sizeHint().height())
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._elide()
+
+    def _elide(self) -> None:
+        shown = self.fontMetrics().elidedText(self._full, Qt.TextElideMode.ElideMiddle,
+                                              max(10, self.width()))
+        QLabel.setText(self, shown)
+
+
+class _ElidedCheck(QCheckBox):
+    """A tick box whose label gives way to "…" in the middle when the rail is narrow.
+    It can be dragged up or down: ``dragMoved(global y)`` while it moves and
+    ``dragDone(global y)`` where it is let go (a drag never ticks the box)."""
+
+    dragMoved = Signal(float)
+    dragDone = Signal(float)
+    DRAG_PX = 5
+
+    def __init__(self, text: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._press_y: float | None = None
+        self._dragging = False
+        self._full = text
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        self.setText(text)
+
+    def full_text(self) -> str:
+        return self._full
+
+    def minimumSizeHint(self) -> QSize:
+        return QSize(40, super().minimumSizeHint().height())
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._press_y = event.globalPosition().y()
+            self._dragging = False
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        y = event.globalPosition().y()
+        if self._press_y is not None and not self._dragging \
+                and abs(y - self._press_y) >= self.DRAG_PX:
+            self._dragging = True
+            self.setDown(False)                 # a drag does not tick or untick
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+        if self._dragging:
+            self.dragMoved.emit(y)
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        dragging, self._dragging, self._press_y = self._dragging, False, None
+        if dragging:
+            self.unsetCursor()
+            self.setDown(False)
+            self.dragDone.emit(event.globalPosition().y())
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        # the text gets what is left beside the tick box
+        box = self.style().pixelMetric(QStyle.PixelMetric.PM_IndicatorWidth) + 8
+        room = max(10, self.width() - box)
+        shown = self.fontMetrics().elidedText(self._full, Qt.TextElideMode.ElideMiddle, room)
+        if shown != self.text():
+            self.setText(shown)
+
+
 class _ChevronCombo(QComboBox):
     """A combo box whose arrow is a thin painted chevron (the style sheet hides the
-    platform arrow)."""
+    platform arrow). It may be narrower than its longest entry: the shown entry then
+    gives way to "…" in the middle, and the chevron stays in sight."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.setMinimumContentsLength(4)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
     def paintEvent(self, event) -> None:
-        super().paintEvent(event)
+        sp = QStylePainter(self)
+        opt = QStyleOptionComboBox()
+        self.initStyleOption(opt)
+        room = self.style().subControlRect(QStyle.ComplexControl.CC_ComboBox, opt,
+                                           QStyle.SubControl.SC_ComboBoxEditField, self).width()
+        room = min(room, self.width() - 30) if room > 0 else self.width() - 30
+        opt.currentText = self.fontMetrics().elidedText(
+            opt.currentText, Qt.TextElideMode.ElideMiddle, max(10, room))
+        sp.drawComplexControl(QStyle.ComplexControl.CC_ComboBox, opt)
+        sp.drawControl(QStyle.ControlElement.CE_ComboBoxLabel, opt)
+        sp.end()
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         pen = QPen(self.palette().color(self.palette().ColorRole.PlaceholderText), 1.5)
@@ -603,13 +758,25 @@ class NavigatorRail(QWidget):
     sortChanged = Signal(str)                      # how the sequence list is ordered
     findRequested = Signal(str, str)               # track path ("" = all), text
     sectionToggled = Signal(str, bool)             # "genome" / "bookmarks", open
+    trackShown = Signal(int, bool)                 # track index, shown
+    trackMoved = Signal(int, int)                  # track index, its new index
+
+    def sizeHint(self) -> QSize:
+        # not the width of the longest track name: that only gives way to "…"
+        return QSize(RAIL_W, super().sizeHint().height())
+
+    def minimumSizeHint(self) -> QSize:
+        # as narrow as the content allows (the Bookmarks header with + Add and ⋯),
+        # with room for the scroll bar, so dragging never cuts anything off
+        sb = self.style().pixelMetric(QStyle.PixelMetric.PM_ScrollBarExtent)
+        w = self._body.minimumSizeHint().width() + sb + 2
+        return QSize(max(RAIL_MIN_W, w), super().minimumSizeHint().height())
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
 
 
         self.setObjectName("navigatorRail")
-        self.setMinimumWidth(220)
         self.bookmarks: list[Bookmark] = []
         self.recent: list[Place] = []
         outer = QVBoxLayout(self)
@@ -646,12 +813,23 @@ class NavigatorRail(QWidget):
         sf.setPointSizeF(max(8.0, sf.pointSizeF() - 1.5))
         self.density_track.setFont(sf)
         self.density_track.setToolTip(
-            "Which track's features shade the sequence bars: darker where that track has "
-            "more features (genes, repeats…) per stretch of sequence")
+            "Which track shades the sequence bars. Features (GFF / BED): darker where "
+            "more start; signal (bigWig): darker where higher. Both are scaled to the "
+            "top 1% so one outlier does not pale the rest. Mappings (BAM): read depth "
+            "against the genome's median depth: blue usual, orange 2x or more (a "
+            "collapsed repeat?), grey low, dark none; a stretch of 5 kb or more that "
+            "is off shows even on a long sequence")
         self.density_track.currentIndexChanged.connect(
             lambda _i: self.densityTrackChanged.emit(str(self.density_track.currentData() or "")))
         dens.addWidget(self.density_track, 1)
         self.genome.content.addLayout(dens)
+        # e.g. while a BAM's coverage of every sequence is worked out
+        self.density_note = QLabel("", body)
+        self.density_note.setStyleSheet(f"color: {muted};")
+        self.density_note.setWordWrap(True)
+        self.density_note.setTextFormat(Qt.TextFormat.RichText)
+        self.density_note.setVisible(False)
+        self.genome.content.addWidget(self.density_note)
         self.map = ChromosomeMap(body)
         self.map.goRequested.connect(
             lambda c, a, b: self.goRequested.emit(c, a, b, ""))
@@ -686,6 +864,25 @@ class NavigatorRail(QWidget):
         self.genome.content.addLayout(row)
         self._all_chroms: list[tuple[str, int]] = []
         lay.addWidget(self.genome)
+        lay.addWidget(self._rule(body))
+
+        # Tracks: every track in the order drawn, a tick to show or hide each
+        self.tracks_section = _Section("Tracks", body)
+        self.tracks_section.toggled.connect(lambda on: self.sectionToggled.emit("tracks", on))
+        self.tracks_count = QLabel("", body)
+        self.tracks_count.setStyleSheet(f"color: {muted};")
+        self.tracks_section.right.addWidget(self.tracks_count)
+        self.tracks_box = QVBoxLayout()
+        self.tracks_box.setSpacing(2)
+        self.tracks_section.content.addLayout(self.tracks_box)
+        self.tracks_empty = QLabel("Add tracks from the Tracks menu or by dropping files "
+                                   "on the view.", body)
+        self.tracks_empty.setWordWrap(True)
+        self.tracks_empty.setStyleSheet(f"color: {muted};")
+        self.tracks_section.content.addWidget(self.tracks_empty)
+        self.track_boxes: list[QCheckBox] = []
+        self._tracks_sig = None
+        lay.addWidget(self.tracks_section)
         lay.addWidget(self._rule(body))
 
         # Bookmarks
@@ -845,8 +1042,16 @@ class NavigatorRail(QWidget):
             self.map_scroll.ensureVisible(10, i * ChromosomeMap.ROW_H + ChromosomeMap.ROW_H // 2,
                                           0, ChromosomeMap.ROW_H)
 
-    def set_density(self, density: dict[str, list[float]]) -> None:
+    def set_density(self, density: dict[str, list[float]], mode: str = "count",
+                    detail: dict[str, list[float]] | None = None,
+                    median: float = 0.0) -> None:
+        """``mode`` "count": values 0–1, darker is more; "depth": read depth over
+        the genome's median depth (``median``), coloured by depth_color, with the
+        depths themselves in ``detail`` for the tooltip."""
         self.map.density = density
+        self.map.density_mode = mode
+        self.map.density_detail = detail or {}
+        self.map.density_median = median
         if self.sort.currentData() == SORT_DENSITY:
             self._apply_filter()
         self.map.update()
@@ -869,6 +1074,8 @@ class NavigatorRail(QWidget):
         has = bool(tracks)
         self.find_track.setEnabled(has)
         self.find_box.setEnabled(has)
+        if has and self.find_note.text().startswith("Add a GFF"):
+            self.find_note.setVisible(False)     # a feature track was added since
         if not has:
             self.set_find_results([], 0)
             self.find_note.setText("Add a GFF, GTF or BED track to search its features.")
@@ -909,8 +1116,16 @@ class NavigatorRail(QWidget):
         self.find_note.setText("Nothing matches." if text and not hits else "")
         self.find_note.setVisible(bool(text) and not hits)
 
+    @staticmethod
+    def depth_legend(median: float) -> str:
+        """Key to the read-depth colours, for density_note."""
+        def sw(ratio: float) -> str:
+            return (f'<span style="color:{depth_color(ratio).name()}">&#9632;</span>')
+        return (f"Read depth vs the median {median:,.1f}×: {sw(1.0)} usual "
+                f"{sw(2.5)} 2×+ (collapsed repeat?) {sw(0.2)} low {sw(0.0)} none")
+
     def set_density_tracks(self, tracks: list[tuple[str, str]], current: str) -> None:
-        """The annotation tracks that can shade the bars: (path, name)."""
+        """The tracks that can shade the bars: (path, name)."""
         combo = self.density_track
         combo.blockSignals(True)
         combo.clear()
@@ -920,6 +1135,71 @@ class NavigatorRail(QWidget):
         k = combo.findData(current)
         combo.setCurrentIndex(max(k, 0))
         combo.blockSignals(False)
+
+    # ------------------------------------------------ tracks
+
+    def set_tracks(self, tracks: list[tuple[str, bool, str]]) -> None:
+        """The tracks in the order they are drawn: (name, shown, tooltip)."""
+        sig = tuple(tracks)
+        if sig == self._tracks_sig:
+            return
+        self._tracks_sig = sig
+        self._clear(self.tracks_box)
+        self.track_boxes = []
+        for i, (name, shown, tip) in enumerate(tracks):
+            box = _ElidedCheck(name)
+            box.setChecked(shown)
+            box.setToolTip(f"{tip}\nDrag up or down to change the track order"
+                           if tip else "Drag up or down to change the track order")
+            box.toggled.connect(lambda on, i=i: self.trackShown.emit(i, bool(on)))
+            box.dragMoved.connect(lambda y, i=i: self._track_drag_at(i, y))
+            box.dragDone.connect(lambda y, i=i: self._track_drop_at(i, y))
+            self.tracks_box.addWidget(box)
+            self.track_boxes.append(box)
+        n_on = sum(1 for _n, on, _t in tracks if on)
+        self.tracks_count.setText(f"{n_on} of {len(tracks)} shown" if n_on < len(tracks)
+                                  else (f"{len(tracks)}" if tracks else ""))
+        self.tracks_empty.setVisible(not tracks)
+
+    def _track_slot(self, gy: float) -> int:
+        """The gap (0 = above the first name) nearest global y ``gy``."""
+        for k, box in enumerate(self.track_boxes):
+            mid = box.mapToGlobal(box.rect().center()).y()
+            if gy < mid:
+                return k
+        return len(self.track_boxes)
+
+    def _drop_line(self) -> QFrame:
+        line = getattr(self, "_track_line", None)
+        if line is None:
+            line = QFrame(self._body)
+            line.setFixedHeight(2)
+            line.setStyleSheet("background: #3d7be0;")
+            self._track_line = line
+        return line
+
+    def _track_drag_at(self, i: int, gy: float) -> None:
+        """While a name is dragged: a blue line where it would go."""
+        boxes = self.track_boxes
+        if not boxes:
+            return
+        k = self._track_slot(gy)
+        ref = boxes[min(k, len(boxes) - 1)]
+        top = ref.mapTo(self._body, ref.rect().topLeft())
+        y = top.y() - 2 if k < len(boxes) else top.y() + ref.height()
+        line = self._drop_line()
+        line.setGeometry(top.x(), int(y), ref.width(), 2)
+        line.setVisible(k not in (i, i + 1))      # no line where it already is
+        line.raise_()
+
+    def _track_drop_at(self, i: int, gy: float) -> None:
+        line = getattr(self, "_track_line", None)
+        if line is not None:
+            line.hide()
+        k = self._track_slot(gy)
+        if k in (i, i + 1):
+            return
+        self.trackMoved.emit(i, k - 1 if k > i else k)
 
     # ------------------------------------------------ bookmarks
 

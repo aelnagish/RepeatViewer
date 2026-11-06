@@ -252,11 +252,13 @@ class GenomeTracksMixin:
         return ALN_SQUISH_H if squished else ALN_ROW_H
 
     def rows_height(self, t) -> int:
-        """Height in pixels of a track's rows (under an alignment track's coverage):
-        the "height" the user dragged the track to, or the default room."""
+        """The most room in pixels a track's rows may take (under an alignment
+        track's coverage): the "height" the user set or dragged the track to, or the
+        default. A track is only as tall as what it shows needs, up to this."""
         h = t.settings.get("height")
         if h is not None:
-            return max(MIN_ROWS_H, int(h))
+            h = max(MIN_ROWS_H, int(h))
+            return h
         if _is_signal(t):
             return SIGNAL_H
         if _is_junction(t):
@@ -287,9 +289,12 @@ class GenomeTracksMixin:
         m = self.model
         if m is None:
             return 1
-        if "height" in t.settings:
-            return self._max_rows(t)        # resized: exactly that tall
-        # default: smaller when the reads (or features) need fewer rows
+        if not t.settings.get("show_all"):
+            # a fixed height: the rows that fit (a mark tells when more are hidden)
+            return self._max_rows(t)
+        # Show all: as many rows as the features or reads in view use
+        if t.kind == gt.KIND_ANNOTATION:
+            return max(1, min(self._max_rows(t), self._rows_in_view(t)))
         known = getattr(t, "rows_known", None)
         if known is not None and not known(m.ref_id):
             # a BAM whose reads for this sequence are not loaded (yet, or zoomed out
@@ -335,18 +340,38 @@ class GenomeTracksMixin:
         if y is None:
             return -1
         for i, (top, h) in enumerate(self._extra_spans):
-            if abs(y - (top + h - TRACK_GAP / 2)) <= RESIZE_GRAB:
+            if h > 0 and abs(y - (top + h - TRACK_GAP / 2)) <= RESIZE_GRAB:
                 return i
         return -1
 
+    def _rows_in_view(self, t) -> int:
+        """Rows the features in view use (their rows are fixed per sequence, so
+        this is the lowest one in view plus one)."""
+        m = self.model
+        span = self.visible_span() if m is not None else None
+        if span is None:
+            return t.row_count(m.ref_id) if m is not None else 1
+        a, b = int(span[0]), int(span[1]) + 1
+        key = (m.ref_id, a, b, t.layout_version(m.ref_id, a, b))
+        memo = t.__dict__.get("_view_rows_memo")
+        if memo is not None and memo[0] == key:
+            return memo[1]
+        if t.count_in(m.ref_id, a, b) > 20_000:
+            n = t.row_count(m.ref_id)          # very many: the rows of the sequence
+        else:
+            n = max((r for _it, r in t.fetch(m.ref_id, a, b)), default=-1) + 1
+        t._view_rows_memo = (key, n)
+        return n
+
     def _extra_track_h(self, t) -> int:
+        if t.settings.get("hidden"):
+            return 0                     # unticked in the side panel's Tracks list
         if _is_custom(t):
             return self.rows_height(t) + TRACK_GAP
         if t.kind == gt.KIND_ANNOTATION:
-            rows = self._shown_rows(t) * self._row_h(t)
-            if "height" in t.settings:
-                rows = self.rows_height(t)      # exactly as tall as dragged
-            return rows + TRACK_GAP
+            if t.settings.get("show_all"):
+                return self._shown_rows(t) * self._row_h(t) + TRACK_GAP
+            return self.rows_height(t) + TRACK_GAP
         return ALN_COV_H + 2 + self._layout(t)[1] + TRACK_GAP
 
     # ---------------------------------------------------------------- groups and sorting
@@ -374,14 +399,15 @@ class GenomeTracksMixin:
         self._sync_grouping(t)
         if not t.grouped:
             n = self._shown_rows(t)
-            area = self.rows_height(t) if "height" in t.settings else n * rh
-            return [(None, 0, n)], max(n * rh, area) if "height" not in t.settings else area
+            if t.settings.get("show_all"):
+                return [(None, 0, n)], n * rh
+            return [(None, 0, n)], self.rows_height(t)      # a fixed height
         counts = t.group_rows(self.model.ref_id)
         labels = sorted(counts, key=lambda g: (g.startswith(("no ", "unpaired")), g))
         if not labels:
             return [], rh
         cap = max(3, self._max_rows(t) // len(labels))
-        fixed = "height" in t.settings          # resized: the groups share that height
+        fixed = not t.settings.get("show_all")      # the groups share the height
         groups, y = [], 0
         for g in labels:
             shown = cap if fixed else max(1, min(cap, counts[g]))
@@ -503,7 +529,10 @@ class GenomeTracksMixin:
             loc = self._wrap_locate(pos)
             return None if loc is None else loc[1]
         if self.model is not None and self.model.browser:
-            return pos.y() + self.verticalScrollBar().value()
+            v = self.verticalScrollBar().value()
+            if v > 0 and pos.y() < self.browser_pinned_h():
+                return pos.y()              # the pinned ruler / sequence rows
+            return pos.y() + v
         return pos.y()
 
     def in_header(self, pos: QPointF) -> bool:
@@ -521,7 +550,7 @@ class GenomeTracksMixin:
 
     def _paint_extra_tracks(self, p: QPainter, bp0: int, bp1: int, w: int) -> None:
         m = self.model
-        if m is None:
+        if m is None or getattr(self, "_pinned_pass", False):
             return
         pal = self.palette()
         mid = pal.color(pal.ColorRole.Mid)
@@ -535,7 +564,7 @@ class GenomeTracksMixin:
             v = self.verticalScrollBar().value()
             vis = (v - 4, v + self.viewport().height() + 4)
         for k, (t, (top, h)) in enumerate(zip(self.tracks, self._extra_spans)):
-            if vis is not None and (top + h < vis[0] or top > vis[1]):
+            if h <= 0 or (vis is not None and (top + h < vis[0] or top > vis[1])):
                 continue
             if k < last:     # the last one sits on the header line: no second rule
                 p.setPen(QPen(self._track_rule_color(), 1))
@@ -560,6 +589,7 @@ class GenomeTracksMixin:
                         t.on_tile_ready = self._tile_ready_soon
                     with drawing() if drawing is not None else _no_ctx():
                         self._paint_aln_track(p, t, top, h, bp0, bp1, w, mid)
+                self._paint_more_mark(p, t, top, h, w)
             except Exception as exc:  # noqa: BLE001 - a bad file must not break the view
                 p.setPen(mid)
                 p.drawText(QRectF(self.label_w + 6, top, w, NOTE_H),
@@ -863,6 +893,52 @@ class GenomeTracksMixin:
                            self.render_page, pal.color(pal.ColorRole.Base),
                            self.model.ref_id if self.model is not None else "")
 
+    MORE_H = 14      # the "⋯ N more rows" mark at a track's bottom right
+
+    def _hidden_rows(self, t) -> int:
+        """Rows (samples for a VCF) that do not fit in the track's height."""
+        m = self.model
+        if m is None or _is_signal(t) or _is_junction(t):
+            return 0
+        if _is_variant(t):
+            rows = max(0, (self.rows_height(t) - VAR_SITE_H - 2) // self._row_h(t))
+            return max(0, len(t.samples) - rows)
+        if t.kind == gt.KIND_ANNOTATION:
+            return max(0, self._rows_in_view(t) - self._shown_rows(t))
+        if t.grouped:
+            counts = t.group_rows(m.ref_id)
+            return sum(max(0, counts.get(g, 0) - shown)
+                       for g, _y, shown in self._layout(t)[0])
+        known = getattr(t, "rows_known", None)
+        if known is not None and not known(m.ref_id):
+            return 0
+        return max(0, t.row_count(m.ref_id) - self._shown_rows(t))
+
+    def _paint_more_mark(self, p, t, top, h, w) -> None:
+        """A track too short for all its rows: "⋯ N more rows" at its bottom right
+        (taller via Track height, Show all, or a drag of its bottom line)."""
+        n = self._hidden_rows(t)
+        if n <= 0:
+            return
+        pal = self.palette()
+        font = QFont(p.font())
+        font.setPointSize(7)
+        p.setFont(font)
+        what = "sample" if _is_variant(t) else "row"
+        text = f"⋯ {n:,} more {what}{'s' if n != 1 else ''}"
+        tw = QFontMetrics(font).horizontalAdvance(text) + 12
+        r = QRectF(w - tw - 6, top + h - TRACK_GAP - self.MORE_H, tw, self.MORE_H - 1)
+        bg = QColor(pal.color(pal.ColorRole.Base))
+        bg.setAlpha(235)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        p.setPen(QPen(pal.color(pal.ColorRole.Mid), 1))
+        p.setBrush(bg)
+        p.drawRoundedRect(r, 6, 6)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        p.setPen(pal.color(pal.ColorRole.Text))
+        p.drawText(r, Qt.AlignmentFlag.AlignCenter, text)
+
     def _tile_ready_soon(self) -> None:
         """A BAM tile was decoded (called from its worker thread): draw again, once
         for a burst of tiles."""
@@ -900,7 +976,9 @@ class GenomeTracksMixin:
                 self.viewport().update()     # a new depth scale: shifted pixels are stale
             self._cov_max[id(t)] = self._tile_peak
             if not t.grouped and t.tile_complete(self.model.ref_id, *span):
-                self._blit_rects.append((top, h - TRACK_GAP))
+                # the "more rows" mark stays put: its strip is drawn, not shifted
+                cut = self.MORE_H if self._hidden_rows(t) else 0
+                self._blit_rects.append((top, h - TRACK_GAP - cut))
             self._paint_body(p, t, top, h - TRACK_GAP, *span,
                              extra_key=self._tile_peak)
             if t.grouped:
@@ -1540,7 +1618,11 @@ class GenomeTracksMixin:
         small.setPointSize(7)
         fm_small = QFontMetrics(small)
         last = len(self._extra_spans) - 1
+        if getattr(self, "_pinned_pass", False):
+            return
         for k, (t, (top, h)) in enumerate(zip(self.tracks, self._extra_spans)):
+            if h <= 0:
+                continue                 # hidden
             p.setFont(font)
             p.setPen(fg)
             p.drawText(QRectF(6, top, self.label_w - 10, 16),
@@ -1847,6 +1929,9 @@ class GenomeTracksMixin:
                 self._interactive_at = 0.0
                 self.viewChanged.emit()         # where the drag stopped, at once
             else:
+                # a click (no drag) in the tracks: the marked region goes away
+                if getattr(self, "region_sel", None) is not None:
+                    self.set_region_selection(None)
                 found = self.track_items_at(event.position())
                 if found is not None and found[1]:
                     self.trackItemClicked.emit(found[0], found[1][0],
@@ -1866,9 +1951,14 @@ class GenomeTracksMixin:
                     self.set_region_selection(None)
                     self.show_range(a, b)
             elif getattr(self, "sel_chip_off", False) and self.model is not None:
-                # genome browser: a click marks one position; zooming keeps it in place
-                bp = max(0, min(self.model.length - 1, self.bp_at(x0)))
-                self.set_region_selection(bp, bp + 1)
+                # genome browser: a click clears a marked region; with none marked,
+                # it marks one position (zooming keeps it in place)
+                sel = getattr(self, "region_sel", None)
+                if sel is not None and sel[1] - sel[0] > 1:
+                    self.set_region_selection(None)
+                else:
+                    bp = max(0, min(self.model.length - 1, self.bp_at(x0)))
+                    self.set_region_selection(bp, bp + 1)
             else:
                 self.set_region_selection(None)
             self.viewport().update()
@@ -1923,9 +2013,7 @@ class GenomeTracksMixin:
         x0, x1 = self.x_of(sel[0]), self.x_of(sel[1])
         lo, hi = float(self.label_w) + 4, float(vp.width()) - chip.width() - 4
         x = min(max((x0 + x1) / 2 - chip.width() / 2, lo), max(lo, hi))
-        y = self.RULER_ZONE + 4
-        if m.browser:
-            y -= self.verticalScrollBar().value()
+        y = self.RULER_ZONE + 4          # the ruler stays pinned in the genome browser
         y = max(2, y)
         from PySide6.QtCore import QPoint
 

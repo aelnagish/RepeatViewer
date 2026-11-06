@@ -1567,6 +1567,10 @@ class ContigCanvas(GenomeTracksMixin, QAbstractScrollArea):
         if self.tracks_mouse_press(event):
             event.accept()
             return
+        if (self.model is not None and self.model.browser
+                and event.button() == Qt.MouseButton.LeftButton
+                and event.position().x() >= self.label_w and self.region_sel is not None):
+            self.set_region_selection(None)      # a click below the tracks clears it too
         i = self.read_at(event.position())
         mods = event.modifiers()
         if i >= 0:
@@ -1590,12 +1594,30 @@ class ContigCanvas(GenomeTracksMixin, QAbstractScrollArea):
         if self.ruler_double_click(event.position()):
             event.accept()
             return
+        if self.model is not None and self.model.browser:
+            # genome browser: zoom in 2x around the spot (never Fit, which would
+            # throw away the place in view); the names column does nothing
+            x = event.position().x()
+            if x >= self.label_w and event.button() == Qt.MouseButton.LeftButton:
+                self.zoom_in_at(x)
+            event.accept()
+            return
         i = self.read_at(event.position())
         if i < 0:
             self.fit()
         else:
             self.readDoubleClicked.emit(i)
         super().mouseDoubleClickEvent(event)
+
+    def zoom_in_at(self, x: float, factor: float = 2.0) -> None:
+        """Zoom in ``factor`` times with the base at ``x`` moved to the middle."""
+        m = self.model
+        if m is None:
+            return
+        bp = max(0.0, min(m.length - 1.0, (x - self.label_w + self.horizontalScrollBar().value())
+                          / self.ppb)) if not self.wrap_active() else float(self.bp_at(x))
+        half = self._data_w() / (self.ppb * factor) / 2
+        self.show_range(int(bp - half), int(bp + half))
 
     def show_range(self, start0: int, end0: int) -> None:
         """Zoom so [start0, end0) fills the view (a single position: zoom to bases)."""
@@ -1755,15 +1777,24 @@ class ContigCanvas(GenomeTracksMixin, QAbstractScrollArea):
         m = self.model
         rects = getattr(self, "_blit_rects", [])
         w = vp.width()
+        if m is not None and m.browser and rects:
+            self._track_y()
+            if tuple(self._extra_spans) != getattr(self, "_spans_sig", None):
+                rects = []             # a track's height changed with the view: redraw all
         if (not dx or m is None or not m.browser or self.wrap_active() or not rects
                 or abs(dx) >= (w - self.label_w) // 2 or self._ruler_drag is not None):
             vp.update()
             return
         v = self.verticalScrollBar().value()
         rest = QRegion(vp.rect())
+        below = vp.rect()
+        if v > 0:
+            # tracks pass under the pinned ruler rows: never shift those pixels
+            pin = self.browser_pinned_h()
+            below = QRect(0, pin, w, max(0, vp.height() - pin))
         for top, hh in rects:
             r = QRect(self.label_w, int(top - v), w - self.label_w, int(hh))
-            r = r.intersected(vp.rect())
+            r = r.intersected(below)
             if r.isEmpty():
                 continue
             vp.scroll(dx, 0, r)              # shifts the pixels, asks for the new strip
@@ -1788,18 +1819,62 @@ class ContigCanvas(GenomeTracksMixin, QAbstractScrollArea):
             bp0 = max(0, self.bp_at(self.label_w) - 1)
             bp1 = min(m.length, self.bp_at(w) + 2)
             if m.browser:
-                # no placed sequences: the tracks themselves scroll up and down
+                # no placed sequences: the tracks themselves scroll up and down,
+                # under the ruler and sequence rows, which stay pinned at the top
                 v = self.verticalScrollBar().value()
+                pin = self.browser_pinned_h() if v > 0 else 0
+                from PySide6.QtCore import QRect
+                from PySide6.QtGui import QRegion
+
+                # only the part being redrawn (after a sideways shift, a strip)
+                p.setClipRegion(QRegion(event.region()).intersected(
+                    QRect(0, pin, w, max(0, h - pin))))
                 p.translate(0, -v)
                 self._paint_page(p, w, h + v, bp0, bp1, 0)
                 self._paint_drag_overlay(p)
                 p.resetTransform()
+                if pin:
+                    self._paint_pinned(p, w, pin, bp0, bp1, bg)
                 self._place_sel_chip()
+                self._spans_sig = tuple(self._extra_spans)
+                page = self.header_h()
+                if page != getattr(self, "_page_h_seen", page):
+                    # tracks fit what is in view: the page grew or shrank
+                    from PySide6.QtCore import QTimer
+
+                    QTimer.singleShot(0, self._update_scrollbars)
+                self._page_h_seen = page
                 return
             self._paint_page(p, w, h, bp0, bp1, self.verticalScrollBar().value())
             self._paint_drag_overlay(p)
             self._place_sel_chip()
         self._paint_info(p, h)
+
+    def browser_pinned_h(self) -> int:
+        """Genome browser: height of the ruler and sequence rows kept at the top of
+        the view while the tracks under them scroll."""
+        ys = self._track_y()
+        if self._extra_spans:
+            return int(self._extra_spans[0][0]) - 2
+        return int(ys["reads"])
+
+    def _paint_pinned(self, p: QPainter, w: int, pin: int, bp0: int, bp1: int,
+                      bg: QColor) -> None:
+        """The pinned rows, drawn over the scrolled page (tracks are skipped)."""
+        from PySide6.QtCore import QRect
+
+        p.setClipRect(QRect(0, 0, w, pin))
+        p.fillRect(QRect(0, 0, w, pin), bg)
+        self._pinned_pass = True
+        try:
+            self._paint_page(p, w, pin, bp0, bp1, 0)
+            self._paint_drag_overlay(p)
+        finally:
+            self._pinned_pass = False
+        p.setClipping(False)
+        # a rule under the pinned rows, so scrolled tracks clearly pass beneath it
+        p.setPen(QPen(self._track_rule_color(), 1))
+        p.drawLine(0, pin - 1, w, pin - 1)
 
     def info_lines(self) -> tuple[str, str, str]:
         """Three short lines for the foot of the name column: the selected sequence, or
@@ -1894,7 +1969,10 @@ class ContigCanvas(GenomeTracksMixin, QAbstractScrollArea):
         font.setPointSize(8)
         p.setFont(font)
         header = self.header_h()
-        p.setClipRect(QRectF(self.label_w, 0, w - self.label_w, header))
+        # within the part being redrawn (the tracks skip pictures outside it)
+        p.setClipRect(QRectF(self.label_w, 0, w - self.label_w, header),
+                      Qt.ClipOperation.IntersectClip if p.hasClipping()
+                      else Qt.ClipOperation.ReplaceClip)
         self._paint_ruler(p, bp0, bp1, fg, mid)
         self._paint_features(p, ys["features"], bp0, bp1)
         if m.detailed:
@@ -3043,6 +3121,8 @@ def _sidebar_icon(widget: QWidget):
         icon.addPixmap(pix)
     return icon
 
+
+DENSITY_RUN_BP = 5000       # Genome list: shortest odd-depth stretch that shows
 
 class ContigViewPanel(QWidget):
     """A Map to Reference result (``.rvmap``), laid out like Geneious: document tabs along
@@ -4764,7 +4844,8 @@ class ContigViewPanel(QWidget):
         act.setCheckable(True)
         act.setChecked(cur is None and not show_all)
         if not signal:
-            act = height.addAction("Show all", lambda: self._set_track_height(i, "all"))
+            act = height.addAction("Show all rows",
+                                   lambda: self._set_track_height(i, "all"))
             act.setCheckable(True)
             act.setChecked(show_all)
             act.setToolTip("As tall as every row of features, reads or samples needs")
@@ -4773,7 +4854,9 @@ class ContigViewPanel(QWidget):
             act.setCheckable(True)
             act.setChecked(cur is not None and int(cur) == px)
         height.addSeparator()
-        hint = height.addAction("Or drag the track's bottom line")
+        hint = height.addAction("Or drag the track's bottom line · ⋯ marks rows "
+                                "that do not fit" if not signal else
+                                "Or drag the track's bottom line")
         hint.setEnabled(False)
         if isinstance(t, gt.BlastTrack):
             side = menu.addMenu("Reference is the BLAST")
@@ -5291,6 +5374,10 @@ class ContigViewPanel(QWidget):
             elif isinstance(t, gt.IndexedBamTrack):
                 t.reload_coverage()
             self.canvas.viewport().update()
+            # the Genome list shades by this BAM's coverage: now it can
+            self._rail_density_note("" if not err else f"Read coverage failed: {err}")
+            self._nav_density_key = None
+            self._nav_density()
 
         job.done.connect(finished)
         job.finished.connect(job.deleteLater)
@@ -5414,6 +5501,9 @@ class ContigViewPanel(QWidget):
         r.densityTrackChanged.connect(self._set_density_track)
         r.sectionToggled.connect(lambda key, on: _write(f"rail_{key}", bool(on)))
         r.genome.set_open(_read_bool("rail_genome", True))
+        r.tracks_section.set_open(_read_bool("rail_tracks", True))
+        r.trackShown.connect(self._show_track)
+        r.trackMoved.connect(self._move_track)
         r.bm_section.set_open(_read_bool("rail_bookmarks", True))
         r.find_section.set_open(_read_bool("rail_find", True))
         r.set_sort(_read_text("rail_sort", "file"))
@@ -5659,6 +5749,7 @@ class ContigViewPanel(QWidget):
         self._rail.set_view(m.ref_id, a, b)
         self._nav_flags()
         self._nav_density()
+        self._nav_tracks()
         if record and not self._nav_applying:
             self._nav_timer.start()
 
@@ -5677,7 +5768,158 @@ class ContigViewPanel(QWidget):
         self._nav_go(m.ref_id, max(0, a - pad), min(m.length, b + pad), name)
 
     def _density_tracks(self) -> list:
-        return [t for t in self.canvas.tracks if t.kind == gt.KIND_ANNOTATION]
+        """Tracks the Genome list can shade by: features (count), mappings (read
+        coverage) and signal files (bigWig / bedGraph values)."""
+        kinds = (gt.KIND_ANNOTATION, gt.KIND_ALIGNMENT, gt.KIND_SIGNAL)
+        return [t for t in self.canvas.tracks if t.kind in kinds]
+
+    def _density_row(self, t, chrom: str, n: int, bins: int) -> list[float] | None:
+        """One sequence's shading values (``bins`` of them), or None when the track
+        has nothing there. Features: how many start in each bin; reads: the mean
+        depth (from the BAM's whole-genome coverage, worked out once in the
+        background); signal: the highest value."""
+        if t.resolve(chrom) is None:
+            return None
+        if t.kind == gt.KIND_ANNOTATION:
+            row = [0.0] * bins
+            for it, _r in t.fetch(chrom, 0, n):
+                row[min(bins - 1, int(it.start * bins / n))] += 1
+            return row
+        if t.kind == gt.KIND_SIGNAL:
+            vals = t.signal(chrom, 0, n, bins)
+            if vals is None:
+                return None
+            return [max(0.0, float(v)) for v in np.nan_to_num(vals, nan=0.0)]
+        # reads: see _coverage_rows
+        prof, _bin = self._coverage_profile(t, chrom)
+        if prof is None or not len(prof):
+            return None
+        edges = np.linspace(0, len(prof), bins + 1).astype(int)
+        return [float(prof[a:max(a + 1, b)].mean()) if a < len(prof) else 0.0
+                for a, b in zip(edges[:-1], edges[1:])]
+
+    def _coverage_profile(self, t, chrom: str):
+        """(mean depth per bin, bp per bin) of one sequence for a mapping track, or
+        (None, 0): a BAM's comes from its whole-genome coverage (worked out once in
+        the background), a PAF / SAM's from its reads in memory."""
+        if t.resolve(chrom) is None:
+            return None, 0
+        if isinstance(t, gt.IndexedBamTrack):
+            cache = t._cov_cache
+            if cache is None:
+                self._coverage_for_density(t)
+                return None, 0
+            prof = cache.get(t.resolve(chrom))
+            return (None, 0) if prof is None else (np.asarray(prof, dtype=float),
+                                                   int(cache.get("__bin__", 1000)))
+        ix = t.index(chrom)
+        if ix is None:
+            return None, 0
+        return np.asarray(ix.coverage_profile(), dtype=float), gt.COV_BIN
+
+    def _coverage_rows(self, t, chroms, bins: int):
+        """Read depth along every sequence, relative to the genome's usual depth.
+
+        Returns (rows, depths, median): ``rows[chrom]`` holds ``bins`` ratios of
+        depth to the genome-wide median depth (median of the covered bins, so
+        unplaced or empty stretches do not drag it down); ``depths`` the depth
+        behind each ratio. Each ratio is the bin's mean depth, unless the bin holds
+        a stretch of DENSITY_RUN_BP or more at 2x the median or more (shown: its
+        highest) or, failing that, one at a quarter of it or less (shown: its
+        lowest). So a collapsed repeat or a gap a few kb long still shows on a
+        bar that stands for megabases, where a plain mean would hide it."""
+        from numpy.lib.stride_tricks import sliding_window_view
+
+        profs = {}
+        for chrom, n in chroms:
+            if n <= 0:
+                continue
+            try:
+                prof, step = self._coverage_profile(t, chrom)
+            except (gt.TrackError, OSError, ValueError, KeyError):
+                prof = None
+            if prof is not None and len(prof) and prof.any():
+                profs[chrom] = (prof, step)
+        if not profs:
+            return {}, {}, 0.0
+        covered = np.concatenate([p[p > 0] for p, _s in profs.values()])
+        median = float(np.median(covered)) if len(covered) else 0.0
+        if median <= 0:
+            return {}, {}, 0.0
+        rows: dict[str, list[float]] = {}
+        depths: dict[str, list[float]] = {}
+        for chrom, (prof, step) in profs.items():
+            w = max(1, min(len(prof), round(DENSITY_RUN_BP / max(1, step))))
+            # a run's depth: the median over DENSITY_RUN_BP, so one odd bin is not one
+            run = (np.median(sliding_window_view(prof, w), axis=1) if w > 1 else prof)
+            edges = np.linspace(0, len(prof), bins + 1).astype(int)
+            row, dep = [], []
+            for a, b in zip(edges[:-1], edges[1:]):
+                b = max(a + 1, b)
+                if a >= len(prof):
+                    row.append(0.0)
+                    dep.append(0.0)
+                    continue
+                d = float(prof[a:b].mean())
+                seg = run[a:max(a, b - w + 1)]          # the runs wholly in the bin
+                if len(seg):
+                    hi, lo = float(seg.max()), float(seg.min())
+                    if hi >= 2 * median:
+                        d = hi
+                    elif lo <= median / 4:
+                        d = lo
+                dep.append(d)
+                row.append(d / median)
+            rows[chrom] = row
+            depths[chrom] = dep
+        return rows, depths, median
+
+    def _coverage_for_density(self, t) -> None:
+        """A BAM with no whole-genome coverage yet: work it out once (saved next to
+        the BAM as .rvcov.npz), then shade the Genome list."""
+        if getattr(t, "_density_cov_started", False):
+            return
+        t._density_cov_started = True
+        i = next((k for k, x in enumerate(self.canvas.tracks) if x is t), None)
+        if i is not None:
+            self._build_coverage(i)
+            self._rail_density_note("Working out read coverage of every sequence…")
+
+    def _nav_tracks(self) -> None:
+        """The side panel's Tracks list: every track in drawing order, ticked when
+        shown."""
+        what = {gt.KIND_ANNOTATION: "features", gt.KIND_ALIGNMENT: "alignments",
+                gt.KIND_SIGNAL: "signal", gt.KIND_VARIANT: "variants",
+                gt.KIND_JUNCTION: "splice junctions"}
+        self._rail.set_tracks([(t.name, not t.settings.get("hidden"),
+                                f"{what.get(t.kind, t.kind)} · {t.path}")
+                               for t in self.canvas.tracks])
+
+    def _show_track(self, i: int, shown: bool) -> None:
+        """Tick / untick a track in the side panel: it is drawn or left out (kept
+        loaded, and saved with the session)."""
+        if not 0 <= i < len(self.canvas.tracks):
+            return
+        t = self.canvas.tracks[i]
+        if shown:
+            t.settings.pop("hidden", None)
+        else:
+            t.settings["hidden"] = True
+        self.canvas._tracks_changed()
+        self._remember_tracks()
+        self._nav_tracks()
+
+    def _move_track(self, src: int, dst: int) -> None:
+        """A name dragged in the side panel's Tracks list: the track moves there
+        (and is saved, as when its name is dragged in the view)."""
+        self.canvas.move_track(src, dst)
+        self._nav_tracks()
+
+    def _rail_density_note(self, text: str) -> None:
+        note = getattr(self._rail, "density_note", None)
+        if note is not None:
+            note.setText(text)
+            note.setVisible(bool(text))
 
     def _set_density_track(self, path: str) -> None:
         self._density_track = path            # "" : no shading
@@ -5695,39 +5937,54 @@ class ContigViewPanel(QWidget):
         tracks = self._density_tracks()
         choice = self._density_track
         if choice is None:
-            src = tracks[:1]
+            # by default the first feature track (a BAM's coverage takes a pass over
+            # the whole file, so only when picked)
+            src = ([t for t in tracks if t.kind == gt.KIND_ANNOTATION]
+                   or [t for t in tracks if t.kind == gt.KIND_SIGNAL])[:1]
         else:
             src = [t for t in tracks if str(t.path) == choice]
         key = (tuple(str(t.path) for t in tracks), tuple(id(t) for t in src))
         if key == self._nav_density_key:
             return
         self._nav_density_key = key
-        self._rail.set_density_tracks([(str(t.path), t.name) for t in tracks],
-                                      str(src[0].path) if src else "")
-        self._rail.set_find_tracks([(str(t.path), t.name) for t in tracks])
+        what = {gt.KIND_ALIGNMENT: " · coverage", gt.KIND_SIGNAL: " · signal"}
+        self._rail.set_density_tracks([(str(t.path), t.name + what.get(t.kind, ""))
+                                       for t in tracks], str(src[0].path) if src else "")
+        self._rail.set_find_tracks([(str(t.path), t.name) for t in tracks
+                                    if t.kind == gt.KIND_ANNOTATION])
         chroms = self._nav_chroms()
         if not src or len(chroms) > 5000:
             self._rail.set_density({})
             return
         t = src[0]
         bins = 60
+        if t.kind != gt.KIND_ALIGNMENT or getattr(t, "_cov_cache", True) is not None:
+            self._rail_density_note("")
+        if t.kind == gt.KIND_ALIGNMENT:
+            rows, depths, median = self._coverage_rows(t, chroms, bins)
+            self._rail.set_density(rows, mode="depth", detail=depths, median=median)
+            if rows:
+                self._rail_density_note(self._rail.depth_legend(median))
+            return
         counts: dict[str, list[float]] = {}
-        peak = 0.0
         for chrom, n in chroms:
             if n <= 0:
                 continue
-            row = [0.0] * bins
             try:
-                items = t.fetch(chrom, 0, n) if t.resolve(chrom) is not None else []
+                row = self._density_row(t, chrom, n, bins)
             except (gt.TrackError, OSError, ValueError, KeyError):
-                items = []
-            for it, _r in items:
-                row[min(bins - 1, int(it.start * bins / n))] += 1
+                row = None
+            if row is None:
+                continue
             if any(row):
                 counts[chrom] = row
-                peak = max(peak, max(row))
-        if peak > 0:
-            counts = {c: [v / peak for v in row] for c, row in counts.items()}
+        if counts:
+            # scale to the 99th percentile, not the single highest bin, so one
+            # outlier (a gene cluster, a spike in a bigWig) does not pale the rest
+            vals = np.array([v for row in counts.values() for v in row if v > 0])
+            top = float(np.percentile(vals, 99, method="higher")) if len(vals) else 0.0
+            if top > 0:
+                counts = {c: [min(1.0, v / top) for v in row] for c, row in counts.items()}
         self._rail.set_density(counts)
 
     def _nav_find(self, path: str, text: str) -> None:
