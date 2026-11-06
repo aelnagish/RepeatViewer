@@ -20,6 +20,7 @@ from .image_session import ImageSession
 from .importer import channel_layers, natural_key
 from .karyotype import Karyotype, list_karyotypes
 from .lists import dye_color, load_lists
+from .signals_detect import DetectMixin
 from .model import POSITIONS, STRENGTHS, ChromosomeMark, ImageDetails, Signal, image_details, load_slides, new_id, set_image_details
 
 ARM_LABELS = {"cen": "Centromere", "p": "p", "q": "q"}
@@ -62,7 +63,7 @@ class CellStatus:
     marked: bool
 
 
-class SignalsSession:
+class SignalsSession(DetectMixin):
     def __init__(self, folder: Path, image: CytoImage, karyotype: Karyotype | None = None) -> None:
         self.folder = Path(folder).expanduser().resolve()
         self.image = image
@@ -76,6 +77,7 @@ class SignalsSession:
         species = image.metadata.get("species") or slide_species
         self.karyotype: Karyotype | None = karyotype or pick_karyotype(self.karyotypes, self.details.karyotype, species)
         self.dirty = False
+        self._copy_to_slide = False
 
     # ---------------------------------------------------------------- karyotype and labels
 
@@ -386,6 +388,9 @@ class SignalsSession:
                 best = (d, ("signal", s.id))
         if best:
             return best[1]
+        inside = self.mark_at(x, y) if any(m.mask for m in self.details.chromosomes) else None
+        if inside is not None:
+            return ("mark", inside.id)
         for m in self.details.chromosomes:
             d = sg.distance_to_mark(x, y, m)
             if d <= tolerance * 1.5 and (best is None or d < best[0]):
@@ -434,9 +439,39 @@ class SignalsSession:
         stored.karyotype = self.details.karyotype
         stored.chromosomes = self.details.chromosomes
         stored.signals = self.details.signals
+        stored.detection = dict(self.details.detection)
+        mine = {c.id: c for c in self.details.channels}
+        for c in stored.channels:  # probe names, dyes and colours chosen in the Probes table
+            if c.id in mine:
+                c.probe, c.dye, c.display.color = mine[c.id].probe, mine[c.id].dye, mine[c.id].display.color
         set_image_details(fresh, stored)
         update_image(self.folder, fresh)
+        if self._copy_to_slide:
+            self._save_to_slide(stored)
+            self._copy_to_slide = False
         self.dirty = False
+
+    def _save_to_slide(self, stored: ImageDetails) -> int:
+        """Same detection settings and, by channel number, the same probes in the other cells of the slide."""
+        if not stored.slide_id:
+            return 0
+        n = 0
+        for image in load_images(self.folder):
+            if image.id == self.image.id:
+                continue
+            d = image_details(image)
+            if d.slide_id != stored.slide_id:
+                continue
+            d.detection.update({k: v for k, v in stored.detection.items() if k in ("chromosomes", "probes", "picture_probes")})
+            for i, c in enumerate(d.channels):
+                if i < len(stored.channels) and stored.channels[i].probe and not c.probe:
+                    c.probe = stored.channels[i].probe
+                    c.dye = c.dye or stored.channels[i].dye
+                    c.display.color = stored.channels[i].display.color
+            set_image_details(image, d)
+            update_image(self.folder, image)
+            n += 1
+        return n
 
 
 def _short_cell_name(image: CytoImage, number: int) -> str:

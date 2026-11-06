@@ -26,6 +26,8 @@ dependencies = [
   "flexidot @ git+https://github.com/qjiangzhao/flexidot.git@Jiangzhao",
   "pytrf>=1.4",
   "scikit-learn>=1.3",
+  # Cytogenetics: chromosome and signal detection (comes with scikit-learn, listed for clarity)
+  "scipy>=1.10",
   # ORF detection (auto annotation / protein similarity) and HMM search (Dfam, etc.)
   "orfipy>=0.0.4",
   "pyahocorasick>=2.0",

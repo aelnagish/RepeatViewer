@@ -102,7 +102,7 @@ def build_items(folder: Path) -> list[LibraryItem]:
             channels=len(details.channels),
             channel_colours=[c.display.color for c in channels],
             probe_info=info,
-            n_marks=len(details.chromosomes),
+            n_marks=sum(1 for m in details.chromosomes if m.named),
             n_signals=len(details.signals),
             n_expected=_expected(karyotypes, details.karyotype,
                                  image.metadata.get("species") or (slide.species if slide else "")),

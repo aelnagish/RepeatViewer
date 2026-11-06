@@ -40,7 +40,8 @@ HELP_TEXT = (
     "channels, marked chromosomes and signals.<br><br>"
     "<b>Library</b>: all images, grouped by slide, with filters.<br>"
     "<b>Image</b>: one cell with its channels, levels and scale bar.<br>"
-    "<b>Signals</b>: number chromosomes and mark signals.<br>"
+    "<b>Signals</b>: find the chromosomes and the signals of every probe, check them, then pair the homologues "
+    "(1 Chromosomes, 2 Signals, 3 Pair).<br>"
     "<b>Idiogram</b>: signals on the karyotype, compared with the assembly.<br>"
     "<b>Figure</b>: panels with letters, labels and a legend.<br><br>"
     "Use <b>Options</b> to show or hide the side panel."
@@ -166,6 +167,7 @@ class CytogeneticsWorkspace(QWidget):
         self._pages["Signals"].imageChanged.connect(lambda i: self._on_image_shown(i, "Signals"))
         self._pages["Signals"].idiogramRequested.connect(lambda: self.show_tab("Idiogram"))
         self._pages["Signals"].karyotypesChanged.connect(self.refresh)
+        self._pages["Signals"].figureRequested.connect(self.add_to_figure)
         self._pages["Idiogram"].karyotypesChanged.connect(self.refresh)
         self._pages["Idiogram"].figureRequested.connect(self.add_idiogram_to_figure)
         self._pages["Idiogram"].openSignalRequested.connect(self.open_signal)

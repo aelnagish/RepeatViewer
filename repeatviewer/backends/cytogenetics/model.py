@@ -17,6 +17,7 @@ SLIDES_FILE = "slides.json"
 ARMS = ("p", "cen", "q")
 POSITIONS = ("pericentromeric", "interstitial", "subterminal", "terminal")
 STRENGTHS = ("strong", "medium", "weak")
+UNNAMED = "?"  # chromosome name of a detected chromosome that is not paired yet
 
 
 def new_id() -> str:
@@ -91,10 +92,20 @@ class ChromosomeMark:
     centromere: tuple[float, float] | None = None
     telomere_p: tuple[float, float] | None = None
     telomere_q: tuple[float, float] | None = None
+    # found by detection (Signals step 1): outline and midline from p to q telomere
+    midline: list | None = None  # [[x, y], ...]
+    mask: dict | None = None  # segment.encode_mask output
+    auto: bool = False
+    check: str = ""  # why it should be looked at ("" = fine or accepted)
 
     @property
     def label(self) -> str:
         return f"{self.chromosome}{self.homologue}"
+
+    @property
+    def named(self) -> bool:
+        """False for chromosomes found by detection and not yet paired with the karyotype ("?")."""
+        return self.chromosome != UNNAMED
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -106,6 +117,9 @@ class ChromosomeMark:
         data = dict(raw)
         for key in ("centromere", "telomere_p", "telomere_q"):
             data[key] = _point(raw.get(key))
+        line = raw.get("midline")
+        data["midline"] = [p for p in (_point(q) for q in line) if p] if isinstance(line, list) else None
+        data["mask"] = raw.get("mask") if isinstance(raw.get("mask"), dict) else None
         return _build(cls, data)
 
 
@@ -121,6 +135,9 @@ class Signal:
     rel_distance: float | None = None  # 0 at the centromere, 1 at the telomere
     strength: str = ""
     manual: bool = False  # arm/position set by hand, never recomputed
+    auto: bool = False  # found by detection (replaced when the probe is detected again)
+    check: str = ""  # why it should be looked at
+    peak: float | None = None  # detection strength, in thresholds
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -143,6 +160,7 @@ class ImageDetails:
     chromosomes: list[ChromosomeMark] = field(default_factory=list)
     signals: list[Signal] = field(default_factory=list)
     adjustment_log: list[str] = field(default_factory=list)
+    detection: dict = field(default_factory=dict)  # Signals detection settings and probe table of this cell
 
     @property
     def is_multichannel(self) -> bool:
@@ -160,6 +178,7 @@ class ImageDetails:
             "chromosomes": [c.to_dict() for c in self.chromosomes],
             "signals": [s.to_dict() for s in self.signals],
             "adjustment_log": list(self.adjustment_log),
+            "detection": dict(self.detection),
         }
 
     @classmethod
@@ -177,6 +196,7 @@ class ImageDetails:
             chromosomes=[c for c in (ChromosomeMark.from_dict(x) for x in extra.get("chromosomes") or []) if c],
             signals=[s for s in (Signal.from_dict(x) for x in extra.get("signals") or []) if s],
             adjustment_log=[str(x) for x in extra.get("adjustment_log") or []],
+            detection=dict(extra.get("detection") or {}) if isinstance(extra.get("detection"), dict) else {},
         )
 
 

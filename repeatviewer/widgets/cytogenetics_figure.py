@@ -262,6 +262,8 @@ class FigurePainter:
             for m in details.chromosomes:
                 if not full_w or not full_h:
                     break
+                if not m.named:  # detected but not paired yet: no name to print
+                    continue
                 q = to_panel(m.x / full_w, m.y / full_h)
                 if q is not None:
                     p.setPen(QColor("#000000"))

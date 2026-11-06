@@ -718,7 +718,10 @@ ADD_DYE = "Add New Dye…"
 class KaryotypeDialog(QDialog):
     """Create or edit one karyotype. Changes are written on Save; Cmd+Z undoes inside the window."""
 
-    def __init__(self, folder: Path, name: str = "", parent: QWidget | None = None) -> None:
+    def __init__(self, folder: Path, name: str = "", parent: QWidget | None = None, *,
+                 karyotype: "kt.Karyotype | None" = None) -> None:
+        """``karyotype``: open these values (not yet saved), e.g. measured from cells; ``name`` is then the
+        stored karyotype that Save replaces ("" = a new one)."""
         super().__init__(parent)
         self.setWindowTitle("Edit karyotype")
         self.setWindowFlag(Qt.WindowType.Tool, True)  # stays above the RepeatViewer windows while it is open
@@ -727,6 +730,8 @@ class KaryotypeDialog(QDialog):
         self._folder = Path(folder).expanduser().resolve()
         existing = kt.load_karyotype(self._folder, name) if name else None
         self._old_name = existing.name if existing else ""
+        if karyotype is not None:
+            existing = karyotype
         self._k: kt.Karyotype = copy.deepcopy(existing) if existing else kt.new_karyotype("New karyotype", 8, 2)
         self._listed = [c.name for c in self._k.chromosomes]
         self._saved = ""

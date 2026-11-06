@@ -28,9 +28,32 @@ def _seg_distance(p, a, b) -> float:
     return math.hypot(p[0] - q[0], p[1] - q[1])
 
 
+def _project(p, line) -> tuple[float, float, float]:
+    """(distance to the polyline, arc length of the nearest point, total length)."""
+    best_d, best_s, run = float("inf"), 0.0, 0.0
+    for a, b in zip(line, line[1:]):
+        ab = _sub(b, a)
+        seg = math.hypot(*ab)
+        denom = seg * seg
+        t = 0.0 if denom == 0 else max(0.0, min(1.0, _dot(_sub(p, a), ab) / denom))
+        q = (a[0] + t * ab[0], a[1] + t * ab[1])
+        d = math.hypot(p[0] - q[0], p[1] - q[1])
+        if d < best_d:
+            best_d, best_s = d, run + t * seg
+        run += seg
+    return best_d, best_s, run
+
+
+def arc_position(line, point) -> float:
+    """Arc length along a polyline of the point nearest to ``point``."""
+    return _project(point, line)[1]
+
+
 def distance_to_mark(x: float, y: float, mark: ChromosomeMark) -> float:
-    """Distance from a point to the chromosome axis (telomere, centromere, telomere), or its label."""
+    """Distance from a point to the chromosome axis (midline, or telomere-centromere-telomere), or its label."""
     p = (x, y)
+    if mark.midline and len(mark.midline) >= 2:
+        return _project(p, mark.midline)[0]
     pts = [q for q in (mark.telomere_p, mark.centromere, mark.telomere_q) if q is not None]
     if len(pts) >= 2:
         return min(_seg_distance(p, pts[i], pts[i + 1]) for i in range(len(pts) - 1))
@@ -61,6 +84,20 @@ def classify(signal: Signal, mark: ChromosomeMark | None) -> None:
     Signals set by hand (``manual``) are left alone; without a centromere nothing is set.
     """
     if signal.manual or mark is None or mark.centromere is None:
+        return
+    if mark.midline and len(mark.midline) >= 2:
+        _d, at, total = _project((signal.x, signal.y), mark.midline)
+        cen = arc_position(mark.midline, mark.centromere)
+        if total <= 0:
+            return
+        if at <= cen:
+            arm, rel = "p", (cen - at) / cen if cen > 0 else 0.0
+        else:
+            arm, rel = "q", (at - cen) / (total - cen) if total > cen else 0.0
+        rel = max(0.0, min(1.0, rel))
+        signal.arm = "cen" if rel < CENTROMERE_ZONE else arm
+        signal.rel_distance = round(rel, 3)
+        signal.position = position_class(signal.arm, rel)
         return
     c = mark.centromere
     s = (signal.x, signal.y)
@@ -109,7 +146,7 @@ def summarize(images: list[ImageDetails], order: list[str] | None = None) -> lis
     seen: dict[tuple[str, str], set[tuple[int, str]]] = {}
     places: dict[tuple[str, str], Counter] = {}
     for idx, details in enumerate(images):
-        marks = {m.id: m for m in details.chromosomes}
+        marks = {m.id: m for m in details.chromosomes if m.named}
         for m in marks.values():
             total[m.chromosome] += 1
             cells_per_chrom.setdefault(m.chromosome, set()).add(idx)
@@ -130,7 +167,7 @@ def summarize(images: list[ImageDetails], order: list[str] | None = None) -> lis
 
 
 def unsignalled_chromosomes(images: list[ImageDetails], rows: list[SummaryRow]) -> list[str]:
-    marked = {m.chromosome for d in images for m in d.chromosomes}
+    marked = {m.chromosome for d in images for m in d.chromosomes if m.named}
     with_signal = {r.chromosome for r in rows}
     return sorted(marked - with_signal, key=natural_key)
 
