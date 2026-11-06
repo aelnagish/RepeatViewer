@@ -4229,10 +4229,20 @@ class PreviewTabWidget(QTabWidget):
     ) -> bool:
         """Open ``path`` in a tab of its own (or the tab it is already in), show its
         alignment and select ``record_ids`` (tree → "Show in alignment").
-        ``extract_folder``: where that tab's Extract saves (the tree's folder)."""
+        ``extract_folder``: where that tab's Extract saves (the tree's folder).
+
+        Always one alignment view, even when Split is open or remembered for MSAs:
+        split panes load their own copies, so the selection made here on the tab's
+        page would not be seen. Split stays remembered for files opened otherwise."""
         resolved = Path(path).expanduser().resolve()
-        if not self.open_file(resolved, replace=False):
-            return False
+        if self.is_split_active():
+            self._close_inline_split(clear_preference=False)
+        self._suppress_remembered_split = True
+        try:
+            if not self.open_file(resolved, replace=False):
+                return False
+        finally:
+            self._suppress_remembered_split = False
         index = self._path_to_index.get(str(resolved))
         if index is None or not (0 <= index < self.count()):
             return False

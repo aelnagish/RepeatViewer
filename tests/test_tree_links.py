@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from PySide6.QtWidgets import QGraphicsSimpleTextItem, QMenu
 
 from repeatviewer.backends import tree_links as tk
@@ -114,6 +115,53 @@ def test_preview_opens_alignment_with_rows_selected(qapp, tmp_path):
     tree_page.tree_panel().show_in_alignment("A")
     assert tabs.currentWidget() is page and tabs.count() == 2
     assert [overview._record_ids[r] for r in overview._bars.selected_rows()] == ["A"]
+
+
+@pytest.fixture
+def split_preview(qapp, tmp_path, monkeypatch):
+    """A tree in a Preview inside a host layout (as in the app), with Split remembered
+    for MSAs. Waits out the split's delayed work before the host goes away."""
+    from PySide6.QtCore import QEventLoop, QTimer
+    from PySide6.QtWidgets import QVBoxLayout, QWidget
+
+    from repeatviewer.widgets import preview_tabs
+
+    monkeypatch.setattr(preview_tabs, "load_preview_split_preference", lambda kind: (True, 1, 1))
+    monkeypatch.setattr(preview_tabs, "save_preview_split_preference", lambda *a, **k: None)
+    host = QWidget()
+    QVBoxLayout(host)
+    tabs = preview_tabs.PreviewTabWidget(host)
+    host.layout().addWidget(tabs)
+    host.resize(1000, 700)
+    tabs.open_file(_run(tmp_path), replace=False)
+    yield tabs
+    loop = QEventLoop()
+    QTimer.singleShot(700, loop.quit)
+    loop.exec()
+
+
+def test_show_in_alignment_ignores_remembered_split(split_preview):
+    tabs = split_preview
+    assert not tabs.is_split_active()      # a tree is not an MSA: no split yet
+    tabs.currentWidget().tree_panel().show_in_alignment("D")
+    assert not tabs.is_split_active()      # one view, not two copies of the alignment
+    page = tabs.currentWidget()
+    assert page.path.name == "sat.fa_tree.aln.fa"
+    overview = page._annotation_overview
+    assert [overview._record_ids[r] for r in overview._bars.selected_rows()] == ["D"]
+
+
+def test_show_in_alignment_closes_an_open_split_but_keeps_the_preference(split_preview, monkeypatch):
+    tabs = split_preview
+    tree_page = tabs.currentWidget()
+    assert tabs.open_split_with_tabs(1, 1) and tabs.is_split_active()
+    saved = []
+    monkeypatch.setattr(tabs, "_remember_current_split", lambda **k: saved.append(k))
+    tree_page.tree_panel().show_in_alignment("D")
+    assert not tabs.is_split_active() and not tabs.isHidden()
+    assert saved == []                     # the user's Split preference stays as it was
+    overview = tabs.currentWidget()._annotation_overview
+    assert [overview._record_ids[r] for r in overview._bars.selected_rows()] == ["D"]
 
 
 def test_double_click_empty_space_still_fits(qapp, tmp_path):
