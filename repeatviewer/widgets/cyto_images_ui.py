@@ -900,21 +900,9 @@ def open_images(parent: QWidget | None, folder: Path, images: list[CytoImage], *
     picker.show()
 
 
-def _in_workspace(parent: QWidget | None, fasta_path: Path, images: list[CytoImage]) -> bool:
-    """Show the images in the Cytogenetics workspace (Library filtered to the sequence; one image opens directly)."""
-    window = parent.window() if parent is not None else None
-    opener = getattr(window, "_open_cytogenetics_workspace", None)
-    if opener is None or not images:
-        return False
-    opener(tab="Library", sequence=fasta_path, image_id=images[0].id if len(images) == 1 else "")
-    return True
-
-
 def open_images_for_sequence(parent: QWidget | None, fasta_path: Path) -> None:
     fasta_path = Path(fasta_path).expanduser().resolve()
     images = images_for_sequence(fasta_path)
-    if _in_workspace(parent, fasta_path, images):
-        return
     open_images(parent, fasta_path.parent, images, title=fasta_path.name)
 
 

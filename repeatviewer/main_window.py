@@ -468,7 +468,6 @@ from repeatviewer.views.settings_dialog import (
     load_root_folders,
     save_workspace,
 )
-from repeatviewer.cytogenetics_actions import CytogeneticsActionsMixin
 from repeatviewer.ncbi_download_actions import NcbiDownloadActionsMixin
 from repeatviewer.primer_actions import PrimerActionsMixin
 from repeatviewer.views.toolbar_dialog import (
@@ -593,7 +592,6 @@ _TOOLBAR_TOOLTIPS = {
     "tree": "Phylogenetic tree from the selected FASTA (MAFFT + IQ-TREE / FastME / FastTree)",
     "map_reference": "Map the selected sequences or reads to a reference (minimap2 / HISAT2)",
     "primers": "Primers and Probes: Design, Map, Database",
-    "cytogenetics": "Cytogenetics: images, channels, signals, idiograms and figures",
     "blast": "BLAST selected FASTA against the project genome using default parameters",
     "hmmer": "HMMER (pyhmmer) search of selected FASTA against a project HMM database",
     "te_genome_map": "Genome density plot using default parameters",
@@ -614,7 +612,6 @@ _JOB_DISPLAY_TITLES = {
     "hmmer": "HMMER",
     "extend": "MSA Extend",
     "tsd_search": "TSD search",
-    "chromosome_sizes": "Make Chromosome Sizes File",
     "msa_clean": "MSA Clean",
     "msa_clean_gappy": "MSA remove gappy columns",
     "msa_clean_div": "Clean row with divergence",
@@ -2311,7 +2308,7 @@ class _ToolbarActionButton(QToolButton):
 
 
 class MainWindow(
-    CytogeneticsActionsMixin, NcbiDownloadActionsMixin, PrimerActionsMixin, QMainWindow
+    NcbiDownloadActionsMixin, PrimerActionsMixin, QMainWindow
 ):
     """Browser panel with folders, files, and preview."""
 
@@ -2573,7 +2570,6 @@ class MainWindow(
         self._file_list.attach_cyto_image_requested.connect(self._attach_cyto_images)
         self._file_list.annotation_files_dropped.connect(self._import_dropped_annotations)
         self._file_list.cyto_images_requested.connect(self._open_cyto_images)
-        self._file_list.chromosome_sizes_requested.connect(self._make_chromosome_sizes)
         from repeatviewer.widgets.cyto_images_ui import cyto_notifier
 
         cyto_notifier().changed.connect(self._on_cyto_images_changed)
@@ -5993,7 +5989,6 @@ class MainWindow(
         self._populate_tree_menu(tools_menu.addMenu("T&ree"))
         self._populate_map_menu(tools_menu.addMenu("&Mapping"))
         self._populate_primers_menu(tools_menu.addMenu("&Primers and Probes"))
-        self._populate_cytogenetics_menu(tools_menu.addMenu("&Cytogenetics"))
         self._populate_extend_menu(tools_menu.addMenu("MSA &Extend"))
         self._populate_tsd_search_menu(tools_menu.addMenu("TSD &search"))
         self._populate_teaid_menu(tools_menu.addMenu("&TE-Aid"))
@@ -7573,13 +7568,6 @@ class MainWindow(
                 show_default_action=False,
                 right_click_slot=self._quick_primer_design_right_click,
             )
-        elif tool_id == "cytogenetics":
-            self._add_toolbar_action_button(
-                bar,
-                "Cytogenetics",
-                lambda: self._open_cytogenetics_workspace(),
-                tooltip="Open the Cytogenetics workspace of the current folder.",
-            )
         elif tool_id == "ncbi_download":
             self._add_toolbar_action_button(
                 bar,
@@ -8902,7 +8890,6 @@ class MainWindow(
         self._sync_hmmer_params_dialog_from_folder(folder)
         self._sync_create_folder_dialog_from_folder(folder)
         self._sync_transfer_source_from_folder(folder)
-        self._sync_cytogenetics_windows_from_files(folder)
 
     def _refresh_current_folder(self) -> None:
         if self._current_folder and self._current_folder.is_dir():
@@ -10502,8 +10489,6 @@ class MainWindow(
             "_define_database_dialog",
             "_plugin_run_dialog",
             "_primer_check_dialog",
-            "_cyto_import_dialog",
-            "_cyto_lists_dialog",
         ):
             dialog = getattr(self, attr, None)
             if dialog is None:
@@ -10885,7 +10870,6 @@ class MainWindow(
             self._sync_hmmer_params_dialog_from_files(panel_path)
             self._sync_tree_trait_dialog_from_files(panel_path)
             self._sync_primer_check_dialog_from_files(panel_path)
-            self._sync_cytogenetics_windows_from_files(panel_path)
             filled_transfer = self._sync_transfer_source_from_files(panel_path)
             if not filled_transfer:
                 self._stop_transfer_session_on_file_navigation(panel_path)
@@ -10897,10 +10881,6 @@ class MainWindow(
     def _preview_follow_selection_blocked(self) -> bool:
         """True while a dialog uses Files-panel clicks to fill its own fields."""
         if self._file_list.suppress_selection_preview():
-            return True
-        from repeatviewer.widgets.cyto_panel_targets import any_visible as _cyto_window_open
-
-        if _cyto_window_open():
             return True
         if self._define_database_dialog is not None and self._define_database_dialog.isVisible():
             return True
