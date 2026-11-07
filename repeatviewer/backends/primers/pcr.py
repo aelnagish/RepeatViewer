@@ -601,23 +601,50 @@ def describe(result: PcrResult) -> str:
 class RecordSites:
     record: str
     length: int
+    # Sites kept for drawing (all of them up to MAX_SITES_PER_RECORD).
     sites: list[tuple[str, str, int, int]] = field(default_factory=list)  # primer, strand, pos, mm
-    products: list[tuple[int, int, int]] = field(default_factory=list)    # start, end, size
+    # Products kept for drawing: start, end, size, left primer, right primer.
+    products: list[tuple[int, int, int, str, str]] = field(default_factory=list)
+    # Full counts (not limited by what is kept for drawing).
+    site_counts: dict[str, dict[int, int]] = field(default_factory=dict)   # primer -> mm -> n
+    pair_counts: dict[tuple[str, str], int] = field(default_factory=dict)  # (left, right) -> n
+    sites_truncated: bool = False
+    products_truncated: bool = False
 
-    def counts(self) -> dict[int, int]:
+    def counts(self, primers: set[str] | None = None) -> dict[int, int]:
         out: dict[int, int] = {}
-        for _p, _s, _pos, mm in self.sites:
-            out[mm] = out.get(mm, 0) + 1
+        for name, by_mm in self.site_counts.items():
+            if primers is not None and name not in primers:
+                continue
+            for mm, n in by_mm.items():
+                out[mm] = out.get(mm, 0) + n
         return out
 
+    def total_sites(self, primers: set[str] | None = None) -> int:
+        return sum(self.counts(primers).values())
 
-MAX_SITES_PER_RECORD = 5000
+    def pair_products(self, left: str, right: str) -> int:
+        """Products with ``left`` on the forward site and ``right`` on the reverse site
+        (either order, since both primers go into the tube)."""
+        n = self.pair_counts.get((left, right), 0)
+        if left != right:
+            n += self.pair_counts.get((right, left), 0)
+        return n
+
+
+MAX_SITES_PER_RECORD = 20000
+MAX_PRODUCTS_PER_RECORD = 200000
+MAX_PRODUCTS_DRAWN = 5000
 
 
 def genome_sites(genome: Path, primers: list[Primer], *, max_mismatches: int = 2,
                  three_prime_exact: int = 3, max_product: int = 5000,
                  progress: ProgressFn = None, cancel: CancelFn = None) -> list[RecordSites]:
-    """Sites of each primer on every record of a FASTA, plus products per record."""
+    """Sites of each primer on every record of a FASTA, plus products per record.
+
+    Counts are complete; only what is kept for drawing is limited (the
+    ``*_truncated`` flags say when).
+    """
     genome = Path(genome).expanduser()
     if not genome.is_file():
         raise th.PrimerError(f"Genome FASTA not found: {genome}")
@@ -627,11 +654,21 @@ def genome_sites(genome: Path, primers: list[Primer], *, max_mismatches: int = 2
 
     def on_record(rid, seq, sites):
         rs = RecordSites(record=rid, length=len(seq))
+        for x in sites:
+            by_mm = rs.site_counts.setdefault(x.primer, {})
+            by_mm[x.mismatches] = by_mm.get(x.mismatches, 0) + 1
         for x in sites[:MAX_SITES_PER_RECORD]:
             pos = x.start if x.strand == "+" else x.end
             rs.sites.append((x.primer, x.strand, pos, x.mismatches))
-        prods = bd.predict_products(sites, min_size=30, max_size=max_product, max_products=2000)
-        rs.products = [(p.start, p.end, p.size) for p in prods]
+        rs.sites_truncated = len(sites) > MAX_SITES_PER_RECORD
+        prods = bd.predict_products(sites, min_size=30, max_size=max_product,
+                                    max_products=MAX_PRODUCTS_PER_RECORD)
+        rs.products_truncated = len(prods) >= MAX_PRODUCTS_PER_RECORD
+        for p in prods:
+            key = (p.forward, p.reverse)
+            rs.pair_counts[key] = rs.pair_counts.get(key, 0) + 1
+        rs.products = [(p.start, p.end, p.size, p.forward, p.reverse)
+                       for p in prods[:MAX_PRODUCTS_DRAWN]]
         out.append(rs)
 
     bd.search_records([(p.name, p.sequence) for p in primers], bd.iter_fasta(genome), s,
