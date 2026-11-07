@@ -1104,7 +1104,7 @@ class PrimerDesignDialog(_TabbedToolDialog):
         rcl.addWidget(self._rc_run)
         res_box = QGroupBox("Results", self)
         rl = QVBoxLayout(res_box)
-        self._annotate = QCheckBox("Add the best pair to the sequence annotations", self)
+        self._annotate = QCheckBox("Ask which pairs to add to the sequence after the run", self)
         self._annotate.setChecked(initial.annotate_design)
         self._to_db = QCheckBox("Add the designed primers to the Primer Database", self)
         self._to_db.setChecked(initial.save_design_to_database)

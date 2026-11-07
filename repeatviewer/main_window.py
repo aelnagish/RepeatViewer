@@ -470,6 +470,7 @@ from repeatviewer.views.settings_dialog import (
 )
 from repeatviewer.ncbi_download_actions import NcbiDownloadActionsMixin
 from repeatviewer.primer_actions import PrimerActionsMixin
+from repeatviewer.pcr_actions import PcrActionsMixin
 from repeatviewer.views.toolbar_dialog import (
     DEFAULT_TOOLBAR_ORDER,
     load_toolbar_font_size,
@@ -592,6 +593,8 @@ _TOOLBAR_TOOLTIPS = {
     "tree": "Phylogenetic tree from the selected FASTA (MAFFT + IQ-TREE / FastME / FastTree)",
     "map_reference": "Map the selected sequences or reads to a reference (minimap2 / HISAT2)",
     "primers": "Primers and Probes: Design, Map, Database",
+    "pcr": "In-silico PCR with the primers of the selected sequences",
+    "gel": "New in-silico gel (.rvgel)",
     "blast": "BLAST selected FASTA against the project genome using default parameters",
     "hmmer": "HMMER (pyhmmer) search of selected FASTA against a project HMM database",
     "te_genome_map": "Genome density plot using default parameters",
@@ -625,6 +628,8 @@ _JOB_DISPLAY_TITLES = {
     "dna_translation": "DNA translation",
     "te_abundance_plot": "TE abundance plot",
     "primers": "Primers",
+    "pcr": "PCR",
+    "gel": "Gel",
 }
 
 
@@ -2308,7 +2313,7 @@ class _ToolbarActionButton(QToolButton):
 
 
 class MainWindow(
-    NcbiDownloadActionsMixin, PrimerActionsMixin, QMainWindow
+    NcbiDownloadActionsMixin, PrimerActionsMixin, PcrActionsMixin, QMainWindow
 ):
     """Browser panel with folders, files, and preview."""
 
@@ -7568,6 +7573,25 @@ class MainWindow(
                 show_default_action=False,
                 right_click_slot=self._quick_primer_design_right_click,
             )
+        elif tool_id == "pcr":
+            self._add_toolbar_action_button(
+                bar,
+                "PCR",
+                lambda: self._open_pcr_window(),
+                tooltip=(
+                    "Click: open the PCR window with the selected sequences and their primers.\n"
+                    "Right-click: action chosen in the Options tab "
+                    "(default: open the window)."
+                ),
+                right_click_slot=self._quick_pcr_right_click,
+            )
+        elif tool_id == "gel":
+            self._add_toolbar_action_button(
+                bar,
+                "Gel",
+                self._new_gel_document,
+                tooltip="Click: a new in-silico gel (.rvgel) in this folder.",
+            )
         elif tool_id == "ncbi_download":
             self._add_toolbar_action_button(
                 bar,
@@ -10870,6 +10894,7 @@ class MainWindow(
             self._sync_hmmer_params_dialog_from_files(panel_path)
             self._sync_tree_trait_dialog_from_files(panel_path)
             self._sync_primer_check_dialog_from_files(panel_path)
+            self._sync_pcr_window_from_files(panel_path)
             filled_transfer = self._sync_transfer_source_from_files(panel_path)
             if not filled_transfer:
                 self._stop_transfer_session_on_file_navigation(panel_path)

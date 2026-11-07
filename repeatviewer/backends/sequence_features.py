@@ -837,6 +837,12 @@ def _cleanup_legacy_sidecars(fasta_path: Path) -> None:
             _remove_sidecar_if_exists(legacy_gff)
 
 
+def _primers_sidecar_for(fasta_path: Path) -> Path:
+    """Primers kept with a FASTA (Annotation view > Primers): ``{stem}.primers_RV.json``."""
+    seqmap = sidecar_path(fasta_path)
+    return seqmap.with_name(seqmap.name[: -len(".seqmap_RV.json")] + ".primers_RV.json")
+
+
 def is_sequence_map_hidden_file(path: Path) -> bool:
     """True for sequence-map / coverage / boundaries JSON sidecars (hidden)."""
     name = path.name
@@ -845,6 +851,7 @@ def is_sequence_map_hidden_file(path: Path) -> bool:
         or name.endswith(".seqmap.json")
         or name.endswith(".blastcov_RV.json")
         or name.endswith(".boundaries_RV.json")
+        or name.endswith(".primers_RV.json")
     )
 
 
@@ -887,6 +894,7 @@ def companion_annotation_files_for_delete(path: Path) -> list[Path]:
             legacy_sidecar_path(resolved),
             blast_coverage_sidecar_path(resolved),
             boundaries_sidecar_path(resolved),
+            _primers_sidecar_for(resolved),
         ):
             _add(candidate)
         return companions
@@ -925,6 +933,7 @@ def companion_annotation_renames_for_fasta(
         (legacy_sidecar_path(old), sidecar_path(new)),
         (blast_coverage_sidecar_path(old), blast_coverage_sidecar_path(new)),
         (boundaries_sidecar_path(old), boundaries_sidecar_path(new)),
+        (_primers_sidecar_for(old), _primers_sidecar_for(new)),
     ):
         if not src.is_file():
             continue

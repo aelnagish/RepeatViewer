@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import replace
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QTimer, Signal, Slot
+from PySide6.QtCore import QObject, Qt, QTimer, Signal, Slot
 from PySide6.QtWidgets import QMenu, QMessageBox
 
 from repeatviewer.backends.job_cancel import CANCELLED_MESSAGE
@@ -117,9 +117,11 @@ class PrimerJobWorker(QObject):
                         progress=_progress, cancel=self._cancelled,
                         report_path=self._report_path)
                 else:
+                    # Nothing is written onto the sequences here: the user picks
+                    # the pairs to add afterwards (Designed Primers window).
                     main, files, payload = pj.run_design(
                         self._seq_files, self._settings, progress=_progress,
-                        cancel=self._cancelled, annotate=self._annotate,
+                        cancel=self._cancelled, annotate=False,
                         report_path=self._report_path)
                 saved = 0
                 if self._kind == PRIMER_JOB_DESIGN and self._save_to_database and payload.get("pairs"):
@@ -137,6 +139,9 @@ class PrimerJobWorker(QObject):
                 "sites": int((payload.get("counts") or {}).get("sites", 0)),
                 "warnings": list(payload.get("warnings", [])),
                 "saved_to_database": saved,
+                "pair_list": list(payload.get("pairs", [])) if self._kind == PRIMER_JOB_DESIGN else [],
+                "ask_pairs": bool(self._annotate) if self._kind == PRIMER_JOB_DESIGN else False,
+                "inputs": [str(p) for p in self._seq_files],
             })
         except PrimerCancelled:
             self.failed.emit(CANCELLED_MESSAGE)
@@ -180,6 +185,9 @@ class PrimerActionsMixin:
         a.setToolTip("Test primers against sequences: binding sites and products")
         a = menu.addAction(database, self._open_primer_database)
         a.setToolTip("Your saved primers, with Tm, hairpin and dimer checks")
+        populate = getattr(self, "_populate_pcr_menu_items", None)
+        if populate is not None:
+            populate(menu)
         menu.setToolTipsVisible(True)
 
     def _open_primers_manual(self) -> None:
@@ -224,7 +232,8 @@ class PrimerActionsMixin:
     def _quick_primer_design_right_click(self) -> None:
         self._run_primer_design_default()
 
-    def _open_primer_design_dialog(self, *, mode: str | None = None) -> None:
+    def _open_primer_design_dialog(self, *, mode: str | None = None,
+                                   files: list[Path] | None = None) -> None:
         if not self._primers_ready():
             return
         from repeatviewer.views.primer_dialogs import PrimerDesignDialog
@@ -239,9 +248,10 @@ class PrimerActionsMixin:
                 data.update(dz.mode_preset(mode))
                 data["mode"] = mode
                 opts = replace(opts, design=data, last_dialog_tab=PRIMER_DIALOG_TAB_PRIMERS)
+        start_files = list(files or [])
         dialog = PrimerDesignDialog(
             initial=opts,
-            files=self._primer_candidate_files(),
+            files=start_files or self._primer_candidate_files(),
             project_genome=self._genome_path_resolved(),
             parent=self,
         )
@@ -256,7 +266,8 @@ class PrimerActionsMixin:
                 return
             # What the window shows; with Use selected and nothing shown yet, the panel.
             files = d.template_files() or (
-                self._primer_candidate_files() if d.uses_selected() else [])
+                (start_files or self._primer_candidate_files())
+                if d.uses_selected() else [])
             if not files:
                 QMessageBox.information(
                     self, "Primer Design",
@@ -623,8 +634,33 @@ class PrimerActionsMixin:
         self._set_status_message(msg, 12000, override_file_link=True)
         if result.get("annotated"):
             self._reload_annotated_previews(getattr(self, "_last_job_source_files", []))
+        if result.get("ask_pairs") and result.get("pair_list"):
+            self._offer_designed_pairs(result["pair_list"], result.get("inputs") or [])
 
-    def _reload_annotated_previews(self, fastas: list[Path]) -> None:
+    def _offer_designed_pairs(self, pairs: list, inputs: list) -> None:
+        from repeatviewer.views.primer_edit_dialog import DesignedPairsDialog
+
+        dialog = DesignedPairsDialog(pairs, [Path(p) for p in inputs], parent=self)
+        dialog.setWindowFlag(Qt.WindowType.Tool, True)
+
+        def _done(code: int) -> None:
+            if code:
+                try:
+                    changed = dialog.add_ticked()
+                except Exception as exc:  # noqa: BLE001
+                    QMessageBox.warning(self, "Primer Design", f"Could not add the primers:\n{exc}")
+                    changed = []
+                if changed:
+                    self._reload_annotated_previews(changed, include_current=True)
+                    self._set_status_message(
+                        f"Added the ticked primers to {', '.join(p.name for p in changed)}", 8000)
+            dialog.deleteLater()
+
+        dialog.finished.connect(_done)
+        dialog.show()
+        dialog.raise_()
+
+    def _reload_annotated_previews(self, fastas: list[Path], *, include_current: bool = False) -> None:
         """Open previews of the annotated inputs show the new primer arrows.
 
         Pages with unsaved edits are left alone (``reload_from_disk`` skips them).
@@ -645,7 +681,7 @@ class PrimerActionsMixin:
             page = tabs.widget(index)
             # The active tab now shows the report; only background tabs that
             # still show an annotated input need the new arrows.
-            if page is current or not isinstance(page, FilePreviewPage):
+            if (page is current and not include_current) or not isinstance(page, FilePreviewPage):
                 continue
             if str(getattr(page, "path", "")) in keys:
                 try:

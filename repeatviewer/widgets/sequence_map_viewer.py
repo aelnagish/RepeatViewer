@@ -3172,6 +3172,14 @@ class SequenceMapCanvas(QWidget):
         self._find_max_len = max((b - a + 1 for a, b in self._find_hits), default=0)
         self.update()
 
+    def set_primer_marks(self, positions: list[int]) -> None:
+        """Template bases where a primer has a mismatch (1-based), drawn red."""
+        marks = sorted({int(p) for p in positions if int(p) > 0})
+        if marks == getattr(self, "_primer_marks", []):
+            return
+        self._primer_marks = marks
+        self.update()
+
     def find_hits(self) -> list[tuple[int, int]]:
         return list(self._find_hits)
 
@@ -3978,8 +3986,29 @@ class SequenceMapCanvas(QWidget):
         clip = QRectF(event.rect())
         if self._find_hits and not self.uses_wrap():
             self._paint_find_hits(painter, clip)
+        if getattr(self, "_primer_marks", None):
+            self._paint_primer_marks(painter, clip)
         self._paint_selection_overlay(painter, clip)
         painter.end()
+
+    def _paint_primer_marks(self, painter: QPainter, clip: QRectF) -> None:
+        """Red boxes on bases where a primer does not match the template."""
+        _, _, cell_w, _ = self._nucleotide_cell_geometry()
+        if cell_w <= 0:
+            return
+        _, cell_h_f, _ = self._cell_size()
+        height = float(cell_h_f + self._extra_display_height())
+        painter.save()
+        painter.setPen(QPen(QColor("#d0342c"), 1.5))
+        fill = QColor("#d0342c")
+        fill.setAlpha(70)
+        for pos in self._primer_marks:
+            x, y = self._index_to_xy(pos - 1)
+            rect = QRectF(x, y, max(2.0, float(cell_w)), height)
+            if clip.intersects(rect):
+                painter.fillRect(rect, fill)
+                painter.drawRect(rect)
+        painter.restore()
 
     def _paint_selection_overlay(self, painter: QPainter, clip: QRectF) -> None:
         """Blue tint on selected nucleotides only (no grey veil on this strip)."""
@@ -5400,6 +5429,9 @@ class SequenceMapWidget(QWidget):
 
     def set_find_hits(self, hits: list[tuple[int, int]]) -> None:
         self._canvas.set_find_hits(hits)
+
+    def set_primer_marks(self, positions: list[int]) -> None:
+        self._canvas.set_primer_marks(positions)
 
     def select_by_position(self, start: int, end: int, *, _attempt: int = 0) -> None:
         if self._data is None or self.is_too_long_for_display():
@@ -8058,6 +8090,9 @@ class SequenceMapPanel(QWidget):
         )
 
         self._sequence_combo.currentIndexChanged.connect(self._on_sequence_combo_changed)
+        self._primers_stale = True
+        self._rail.primers_panel.set_host(self)
+        self._rail.tabChanged.connect(self._on_rail_tab_for_primers)
         self._sequence_search.returnPressed.connect(self._on_sequence_search_submitted)
         self._rail.addFeatureClicked.connect(self._on_add_feature_clicked)
         self._rail.addFeatureSettingsClicked.connect(
@@ -8955,6 +8990,7 @@ class SequenceMapPanel(QWidget):
         self._sync_too_long_controls()
         if not self._map.is_too_long_for_display():
             self.refresh_sequence_summary()
+        self._mark_primers_stale()
 
     def _sync_too_long_controls(self) -> None:
         """Hide the right rail when the map is blocked for a too-long sequence."""
@@ -9008,6 +9044,66 @@ class SequenceMapPanel(QWidget):
         if not seq_id:
             return
         self.ensure_active_sequence(str(seq_id))
+
+    # ------------------------------------------------------------ primers tab
+
+    def _primers_tab_visible(self) -> bool:
+        from repeatviewer.widgets.sequence_annotation_rail import PRIMERS_TAB_INDEX
+
+        rail = self._rail
+        return (getattr(rail, "_active_tab", -1) == PRIMERS_TAB_INDEX
+                and not getattr(rail, "_panel_collapsed", False))
+
+    def _mark_primers_stale(self) -> None:
+        self._primers_stale = True
+        if self._primers_tab_visible():
+            QTimer.singleShot(0, self._reload_primers_panel)
+        else:
+            self._map.set_primer_marks([])
+
+    def _reload_primers_panel(self) -> None:
+        if self._map.data() is None:
+            return
+        self._primers_stale = False
+        self._rail.primers_panel.reload()
+
+    def _on_rail_tab_for_primers(self, index: int) -> None:
+        from repeatviewer.widgets.sequence_annotation_rail import PRIMERS_TAB_INDEX
+
+        if index == PRIMERS_TAB_INDEX:
+            self._reload_primers_panel()
+        else:
+            self._map.set_primer_marks([])
+
+    def show_primers_tab(self) -> None:
+        self._rail.show_primers_tab()
+        self._reload_primers_panel()
+
+    def primers_panel(self):
+        return self._rail.primers_panel
+
+    def primers_host_path(self) -> Path:
+        return self._path
+
+    def primers_host_sequence(self) -> tuple[str, str]:
+        data = self._map.data()
+        if data is None:
+            raise ValueError("no sequence")
+        return str(data.sequence_id or ""), str(data.sequence or "")
+
+    def primers_host_features(self) -> list[SequenceFeature]:
+        return list(self._map.features())
+
+    def primers_host_apply_features(self, features: list[SequenceFeature]) -> None:
+        self._push_feature_undo_snapshot()
+        self._map.set_features(list(features))
+        self.save_annotations(silent=True)
+
+    def primers_host_show(self, start: int, end: int) -> None:
+        self.select_by_position(int(start), int(end))
+
+    def primers_host_set_marks(self, positions: list[int]) -> None:
+        self._map.set_primer_marks(list(positions))
 
     @Slot(str)
     def _on_sequence_search_activated(self, text: str) -> None:
@@ -9093,6 +9189,7 @@ class SequenceMapPanel(QWidget):
         self._sync_too_long_controls()
         if not self._map.is_too_long_for_display():
             self.refresh_sequence_summary()
+        self._mark_primers_stale()
         self._sequence_combo.setToolTip(data.sequence_id)
         self.activeSequenceChanged.emit(data.sequence_id)
         return True

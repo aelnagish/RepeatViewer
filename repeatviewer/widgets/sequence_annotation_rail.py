@@ -121,6 +121,7 @@ _SETTINGS_HIDDEN_ANN_KINDS_KEY = "hidden_annotation_kinds"
 _ANNOTATION_KINDS_FLOW_MAX_HEIGHT = 80
 # Default first open: Annotation tab with all sections collapsed.
 _DEFAULT_TAB_INDEX = 1
+PRIMERS_TAB_INDEX = 4
 _COLLAPSED_RAIL_WIDTH = _RAIL_TAB_WIDTH
 _ANNOTATION_SECTION_IDS = (
     "feature_detection",
@@ -792,10 +793,12 @@ class SequenceAnnotationRail(QWidget):
         self._annotations_page = self._build_annotations_page()
         self._find_page = self._build_find_page()
         self._others_page = self._build_others_page()
+        self._primers_page = self._build_primers_page()
         self._stack.addWidget(self._show_page)
         self._stack.addWidget(self._annotations_page)
         self._stack.addWidget(self._find_page)
         self._stack.addWidget(self._others_page)
+        self._stack.addWidget(self._primers_page)
 
         self._divider = QFrame(self)
         self._divider.setFrameShape(QFrame.Shape.VLine)
@@ -819,6 +822,7 @@ class SequenceAnnotationRail(QWidget):
             "Annotations — detect, edit, and transfer features (click again to hide)",
             "Find — motif search in the active sequence (click again to hide)",
             "Others — extra options (click again to hide)",
+            "Primers: primers on this sequence and PCR (click again to hide)",
         )
         for index, (label, tip) in enumerate(
             (
@@ -826,6 +830,7 @@ class SequenceAnnotationRail(QWidget):
                 ("Annotation", self._tab_tips[1]),
                 ("Find", self._tab_tips[2]),
                 ("Others", self._tab_tips[3]),
+                ("Primers", self._tab_tips[4]),
             )
         ):
             btn = _RotatedTabButton(label, self._tab_strip)
@@ -1533,6 +1538,22 @@ class SequenceAnnotationRail(QWidget):
         layout.addStretch(1)
         self.sync_color_scheme_combos()
         return self._wrap_scroll(page)
+
+    def _build_primers_page(self) -> QWidget:
+        from repeatviewer.widgets.primers_panel import PrimersPanel
+
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+        title, _rule = _page_title_with_rule("Primers", page)
+        layout.addWidget(title)
+        self.primers_panel = PrimersPanel(page, width=self._module_width)
+        layout.addWidget(self.primers_panel, 1)
+        return self._wrap_scroll(page)
+
+    def show_primers_tab(self) -> None:
+        self.set_current_tab(PRIMERS_TAB_INDEX)
 
     def _build_others_page(self) -> QWidget:
         page = QWidget()
