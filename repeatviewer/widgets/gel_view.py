@@ -298,7 +298,15 @@ class GelDocumentPanel(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
+        self.setObjectName("gelDocument")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        # One background for the toolbar, the gel area and the side panel.
+        self.setStyleSheet(
+            "QWidget#gelDocument, QWidget#gelBar, QWidget#gelHolder, QWidget#gelSide,"
+            " QScrollArea#gelSideScroll, QScrollArea#gelSideScroll > QWidget"
+            " { background: palette(base); }")
         bar = QWidget(self)
+        bar.setObjectName("gelBar")
         bl = QHBoxLayout(bar)
         bl.setContentsMargins(12, 8, 12, 8)
         bl.setSpacing(6)
@@ -337,6 +345,7 @@ class GelDocumentPanel(QWidget):
 
         split = QSplitter(Qt.Orientation.Horizontal, self)
         holder = QWidget(split)
+        holder.setObjectName("gelHolder")
         hl = QVBoxLayout(holder)
         hl.setContentsMargins(16, 12, 16, 12)
         self.view = GelView(holder)
@@ -344,6 +353,7 @@ class GelDocumentPanel(QWidget):
         split.addWidget(holder)
 
         side = QWidget(split)
+        side.setObjectName("gelSide")
         side.setMinimumWidth(320)
         side.setMaximumWidth(460)
         sl = QVBoxLayout(side)
@@ -380,8 +390,8 @@ class GelDocumentPanel(QWidget):
         sl.addWidget(self.mass_check)
         sl.addWidget(self.dimer_check)
         sl.addWidget(QLabel("<b>Lanes</b>", side))
-        self.lanes_table = QTableWidget(0, 3, side)
-        self.lanes_table.setHorizontalHeaderLabels(["#", "From", "Cut with"])
+        self.lanes_table = QTableWidget(0, 2, side)
+        self.lanes_table.setHorizontalHeaderLabels(["#", "From"])
         self.lanes_table.verticalHeader().hide()
         self.lanes_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.lanes_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
@@ -401,6 +411,7 @@ class GelDocumentPanel(QWidget):
         self.band_label.hide()
         sl.addWidget(self.band_label)
         scroll = QScrollArea(split)
+        scroll.setObjectName("gelSideScroll")
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
@@ -475,7 +486,6 @@ class GelDocumentPanel(QWidget):
     def _fill_lanes(self) -> None:
         doc = self._doc
         self.lanes_table.setRowCount(len(doc.lanes))
-        from repeatviewer.backends.primers.on_sequence import COMMON_ENZYMES
 
         for r, lane in enumerate(doc.lanes):
             self.lanes_table.setItem(r, 0, QTableWidgetItem("L" if lane.kind == gd.LANE_LADDER
@@ -484,18 +494,6 @@ class GelDocumentPanel(QWidget):
             item = QTableWidgetItem(name)
             item.setToolTip(f"{len(lane.bands)} band(s)" + (f"\n{lane.source}" if lane.source else ""))
             self.lanes_table.setItem(r, 1, item)
-            combo = QComboBox(self.lanes_table)
-            combo.addItem("none", "")
-            for e in COMMON_ENZYMES:
-                combo.addItem(e, e)
-            combo.setCurrentIndex(max(0, combo.findData(lane.cut_with)))
-            cuttable = lane.kind != gd.LANE_LADDER and any(b.sequence for b in lane.bands)
-            combo.setEnabled(cuttable)
-            if not cuttable:
-                combo.setToolTip("No sequences in this lane to cut")
-            combo.currentIndexChanged.connect(
-                lambda _i, row=r, c=combo: self._on_cut(row, c.currentData()))
-            self.lanes_table.setCellWidget(r, 2, combo)
 
     # ---------------------------------------------------------------- settings
 
