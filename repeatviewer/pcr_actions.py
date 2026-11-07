@@ -94,12 +94,8 @@ class PcrActionsMixin:
         menu.addSeparator()
         a = menu.addAction("PCR", lambda: self._open_pcr_window())
         a.setToolTip("In-silico PCR: products of the primers on the selected sequences")
-        a = menu.addAction("New Gel", self._new_gel_document)
-        a.setToolTip("An empty in-silico gel (.rvgel) in this folder")
         a = menu.addAction("Binding Sites on Chromosomes", lambda: self._open_primer_genome_view([]))
         a.setToolTip("Where primers bind across a genome, per chromosome")
-        a = menu.addAction("Bench Card", lambda: self._open_bench_card(None))
-        a.setToolTip("Mastermix, PCR program and expected gel, ready to print")
 
     # ------------------------------------------------------------- PCR window
 
@@ -121,13 +117,15 @@ class PcrActionsMixin:
             primers = self._primers_of_files(templates)
         win = self._pcr_window
         try:
-            alive = win is not None and win.isVisible()
+            alive = win is not None and win.objectName() is not None
         except RuntimeError:
             alive = False
         if alive:
+            # Reuse the window (it may be hidden after opening a result in Preview).
             for t in templates:
                 win.apply_path_from_panel(Path(t))
             win.add_primers(list(primers))
+            win.show()
             win.raise_()
             win.activateWindow()
             return
@@ -141,8 +139,10 @@ class PcrActionsMixin:
         win.saveRequested.connect(
             lambda s, w=win: (save_pcr_settings(s, w.right_click_runs()),
                               self._set_status_message("PCR settings saved", 4000)))
-        win.openGelRequested.connect(self._open_gel_for_pcr)
-        win.openFileRequested.connect(self._on_preview_open_requested)
+        win.openGelRequested.connect(
+            lambda res, w=win: (self._step_aside(w), self._open_gel_for_pcr(res)))
+        win.openFileRequested.connect(
+            lambda path, w=win: (self._step_aside(w), self._on_preview_open_requested(path)))
         win.benchCardRequested.connect(self._open_bench_card)
 
         def _closed(*_a) -> None:
@@ -319,6 +319,21 @@ class PcrActionsMixin:
         self._primer_genome_dialog = dlg
         dlg.show()
         dlg.raise_()
+
+    def _step_aside(self, win) -> None:
+        """Hide a tool window so what it opened in Preview is in front.
+
+        The window keeps its results; Tools > Primers and Probes > PCR (or the
+        Primers tab's Run PCR) shows it again.
+        """
+        try:
+            win.hide()
+        except RuntimeError:
+            return
+        self.raise_()
+        self.activateWindow()
+        self._set_status_message(
+            "PCR window hidden; Tools > Primers and Probes > PCR shows it again", 6000)
 
     def _open_bench_card(self, result) -> None:
         from repeatviewer.views.bench_card_dialog import BenchCardDialog

@@ -332,7 +332,7 @@ class BenchCardDialog(QDialog):
             if self.show_places.isChecked() and self._places.get(p.name):
                 line += f' · {html.escape(self._places[p.name])}'
             if self.show_seqs.isChecked():
-                line += (f'<br><span style="font-family:monospace;font-size:small">'
+                line += (f'<br><span style="font-family:Menlo,Consolas,Courier;font-size:small">'
                          f"{html.escape(p.sequence)}</span>")
             rows.append(line)
         self.primers_label.setText("<b>Primers</b><br>" + "<br>".join(rows))
@@ -412,9 +412,13 @@ class BenchCardDialog(QDialog):
         dlg = QPrintDialog(printer, self)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
+        from PySide6.QtCore import QPoint
+
         p = QPainter(printer)
-        rect = printer.pageRect(QPrinter.Unit.DevicePixel)
-        scale = min(rect.width() / self.page.width(), rect.height() / self.page.height())
-        p.scale(scale, scale)
-        self.page.render(p)
-        p.end()
+        try:
+            rect = printer.pageRect(QPrinter.Unit.DevicePixel)
+            scale = min(rect.width() / self.page.width(), rect.height() / self.page.height())
+            p.scale(scale, scale)
+            self.page.render(p, QPoint())
+        finally:
+            p.end()

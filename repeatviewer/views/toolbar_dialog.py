@@ -65,8 +65,6 @@ TOOLS_TOOLBAR_IDS: tuple[str, ...] = (
     "tree",
     "map_reference",
     "primers",
-    "pcr",
-    "gel",
     "repeat_quantify",
     "extend",
     "tsd_search",
@@ -114,8 +112,6 @@ TOOLBAR_LABELS: dict[str, str] = {
     "tree": "Tree",
     "map_reference": "Mapping",
     "primers": "Primers and Probes",
-    "pcr": "PCR",
-    "gel": "Gel",
     "repeat_quantify": "Repeat Quantify",
     "blast": "BLAST",
     "hmmer": "HMMER",
@@ -250,29 +246,6 @@ def _rename_old_toolbar_ids(ids: list[str]) -> list[str]:
     return out
 
 
-PCR_GEL_MIGRATION_KEY = "pcr_gel_added"
-
-
-def _add_pcr_gel_once(visible: list[str], registry) -> list[str]:
-    """PCR and Gel buttons appear once next to Primers and Probes (Nov 2026)."""
-    from PySide6.QtCore import QSettings
-
-    s = QSettings()
-    s.beginGroup(TOOLBAR_SETTINGS_GROUP)
-    done = s.value(PCR_GEL_MIGRATION_KEY, False)
-    if isinstance(done, str):
-        done = done.strip().lower() in {"1", "true", "yes", "on"}
-    if not done:
-        s.setValue(PCR_GEL_MIGRATION_KEY, True)
-    s.endGroup()
-    if done or "primers" not in visible or "pcr" in visible:
-        return visible
-    i = visible.index("primers") + 1
-    out = visible[:i] + ["pcr", "gel"] + [t for t in visible[i:] if t != "gel"]
-    save_toolbar_order(out, registry)
-    return out
-
-
 def load_toolbar_order(registry: PluginRegistry | None = None) -> list[str]:
     from PySide6.QtCore import QSettings
 
@@ -301,7 +274,6 @@ def load_toolbar_order(registry: PluginRegistry | None = None) -> list[str]:
     # Migrate users still on the previous default (which included Repeat Quantify).
     # One-shot only: after this has run once, Repeat Quantify is a normal toolbar
     # button the user is free to keep.
-    visible = _add_pcr_gel_once(visible, registry)
     if not migration_done and "repeat_quantify" in visible:
         stripped = [tool_id for tool_id in visible if tool_id != "repeat_quantify"]
         if stripped == list(default_order):

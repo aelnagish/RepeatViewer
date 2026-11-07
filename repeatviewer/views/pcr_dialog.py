@@ -579,7 +579,9 @@ class PcrWindow(QDialog):
         self.lane_combo.setVisible(len(result.lanes) > 1)
         self.lane_label.setVisible(len(result.lanes) > 1)
         self.summary.setText(f"<b>{html.escape(pcr.describe(result))}</b>")
-        sub = [f"{len(result.templates)} template(s)", ", ".join(p.name for p in result.primers),
+        names = [p.name for p in result.primers]
+        prim = ", ".join(names) if len(names) <= 3 else f"{len(names)} primers"
+        sub = [f"{len(result.templates)} template(s)", prim,
                pcr.MODE_LABELS.get(result.settings.mode, "")]
         if self._outputs.get("fasta"):
             sub.append(f"saved as {Path(self._outputs['fasta']).name}")
@@ -637,7 +639,7 @@ class PcrWindow(QDialog):
         if p.sequence:
             lines.append(f"{gc:.0f} % GC · {p.forward} → … ← {p.reverse}")
             snippet = html.escape(p.sequence[:44]) + ("…" if len(p.sequence) > 44 else "")
-            lines.append(f'<span style="font-family:monospace;color:gray">{snippet}</span>')
+            lines.append(f'<span style="font-family:Menlo,Consolas,Courier;color:gray">{snippet}</span>')
         if p.locations:
             lines.append(html.escape(", ".join(p.locations[:3])))
         if p.sites > 1:

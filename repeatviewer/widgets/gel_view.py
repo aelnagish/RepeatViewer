@@ -393,8 +393,6 @@ class GelDocumentPanel(QWidget):
         self.lanes_table.setColumnWidth(0, 30)
         self.lanes_table.setColumnWidth(1, 170)
         sl.addWidget(self.lanes_table, 1)
-        self.all_cut_button = QPushButton("Apply Enzyme to All Lanes", side)
-        sl.addWidget(self.all_cut_button, 0, Qt.AlignmentFlag.AlignLeft)
         self.band_label = QLabel(side)
         self.band_label.setWordWrap(True)
         self.band_label.setTextFormat(Qt.TextFormat.RichText)
@@ -422,7 +420,6 @@ class GelDocumentPanel(QWidget):
         self.remove_button.clicked.connect(self._remove_lane)
         self.left_button.clicked.connect(lambda: self._move_lane(-1))
         self.right_button.clicked.connect(lambda: self._move_lane(1))
-        self.all_cut_button.clicked.connect(self._cut_all)
         self.compare_button.clicked.connect(self._compare_photo)
         self.view.bandClicked.connect(self._on_band)
         self.view.laneClicked.connect(self._select_lane_row)
@@ -531,17 +528,6 @@ class GelDocumentPanel(QWidget):
         if self._loading or self._doc is None or not (0 <= row < len(self._doc.lanes)):
             return
         self._doc.lanes[row].cut_with = str(enzyme or "")
-        self._changed()
-
-    def _cut_all(self) -> None:
-        row = self._current_row()
-        if self._doc is None or row is None:
-            return
-        enz = self._doc.lanes[row].cut_with
-        for lane in self._doc.lanes:
-            if lane.kind != gd.LANE_LADDER and any(b.sequence for b in lane.bands):
-                lane.cut_with = enz
-        self._sync_controls()
         self._changed()
 
     # ---------------------------------------------------------------- lanes
@@ -672,7 +658,7 @@ class GelDocumentPanel(QWidget):
 
 def save_view_image(view: QWidget, path: Path, kind: str) -> None:
     """PNG at 300 dpi or vector-ish PDF of a widget's painting."""
-    from PySide6.QtCore import QSize
+    from PySide6.QtCore import QPoint, QSize
     from PySide6.QtGui import QImage, QPageSize, QPdfWriter
 
     if kind == "png":
@@ -683,9 +669,11 @@ def save_view_image(view: QWidget, path: Path, kind: str) -> None:
         img.setDotsPerMeterX(int(300 / 0.0254))
         img.setDotsPerMeterY(int(300 / 0.0254))
         p = QPainter(img)
-        p.scale(scale, scale)
-        view.render(p)
-        p.end()
+        try:
+            p.scale(scale, scale)
+            view.render(p, QPoint())
+        finally:
+            p.end()
         img.save(str(path), "PNG")
         return
     writer = QPdfWriter(str(path))
@@ -694,5 +682,7 @@ def save_view_image(view: QWidget, path: Path, kind: str) -> None:
 
     writer.setPageSize(QPageSize(QSizeF(view.width(), view.height()), QPageSize.Unit.Point))
     p = QPainter(writer)
-    view.render(p)
-    p.end()
+    try:
+        view.render(p, QPoint())
+    finally:
+        p.end()
