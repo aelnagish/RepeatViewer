@@ -185,7 +185,7 @@ _UNSUPPORTED_PREVIEW_SUFFIXES = {
 
 def _preview_kind(path: Path) -> str:
     suffix = path.suffix.lower()
-    if suffix == _CONTIG_PREVIEW_SUFFIX:
+    if suffix in (_CONTIG_PREVIEW_SUFFIX, _GEL_PREVIEW_SUFFIX):
         return "contig"
     if suffix in _DOTPLOT_PREVIEW_SUFFIXES:
         return "dotplot"
@@ -278,6 +278,8 @@ _DOTPLOT_PREVIEW_SUFFIXES = frozenset({".paf", ".1aln"})
 from repeatviewer.backends.tree_layout import is_tree_file as _is_tree_path  # noqa: E402
 # Map to Reference results (.rvmap) open in the contig view.
 _CONTIG_PREVIEW_SUFFIX = ".rvmap"
+# In-silico gels (Primers and Probes > Gel) open in the gel view.
+_GEL_PREVIEW_SUFFIX = ".rvgel"
 
 
 def is_previewable_file(path: Path) -> bool:
@@ -287,7 +289,7 @@ def is_previewable_file(path: Path) -> bool:
     name = resolved.name.lower()
     if suffix in _DOTPLOT_PREVIEW_SUFFIXES or _is_tree_path(resolved):
         return True
-    if suffix == _CONTIG_PREVIEW_SUFFIX:
+    if suffix in (_CONTIG_PREVIEW_SUFFIX, _GEL_PREVIEW_SUFFIX):
         return True
     if is_bismark_cov_file(resolved):
         return True
@@ -312,7 +314,7 @@ def preview_path_priority(path: Path) -> int:
         return 1
     if suffix in _DOTPLOT_PREVIEW_SUFFIXES or _is_tree_path(path):
         return 2
-    if suffix == _CONTIG_PREVIEW_SUFFIX:
+    if suffix in (_CONTIG_PREVIEW_SUFFIX, _GEL_PREVIEW_SUFFIX):
         return 2
     if suffix == ".pdf":
         return 3
@@ -1559,6 +1561,24 @@ class FilePreviewPage(QWidget):
         self._stack.setCurrentWidget(self._contig_panel)
         self._contig_panel.load(path)
 
+    def _show_gel(self, path: Path) -> None:
+        """Draw an in-silico gel (.rvgel)."""
+        from repeatviewer.widgets.gel_view import GelDocumentPanel
+
+        if getattr(self, "_gel_panel", None) is None:
+            self._gel_panel = GelDocumentPanel(self)
+            self._gel_panel.setSizePolicy(
+                QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+            )
+            self._gel_panel.openRequested.connect(self.openFileRequested.emit)
+            self._gel_panel.fileWritten.connect(self.fileWritten.emit)
+            self._stack.addWidget(self._gel_panel)
+        self._stack.setCurrentWidget(self._gel_panel)
+        self._gel_panel.load(path)
+
+    def gel_panel(self):
+        return getattr(self, "_gel_panel", None)
+
     def contig_panel(self):
         """The contig view of this page, if it was ever shown (else None)."""
         return getattr(self, "_contig_panel", None)
@@ -1576,13 +1596,15 @@ class FilePreviewPage(QWidget):
         )
 
     def is_contig_preview_active(self) -> bool:
-        """Mapping result (.rvmap): the contig view zooms itself (−, +, wheel, pinch)."""
-        panel = getattr(self, "_contig_panel", None)
-        return (
-            not self._single_fasta_mode
-            and panel is not None
-            and self._stack.currentWidget() is panel
-        )
+        """Mapping result (.rvmap): the contig view zooms itself (−, +, wheel, pinch).
+
+        A gel (.rvgel) is treated the same way: no title-bar zoom.
+        """
+        if self._single_fasta_mode:
+            return False
+        current = self._stack.currentWidget()
+        return current is not None and current in (
+            getattr(self, "_contig_panel", None), getattr(self, "_gel_panel", None))
 
     def _ensure_dotplot_panel(self):
         """Create the dotplot panel on first use.
@@ -2506,6 +2528,9 @@ class FilePreviewPage(QWidget):
             return
         if suffix == _CONTIG_PREVIEW_SUFFIX:
             self._show_contig(path)
+            return
+        if suffix == _GEL_PREVIEW_SUFFIX:
+            self._show_gel(path)
             return
         if suffix == ".pdf":
             status = self._pdf.load_file(path)

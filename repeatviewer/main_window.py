@@ -470,6 +470,7 @@ from repeatviewer.views.settings_dialog import (
 )
 from repeatviewer.ncbi_download_actions import NcbiDownloadActionsMixin
 from repeatviewer.primer_actions import PrimerActionsMixin
+from repeatviewer.pcr_actions import PcrActionsMixin
 from repeatviewer.views.toolbar_dialog import (
     DEFAULT_TOOLBAR_ORDER,
     load_toolbar_font_size,
@@ -2308,7 +2309,7 @@ class _ToolbarActionButton(QToolButton):
 
 
 class MainWindow(
-    NcbiDownloadActionsMixin, PrimerActionsMixin, QMainWindow
+    NcbiDownloadActionsMixin, PrimerActionsMixin, PcrActionsMixin, QMainWindow
 ):
     """Browser panel with folders, files, and preview."""
 
@@ -10870,6 +10871,7 @@ class MainWindow(
             self._sync_hmmer_params_dialog_from_files(panel_path)
             self._sync_tree_trait_dialog_from_files(panel_path)
             self._sync_primer_check_dialog_from_files(panel_path)
+            self._sync_pcr_window_from_files(panel_path)
             filled_transfer = self._sync_transfer_source_from_files(panel_path)
             if not filled_transfer:
                 self._stop_transfer_session_on_file_navigation(panel_path)
