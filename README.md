@@ -87,7 +87,7 @@ On Windows, it is recommended to place the repository in a user-writable directo
 - Microsoft Visual Studio Build Tools with the C++ workload are required to install orfipy, which is used as a dependency by this repository.
   The required build tools can be installed from a PowerShell terminal using:
   ```bash
-  winget install -e --id Microsoft.VisualStudio.BuildTools --override "--passive --add Microsoft.VisualS
+  winget install -e --id Microsoft.VisualStudio.BuildTools --override "--passive --add Microsoft.VisualS"
   ```
 
 #### 2. Download RepeatViewer from GitHub
