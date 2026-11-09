@@ -178,6 +178,8 @@ def test_panel_loads_and_draws(qapp, tmp_path, monkeypatch, which):
     assert panel._result.reference is not None
     assert panel.canvas.chrom == "chr1"
     assert not panel._banner.isVisible()
+    # Alignments and annotations open at Fit (whole chromosome).
+    assert panel.canvas.view_range() == (0, panel.canvas.length)
     panel.canvas.show_range(0, 1500)
     img = panel.canvas.grab().toImage()
     assert img.width() > 0

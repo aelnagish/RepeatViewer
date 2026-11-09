@@ -312,16 +312,35 @@ def coverage_bins(starts: np.ndarray, ends: np.ndarray, bin_size: int,
     return cov.astype(np.float32)
 
 
-def window_profile(profile: np.ndarray, bin_size: int, start: int, end: int,
+def window_profile(profile: np.ndarray, bin_size: int, start: float, end: float,
                    n: int) -> np.ndarray:
-    """``n`` values (max of the bins under each) for [start, end) from a binned profile."""
+    """``n`` values (max of the bins under each) for [start, end) from a binned profile.
+
+    ``start`` / ``end`` may be floats (browser ``start`` + ``bpp·width``). Each
+    output sample ``i`` is the max over profile bins overlapping
+    ``[start + i·span/n, start + (i+1)·span/n)`` — the same edges ``x_of`` uses
+    for reads. Equal *index* chunks of ``profile[lo:hi]`` (old behaviour) drifted
+    off those edges and put density bars beside the mapping ticks.
+    """
     if n <= 0 or end <= start or profile.size == 0:
         return np.zeros(max(0, n), dtype=np.float32)
-    lo = max(0, start // bin_size)
-    hi = min(profile.size, max(lo + 1, -(-end // bin_size)))
-    if lo >= profile.size:
-        return np.zeros(n, dtype=np.float32)
-    return _max_per_point(profile[lo:hi], n)
+    span = float(end - start)
+    edges = float(start) + np.arange(n + 1, dtype=np.float64) * (span / n)
+    # Bin k covers [k·bin, (k+1)·bin). Use floor(g/bin) / ceil(g/bin), not
+    # floor(g)//bin — the latter skips the last overlapping bin and shifts density.
+    lo = np.floor(edges[:-1] / bin_size).astype(np.int64)
+    hi = np.ceil(edges[1:] / bin_size).astype(np.int64)
+    hi = np.maximum(hi, lo + 1)
+    lo = np.clip(lo, 0, profile.size)
+    hi = np.clip(hi, 0, profile.size)
+    out = np.zeros(n, dtype=np.float32)
+    # n is the pixel count (~view width); a Python loop keeps the per-slice max
+    # exact without reduceat edge-cases for empty spans.
+    for i in range(n):
+        a, b = int(lo[i]), int(hi[i])
+        if b > a:
+            out[i] = float(profile[a:b].max())
+    return out
 
 
 def items_coverage(items: Iterable[TrackItem], start: int, end: int, n: int) -> np.ndarray:

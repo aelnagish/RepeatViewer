@@ -474,6 +474,57 @@ class LightBrowserCanvas(QWidget):
     def bp_at(self, x: float) -> float:
         return self.start + x * self.bpp
 
+    def _view_coverage(self, track, chrom: str):
+        """Coverage for the visible pixels, edges matching ``bp_at`` / ``x_of``."""
+        w = max(1, self.width())
+        left = float(self.start)
+        right = left + float(self.bpp) * w
+        if right <= left:
+            return None, left, right, w
+        # ChromIndex profile: resample on the exact continuous window (not
+        # floor/ceil view_range), so density lines up with mapping ticks.
+        index = getattr(track, "index", None)
+        if callable(index):
+            ix = index(chrom)
+            if ix is not None and hasattr(ix, "coverage_profile"):
+                span = right - left
+                if span / w < gt.COV_BIN:
+                    a = max(0, int(math.floor(left)))
+                    b = min(self.length, max(a + 1, int(math.ceil(right))))
+                    return ix.window_coverage(a, b, w), left, right, w
+                return (
+                    gt.window_profile(ix.coverage_profile(), gt.COV_BIN, left, right, w),
+                    left,
+                    right,
+                    w,
+                )
+        a = max(0, int(math.floor(left)))
+        b = min(self.length, max(a + 1, int(math.ceil(right))))
+        return track.coverage(chrom, a, b, w), left, right, w
+
+    def _paint_coverage_bars(
+        self,
+        p: QPainter,
+        cov,
+        left: float,
+        right: float,
+        top: float,
+        height: float,
+        scale: float,
+    ) -> None:
+        """Draw coverage on the same X scale as reads (``x_of`` / ``bp_at``)."""
+        n = len(cov)
+        if n <= 0 or right <= left:
+            return
+        span = float(right - left)
+        for i, v in enumerate(cov):
+            if v <= 0:
+                continue
+            x0 = self.x_of(left + i * span / n)
+            x1 = self.x_of(left + (i + 1) * span / n)
+            hh = max(1.0, float(v) * scale)
+            p.drawRect(QRectF(x0, top + height - hh, max(1.0, x1 - x0), hh))
+
     def zoom(self, factor: float, x: float | None = None) -> None:
         """``factor`` > 1 zooms in, around pixel ``x`` (default: the middle)."""
         if x is None:
@@ -679,20 +730,18 @@ class LightBrowserCanvas(QWidget):
         t = self.track
         visible = t.reads_visible(a, b)
         n_items = t.count_in(self.chrom, a, b) if visible else 0
-        # coverage
-        cov = t.coverage(self.chrom, a, b, w)
+        # coverage — same start/bpp X mapping as reads
+        cov, left, right, _cov_w = self._view_coverage(t, self.chrom)
         cov_top = top + 2
         if cov is not None and len(cov):
             peak = float(np.max(cov)) if len(cov) else 0.0
             if peak > 0:
                 p.setPen(Qt.PenStyle.NoPen)
                 p.setBrush(QColor("#a9a9a9"))
-                xs = np.arange(len(cov), dtype=float)
                 scale = (COV_H - 12) / peak
-                for x, v in zip(xs, cov):
-                    if v > 0:
-                        hh = max(1.0, v * scale)
-                        p.drawRect(QRectF(x, cov_top + COV_H - hh, 1.0, hh))
+                self._paint_coverage_bars(
+                    p, cov, left, right, cov_top, COV_H, scale
+                )
             p.setPen(fg)
             p.drawText(QPointF(4, cov_top + 10), f"0–{int(round(peak)):,}")
         p.setPen(QPen(mid, 1))
@@ -801,16 +850,15 @@ class LightBrowserCanvas(QWidget):
         area_h = self._rows_area_h()
         n = t.count_in(self.chrom, a, b)
         if n > MAX_FEATURES_DRAWN:
-            cov = t.coverage(self.chrom, a, b, w)
+            cov, left, right, _cov_w = self._view_coverage(t, self.chrom)
             self._content_h = 0
             if cov is not None and len(cov) and float(np.max(cov)) > 0:
                 peak = float(np.max(cov))
                 p.setPen(Qt.PenStyle.NoPen)
                 p.setBrush(QColor(GENE_COLOR))
-                for x, v in enumerate(cov):
-                    if v > 0:
-                        hh = max(1.0, v / peak * 50)
-                        p.drawRect(QRectF(x, rows_top + 60 - hh, 1.0, hh))
+                self._paint_coverage_bars(
+                    p, cov, left, right, rows_top + 10, 50, 50.0 / peak
+                )
             self._note(p, rows_top + 80, f"{n:,} features here: zoom in to see them", fg)
             return
         placed = t.fetch(self.chrom, a, b)
@@ -968,12 +1016,9 @@ class LightBrowserCanvas(QWidget):
         else:
             if dx:
                 self.pan_px(dx)
-            if dy:
-                if self._content_h > self._rows_area_h():
-                    self.scroll_rows(-int(dy))
-                elif not dx:
-                    # nothing to scroll: a vertical wheel zooms, like most genome browsers
-                    self.zoom(1.0015 ** dy, event.position().x())
+            if dy and self._content_h > self._rows_area_h():
+                self.scroll_rows(-int(dy))
+            # Plain two-finger up/down must not zoom; use +/−, slider, pinch, or Cmd+scroll.
         event.accept()
 
     def event(self, event) -> bool:
@@ -1421,14 +1466,10 @@ class LightGenomeBrowserPanel(QWidget):
             chrom, a, b = keep_view
             self._go(chrom, a, b)
         elif res.order:
+            # Open at Fit (whole sequence) for alignments and annotations alike.
             chrom = next((n for n in res.order if n in res.first), res.order[0])
-            span = res.first.get(chrom)
-            if span is not None:
-                s, e = span
-                width = max(e - s, 20_000)
-                self._go(chrom, s, s + width)
-            else:
-                self._go(chrom, 0, res.lengths.get(chrom, 1))
+            length = res.lengths.get(chrom, 1)
+            self._go(chrom, 0, length)
         self._update_reference_ui()
 
     def _update_reference_ui(self) -> None:
@@ -1545,12 +1586,10 @@ class LightGenomeBrowserPanel(QWidget):
     def _on_chrom_chosen(self, chrom: str) -> None:
         if not chrom or self._result is None:
             return
-        span = self._result.first.get(chrom)
+        # Always Fit the whole scaffold; keep the previous zoom only hurts when
+        # jumping between chromosomes of very different lengths.
         length = self._result.lengths.get(chrom, 1)
-        if span is not None and _is_alignment(self.path):
-            self._go(chrom, span[0], span[0] + 20_000)
-        else:
-            self._go(chrom, 0, length)
+        self._go(chrom, 0, length)
 
     def _on_locus_entered(self, text: str) -> None:
         text = text.strip()
