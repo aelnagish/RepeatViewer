@@ -6581,7 +6581,7 @@ class MultiSequenceOverviewPanel(QWidget):
         rail.sequenceSortChanged.connect(self._on_sequence_sort_changed)
         rail.findRequested.connect(self._on_rail_find_requested)
         rail.panelCollapsedChanged.connect(self._on_rail_panel_collapsed_changed)
-        self._annotations_hidden = False  # toolbar "Feat" toggle
+        self._annotations_hidden = False  # toolbar "Ann" toggle
         self._find_items: list = []
         self._find_index: int = -1
         self._find_key: object | None = None
@@ -6932,14 +6932,14 @@ class MultiSequenceOverviewPanel(QWidget):
         self._save_overview_display_settings()
 
     def _on_show_annotation_track_changed(self, enabled: bool) -> None:
-        # Toolbar "Feat" off wins over the per-type checkboxes.
+        # Toolbar "Ann" off wins over the per-type checkboxes.
         self._bars.set_show_annotation_track(
             bool(enabled) and not self._annotations_hidden
         )
         self._sync_names_column()
 
     def _on_annotations_toggled(self, shown: bool) -> None:
-        """Toolbar "Feat": hide/show all feature tracks, keeping type picks."""
+        """Toolbar "Ann": hide/show all annotation tracks, keeping type picks."""
         self._annotations_hidden = not bool(shown)
         self._on_show_annotation_track_changed(
             self._rail.show_annotation_track.isChecked()
@@ -6948,7 +6948,7 @@ class MultiSequenceOverviewPanel(QWidget):
     def _reveal_features_on_canvas(
         self, kinds: list[str] | tuple[str, ...] | set[str] | None = None
     ) -> None:
-        """After detection / add / transfer: show features even if Feat or Display hid them."""
+        """After detection / add / transfer: show annotations even if Ann or Display hid them."""
         if kinds:
             self._rail.ensure_annotation_kinds_visible(kinds)
         self._annotations_hidden = False
@@ -7826,7 +7826,7 @@ class MultiSequenceOverviewPanel(QWidget):
         self._annotations_dirty = True
         reveal_kinds = tuple(self._ann_reveal_kinds)
         self._refresh_features_after_edit()
-        # Show predicted kinds even if Feat / Displayed annotations had them off.
+        # Show predicted kinds even if Ann / Displayed annotations had them off.
         self._reveal_features_on_canvas(reveal_kinds or None)
         skipped = list(getattr(result, "skipped_sequences", ()) or ())
         if skipped:

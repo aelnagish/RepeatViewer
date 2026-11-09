@@ -1553,11 +1553,8 @@ class LightBrowserCanvas(QWidget):
             ) + "</table>"
             QToolTip.showText(event.globalPosition().toPoint(), html, self)
         else:
-            bp = int(self.bp_at(event.position().x())) + 1
-            if 0 < bp <= self.length:
-                self.setToolTip("")
-                QToolTip.showText(event.globalPosition().toPoint(), f"{self.chrom}:{bp:,}",
-                                  self)
+            # No floating chrom:position tooltip while moving the mouse.
+            QToolTip.hideText()
 
     def leaveEvent(self, event) -> None:  # noqa: N802
         self._set_name_hover(None)

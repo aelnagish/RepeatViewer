@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
     QToolButton,
     QVBoxLayout,
     QWidget,
+    QWidgetAction,
 )
 
 from repeatviewer.widgets.combo_boxes import NoWheelComboBox as QComboBox
@@ -1288,7 +1289,7 @@ class SequenceAnnotationRail(QWidget):
         color_section.add_layout(color_form)
 
         self.color_multi_sequence_background = QCheckBox(
-            "Color nucleotide/protein background", color_section
+            "Color letter background", color_section
         )
         self.color_multi_sequence_background.setChecked(True)
         self.color_multi_sequence_background.setToolTip(
@@ -2432,15 +2433,47 @@ class SequenceAnnotationRail(QWidget):
         if not overflow:
             return
         menu = QMenu(self._annotation_kinds_more_btn)
+        # Real checkboxes so several types can be ticked/unticked without closing.
+        # Shift+click applies the clicked row's new state across the range from the
+        # last clicked row (standard list range multi-select).
+        rows: list[QCheckBox] = []
+        anchor: list[int | None] = [None]
+
+        def _bind_row_press(box: QCheckBox, index: int) -> None:
+            def _press(event) -> None:  # noqa: ANN001
+                if (
+                    event.button() == Qt.MouseButton.LeftButton
+                    and (event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+                    and anchor[0] is not None
+                ):
+                    target = not box.isChecked()
+                    lo, hi = sorted((anchor[0], index))
+                    for i in range(lo, hi + 1):
+                        rows[i].setChecked(target)
+                    event.accept()
+                    return
+                if event.button() == Qt.MouseButton.LeftButton:
+                    anchor[0] = index
+                QCheckBox.mousePressEvent(box, event)
+
+            box.mousePressEvent = _press  # type: ignore[method-assign]
+
         for key in overflow:
-            check = self.annotation_kind_checks.get(key)
-            if check is None:
+            source = self.annotation_kind_checks.get(key)
+            if source is None:
                 continue
             label = annotation_visibility_label(key)
-            action = menu.addAction(label)
-            action.setCheckable(True)
-            action.setChecked(check.isChecked())
-            action.toggled.connect(check.setChecked)
+            row = QCheckBox(label, menu)
+            row.setChecked(source.isChecked())
+            row.setStyleSheet(source.styleSheet())
+            tip = source.toolTip() or f"Show or hide “{label}” annotation tracks."
+            row.setToolTip(f"{tip}\nShift+click to tick or untick a range.")
+            row.toggled.connect(source.setChecked)
+            _bind_row_press(row, len(rows))
+            rows.append(row)
+            action = QWidgetAction(menu)
+            action.setDefaultWidget(row)
+            menu.addAction(action)
         menu.exec(
             self._annotation_kinds_more_btn.mapToGlobal(
                 QPoint(0, self._annotation_kinds_more_btn.height())

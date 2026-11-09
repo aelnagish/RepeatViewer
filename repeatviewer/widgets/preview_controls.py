@@ -872,7 +872,7 @@ class AnnotationZoomBar(QWidget):
     clean_requested = Signal()
     consensus_requested = Signal()
     coverage_requested = Signal()
-    # Overview toolbar "Feat": show/hide every feature track at once.
+    # Overview toolbar "Ann": show/hide every annotation track at once.
     annotations_toggled = Signal(bool)
     extract_requested = Signal()  # kept for callers; Extract is not on this bar
     filter_text_changed = Signal(str)
@@ -1032,7 +1032,7 @@ class AnnotationZoomBar(QWidget):
         # Cov is kept (signal + handler) but no longer offered in the toolbar.
         self._coverage_btn_offered = False
 
-        feat_btn = QPushButton("Feat", self._overview_host)
+        feat_btn = QPushButton("Ann", self._overview_host)
         feat_btn.setCheckable(True)
         feat_btn.setChecked(True)
         feat_btn.setFixedHeight(_OVERVIEW_SELECT_FIT_HEIGHT)
@@ -1040,7 +1040,7 @@ class AnnotationZoomBar(QWidget):
         feat_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         feat_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         feat_btn.setToolTip(
-            "Show or hide all feature tracks on the MSA. Which types are "
+            "Show or hide all annotation tracks on the MSA. Which types are "
             "ticked under Display → Displayed annotations is kept."
         )
         feat_btn.toggled.connect(self.annotations_toggled.emit)
