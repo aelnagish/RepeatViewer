@@ -33,6 +33,8 @@ def test_file_family_key_groups_align_and_ops() -> None:
     assert file_family_key("reads.fa_self_dot_2.paf") == "reads.fa"
     assert file_family_key("reads.fa_minimap.rvmap") == "reads.fa"
     assert file_family_key("reads.fa_minimap.paf") == "reads.fa"
+    assert file_family_key("reads.fa_minimap.paf.rv.json") == "reads.fa"
+    assert file_family_key("reads.fa_minimap.sam.rv.json") == "reads.fa"
     assert file_family_key("reads.fa_minimap_2.sam") == "reads.fa"
     assert file_family_key("reads.fa_hisat.sam") == "reads.fa"
     assert file_family_key("reads.fa_hmmer.txt") == "reads.fa"

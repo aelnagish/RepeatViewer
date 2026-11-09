@@ -1581,6 +1581,9 @@ class FilePreviewPage(QWidget):
             self._light_browser.setSizePolicy(
                 QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
             )
+            self._light_browser.openRequested.connect(self.openFileRequested.emit)
+            self._light_browser.fileWritten.connect(self.fileWritten.emit)
+            self._light_browser.blastRequested.connect(self.blastRequested.emit)
             self._stack.addWidget(self._light_browser)
         self._stack.setCurrentWidget(self._light_browser)
         self._light_browser.load(path)
@@ -2538,6 +2541,16 @@ class FilePreviewPage(QWidget):
             return
         self._set_single_fasta_mode(False)
         suffix = path.suffix.lower()
+        if path.name.lower().endswith(".rv.json"):
+            from repeatviewer.backends.map_reference import alignment_for_run_json
+
+            target = alignment_for_run_json(path)
+            if target is not None and _is_light_browser_path(target):
+                self._show_light_browser(target)
+                return
+            if target is not None and target.suffix.lower() == ".paf":
+                self._show_alignment_dotplot(target)
+                return
         if _is_light_browser_path(path):
             self._show_light_browser(path)
             return

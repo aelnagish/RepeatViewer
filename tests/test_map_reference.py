@@ -241,6 +241,32 @@ def test_load_map_options_migrates_mafft_to_auto(monkeypatch):
     assert opts.min_identity == 0.7
 
 
+def test_find_run_json_follows_bam_rename(tmp_path):
+    sam = tmp_path / "reads.fa_minimap.sam"
+    record = mr.run_json_path(sam)
+    record.write_text('{"format":"repeatviewer-map","contigs":[]}')
+    bam = tmp_path / "reads.fa_minimap.bam"
+    assert mr.find_run_json(bam) == record
+    assert mr.find_run_json(tmp_path / "reads.fa_minimap.cram") == record
+    assert mr.alignment_for_run_json(record) is None
+    sam.write_text("@HD\tVN:1.6\n")
+    assert mr.alignment_for_run_json(record) == sam
+
+
+def test_run_json_rename_follows_sam_to_bam(tmp_path):
+    sam = tmp_path / "reads.fa_minimap.sam"
+    sam.write_text("@HD\tVN:1.6\n")
+    record = mr.run_json_path(sam)
+    record.write_text("{}")
+    bam = tmp_path / "elsewhere" / "reads.fa_minimap.bam"
+    assert mr.is_run_json_file(record)
+    assert not mr.is_run_json_file(sam)
+    assert mr.alignment_run_json_companions(sam) == [record]
+    assert mr.alignment_run_json_companions(tmp_path / "reads.fa") == []
+    assert mr.alignment_run_json_renames(sam, bam) == [(record, mr.run_json_path(bam))]
+    assert mr.alignment_run_json_renames(sam, sam) == []
+
+
 def test_plan_outputs_keeps_full_name_and_never_overwrites(tmp_path):
     q = tmp_path / "variant2.fa"
     q.write_text(">a\nACGT\n")
@@ -430,7 +456,8 @@ def test_minimap2_satellite_end_to_end(tmp_path):
     if opts is None:
         pytest.skip("minimap2 not available")
     rvmap, files, report = mr.run_mapping([variants], opts)
-    assert rvmap.name == "variants.fa_minimap.rvmap" and rvmap.parent == tmp_path
+    assert rvmap.name == "variants.fa_minimap.paf.rv.json" and rvmap.parent == tmp_path
+    assert not (tmp_path / "variants.fa_minimap.rvmap").exists()
     paf = tmp_path / "variants.fa_minimap.paf"
     assert paf.is_file() and paf in files
     data = mr.load_rvmap(rvmap)
@@ -508,6 +535,8 @@ def test_read_mappers_end_to_end(tmp_path, engine):
     tag = "minimap" if engine == MAP_ENGINE_MINIMAP2 else "hisat"
     raw = tmp_path / f"reads.fq_{tag}.{'paf' if engine == MAP_ENGINE_MINIMAP2 else 'sam'}"
     assert raw.is_file() and raw in files
+    assert rvmap == mr.run_json_path(raw)
+    assert mr.find_run_json(raw.with_suffix(".bam") if raw.suffix == ".sam" else raw) == rvmap
 
 
 def test_reference_lengths_line_by_line_and_fai(tmp_path):

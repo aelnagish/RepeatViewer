@@ -16,12 +16,13 @@ like Geneious Prime's "Map to Reference", with additions for repeat work:
   written with the lifted annotations, so they open annotated in the viewer.
 
 Results follow the RepeatViewer naming rule (full input name, then a suffix):
-``<input>_minimap.rvmap`` / ``<input>_hisat.rvmap`` next to the input (opens in
-the contig view), the selected aligner output beside it
-(``…_minimap.paf`` / ``…_minimap.sam`` / ``…_hisat.sam``), and a matching
-``_details/`` folder with the report, consensus, mapped and unused sequences,
-and variant / feature / read tables. A second run becomes ``…_minimap_2…`` /
-``…_hisat_2…``; nothing is overwritten.
+the selected aligner output beside the input
+(``…_minimap.paf`` / ``…_minimap.sam`` / ``…_hisat.sam``), a full run record
+``<alignment>.rv.json`` used by the genome browser (it replaces ``.rvmap``),
+and a matching ``_details/`` folder with the report, consensus, mapped and
+unused sequences, and variant / feature / read tables. A second run becomes
+``…_minimap_2…`` / ``…_hisat_2…``; nothing is overwritten. Older ``.rvmap``
+files still open in the contig view.
 
 Pure functions (parsers, projection, consensus, variants, lift-over) have no Qt
 dependency and are tested in ``tests/test_map_reference.py``.
@@ -74,6 +75,7 @@ from repeatviewer.tool_output_paths import kept_input_name
 RVMAP_SUFFIX = ".rvmap"
 RVMAP_FORMAT = "repeatviewer-map"
 RVMAP_VERSION = 1
+RUN_JSON_SUFFIX = ".rv.json"          # ``reads.fa_minimap.sam`` → ``….sam.rv.json``
 RUN_STAMP_FORMAT = "%Y-%m-%d_%H%M"
 
 # Auto engine: HISAT2 for many short reads, otherwise minimap2.
@@ -1359,16 +1361,125 @@ class OutputLayout:
         return self.details / f"{self.base}{suffix}"
 
     def alignment(self, suffix: str) -> Path:
-        """Selected aligner format (``.paf`` / ``.sam``) next to the ``.rvmap``."""
+        """Selected aligner format (``.paf`` / ``.sam``) next to the run JSON."""
         ext = suffix if suffix.startswith(".") else f".{suffix}"
         return self.parent / f"{self.base}{ext}"
+
+
+def run_json_path(alignment: Path) -> Path:
+    """Run record beside an alignment: ``path.sam`` → ``path.sam.rv.json``."""
+    return Path(str(Path(alignment)) + RUN_JSON_SUFFIX)
+
+
+_RUN_JSON_TAILS = (
+    ".sam.gz.rv.json", ".sam.rv.json", ".bam.rv.json", ".cram.rv.json", ".paf.rv.json",
+)
+_ALIGNMENT_TAILS = (".sam.gz", ".cram", ".bam", ".sam", ".paf")
+
+
+def alignment_run_stem(path: Path) -> str:
+    """Filename without ``.sam`` / ``.bam`` / ``.cram`` / ``.paf`` / ``.sam.gz``."""
+    name = Path(path).name
+    lower = name.lower()
+    for tail in _ALIGNMENT_TAILS:
+        if lower.endswith(tail):
+            return name[: -len(tail)]
+    if lower.endswith(RUN_JSON_SUFFIX):
+        return alignment_run_stem(Path(name[: -len(RUN_JSON_SUFFIX)]))
+    return Path(path).stem
+
+
+def find_run_json(path: Path) -> Path | None:
+    """Run JSON for an alignment, including after SAM is saved as BAM or CRAM.
+
+    Looks in the same directory for ``{path}.rv.json``, then
+    ``{stem}.sam.rv.json``, ``.bam.rv.json``, ``.cram.rv.json``, ``.paf.rv.json``,
+    and ``.sam.gz.rv.json``.
+    """
+    path = Path(path)
+    parent = path.parent
+    stem = alignment_run_stem(path)
+    ordered = [Path(str(path) + RUN_JSON_SUFFIX)]
+    ordered.extend(parent / f"{stem}{tail}" for tail in _RUN_JSON_TAILS)
+    seen: set[str] = set()
+    for cand in ordered:
+        key = str(cand)
+        if key in seen:
+            continue
+        seen.add(key)
+        if cand.is_file():
+            return cand
+    return None
+
+
+def is_alignment_path(path: Path) -> bool:
+    """True for SAM / BAM / CRAM / PAF, including ``.sam.gz``."""
+    name = Path(path).name.lower()
+    return any(name.endswith(tail) for tail in _ALIGNMENT_TAILS)
+
+
+def is_run_json_file(path: Path) -> bool:
+    """True for a mapping run record (``*.rv.json``), hidden beside its alignment."""
+    return Path(path).name.lower().endswith(RUN_JSON_SUFFIX)
+
+
+def alignment_run_json_companions(path: Path) -> list[Path]:
+    """The run record that belongs with this alignment, if it is still on disk."""
+    path = Path(path)
+    if not is_alignment_path(path):
+        return []
+    found = find_run_json(path)
+    return [found] if found is not None else []
+
+
+def alignment_run_json_renames(old: Path, new: Path) -> list[tuple[Path, Path]]:
+    """Keep the run record named ``<new alignment>.rv.json``.
+
+    Renaming, moving, or saving SAM as BAM / CRAM moves the one record with the
+    alignment. A ``reads.sam.rv.json`` becomes ``reads.bam.rv.json``.
+    """
+    old, new = Path(old), Path(new)
+    if not is_alignment_path(old):
+        return []
+    found = find_run_json(old)
+    if found is None:
+        return []
+    dest = run_json_path(new)
+    try:
+        same = found.resolve() == dest.resolve()
+    except OSError:
+        same = found == dest
+    return [] if same else [(found, dest)]
+
+
+def alignment_for_run_json(path: Path) -> Path | None:
+    """Alignment file that a ``*.rv.json`` record belongs to, if it is still on disk."""
+    path = Path(path)
+    name = path.name
+    if not name.lower().endswith(RUN_JSON_SUFFIX):
+        return path if path.is_file() else None
+    stem = name[: -len(RUN_JSON_SUFFIX)]
+    direct = path.parent / stem
+    if direct.is_file():
+        return direct
+    base = alignment_run_stem(Path(stem))
+    for tail in _ALIGNMENT_TAILS:
+        cand = path.parent / f"{base}{tail}"
+        if cand.is_file():
+            return cand
+    return None
 
 
 def _base_outputs_exist(parent: Path, base: str) -> bool:
     """True when a previous run already claimed this base name."""
     if (parent / f"{base}{RVMAP_SUFFIX}").exists():
         return True
-    return any((parent / f"{base}{ext}").exists() for ext in (".paf", ".sam"))
+    for ext in (".paf", ".sam"):
+        if (parent / f"{base}{ext}").exists():
+            return True
+        if (parent / f"{base}{ext}{RUN_JSON_SUFFIX}").exists():
+            return True
+    return False
 
 
 def plan_outputs(inputs: list[Path], *, engine: str | None = None) -> OutputLayout:
@@ -1822,7 +1933,8 @@ def run_mapping(
 ) -> tuple[Path, list[Path], Path]:
     """Map ``queries`` to ``opts.reference_fasta``.
 
-    Returns (.rvmap file, created files, report HTML)."""
+    Returns (run record ``<alignment>.rv.json``, created files, report HTML).
+    ``.rvmap`` is not written."""
     say = progress or (lambda _m: None)
     queries = [Path(q).expanduser() for q in queries]
     ref_text = str(opts.reference_fasta or "").strip()
@@ -1896,9 +2008,9 @@ def run_mapping(
     from repeatviewer.backends.job_cancel import JobCancelledError
 
     def _cleanup() -> None:
-        layout.rvmap.unlink(missing_ok=True)
         for ext in (".paf", ".sam"):
             layout.alignment(ext).unlink(missing_ok=True)
+            run_json_path(layout.alignment(ext)).unlink(missing_ok=True)
         shutil.rmtree(layout.details, ignore_errors=True)
 
     try:
@@ -2496,9 +2608,11 @@ def _write_outputs(run: MapRun, layout: OutputLayout, info: InputInfo, created: 
 
     report = layout.path("_report.html")
     details["report"] = report.name
-    rvmap = layout.rvmap
+    # Full run record next to the aligner file. The genome browser reads it.
+    # ``.rvmap`` is no longer written; older files still open in the contig view.
+    result = run_json_path(raw) if raw is not None else layout.parent / f"{layout.base}.rv.json"
     title = f"{output_base_name(run.queries)} mapped to {run.reference.name}"
-    report.write_text(report_html(run, [rvmap, *created, report], title), encoding="utf-8")
+    report.write_text(report_html(run, [result, *created, report], title), encoding="utf-8")
     created.append(report)
 
     payload = {
@@ -2518,6 +2632,7 @@ def _write_outputs(run: MapRun, layout: OutputLayout, info: InputInfo, created: 
                     "mean_identity": round(statistics.mean([r.identity for r in run.records]), 4)
                     if run.records else None},
         "warnings": run.warnings,
+        "alignment": raw.name if raw is not None else "",
         "details_dir": layout.details.name,
         "details": details,
         "unused": [[n, r] for n, r in list(run.unused.items())[:10_000]],
@@ -2546,8 +2661,8 @@ def _write_outputs(run: MapRun, layout: OutputLayout, info: InputInfo, created: 
             "reads": [_read_json(r, lf, pl, with_marks=not c.detailed) for r, lf, pl in shown],
         }
         payload["contigs"].append(entry)
-    rvmap.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
-    return rvmap, [rvmap, *created], report
+    result.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
+    return result, [result, *created], report
 
 
 # --------------------------------------------------------------------------

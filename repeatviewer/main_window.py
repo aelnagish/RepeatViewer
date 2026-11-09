@@ -5187,9 +5187,9 @@ class MainWindow(
         rvmap = Path(result["rvmap"])
         created = [Path(p) for p in result["files"] if Path(p).is_file()]
         if self._current_folder:
-            # The .rvmap and selected aligner format (.paf / .sam) sit next to the
-            # input (green); the .rvmap opens in the contig view (deep blue).
-            # Report / tables / FASTA live in <stem>_details.
+            # The aligner file (.paf / .sam) sits next to the input. Its run
+            # record (<alignment>.rv.json) stays hidden beside it. Report /
+            # tables / FASTA live in <stem>_details.
             self._refresh_subfolders_under(self._current_folder)
             self._populate_file_list(
                 self._current_folder,
@@ -5197,19 +5197,23 @@ class MainWindow(
                 source_files=getattr(self, "_last_job_source_files", []),
                 open_preview=False,
             )
-        if rvmap.is_file():
-            self._auto_open_outputs([rvmap])
         alignment = next(
             (
                 p
                 for p in created
-                if p.parent == rvmap.parent and p.suffix.lower() in {".paf", ".sam"}
+                if p.parent == rvmap.parent and p.suffix.lower() in {".sam", ".paf"}
             ),
             None,
         )
-        extra = f" + {alignment.name}" if alignment is not None else ""
+        # Open the alignment in the genome browser (SAM) or dotplot (PAF).
+        # The run JSON is loaded beside that view; it is not a separate contig document.
+        if alignment is not None and alignment.is_file():
+            self._auto_open_outputs([alignment])
+        elif rvmap.is_file() and not rvmap.name.lower().endswith(".rv.json"):
+            self._auto_open_outputs([rvmap])
+        shown = alignment.name if alignment is not None else rvmap.name
         self._set_status_message(
-            f"Mapping completed — {rvmap.name}{extra} (report in {rvmap.stem}_details)",
+            f"Mapping completed — {shown}",
             12000, override_file_link=True,
         )
 
@@ -8553,10 +8557,13 @@ class MainWindow(
 
     def _is_hidden_browser_file(self, path: Path) -> bool:
         """True for files that must stay out of the Files panel (incl. job outputs)."""
+        from repeatviewer.backends.map_reference import is_run_json_file
+
         return (
             is_repeatviewer_hits_cache_file(path)
             or is_sequence_map_hidden_file(path)
             or is_flexidot_extra_plot_file(path)
+            or is_run_json_file(path)
             or self._is_blast_index_sidecar(path)
         )
 
@@ -13993,6 +14000,7 @@ class MainWindow(
             self._file_list.refresh_cyto_images()
 
     def _rename_file(self, path: Path) -> None:
+        from repeatviewer.backends.map_reference import alignment_run_json_renames
         from repeatviewer.backends.sequence_features import (
             companion_annotation_renames_for_fasta,
         )
@@ -14017,15 +14025,16 @@ class MainWindow(
         companion_renames: list[tuple[Path, Path]] = []
         if path.suffix.lower() in _FASTA_SUFFIXES:
             companion_renames = companion_annotation_renames_for_fasta(path, target)
-            blocked = [dst for _src, dst in companion_renames if dst.exists()]
-            if blocked:
-                QMessageBox.warning(
-                    self,
-                    "Rename failed",
-                    "Cannot rename paired annotation file(s); already exists:\n"
-                    + "\n".join(str(path) for path in blocked[:6]),
-                )
-                return
+        companion_renames.extend(alignment_run_json_renames(path, target))
+        blocked = [dst for _src, dst in companion_renames if dst.exists()]
+        if blocked:
+            QMessageBox.warning(
+                self,
+                "Rename failed",
+                "Cannot rename the paired file(s); already exists:\n"
+                + "\n".join(str(item) for item in blocked[:6]),
+            )
+            return
 
         try:
             path.rename(target)
@@ -14065,9 +14074,13 @@ class MainWindow(
             open_preview=True,
         )
         if companion_renames:
-            extras = ", ".join(dst.name for _src, dst in companion_renames)
+            from repeatviewer.backends.map_reference import is_run_json_file
+
+            extras = ", ".join(
+                dst.name for _src, dst in companion_renames if not is_run_json_file(dst)
+            )
             self._set_status_message(
-                f"Renamed to {target.name} (also {extras})",
+                f"Renamed to {target.name}" + (f" (also {extras})" if extras else ""),
                 6000,
             )
         else:
@@ -14635,6 +14648,17 @@ class MainWindow(
                     created.append(comp_dest)
                 except OSError as exc:
                     failed.append(f"{comp.name}: {exc}")
+            from repeatviewer.backends.map_reference import alignment_run_json_renames
+
+            for comp, comp_dest in alignment_run_json_renames(src, dest):
+                if comp_dest.exists():
+                    continue
+                try:
+                    comp_dest.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(comp, comp_dest)
+                    created.append(comp_dest)
+                except OSError as exc:
+                    failed.append(f"{comp.name}: {exc}")
 
         if created:
             self._push_browser_undo(
@@ -14909,7 +14933,9 @@ class MainWindow(
             return None
 
     def _expand_paths_for_delete(self, paths: list[Path]) -> list[Path]:
-        """Include paired JSON annotation sidecars with a FASTA."""
+        """Include paired JSON sidecars: annotations with a FASTA, run record with an alignment."""
+        from repeatviewer.backends.map_reference import alignment_run_json_companions
+
         expanded: list[Path] = []
         seen: set[str] = set()
         for path in paths:
@@ -14917,7 +14943,11 @@ class MainWindow(
                 resolved = path.expanduser().resolve()
             except OSError:
                 continue
-            candidates = [resolved, *companion_annotation_files_for_delete(resolved)]
+            candidates = [
+                resolved,
+                *companion_annotation_files_for_delete(resolved),
+                *alignment_run_json_companions(resolved),
+            ]
             for candidate in candidates:
                 key = str(candidate)
                 if key in seen:
@@ -15487,7 +15517,10 @@ class MainWindow(
             if not dest.parent.is_dir():
                 problems.append(f"{dest.parent.name}: folder no longer there")
                 continue
+            from repeatviewer.backends.map_reference import alignment_run_json_renames
+
             companions = companion_annotation_paths_for_fasta(src)
+            run_pairs = alignment_run_json_renames(src, dest)
             try:
                 if dest.exists():
                     if str(dest) not in overwrite:
@@ -15501,6 +15534,17 @@ class MainWindow(
                 continue
             for comp in companions:
                 comp_dest = sidecar_path(dest)
+                if comp_dest == comp:
+                    continue
+                try:
+                    if comp_dest.exists():
+                        if str(comp_dest) not in overwrite:
+                            continue
+                        set_aside(comp_dest)
+                    place(comp, comp_dest)
+                except OSError as exc:
+                    problems.append(f"{comp.name}: {exc}")
+            for comp, comp_dest in run_pairs:
                 if comp_dest == comp:
                     continue
                 try:
@@ -15777,13 +15821,14 @@ class MainWindow(
         paths = self._expand_paths_for_delete(paths)
         if not paths:
             return
-        names = "\n".join(p.name for p in paths[:10])
-        if len(paths) > 10:
-            names += f"\n… and {len(paths) - 10} more"
+        listed = [p for p in paths if not self._is_hidden_browser_file(p)] or paths
+        names = "\n".join(p.name for p in listed[:10])
+        if len(listed) > 10:
+            names += f"\n… and {len(listed) - 10} more"
         answer = QMessageBox.question(
             self,
             "Delete files",
-            f"Delete {len(paths)} file(s)?\n\n{names}\n\n"
+            f"Delete {len(listed)} file(s)?\n\n{names}\n\n"
             "Press ⌘Z / Ctrl+Z afterward to restore.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
@@ -16060,7 +16105,10 @@ class MainWindow(
             src = raw.expanduser().resolve()
             if not src.is_file():
                 continue
-            # Move/copy annotation companions with the FASTA.
+            # Move/copy annotation companions with the FASTA, and the mapping
+            # run record with its SAM / BAM / CRAM / PAF.
+            from repeatviewer.backends.map_reference import alignment_run_json_renames
+
             companion_srcs = companion_annotation_paths_for_fasta(src)
             dest = self._resolve_transfer_destination(src, target_dir, mode=mode)
             if dest is None:
@@ -16083,6 +16131,7 @@ class MainWindow(
                 undo_files.append((src, dest))
                 created.append(dest)
                 sources.append(src)
+                run_pairs = alignment_run_json_renames(src, dest)
                 for comp in companion_srcs:
                     # Keep canonical JSON sidecar name beside the new FASTA.
                     comp_dest = sidecar_path(dest)
@@ -16095,6 +16144,23 @@ class MainWindow(
                         else:
                             if comp_dest.exists():
                                 set_aside(comp_dest)
+                            shutil.copy2(comp, comp_dest)
+                            undo_created.append((comp_dest, path_fingerprint(comp_dest)))
+                        created.append(comp_dest)
+                    except OSError as exc:
+                        failed.append(f"{comp.name}: {exc}")
+                for comp, comp_dest in run_pairs:
+                    try:
+                        if mode == "cut":
+                            if comp_dest.exists() and comp_dest != comp:
+                                set_aside(comp_dest)
+                            comp_dest.parent.mkdir(parents=True, exist_ok=True)
+                            shutil.move(comp, comp_dest)
+                            undo_moved.append((comp, comp_dest))
+                        else:
+                            if comp_dest.exists():
+                                set_aside(comp_dest)
+                            comp_dest.parent.mkdir(parents=True, exist_ok=True)
                             shutil.copy2(comp, comp_dest)
                             undo_created.append((comp_dest, path_fingerprint(comp_dest)))
                         created.append(comp_dest)
