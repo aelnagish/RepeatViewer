@@ -6589,7 +6589,7 @@ class TsdSearchParamsDialog(QDialog):
         self._saved_right = max(0, int(opts.right_boundary))
 
         self._boundary_source = QComboBox()
-        self._boundary_source.addItem("RepeatViewer", TSD_BOUNDARY_REPEATVIEWER)
+        self._boundary_source.addItem("Auto detect", TSD_BOUNDARY_REPEATVIEWER)
         self._boundary_source.addItem("User define", TSD_BOUNDARY_USER)
         source = (
             opts.boundary_source
@@ -6598,9 +6598,11 @@ class TsdSearchParamsDialog(QDialog):
         )
         idx = self._boundary_source.findData(source)
         self._boundary_source.setCurrentIndex(max(0, idx))
+        from repeatviewer.backends.tsd_search import TSD_BOUNDARY_DEFINITION_HELP
+        from repeatviewer.widgets.help_button import help_tooltip_text
+
         self._boundary_source.setToolTip(
-            "RepeatViewer: *.boundaries_RV.json. "
-            "User define: popup at run time to drag the MSA."
+            help_tooltip_text(TSD_BOUNDARY_DEFINITION_HELP)
         )
 
         self._radius = QSpinBox()
@@ -6842,8 +6844,9 @@ def _auto_resolve_tsd_boundaries(
     aln_len: int,
     reference_extent_1based: tuple[int, int] | None = None,
     reference_sequence: str | None = None,
+    prediction=None,
 ) -> TsdSearchOptions:
-    """Fill left/right from RepeatViewer / reference without a dialog."""
+    """Fill left/right from Auto detect / reference without a dialog."""
     from dataclasses import replace
 
     from repeatviewer.backends.tsd_search import (
@@ -6860,6 +6863,7 @@ def _auto_resolve_tsd_boundaries(
         saved_right=opts.right_boundary,
         reference_extent_1based=reference_extent_1based,
         reference_sequence=reference_sequence,
+        prediction=prediction,
     )
     if left <= 0 and right <= 0:
         rv = boundaries_from_sidecar_1based(file_path, aln_len)
@@ -6877,10 +6881,12 @@ def prompt_tsd_boundaries(
     reference_extent_1based: tuple[int, int] | None = None,
     reference_sequence: str | None = None,
     on_dialog_ready=None,
+    prediction=None,
 ) -> TsdSearchOptions | None:
     """Resolve TE edges for a TSD run.
 
-    RepeatViewer / Reference: resolve silently.
+    Auto detect / Reference: resolve silently (``prediction`` is the open
+    MSA's Boundary prediction, used before ``*.boundaries_RV.json``).
     User define: show a non-modal dialog (MSA drag fills Start/End). Cancel →
     ``None``. Prefills from ``*.boundaries_RV.json`` when available.
     """
@@ -6895,11 +6901,16 @@ def prompt_tsd_boundaries(
             aln_len=aln_len,
             reference_extent_1based=reference_extent_1based,
             reference_sequence=reference_sequence,
+            prediction=prediction,
         )
 
     aln_len = max(1, int(aln_len))
     left, right = 0, 0
-    rv = boundaries_from_sidecar_1based(file_path, aln_len)
+    from repeatviewer.backends.tsd_search import boundaries_from_prediction_1based
+
+    rv = boundaries_from_prediction_1based(prediction) or boundaries_from_sidecar_1based(
+        file_path, aln_len
+    )
     if rv is not None:
         left, right = rv
     elif opts.left_boundary > 0 or opts.right_boundary > 0:
@@ -10782,14 +10793,14 @@ class TeAnnotationDialog(QDialog):
         self._sync_auto_all_check()
 
     def _sync_auto_all_check(self) -> None:
-        # "All" covers LTR/TIR/Tandem/ORF; TSD (MSA-only) and PBS (needs LTR +
-        # BLAST) stay independent and off by default.
+        # "All" covers every shown detector, TSD and PBS included (they still
+        # start unticked by default).
         from repeatviewer.backends.auto_annotation import AutoAnnotationMode
 
         checks = [
             check
-            for mode, check in self._auto_ann_checks.items()
-            if mode not in {AutoAnnotationMode.TSD, AutoAnnotationMode.PBS}
+            for _mode, check in self._auto_ann_checks.items()
+            if not check.isHidden()
         ]
         if not checks:
             return
@@ -10805,8 +10816,8 @@ class TeAnnotationDialog(QDialog):
 
         self._auto_all_updating = True
         for mode, check in self._auto_ann_checks.items():
-            if mode in {AutoAnnotationMode.TSD, AutoAnnotationMode.PBS}:
-                continue
+            if check.isHidden():
+                continue  # e.g. TSD on a single sequence
             check.setChecked(checked)
         self._auto_all_updating = False
 

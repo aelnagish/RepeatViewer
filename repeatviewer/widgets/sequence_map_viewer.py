@@ -7334,7 +7334,7 @@ class TsdSearchSettingsPanel(QWidget):
             return spin
 
         self._boundary_source = NoWheelComboBox(self)
-        self._boundary_source.addItem("RepeatViewer", TSD_BOUNDARY_REPEATVIEWER)
+        self._boundary_source.addItem("Auto detect", TSD_BOUNDARY_REPEATVIEWER)
         if self._allow_user_boundary:
             self._boundary_source.addItem("User define", TSD_BOUNDARY_USER)
         source = (
@@ -7347,14 +7347,11 @@ class TsdSearchSettingsPanel(QWidget):
         idx = self._boundary_source.findData(source)
         self._boundary_source.setCurrentIndex(max(0, idx))
         self._boundary_source.setFixedWidth(max(_SETTINGS_FIELD_WIDTH, 160))
-        help_boundary = (
-            "RepeatViewer: *.boundaries_RV.json."
-            if not self._allow_user_boundary
-            else (
-                "RepeatViewer: *.boundaries_RV.json. "
-                "User define: popup at run time to drag the MSA."
-            )
-        )
+        from repeatviewer.backends.tsd_search import TSD_BOUNDARY_DEFINITION_HELP
+
+        help_boundary = TSD_BOUNDARY_DEFINITION_HELP
+        if not self._allow_user_boundary:
+            help_boundary = help_boundary.split("<br><br><b>User define</b>")[0]
         form.addRow(
             _label("Boundary definition:"),
             field_with_help(
@@ -8414,12 +8411,12 @@ class SequenceMapPanel(QWidget):
         self._sync_auto_annotation_all_check()
 
     def _sync_auto_annotation_all_check(self) -> None:
-        # "All" covers LTR/TIR/Tandem/ORF; TSD (MSA-only) and PBS (needs LTR +
-        # BLAST) stay independent and off by default.
+        # "All" covers every shown detector, TSD and PBS included (they still
+        # start unticked by default).
         checks = [
             check
-            for mode, check in self._auto_ann_checks.items()
-            if mode not in {AutoAnnotationMode.TSD, AutoAnnotationMode.PBS}
+            for _mode, check in self._auto_ann_checks.items()
+            if not check.isHidden()
         ]
         if not checks:
             return
@@ -8433,8 +8430,8 @@ class SequenceMapPanel(QWidget):
             return
         self._auto_all_updating = True
         for mode, check in self._auto_ann_checks.items():
-            if mode in {AutoAnnotationMode.TSD, AutoAnnotationMode.PBS}:
-                continue
+            if check.isHidden():
+                continue  # e.g. TSD on a single sequence
             check.setChecked(checked)
         self._auto_all_updating = False
 

@@ -252,7 +252,7 @@ DEFAULT_TSD_CLUSTER_EPS = 1.0
 DEFAULT_TSD_WRITE_TEXT_REPORT = False
 
 # How left/right TE edges are chosen for a TSD run.
-TSD_BOUNDARY_REPEATVIEWER = "repeatviewer"  # *.boundaries_RV.json
+TSD_BOUNDARY_REPEATVIEWER = "repeatviewer"  # "Auto detect": Boundary prediction
 TSD_BOUNDARY_REFERENCE = "reference"  # legacy (migrated to RepeatViewer)
 TSD_BOUNDARY_USER = "user"  # run-time dialog + MSA drag
 DEFAULT_TSD_BOUNDARY_SOURCE = TSD_BOUNDARY_REPEATVIEWER

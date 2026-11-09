@@ -871,6 +871,8 @@ class AnnotationZoomBar(QWidget):
     clean_requested = Signal()
     consensus_requested = Signal()
     coverage_requested = Signal()
+    # Overview toolbar "Ann": show/hide every annotation track at once.
+    annotations_toggled = Signal(bool)
     extract_requested = Signal()  # kept for callers; Extract is not on this bar
     filter_text_changed = Signal(str)
     filter_return_pressed = Signal()
@@ -912,14 +914,18 @@ class AnnotationZoomBar(QWidget):
         ov.setSpacing(6)
         ov.setAlignment(Qt.AlignmentFlag.AlignVCenter)
 
-        # Finer than the old ±8 so MSA / multi-seq −/+ are easier to fine-tune
-        # (slider range is 0–100).
+        # ±6 of the 0–100 slider per click (~1.4× on a typical MSA); hold the
+        # button to keep zooming.
         zoom_out = _make_overview_zoom_button("−", self._overview_host)
-        zoom_out.setToolTip("Zoom out (Shift+scroll)")
-        zoom_out.clicked.connect(lambda: self._nudge_zoom_slider(-3))
+        zoom_out.setToolTip("Zoom out (hold to repeat; pinch or Shift+scroll)")
+        zoom_out.clicked.connect(lambda: self._nudge_zoom_slider(-6))
         zoom_in = _make_overview_zoom_button("+", self._overview_host)
-        zoom_in.setToolTip("Zoom in (Shift+scroll)")
-        zoom_in.clicked.connect(lambda: self._nudge_zoom_slider(3))
+        zoom_in.setToolTip("Zoom in (hold to repeat; pinch or Shift+scroll)")
+        zoom_in.clicked.connect(lambda: self._nudge_zoom_slider(6))
+        for _btn in (zoom_out, zoom_in):
+            _btn.setAutoRepeat(True)
+            _btn.setAutoRepeatDelay(300)
+            _btn.setAutoRepeatInterval(60)
 
         self._zoom_slider = NoWheelSlider(Qt.Orientation.Horizontal, self._overview_host)
         self._zoom_slider.setObjectName("annotationZoomSlider")
@@ -1022,6 +1028,22 @@ class AnnotationZoomBar(QWidget):
         )
         coverage_btn.clicked.connect(self.coverage_requested.emit)
         self._coverage_btn = coverage_btn
+        # Cov is kept (signal + handler) but no longer offered in the toolbar.
+        self._coverage_btn_offered = False
+
+        ann_btn = QPushButton("Ann", self._overview_host)
+        ann_btn.setCheckable(True)
+        ann_btn.setChecked(True)
+        ann_btn.setFixedHeight(_OVERVIEW_SELECT_FIT_HEIGHT)
+        style_compact_button(ann_btn)
+        ann_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        ann_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        ann_btn.setToolTip(
+            "Show or hide all annotation tracks at once. Which annotation "
+            "types are ticked under Displayed annotations is kept."
+        )
+        ann_btn.toggled.connect(self.annotations_toggled.emit)
+        self._annotations_btn = ann_btn
 
         # Hidden: overview name jump still available via bind API / Find.
         self._name_filter = QLineEdit(self._overview_host)
@@ -1053,6 +1075,7 @@ class AnnotationZoomBar(QWidget):
             clean_btn,
             consensus_btn,
             coverage_btn,
+            ann_btn,
         ):
             ov.addWidget(w, 0, Qt.AlignmentFlag.AlignVCenter)
         # Left-pack controls; sequence count sits on the right after stretch.
@@ -1084,6 +1107,7 @@ class AnnotationZoomBar(QWidget):
                 [clean_btn],
                 [consensus_btn],
                 [coverage_btn],
+                [ann_btn],
                 [self._sequence_count_label],
             ],
             spacing=6,
@@ -1096,6 +1120,7 @@ class AnnotationZoomBar(QWidget):
         self._overview_overflow.set_unit_allowed_by_widget(clean_btn, False)
         self._overview_overflow.set_unit_allowed_by_widget(consensus_btn, False)
         self._overview_overflow.set_unit_allowed_by_widget(coverage_btn, False)
+        self._overview_overflow.set_unit_allowed_by_widget(ann_btn, False)
         layout.addWidget(self._overview_host, 1)
 
         self._actions_btn = _make_preview_actions_button(
@@ -1183,11 +1208,24 @@ class AnnotationZoomBar(QWidget):
         if hider is not None:
             hider.set_unit_allowed_by_widget(self._clean_btn, visible)
             hider.set_unit_allowed_by_widget(self._consensus_btn, visible)
-            hider.set_unit_allowed_by_widget(self._coverage_btn, visible)
+            hider.set_unit_allowed_by_widget(
+                self._coverage_btn, visible and self._coverage_btn_offered
+            )
+            hider.set_unit_allowed_by_widget(
+                self._annotations_btn, self._overview_mode
+            )
         else:
             self._clean_btn.setVisible(visible)
             self._consensus_btn.setVisible(visible)
-            self._coverage_btn.setVisible(visible)
+            self._coverage_btn.setVisible(visible and self._coverage_btn_offered)
+            self._annotations_btn.setVisible(self._overview_mode)
+
+    def set_annotations_shown(self, shown: bool) -> None:
+        """Reflect the bound panel's show-all-annotations state (no signal)."""
+        btn = self._annotations_btn
+        btn.blockSignals(True)
+        btn.setChecked(bool(shown))
+        btn.blockSignals(False)
 
     def set_sequence_count(self, count: int) -> None:
         """Show total sequences on the right (same row as Cons)."""

@@ -101,3 +101,28 @@ def test_load_boundary_prediction_json(tmp_path):
     assert loaded.evaluation == "Good"
     assert loaded.full_length_hits == 4
     assert bp.load_boundary_prediction_json(fasta, msa_width=99) is None
+
+
+def test_te_type_from_file_name():
+    assert bp.te_type_from_name("AmaS_IIc_Beta#Class_I__SINE.raw.fa") == "SINE"
+    assert bp.te_type_from_name("/x/rnd_1#LINE__L1.raw.fa") == "LINE"
+    assert bp.te_type_from_name("Bianca#Ty1_copia__Bianca.raw.fa") == "Other"
+
+
+def test_tsd_auto_detect_priority_ltr_tir_then_cov_then_identity():
+    from repeatviewer.backends.tsd_search import (
+        auto_tsd_span,
+        boundaries_from_prediction_1based,
+    )
+
+    pred = bp.BoundaryPrediction(
+        msa_identity=(10, 90), blast_coverage=(12, 88), terminal_repeat=(5, 95)
+    )
+    assert auto_tsd_span(pred) == (5, 95)
+    pred.terminal_repeat = None
+    assert auto_tsd_span(pred) == (12, 88)
+    pred.blast_coverage = None
+    assert boundaries_from_prediction_1based(pred) == (11, 90)
+    pred.msa_identity = None
+    assert auto_tsd_span(pred) is None
+    assert auto_tsd_span(None) is None

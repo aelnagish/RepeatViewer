@@ -13238,6 +13238,7 @@ class MainWindow(
             reference_extent_1based=ref_extent,
             reference_sequence=ref_seq,
             on_dialog_ready=_wire,
+            prediction=getattr(overview, "_boundary_result", None),
         )
 
     def _overview_panel_for_path(self, path: Path):

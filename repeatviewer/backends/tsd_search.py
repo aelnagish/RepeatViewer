@@ -298,17 +298,60 @@ def resolve_tsd_boundaries(
     return l, r
 
 
+TSD_BOUNDARY_DEFINITION_HELP = (
+    "Sets the TE left and right edges; TSDs are searched within the search "
+    "range (± columns) outside each edge.<br><br>"
+    "<b>Auto detect</b><br>Uses Boundary prediction (Annotation tab). The "
+    "first available boundary is used, in this order:<br>"
+    "1. LTR or TIR<br>"
+    "2. Genome Cov<br>"
+    "3. MSA identity<br>"
+    "Results already shown in Boundary prediction (or saved by TEtrimmer as "
+    "*.boundaries_RV.json) are reused. In an open MSA without them, Boundary "
+    "prediction runs first, then the TSD search starts. If no boundary is "
+    "found, the TSD search splits the MSA at its middle column.<br><br>"
+    "<b>User define</b><br>A window opens at run time; type the left and right "
+    "columns or drag across the MSA to fill them."
+)
+
+
+def auto_tsd_span(prediction) -> tuple[int, int] | None:
+    """Auto detect edge span (0-based, exclusive end): LTR/TIR, Genome Cov, MSA identity.
+
+    A TEtrimmer sidecar that only stores ``final`` falls back to it.
+    """
+    if prediction is None:
+        return None
+    for span in (
+        prediction.terminal_repeat,
+        prediction.blast_coverage,
+        prediction.msa_identity,
+        prediction.final,
+    ):
+        if span is not None and int(span[1]) > int(span[0]):
+            return int(span[0]), int(span[1])
+    return None
+
+
+def boundaries_from_prediction_1based(prediction) -> tuple[int, int] | None:
+    """Auto detect edges as 1-based inclusive columns."""
+    span = auto_tsd_span(prediction)
+    if span is None:
+        return None
+    return span[0] + 1, span[1]  # exclusive end → 1-based last inclusive
+
+
 def boundaries_from_sidecar_1based(
     file_path: str | Path,
     aln_len: int,
 ) -> tuple[int, int] | None:
-    """TE edges from ``*.boundaries_RV.json`` as 1-based inclusive columns."""
+    """Auto detect edges from ``*.boundaries_RV.json`` (1-based inclusive)."""
     from repeatviewer.backends.boundary_predict import load_boundary_prediction_json
 
     prediction = load_boundary_prediction_json(file_path, msa_width=aln_len)
     if prediction is None:
         return None
-    span = prediction.final or prediction.terminal_repeat or prediction.msa_identity
+    span = auto_tsd_span(prediction)
     if span is None:
         return None
     start_0, end_excl = int(span[0]), int(span[1])
@@ -345,8 +388,12 @@ def preferred_tsd_boundaries_1based(
     saved_right: int = 0,
     reference_extent_1based: tuple[int, int] | None = None,
     reference_sequence: str | None = None,
+    prediction=None,
 ) -> tuple[int, int]:
     """Prefill left/right (1-based) for the run-time TSD boundary dialog.
+
+    Auto detect uses ``prediction`` (Boundary prediction in the open MSA)
+    first, then ``*.boundaries_RV.json``.
 
     ``boundary_source`` is one of ``repeatviewer`` / ``reference`` / ``user``.
     Falls back to saved values, then ``0, 0`` (whole-MSA midpoint search).
@@ -373,10 +420,13 @@ def preferred_tsd_boundaries_1based(
                 return extent
         return saved
 
-    # Default / RepeatViewer: *.boundaries_RV.json
+    # Default / Auto detect: Boundary prediction, then *.boundaries_RV.json
     if source != TSD_BOUNDARY_REPEATVIEWER:
         source = TSD_BOUNDARY_REPEATVIEWER
     del source
+    auto = boundaries_from_prediction_1based(prediction)
+    if auto is not None:
+        return auto
     rv = boundaries_from_sidecar_1based(file_path, aln_len)
     if rv is not None:
         return rv

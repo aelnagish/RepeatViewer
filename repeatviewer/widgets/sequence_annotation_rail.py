@@ -45,6 +45,15 @@ from repeatviewer.backends.sequence_features import (
     collect_annotation_visibility_keys,
 )
 
+# Boundary prediction rows: (key, label, guide color).
+BOUNDARY_ROWS: tuple[tuple[str, str, str], ...] = (
+    ("ltr", "LTR", "#ff7f0e"),
+    ("tir", "TIR", "#8c564b"),
+    ("msa_identity", "MSA identity", "#1f77b4"),
+    ("coverage", "Genome Cov", "#2ca02c"),
+    ("poly_a", "PolyA", "#9467bd"),
+)
+
 # Checkbox label → feature-type key used by the annotation colors panel.
 _FEATURE_DETECT_TYPE_BY_LABEL: dict[str, str] = {
     "LTR": "LTR",
@@ -54,7 +63,6 @@ _FEATURE_DETECT_TYPE_BY_LABEL: dict[str, str] = {
     "TSD": "TSD",
     "PBS": "PBS",
 }
-from repeatviewer.backends.boundary_predict import TE_TYPE_CHOICES
 from repeatviewer.backends.genetic_codes import (
     genetic_code_choices,
     normalize_genetic_code_id,
@@ -87,6 +95,28 @@ _READING_FRAMES_HELP = (
     "(offset by 0, 1, or 2 bases).<br><br>"
     "<b>Reverse 1 / 2 / 3</b> — reverse reading frames on the complementary strand "
     "(reverse-complement translation)."
+)
+_BOUNDARY_PREDICTION_HELP = (
+    "Ported from TEtrimmer. The MSA is first cleaned with TEtrimmer's column "
+    "rules (rare nucleotides below 1% become gaps, then gappy or poorly "
+    "conserved columns are removed). Boundaries are found on the cleaned MSA "
+    "and shown as MSA columns.<br><br>"
+    "<b>LTR / TIR</b><br>Self-BLAST of the 0.7 consensus (after end cropping). "
+    "Direct repeats of 100 bp or more at both ends give an LTR; inverted "
+    "repeats of 20 bp or more give a TIR. The span runs from the start of the "
+    "left copy to the end of the right copy.<br><br>"
+    "<b>MSA identity</b><br>Sequence ends are cropped where conservation is "
+    "low, then the boundary is the first and last 4-column window whose 0.8 "
+    "consensus has no N.<br><br>"
+    "<b>Genome Cov</b><br>The 0.7 consensus is BLASTed against the project "
+    "genome. The boundary is where hit coverage rises above background at each "
+    "end (a 20-column window summing over 100, trimmed at a 5× coverage jump). "
+    "If MSA identity extends 30 or more columns past it, Genome Cov is re-run "
+    "with a 0.55 consensus. Needs a project genome.<br><br>"
+    "<b>PolyA</b><br>Only when the file name contains LINE or SINE. A run of 10 "
+    "or more A near the 3′ end of the 0.8 consensus, with an unconserved "
+    "region after it. LINE also crops divergent ends by gaps first.<br><br>"
+    "Tick a row to draw its boundary lines on the MSA."
 )
 _FIND_IUPAC_HELP = (
     "<b>On</b>: IUPAC ambiguity codes are treated as wildcards.<br><br>"
@@ -717,6 +747,8 @@ class SequenceAnnotationRail(QWidget):
     msaColoringModeChanged = Signal(str)  # MSA residue paint mode id
     msaDivergenceChanged = Signal(float)  # conserved-letter frequency threshold 0–1
     boundaryPredictClicked = Signal()  # MSA only: TEtrimmer boundary prediction
+    # frozenset[str] of ticked Boundary prediction rows (guides drawn on the MSA).
+    boundaryGuidesChanged = Signal(object)
     featureDetectClicked = Signal()
     featureDetectSettingsClicked = Signal()
     similarityAnnotateClicked = Signal()
@@ -746,6 +778,7 @@ class SequenceAnnotationRail(QWidget):
     basesZoomedInChanged = Signal(int)
     basesZoomedOutChanged = Signal(int)
     trackHeightChanged = Signal(int)  # MSA/multi overview: Track height 1–10
+    trackDistanceChanged = Signal(int)  # MSA/multi overview: sequence→annotation gap
     annotationLabelSizeChanged = Signal(int)
     annotationThicknessChanged = Signal(int)
     columnDistanceChanged = Signal(int)  # MSA overview: gap between residue columns
@@ -1423,7 +1456,7 @@ class SequenceAnnotationRail(QWidget):
         self.track_height_label = QLabel("Track height:", size_section)
         self.track_height = NoWheelSpinBox(size_section)
         self.track_height.setRange(1, 10)
-        self.track_height.setValue(4)
+        self.track_height.setValue(5)
         self.track_height.setSizePolicy(spin_expand, QSizePolicy.Policy.Fixed)
         self.track_height.setToolTip(
             "Vertical height of each squeezed sequence track (1–10). "
@@ -1433,6 +1466,20 @@ class SequenceAnnotationRail(QWidget):
         self.track_height.valueChanged.connect(self.trackHeightChanged.emit)
         self.track_height_label.setVisible(False)
         self.track_height.setVisible(False)
+
+        self.track_distance_label = QLabel("Track distance:", size_section)
+        self.track_distance = NoWheelSpinBox(size_section)
+        self.track_distance.setRange(1, 40)
+        self.track_distance.setValue(1)
+        self.track_distance.setSizePolicy(spin_expand, QSizePolicy.Policy.Fixed)
+        self.track_distance.setToolTip(
+            "Space below each sequence track (pixels): above its first "
+            "annotation row, or before the next sequence when no "
+            "annotation is shown."
+        )
+        self.track_distance.valueChanged.connect(self.trackDistanceChanged.emit)
+        self.track_distance_label.setVisible(False)
+        self.track_distance.setVisible(False)
 
         # Kept for settings / map wiring; not shown in the Size section.
         self.bases_zoomed_out = NoWheelSpinBox(size_section)
@@ -1519,6 +1566,7 @@ class SequenceAnnotationRail(QWidget):
 
         sizes.addRow(self.bases_font_label, self.bases_zoomed_in)
         sizes.addRow(self.track_height_label, self.track_height)
+        sizes.addRow(self.track_distance_label, self.track_distance)
         sizes.addRow("Annotation labels:", self.annotation_label_size)
         sizes.addRow("Annotation thickness:", self.annotation_thickness)
         self._annotation_distance_label = QLabel(
@@ -1680,22 +1728,35 @@ class SequenceAnnotationRail(QWidget):
         self.boundary_section = _CollapsibleSection(
             "Boundary prediction", page, expanded=False
         )
-        boundary_type_row = QWidget(self.boundary_section)
-        boundary_type_row.setMinimumWidth(0)
-        boundary_type_layout = QHBoxLayout(boundary_type_row)
-        boundary_type_layout.setContentsMargins(0, 0, 0, 0)
-        boundary_type_layout.setSpacing(6)
-        boundary_type_layout.addWidget(QLabel("TE type:", boundary_type_row), 0)
-        self.boundary_te_type_combo = QComboBox(boundary_type_row)
-        self.boundary_te_type_combo.addItems(list(TE_TYPE_CHOICES))
-        self.boundary_te_type_combo.setToolTip(
-            "LINE crops divergent ends by gaps and uses the cropped 0.7 "
-            "consensus for BLAST coverage. LINE and SINE also look for a "
-            "poly-A 3′ end. Other types follow TEtrimmer's default path."
-        )
-        boundary_type_layout.addWidget(self.boundary_te_type_combo, 0)
-        boundary_type_layout.addStretch(1)
-        self.boundary_section.add_widget(boundary_type_row)
+        self.boundary_rows_host = QWidget(self.boundary_section)
+        self.boundary_rows_host.setMinimumWidth(0)
+        rows_grid = QGridLayout(self.boundary_rows_host)
+        rows_grid.setContentsMargins(0, 0, 0, 0)
+        rows_grid.setHorizontalSpacing(6)
+        rows_grid.setVerticalSpacing(2)
+        rows_grid.setColumnStretch(1, 1)
+        # key → (check, value label); key order is the display order.
+        self.boundary_row_widgets: dict[str, tuple[QCheckBox, QLabel]] = {}
+        for row, (key, label, color) in enumerate(BOUNDARY_ROWS):
+            check = QCheckBox(label, self.boundary_rows_host)
+            check.setChecked(False)
+            check.setEnabled(False)
+            # Method colour while enabled; default grey when the row is None.
+            pal = check.palette()
+            for group in (QPalette.ColorGroup.Active, QPalette.ColorGroup.Inactive):
+                pal.setColor(group, QPalette.ColorRole.WindowText, QColor(color))
+            check.setPalette(pal)
+            check.setToolTip(f"Show the {label} boundary lines on the MSA")
+            check.toggled.connect(self._emit_boundary_guides_changed)
+            # Keep the full method name; the value column takes the rest.
+            check.setMinimumWidth(check.sizeHint().width())
+            value = QLabel("None", self.boundary_rows_host)
+            value.setEnabled(False)
+            value.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            rows_grid.addWidget(check, row, 0)
+            rows_grid.addWidget(value, row, 1)
+            self.boundary_row_widgets[key] = (check, value)
+        self.boundary_section.add_widget(self.boundary_rows_host)
         boundary_btn_row = QWidget(self.boundary_section)
         boundary_btn_layout = QHBoxLayout(boundary_btn_row)
         boundary_btn_layout.setContentsMargins(0, 0, 0, 0)
@@ -1704,11 +1765,18 @@ class SequenceAnnotationRail(QWidget):
         self.boundary_run_btn.setFixedWidth(52)
         self.boundary_run_btn.setToolTip(
             "Clean the MSA with TEtrimmer's column rules, then predict the TE "
-            "boundary from MSA identity, BLAST coverage (project genome) and "
-            "LTR/TIR. Results are drawn as dashed column guides."
+            "boundary from LTR/TIR, MSA identity and genome BLAST coverage. "
+            "When the file name contains LINE or SINE, also look for a poly-A "
+            "3′ end (as in TEtrimmer). Tick a row to draw its boundary lines."
         )
         self.boundary_run_btn.clicked.connect(self.boundaryPredictClicked.emit)
         boundary_btn_layout.addWidget(self.boundary_run_btn, 0)
+        boundary_btn_layout.addWidget(
+            make_help_button(
+                boundary_btn_row, "Boundary prediction", _BOUNDARY_PREDICTION_HELP
+            ),
+            0,
+        )
         boundary_btn_layout.addStretch(1)
         self.boundary_section.add_widget(boundary_btn_row)
         self.boundary_result_label = QLabel("", self.boundary_section)
@@ -2754,6 +2822,8 @@ class SequenceAnnotationRail(QWidget):
         self.bases_zoomed_in.setVisible(not overview)
         self.track_height_label.setVisible(overview)
         self.track_height.setVisible(overview)
+        self.track_distance_label.setVisible(overview)
+        self.track_distance.setVisible(overview)
         self.set_msa_display_mode(getattr(self, "_msa_display_mode", False))
         self._column_distance_label.setVisible(False)
         self.column_distance.setVisible(False)
@@ -2825,6 +2895,33 @@ class SequenceAnnotationRail(QWidget):
         """Show (or clear with "") the Boundary prediction summary."""
         self.boundary_result_label.setText(html)
         self.boundary_result_label.setVisible(bool(html))
+
+    def set_boundary_results(self, values: dict[str, str | None]) -> None:
+        """Fill the method rows; ``None`` shows "None" and disables the tick."""
+        for key, (check, label) in self.boundary_row_widgets.items():
+            text = values.get(key)
+            label.setText(text if text else "None")
+            # A row with a boundary starts ticked; "None" stays unticked.
+            check.blockSignals(True)
+            check.setChecked(bool(text))
+            check.blockSignals(False)
+            check.setEnabled(bool(text))
+            label.setEnabled(bool(text))
+
+    def clear_boundary_results(self) -> None:
+        self.set_boundary_results({})
+        self.set_boundary_prediction_text("")
+
+    def boundary_guide_keys(self) -> frozenset[str]:
+        """Ticked rows that have a boundary."""
+        return frozenset(
+            key
+            for key, (check, _label) in self.boundary_row_widgets.items()
+            if check.isChecked() and check.isEnabled()
+        )
+
+    def _emit_boundary_guides_changed(self, _checked: bool = False) -> None:
+        self.boundaryGuidesChanged.emit(self.boundary_guide_keys())
 
     def set_msa_display_mode(self, enabled: bool) -> None:
         """Toggle controls that apply only to aligned residue columns."""

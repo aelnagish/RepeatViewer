@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import math
+
+import numpy as np
 import sys
 import re
 from dataclasses import dataclass
@@ -32,6 +34,7 @@ from PySide6.QtGui import (
     QGuiApplication,
     QImage,
     QKeyEvent,
+    QNativeGestureEvent,
     QPageSize,
     QPainter,
     QPalette,
@@ -194,7 +197,8 @@ _MSA_ZOOM_LETTER_SLIDER = 75  # 3/4 of 0–100 slider
 _MSA_LETTER_BG_SCALE = 1.0
 _MSA_LETTER_BG_MAX_WIDTH_SCALE = 3.0  # bg width at slider max / width at ¾
 _DEFAULT_MSA_FONT_PT = _MSA_LETTER_SIZE_PT
-_DEFAULT_TRACK_HEIGHT = 4  # Others → Track height (1–10); 10 == size-10 band
+_DEFAULT_TRACK_DISTANCE = 1  # Size → Track distance (1–40 px)
+_DEFAULT_TRACK_HEIGHT = 5  # Others → Track height (1–10); 10 == size-10 band
 _DEFAULT_MSA_SEQUENCE_DISTANCE = 1
 _DEFAULT_MULTI_SEQUENCE_DISTANCE = 2
 _DEFAULT_MSA_COLUMN_DISTANCE = 0
@@ -296,6 +300,16 @@ _MAX_ZOOM_OVER_FIT = 32.0
 _QT_MAX_WIDGET_SIZE = 16_777_215
 _BAR_RIGHT_PAD = 8
 _ZOOM_STEP = 1.08
+# Sentinel in the per-row ARGB fill cache: colour not computed yet.
+_FILL_UNSET = 1
+# Zoom steps closer together than this count as one zoom gesture.
+_ZOOM_SETTLE_MS = 160
+# Shift+scroll: zoom factor per classic mouse-wheel notch (angleDelta 120).
+# Trackpad events carry smaller deltas and scale proportionally.
+_WHEEL_ZOOM_PER_NOTCH = 1.3
+# Trackpad pinch: zoom = exp(gain * magnification). One full spread of two
+# fingers (~1.0 magnification) zooms ~20x.
+_PINCH_ZOOM_GAIN = 3.0
 # Compact ruler: scale labels + short ticks (no selection position badges).
 _SCALE_HEIGHT = 20
 # Ignore tiny moves (click / accidental jitter); keep low for responsive feel.
@@ -338,6 +352,32 @@ def _wheel_delta_y(event: QWheelEvent) -> int:
         return 0
     # Mouse wheel notches are typically ±120; map to ~one row, not 120px jumps.
     return int(round(dy * (_MIN_ROW_HEIGHT / 120.0)))
+
+
+def _shift_wheel_zoom_factor(event: QWheelEvent) -> float | None:
+    """Zoom factor for Shift+scroll, proportional to the wheel delta.
+
+    A mouse notch zooms by ``_WHEEL_ZOOM_PER_NOTCH``; trackpad events (small
+    deltas, many per gesture) add up to the same speed per distance scrolled.
+    """
+    angle = event.angleDelta()
+    delta = float(angle.y() or angle.x())
+    if delta == 0.0:
+        pixel = event.pixelDelta()
+        if pixel.isNull():
+            return None
+        # ~40 trackpad pixels ≈ one notch.
+        delta = float(pixel.y() or pixel.x()) * 3.0
+    if delta == 0.0:
+        return None
+    notches = max(-4.0, min(4.0, delta / 120.0))
+    return _WHEEL_ZOOM_PER_NOTCH ** notches
+
+
+def _pinch_zoom_factor(magnification: float) -> float:
+    """Zoom factor for one trackpad pinch event (positive = zoom in)."""
+    m = max(-0.5, min(0.5, float(magnification)))
+    return math.exp(_PINCH_ZOOM_GAIN * m)
 
 
 def _wheel_delta_x(event: QWheelEvent, *, scroll_step: int = 40) -> int:
@@ -410,18 +450,33 @@ def _pack_feature_tracks(
     return tracks
 
 
+def _hairline_width(painter: QPainter) -> float:
+    """One *device* pixel in logical units (0.5 on Retina) for thin MSA gap lines."""
+    try:
+        dpr = float(painter.device().devicePixelRatioF())
+    except Exception:
+        dpr = 1.0
+    return 1.0 / max(1.0, dpr)
+
+
+def _hairline_top(y_mid: float, hair: float) -> float:
+    """Top of a ``hair``-thick line centred on ``y_mid``, snapped to a device row."""
+    return math.floor((float(y_mid) - hair * 0.5) / hair + 0.5) * hair
+
+
 def _row_height(
     n_tracks: int,
     *,
     feat_height: int = _FEAT_HEIGHT,
     feat_gap: int = _FEAT_GAP,
+    track_gap: int | None = None,
 ) -> int:
     seq_band = _BAR_V_PAD + _BAR_HEIGHT + _BAR_V_PAD
-    feat_block = 0
+    feat_block = 0 if track_gap is None else max(0, int(track_gap))
     if n_tracks > 0:
-        # Same gap above the first annotation as between annotation rows.
+        # Track distance above the first annotation; Annotation distance between rows.
         feat_block = (
-            feat_gap
+            (feat_gap if track_gap is None else track_gap)
             + n_tracks * feat_height
             + (n_tracks - 1) * feat_gap
         )
@@ -1233,6 +1288,9 @@ class _BarsCanvas(QWidget):
         self._msa_color_mode = MSA_COLOR_ALL_BACKGROUNDS
         self._msa_divergence_threshold = DEFAULT_MSA_DIVERGENCE_THRESHOLD
         self._msa_col_freqs: list[dict[str, float]] = []
+        # Per-row lazily filled overview fill colours (see _msa_fill_row_cache).
+        self._msa_fill_cache: dict[int, list] = {}
+        self._msa_fill_cache_key: tuple | None = None
         # Explicit Color vs standard pin by record id (None → first sequence).
         self._msa_diff_standard_id: str | None = None
         # Tracks → Standard boundaries (vertical dashed extent guides).
@@ -1244,6 +1302,8 @@ class _BarsCanvas(QWidget):
         self._sequence_row_gap = 0  # pixels between sequences (Others → Sequence distance)
         self._feat_height = _FEAT_HEIGHT
         self._feat_gap = _FEAT_GAP
+        # Sequence track → first annotation row (Size → Track distance).
+        self._track_gap = _DEFAULT_TRACK_DISTANCE
         self._feat_label_point_size = _FEAT_LABEL_POINT_SIZE
         self._column_distance = 0  # pixels between residue backgrounds
         self._color_unaligned_background = True
@@ -1322,9 +1382,62 @@ class _BarsCanvas(QWidget):
         self._msa_layer_cache_origin = QPoint(0, 0)
         self._msa_layer_cache_rect = QRect()
         self._msa_layer_serial = 0
+        # While zoom steps keep coming, redraw only the viewport (+ a small
+        # margin) instead of the 3x-wide overscroll cover; restore the wide
+        # cover once zooming pauses. Every step is still a true redraw.
+        self._zooming = False
+        self._zoom_settle_timer = QTimer(self)
+        self._zoom_settle_timer.setSingleShot(True)
+        self._zoom_settle_timer.timeout.connect(self._end_zooming)
+        # Idle warm-up of the per-column MSA fill colours (see _warm_fill_cache).
+        self._fill_warm_timer = QTimer(self)
+        self._fill_warm_timer.setSingleShot(True)
+        self._fill_warm_timer.timeout.connect(self._warm_fill_cache)
         # Set by export_annotation_view_dialog.vector_export(): paint residues
         # live so PDF/SVG exports get vectors, not the screen pixmap cache.
         self._vector_export = False
+
+    def _note_zoom_step(self) -> None:
+        self._zooming = True
+        self._zoom_settle_timer.start(_ZOOM_SETTLE_MS)
+
+    def _end_zooming(self) -> None:
+        """Zoom paused: rebuild the wide overscroll cover for smooth panning."""
+        self._zooming = False
+        if self._msa_mode:
+            self._invalidate_msa_layer_cache()
+            self.update()
+        self._fill_warm_timer.start(0)
+
+    def _warm_fill_cache(self) -> None:
+        """Fill uncomputed MSA column colours in small idle slices.
+
+        Zooming in samples columns not seen at Fit; computing them ahead of
+        time keeps zoom steps to array lookups.
+        """
+        if not self._msa_mode or not self._msa_seqs:
+            return
+        if self._zooming:
+            return  # resumes from _end_zooming
+        import time as _time
+
+        key = self._msa_fill_cache_identity()
+        deadline = _time.perf_counter() + 0.008
+        for row in range(len(self._msa_seqs)):
+            argb, _gap = self._msa_fill_row_cache(row, key)
+            todo = np.flatnonzero(argb == _FILL_UNSET)
+            if not todo.size:
+                continue
+            seq = self._msa_seqs[row]
+            seq_len = len(seq)
+            for n, col in enumerate(todo.tolist()):
+                ch = seq[col] if col < seq_len else "-"
+                color = self._msa_overview_fill_color(col, ch, row=row)
+                argb[col] = 0 if color is None else int(color.rgba())
+                if n % 64 == 63 and _time.perf_counter() > deadline:
+                    self._fill_warm_timer.start(15)
+                    return
+        # All rows done.
 
     def _invalidate_msa_layer_cache(self) -> None:
         """Drop the MSA residue pixmap (zoom/data — not selection)."""
@@ -1355,7 +1468,8 @@ class _BarsCanvas(QWidget):
     def _msa_layer_cover_size(self, vis: QRect) -> tuple[int, int]:
         """Logical cache size for this viewport (viewport + pad on each side)."""
         # One full viewport of pad → many scroll steps are pure blit.
-        pad_x = max(64, int(vis.width()))
+        # Mid-zoom the pad is wasted (the next step redraws anyway).
+        pad_x = 64 if self._zooming else max(64, int(vis.width()))
         pad_y = max(64, int(vis.height()))
         cw = min(self.width(), int(vis.width()) + 2 * pad_x)
         ch = min(self.height(), int(vis.height()) + 2 * pad_y)
@@ -1880,6 +1994,18 @@ class _BarsCanvas(QWidget):
 
     def feature_gap(self) -> int:
         return int(self._feat_gap)
+
+    def set_track_gap(self, gap: int) -> None:
+        """Gap between a sequence track and its first annotation row."""
+        new = max(1, min(40, int(gap)))
+        if new == self._track_gap:
+            return
+        self._track_gap = new
+        self._recompute_layout()
+        self.update()
+
+    def track_gap(self) -> int:
+        return int(self._track_gap)
 
     def set_feature_label_point_size(self, point_size: int) -> None:
         new = max(0, min(24, int(point_size)))
@@ -2415,6 +2541,63 @@ class _BarsCanvas(QWidget):
                 return pair[0]
             return _msa_plain_bar_color(self)
         return _msa_plain_bar_color(self)
+
+    def _msa_fill_cache_identity(self) -> tuple:
+        """Everything ``_msa_overview_fill_color`` depends on except (row, col)."""
+        return (
+            self._msa_color_mode,
+            self._msa_divergence_threshold,
+            self._msa_standard_row(),
+            tuple(hash(s) for s in self._msa_seqs),
+            id(self._msa_col_freqs),
+            len(self._msa_col_freqs),
+            id(self._msa_qcolors),
+            id(self._msa_default_qcolors),
+            id(self._msa_black_qcolors),
+            _is_dark(self),
+            _msa_plain_bar_color(self).rgba(),
+            _msa_gap_diff_color(self).rgba(),
+        )
+
+    def _msa_fill_row_cache(
+        self, row: int, key: tuple
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """``(argb, gap_mask)`` per column for ``row``; colours fill lazily.
+
+        Zooming only changes which columns are sampled, not their colours, so
+        caching makes Fit/overview repaints cheap array lookups.
+        ``argb`` holds ``_FILL_UNSET`` until a column is first sampled and 0
+        where the scheme paints nothing.
+        """
+        if key != self._msa_fill_cache_key:
+            self._msa_fill_cache = {}
+            self._msa_fill_cache_key = key
+            self._fill_warm_timer.start(50)
+        hit = self._msa_fill_cache.get(row)
+        if hit is not None:
+            return hit
+        n = max(1, int(self._max_length))
+        argb = np.full(n, _FILL_UNSET, dtype=np.uint32)
+        seq = self._msa_seqs[row] if row < len(self._msa_seqs) else ""
+        raw = np.frombuffer(
+            seq[:n].encode("ascii", "replace"), dtype=np.uint8
+        )
+        gap = np.ones(n, dtype=bool)
+        gap[: raw.size] = (raw == ord("-")) | (raw == ord("."))
+        hit = (argb, gap)
+        self._msa_fill_cache[row] = hit
+        return hit
+
+    def _cached_fill_argb(
+        self, argb: np.ndarray, col: int, ch: str, row: int
+    ) -> int:
+        """Overview fill ARGB for ``col`` (0 = no fill), computing on a miss."""
+        value = int(argb[col])
+        if value == _FILL_UNSET:
+            color = self._msa_overview_fill_color(col, ch, row=row)
+            value = 0 if color is None else int(color.rgba())
+            argb[col] = value
+        return value
 
     def _clear_drag_paint_cache(self) -> None:
         """Drop live selection preview state (name kept for existing call sites)."""
@@ -3006,9 +3189,11 @@ class _BarsCanvas(QWidget):
             desired_max = max(ceil, fit_ppb * _MAX_ZOOM_OVER_FIT)
         return fit_ppb, max(fit_ppb, min(desired_max, geometry_limit))
 
-    def set_pixels_per_base(self, ppb: float) -> None:
+    def set_pixels_per_base(self, ppb: float, *, live: bool = False) -> None:
         fit_ppb, max_ppb = self.zoom_bounds()
         self._ppb = max(fit_ppb, min(max_ppb, float(ppb)))
+        if live:
+            self._note_zoom_step()
         self._clear_drag_paint_cache()
         self._invalidate_msa_layer_cache()
         self._recompute_layout()
@@ -3031,6 +3216,7 @@ class _BarsCanvas(QWidget):
         self._pending_scroll_bp = None
         self._ppb = new
         self._clear_drag_paint_cache()
+        self._note_zoom_step()
         self._invalidate_msa_layer_cache()
         self._recompute_layout()
         self.update()
@@ -3097,15 +3283,17 @@ class _BarsCanvas(QWidget):
         self.rowsChanged.emit()
 
     def _msa_track_block_height(self, rid: str) -> int:
+        # Track distance always sits below the sequence band, so it spaces
+        # sequences apart even when no annotation is shown.
         if not self._show_annotation_track:
-            return 0
+            return max(0, int(self._track_gap))
         n_tracks = len(self._tracks.get(rid) or [])
         if n_tracks <= 0:
-            return 0
-        # Lead with Annotation distance so sequence→feature matches feature→feature.
+            return max(0, int(self._track_gap))
+        # Track distance above the first row; Annotation distance between rows.
         gap = max(0, int(self._feat_gap))
         return (
-            gap
+            max(0, int(self._track_gap))
             + n_tracks * self._feat_height
             + (n_tracks - 1) * gap
         )
@@ -3135,6 +3323,7 @@ class _BarsCanvas(QWidget):
                     n_tracks,
                     feat_height=self._feat_height,
                     feat_gap=self._feat_gap,
+                    track_gap=self._track_gap,
                 )
             self._row_tops.append(y)
             self._row_heights.append(h)
@@ -3219,9 +3408,9 @@ class _BarsCanvas(QWidget):
     def _feature_band_y0(self, row: int) -> int:
         """Top Y of the first annotation track (below sequence + gap).
 
-        Gap matches Others → Annotation distance (same as between feature rows).
+        Gap is Size → Track distance.
         """
-        gap = max(0, int(self._feat_gap)) if self._show_annotation_track else 0
+        gap = max(0, int(self._track_gap)) if self._show_annotation_track else 0
         return self._sequence_band_bottom(row) + gap
 
     def _y_in_annotation_band(self, row: int, y: float) -> bool:
@@ -3935,14 +4124,8 @@ class _BarsCanvas(QWidget):
     def wheelEvent(self, event: QWheelEvent) -> None:  # noqa: N802
         mods = event.modifiers() | QGuiApplication.keyboardModifiers()
         if mods & Qt.KeyboardModifier.ShiftModifier:
-            delta = event.angleDelta().y()
-            if delta == 0:
-                delta = event.angleDelta().x()
-            pixel = event.pixelDelta()
-            if delta == 0 and not pixel.isNull():
-                delta = int(pixel.y()) or int(pixel.x())
-            if delta != 0:
-                factor = _ZOOM_STEP if delta > 0 else 1 / _ZOOM_STEP
+            factor = _shift_wheel_zoom_factor(event)
+            if factor is not None:
                 self.zoom_by(factor, anchor_x=event.position().x())
             event.accept()
             return
@@ -4213,6 +4396,9 @@ class _BarsCanvas(QWidget):
     ) -> None:
         """Column-edge guides from Boundary prediction (``[]`` clears)."""
         self._predicted_boundaries = list(guides or [])
+        if self._msa_mode:
+            # Guides are painted into the cached MSA layer.
+            self._invalidate_msa_layer_cache()
         self.update()
 
     def _paint_msa_predicted_boundaries(
@@ -4271,54 +4457,53 @@ class _BarsCanvas(QWidget):
             return
         painter.setPen(Qt.PenStyle.NoPen)
         gap_line = QColor("#e0e0e0") if _is_dark(self) else QColor("#000000")
+        fill_key = self._msa_fill_cache_identity()
+        bar_pad = float(self._bar_pad)
+        inv_ppb = 1.0 / ppb
+        width = px_right - px_left
+        # Column sampled by each screen pixel (same for every row).
+        content_x = np.arange(px_left, px_right, dtype=np.float64) - bar_pad
+        cols = np.floor(content_x * inv_ppb).astype(np.int64)
+        valid = (content_x >= 0.0) & (cols < max_len)
+        cols = np.where(valid, cols, 0)
+        gap_argb = np.uint32(gap_line.rgba())
+        hair = _hairline_width(painter)
         for index in self._rows_in_y_range(float(clip.top()), float(clip.bottom()) + 1.0):
             rid = self._record_ids[index]
             top = self._row_tops[index]
             seq = self._msa_seqs[index] if index < len(self._msa_seqs) else ""
+            seq_len = len(seq)
+            argb, gap = self._msa_fill_row_cache(index, fill_key)
+            sampled = argb[cols]
+            missing = np.unique(cols[valid & (sampled == _FILL_UNSET)])
+            if missing.size:
+                for col in missing.tolist():
+                    ch = seq[col] if col < seq_len else "-"
+                    color = self._msa_overview_fill_color(col, ch, row=index)
+                    argb[col] = 0 if color is None else int(color.rgba())
+                sampled = argb[cols]
+            fill_row = np.where(valid, sampled, 0).astype(np.uint32)
+            # Unfilled gap columns: thin line through the residue band.
+            gap_row = np.where(
+                valid & gap[cols] & (fill_row == 0), gap_argb, 0
+            ).astype(np.uint32)
             y = float(top)
             y_mid = y + float(residue_h) * 0.5
-            px = px_left
-            while px < px_right:
-                content_x = float(px) - float(self._bar_pad)
-                if content_x < 0.0:
-                    px += 1
-                    continue
-                col = int(content_x / ppb)
-                if col >= max_len:
-                    break
-                ch = seq[col] if col < len(seq) else "-"
-                fill = self._msa_overview_fill_color(col, ch, row=index)
-                run_start = px
-                px += 1
-                while px < px_right:
-                    content_x = float(px) - float(self._bar_pad)
-                    if content_x < 0.0:
-                        break
-                    col2 = int(content_x / ppb)
-                    if col2 >= max_len:
-                        break
-                    ch2 = seq[col2] if col2 < len(seq) else "-"
-                    fill2 = self._msa_overview_fill_color(col2, ch2, row=index)
-                    if fill is None or fill2 is None:
-                        if fill is not fill2:
-                            break
-                        if (ch in "-.") != (ch2 in "-."):
-                            break
-                    elif fill.rgba() != fill2.rgba():
-                        break
-                    px += 1
-                run_w = float(px - run_start)
-                if fill is not None:
-                    painter.fillRect(QRectF(float(run_start), y, run_w, float(residue_h)), fill)
-                elif ch in "-.":
-                    pen = QPen(gap_line, 1)
-                    pen.setCosmetic(True)
-                    painter.setPen(pen)
-                    painter.drawLine(
-                        QPointF(float(run_start), y_mid),
-                        QPointF(float(px), y_mid),
-                    )
-                    painter.setPen(Qt.PenStyle.NoPen)
+            if fill_row.any():
+                img = QImage(
+                    fill_row.tobytes(), width, 1, width * 4, QImage.Format.Format_ARGB32
+                ).copy()
+                painter.drawImage(
+                    QRectF(float(px_left), y, float(width), float(residue_h)), img
+                )
+            if gap_row.any():
+                img = QImage(
+                    gap_row.tobytes(), width, 1, width * 4, QImage.Format.Format_ARGB32
+                ).copy()
+                painter.drawImage(
+                    QRectF(float(px_left), _hairline_top(y_mid, hair), float(width), hair),
+                    img,
+                )
             length = max(1, int(self._lengths.get(rid, 1)))
             self._paint_feature_tracks(
                 painter,
@@ -4363,12 +4548,18 @@ class _BarsCanvas(QWidget):
         )
         # Overview: Column distance insets. Letter mode: square→wide fill.
         _bg_margin = max(0.0, float(self._column_distance) * 0.5)
+        fill_key = None if show_letters else self._msa_fill_cache_identity()
         painter.setPen(Qt.PenStyle.NoPen)
         for index in self._rows_in_y_range(float(clip.top()), float(clip.bottom()) + 1.0):
             rid = self._record_ids[index]
             top = self._row_tops[index]
             # No selection wash on residues — dashed outline / name highlight only.
             seq = self._msa_seqs[index] if index < len(self._msa_seqs) else ""
+            row_argb = (
+                None
+                if fill_key is None
+                else self._msa_fill_row_cache(index, fill_key)[0]
+            )
             y = top
             # Feature tracks change the painter font; restore the residue font
             # for every row so later sequences do not inherit annotation text size.
@@ -4384,25 +4575,32 @@ class _BarsCanvas(QWidget):
                 if x > clip.right():
                     break
                 ch = seq[j] if j < len(seq) else "-"
-                fill_bg = self._msa_should_fill_background(j, ch, row=index)
-                paint_pair = self._msa_residue_paint_pair(j, ch, row=index)
-                overview_fill = (
-                    None
-                    if show_letters
-                    else self._msa_overview_fill_color(j, ch, row=index)
-                )
+                if row_argb is None:
+                    # Letter zoom: few visible columns, full colour logic.
+                    fill_bg = self._msa_should_fill_background(j, ch, row=index)
+                    paint_pair = self._msa_residue_paint_pair(j, ch, row=index)
+                    overview_fill = None
+                    fill_argb = 0
+                else:
+                    # Overview blocks: cached fill only (letters not drawn).
+                    fill_bg = False
+                    paint_pair = None
+                    fill_argb = self._cached_fill_argb(row_argb, j, ch, index)
+                    overview_fill = (
+                        QColor.fromRgba(fill_argb) if fill_argb else None
+                    )
                 run_end = j + 1
                 # Coalesce only when columns share one fill/colour (distance 0).
-                if not show_letters and self._column_distance <= 0:
+                if row_argb is not None and self._column_distance <= 0:
+                    is_gap = ch in "-."
                     while run_end < c1:
                         nxt = seq[run_end] if run_end < len(seq) else "-"
-                        nxt_fill = self._msa_overview_fill_color(
-                            run_end, nxt, row=index
+                        nxt_argb = self._cached_fill_argb(
+                            row_argb, run_end, nxt, index
                         )
-                        if overview_fill is None or nxt_fill is None:
-                            if overview_fill is not nxt_fill:
-                                break
-                        elif overview_fill.rgba() != nxt_fill.rgba():
+                        if nxt_argb != fill_argb:
+                            break
+                        if not fill_argb and is_gap != (nxt in "-."):
                             break
                         run_end += 1
                 span = run_end - j
@@ -4469,13 +4667,11 @@ class _BarsCanvas(QWidget):
                             if _is_dark(self)
                             else QColor("#000000")
                         )
-                        pen = QPen(gap_line, 1)
-                        pen.setCosmetic(True)
-                        painter.setPen(pen)
-                        painter.drawLine(
-                            QPointF(x, y_mid), QPointF(x + width, y_mid)
+                        hair = _hairline_width(painter)
+                        painter.fillRect(
+                            QRectF(x, _hairline_top(y_mid, hair), width, hair),
+                            gap_line,
                         )
-                        painter.setPen(Qt.PenStyle.NoPen)
                 elif not show_letters:
                     # Overview: scheme colour or multi-seq light-grey backbone.
                     if overview_fill is not None:
@@ -5680,6 +5876,12 @@ class MultiSequenceOverviewPanel(QWidget):
         # pane uses pixelDelta (trackpad) or a gentle mouse-wheel step.
         self._names_scroll.viewport().installEventFilter(self)
         self._bars_scroll.viewport().installEventFilter(self)
+        # Trackpad pinch (NativeGesture) is delivered to the widget under the
+        # cursor; watch those too and accept touch so macOS sends gestures.
+        for _w in (self._bars, self._names, self._scale):
+            _w.installEventFilter(self)
+        for _w in self._pinch_surfaces():
+            _w.setAttribute(Qt.WidgetAttribute.WA_AcceptTouchEvents, True)
         self._bars_scroll.verticalScrollBar().setSingleStep(18)
         self._bars_scroll.verticalScrollBar().setPageStep(120)
 
@@ -5798,6 +6000,13 @@ class MultiSequenceOverviewPanel(QWidget):
         self._boundary_thread: QThread | None = None
         self._boundary_worker: Worker | None = None
         self._boundary_input: list[str] = []
+        # Boundary prediction guides per rail row key (ticked rows are drawn).
+        self._boundary_guides: dict[str, list[tuple[int, QColor, bool]]] = {}
+        # Last Boundary prediction shown (run or *.boundaries_RV.json); TSD
+        # Auto detect reads it. Feature detection waits on it when requested.
+        self._boundary_result = None
+        self._auto_run_after_boundary = False
+        self._auto_run_start_pending = False
         self._wire_overview_annotation_rail()
         self._bars.set_show_annotation_track(
             bool(self._rail.show_annotation_track.isChecked())
@@ -6193,6 +6402,7 @@ class MultiSequenceOverviewPanel(QWidget):
         self._safe_disconnect(bar.clean_requested, self._open_msa_clean_dialog)
         self._safe_disconnect(bar.consensus_requested, self._open_consensus_dialog)
         self._safe_disconnect(bar.coverage_requested, self._run_msa_blast_coverage)
+        self._safe_disconnect(bar.annotations_toggled, self._on_annotations_toggled)
         self._safe_disconnect(bar.extract_requested, self._extract_selected)
         self._safe_disconnect(bar.filter_text_changed, self._on_name_filter_edited)
         self._safe_disconnect(bar.filter_return_pressed, self._on_name_filter_next)
@@ -6268,6 +6478,8 @@ class MultiSequenceOverviewPanel(QWidget):
         bar.clean_requested.connect(self._open_msa_clean_dialog)
         bar.consensus_requested.connect(self._open_consensus_dialog)
         bar.coverage_requested.connect(self._run_msa_blast_coverage)
+        bar.annotations_toggled.connect(self._on_annotations_toggled)
+        bar.set_annotations_shown(not getattr(self, "_annotations_hidden", False))
         bar.extract_requested.connect(self._extract_selected)
         bar.filter_text_changed.connect(self._on_name_filter_edited)
         bar.filter_return_pressed.connect(self._on_name_filter_next)
@@ -6326,8 +6538,9 @@ class MultiSequenceOverviewPanel(QWidget):
         )
         rail.boundaryPredictClicked.connect(self._run_boundary_prediction)
         self._bars.predictedBoundariesCleared.connect(
-            lambda: self._rail.set_boundary_prediction_text("")
+            lambda: self._clear_boundary_results()
         )
+        rail.boundaryGuidesChanged.connect(lambda _keys: self._sync_boundary_guides())
         rail.featureDetectClicked.connect(self._on_auto_run_clicked)
         rail.featureDetectSettingsClicked.connect(self._open_auto_annotation_settings)
         rail.similarityAnnotateClicked.connect(self._on_similarity_run_clicked)
@@ -6349,6 +6562,7 @@ class MultiSequenceOverviewPanel(QWidget):
         rail.trackHeightChanged.connect(self._on_track_height_changed)
         rail.annotationThicknessChanged.connect(self._on_annotation_thickness_changed)
         rail.annotationDistanceChanged.connect(self._on_annotation_distance_changed)
+        rail.trackDistanceChanged.connect(self._on_track_distance_changed)
         rail.annotationLabelSizeChanged.connect(self._on_annotation_label_size_changed)
         rail.baseNumberSizeChanged.connect(self._on_scale_label_size_changed)
         rail.sequenceDistanceChanged.connect(self._on_sequence_row_gap_changed)
@@ -6367,6 +6581,7 @@ class MultiSequenceOverviewPanel(QWidget):
         rail.sequenceSortChanged.connect(self._on_sequence_sort_changed)
         rail.findRequested.connect(self._on_rail_find_requested)
         rail.panelCollapsedChanged.connect(self._on_rail_panel_collapsed_changed)
+        self._annotations_hidden = False  # toolbar "Ann" toggle
         self._find_items: list = []
         self._find_index: int = -1
         self._find_key: object | None = None
@@ -6376,6 +6591,7 @@ class MultiSequenceOverviewPanel(QWidget):
         self._names.set_label_point_size(track_h)  # names store height+1
         self._bars.set_feature_bar_height(int(rail.annotation_thickness.value()))
         self._bars.set_feature_gap(int(rail.annotation_distance.value()))
+        self._bars.set_track_gap(int(rail.track_distance.value()))
         self._bars.set_feature_label_point_size(int(rail.annotation_label_size.value()))
         self._bars.set_sequence_row_gap(int(rail.sequence_distance.value()))
         self._scale.set_font_point_size(int(rail.base_number_size.value()))
@@ -6406,6 +6622,12 @@ class MultiSequenceOverviewPanel(QWidget):
             # Prefer track_height; migrate old bases_zoomed_in into 1–10 if needed.
             if s.contains("track_height"):
                 track_h = int(s.value("track_height", _DEFAULT_TRACK_HEIGHT))
+                # Default moved 4 → 5: lift a saved old default once.
+                if not s.contains("track_height_default_v5"):
+                    if track_h == 4:
+                        track_h = _DEFAULT_TRACK_HEIGHT
+                        s.setValue("track_height", track_h)
+                    s.setValue("track_height_default_v5", True)
             else:
                 legacy = int(s.value("bases_zoomed_in", _DEFAULT_TRACK_HEIGHT))
                 track_h = max(1, min(10, legacy if legacy <= 10 else _DEFAULT_TRACK_HEIGHT))
@@ -6414,6 +6636,9 @@ class MultiSequenceOverviewPanel(QWidget):
             )
             ann_thickness = int(s.value("annotation_thickness", _FEAT_HEIGHT))
             ann_distance = int(s.value("annotation_distance", _FEAT_GAP))
+            track_distance = int(
+                s.value("track_distance", _DEFAULT_TRACK_DISTANCE)
+            )
             ann_labels = int(s.value("annotation_label_size", _FEAT_LABEL_POINT_SIZE))
             scale_labels = int(s.value("base_number_size", 8))
             col_distance = int(
@@ -6445,11 +6670,13 @@ class MultiSequenceOverviewPanel(QWidget):
         distance = max(0, min(40, distance))
         ann_thickness = max(2, min(40, ann_thickness))
         ann_distance = max(0, min(40, ann_distance))
+        track_distance = max(1, min(40, track_distance))
         ann_labels = max(0, min(24, ann_labels))
         scale_labels = max(4, min(24, scale_labels))
         col_distance = max(0, min(40, col_distance))
         for widget in (
             rail.track_height,
+            rail.track_distance,
             rail.sequence_distance,
             rail.annotation_thickness,
             rail.annotation_distance,
@@ -6461,6 +6688,7 @@ class MultiSequenceOverviewPanel(QWidget):
             widget.blockSignals(True)
         try:
             rail.track_height.setValue(track_h)
+            rail.track_distance.setValue(track_distance)
             rail.sequence_distance.setValue(distance)
             rail.annotation_thickness.setValue(ann_thickness)
             rail.annotation_distance.setValue(ann_distance)
@@ -6471,6 +6699,7 @@ class MultiSequenceOverviewPanel(QWidget):
         finally:
             for widget in (
                 rail.track_height,
+                rail.track_distance,
                 rail.sequence_distance,
                 rail.annotation_thickness,
                 rail.annotation_distance,
@@ -6500,6 +6729,7 @@ class MultiSequenceOverviewPanel(QWidget):
             s.setValue(distance_key, int(rail.sequence_distance.value()))
             s.setValue("annotation_thickness", int(rail.annotation_thickness.value()))
             s.setValue("annotation_distance", int(rail.annotation_distance.value()))
+            s.setValue("track_distance", int(rail.track_distance.value()))
             s.setValue("annotation_label_size", int(rail.annotation_label_size.value()))
             s.setValue("base_number_size", int(rail.base_number_size.value()))
             s.setValue("column_distance", int(rail.column_distance.value()))
@@ -6674,6 +6904,11 @@ class MultiSequenceOverviewPanel(QWidget):
         self._save_overview_display_settings()
         self._sync_names_column()
 
+    def _on_track_distance_changed(self, gap: int) -> None:
+        self._bars.set_track_gap(int(gap))
+        self._save_overview_display_settings()
+        self._sync_names_column()
+
     def _on_annotation_label_size_changed(self, point_size: int) -> None:
         self._bars.set_feature_label_point_size(int(point_size))
         self._save_overview_display_settings()
@@ -6697,8 +6932,18 @@ class MultiSequenceOverviewPanel(QWidget):
         self._save_overview_display_settings()
 
     def _on_show_annotation_track_changed(self, enabled: bool) -> None:
-        self._bars.set_show_annotation_track(bool(enabled))
+        # Toolbar "Ann" off wins over the per-type checkboxes.
+        self._bars.set_show_annotation_track(
+            bool(enabled) and not self._annotations_hidden
+        )
         self._sync_names_column()
+
+    def _on_annotations_toggled(self, shown: bool) -> None:
+        """Toolbar "Ann": hide/show all annotation tracks, keeping type picks."""
+        self._annotations_hidden = not bool(shown)
+        self._on_show_annotation_track_changed(
+            self._rail.show_annotation_track.isChecked()
+        )
 
     def _on_annotation_track_kinds_changed(self, keys: object) -> None:
         if keys is None:
@@ -6952,12 +7197,12 @@ class MultiSequenceOverviewPanel(QWidget):
                     win._set_job_actions_enabled(True)
 
     def _sync_auto_annotation_all_check(self) -> None:
-        # "All" covers LTR/TIR/Tandem/ORF; TSD (MSA-only) and PBS (needs LTR +
-        # BLAST) stay independent and off by default.
+        # "All" covers every shown detector, TSD and PBS included (they still
+        # start unticked by default).
         checks = [
             check
-            for mode, check in self._auto_ann_checks.items()
-            if mode not in {AutoAnnotationMode.TSD, AutoAnnotationMode.PBS}
+            for _mode, check in self._auto_ann_checks.items()
+            if not check.isHidden()
         ]
         if not checks:
             return
@@ -6977,8 +7222,8 @@ class MultiSequenceOverviewPanel(QWidget):
         self._auto_all_updating = True
         try:
             for mode, check in self._auto_ann_checks.items():
-                if mode in {AutoAnnotationMode.TSD, AutoAnnotationMode.PBS}:
-                    continue
+                if check.isHidden():
+                    continue  # e.g. TSD on a single sequence
                 check.setChecked(checked)
         finally:
             self._auto_all_updating = False
@@ -7249,11 +7494,23 @@ class MultiSequenceOverviewPanel(QWidget):
             parent=self.window(),
             reference_extent_1based=ref_extent,
             on_dialog_ready=_wire,
+            prediction=self._boundary_result,
         )
         if updated is None:
             return None
         save_tsd_search_options(updated)
         return updated
+
+    def _tsd_needs_boundary_prediction(self) -> bool:
+        """TSD Auto detect with no Boundary prediction for this MSA yet."""
+        from repeatviewer.job_options import (
+            TSD_BOUNDARY_REPEATVIEWER,
+            load_tsd_search_options,
+        )
+
+        if not self.is_msa_mode() or self._boundary_result is not None:
+            return False
+        return load_tsd_search_options().boundary_source == TSD_BOUNDARY_REPEATVIEWER
 
     def _on_auto_run_clicked(self) -> None:
         if self._annotation_running():
@@ -7277,6 +7534,16 @@ class MultiSequenceOverviewPanel(QWidget):
             )
             return
         tsd_opts = None
+        if AutoAnnotationMode.TSD in modes and self._tsd_needs_boundary_prediction():
+            # TSD Auto detect: run Boundary prediction first, then come back.
+            self._auto_run_after_boundary = True
+            self.statusMessage.emit(
+                "TSD Auto detect: running Boundary prediction first…"
+            )
+            self._run_boundary_prediction()
+            if not self._boundary_running():
+                self._auto_run_after_boundary = False
+            return
         if AutoAnnotationMode.TSD in modes:
             tsd_opts = self._prompt_tsd_boundaries_for_run()
             if tsd_opts is None:
@@ -9082,8 +9349,8 @@ class MultiSequenceOverviewPanel(QWidget):
             answer = QMessageBox.question(
                 self,
                 title,
-                "No project genome is set, so BLAST coverage and the final "
-                "boundary will be skipped. Run MSA identity and LTR/TIR only?",
+                "No project genome is set, so Genome Cov will be skipped. "
+                "Run LTR/TIR, MSA identity and PolyA only?",
             )
             if answer != QMessageBox.StandardButton.Yes:
                 return
@@ -9093,9 +9360,12 @@ class MultiSequenceOverviewPanel(QWidget):
             QMessageBox.information(self, title, "No MSA sequences are loaded.")
             return
         from repeatviewer.job_options import load_teaid_options
-        from repeatviewer.backends.boundary_predict import predict_boundaries
+        from repeatviewer.backends.boundary_predict import (
+            predict_boundaries,
+            te_type_from_name,
+        )
 
-        te_type = self._rail.boundary_te_type_combo.currentText()
+        te_type = te_type_from_name(self._path.name)
         num_threads = max(1, int(load_teaid_options().num_threads))
         self._boundary_cancel = JobCancellation()
         cancel = self._boundary_cancel
@@ -9151,63 +9421,55 @@ class MultiSequenceOverviewPanel(QWidget):
         self._update_window_job_progress(completed, detail)
 
     def _apply_boundary_prediction(self, result) -> None:
-        """Draw method guides + rail summary for a ``BoundaryPrediction``."""
+        """Fill the rail method rows and draw the ticked rows' guides."""
         from repeatviewer.backends.boundary_predict import BoundaryPrediction
+        from repeatviewer.widgets.sequence_annotation_rail import BOUNDARY_ROWS
 
         if not isinstance(result, BoundaryPrediction):
             return
-        # (label, span, color); spans are 0-based start / exclusive end.
-        methods = [
-            ("MSA identity", result.msa_identity, "#1f77b4"),
-            ("BLAST coverage", result.blast_coverage, "#2ca02c"),
-            (result.terminal_repeat_type or "LTR/TIR", result.terminal_repeat, "#ff7f0e"),
-        ]
-        guides: list[tuple[int, QColor, bool]] = []
-        lines: list[str] = []
-        for label, span, color in methods:
+        colors = {key: QColor(color) for key, _label, color in BOUNDARY_ROWS}
+        repeat = result.terminal_repeat
+        rtype = (result.terminal_repeat_type or "").upper()
+        # Spans are 0-based start / exclusive end; shown 1-based inclusive.
+        spans: dict[str, tuple[int, int] | None] = {
+            "ltr": repeat if rtype == "LTR" else None,
+            "tir": repeat if rtype == "TIR" else None,
+            "msa_identity": result.msa_identity,
+            "coverage": result.blast_coverage,
+        }
+        values: dict[str, str | None] = {}
+        guides: dict[str, list[tuple[int, QColor, bool]]] = {}
+        for key, span in spans.items():
             if span is None:
-                lines.append(f"<span style='color:{color}'>┆</span> {label}: none")
+                values[key] = None
                 continue
-            guides.extend(
-                [(span[0], QColor(color), False), (span[1], QColor(color), False)]
-            )
-            lines.append(
-                f"<span style='color:{color}'>┆</span> {label}: "
-                f"{span[0] + 1:,}–{span[1]:,}"
-            )
+            values[key] = f"{span[0] + 1:,}–{span[1]:,}"
+            guides[key] = [(span[0], colors[key], False), (span[1], colors[key], False)]
         if result.poly_a_end is not None:
-            guides.append((result.poly_a_end, QColor("#9467bd"), False))
-            lines.append(
-                f"<span style='color:#9467bd'>┆</span> poly-A end: {result.poly_a_end:,}"
-            )
-        final_color = "#d62728"
-        if result.final is not None:
-            guides.extend(
-                [
-                    (result.final[0], QColor(final_color), True),
-                    (result.final[1], QColor(final_color), True),
-                ]
-            )
-            head = (
-                f"<b><span style='color:{final_color}'>│</span> Final: "
-                f"{result.final[0] + 1:,}–{result.final[1]:,} "
-                f"({result.final[1] - result.final[0]:,} columns)</b><br>"
-                f"Evaluation: <b>{result.evaluation}</b> · "
-                f"{result.full_length_hits} full-length hits"
-            )
+            values["poly_a"] = f"end at {result.poly_a_end:,}"
+            guides["poly_a"] = [(result.poly_a_end, colors["poly_a"], False)]
         else:
-            head = "<b>Final: not defined</b>"
-        detail_bits: list[str] = []
-        if result.sequence_count:
-            detail_bits.append(f"{result.sequence_count} sequences")
-        if result.cleaned_columns:
-            detail_bits.append(f"{result.cleaned_columns:,} columns after cleaning")
-        detail = " · ".join(detail_bits)
-        notes = "".join(f"<br><i>{n}</i>" for n in result.notes)
-        body = "<br>".join(lines)
-        if detail:
-            body = f"{body}<br>{detail}"
-        self._rail.set_boundary_prediction_text(head + "<br>" + body + notes)
+            values["poly_a"] = None
+        self._boundary_guides = guides
+        self._boundary_result = result
+        self._rail.set_boundary_results(values)
+        self._sync_boundary_guides()
+
+    def _clear_boundary_results(self) -> None:
+        """MSA residues changed: drop stale guides and rail rows."""
+        self._boundary_guides = {}
+        self._boundary_result = None
+        self._rail.clear_boundary_results()
+
+    def _sync_boundary_guides(self, _keys: object = None) -> None:
+        """Draw guides for the ticked Boundary prediction rows only."""
+        shown = self._rail.boundary_guide_keys()
+        guides = [
+            guide
+            for key, items in self._boundary_guides.items()
+            if key in shown
+            for guide in items
+        ]
         self._bars.set_predicted_boundaries(guides)
 
     def _restore_boundaries_from_json(self) -> None:
@@ -9233,18 +9495,18 @@ class MultiSequenceOverviewPanel(QWidget):
             self.statusMessage.emit(
                 "Boundary prediction discarded: the MSA changed while it ran."
             )
+            self._auto_run_after_boundary = False
             return
         self._apply_boundary_prediction(result)
-        if result.final is not None:
-            self.statusMessage.emit(
-                f"Boundary prediction · {result.evaluation} · columns "
-                f"{result.final[0] + 1:,}–{result.final[1]:,}"
-            )
-        else:
-            self.statusMessage.emit("Boundary prediction finished without a final boundary.")
+        self.statusMessage.emit("Boundary prediction finished.")
+        if self._auto_run_after_boundary:
+            # Started from _clear_boundary_thread, after this job's progress ends.
+            self._auto_run_after_boundary = False
+            self._auto_run_start_pending = True
 
     @Slot(str)
     def _on_boundary_error(self, message: str) -> None:
+        self._auto_run_after_boundary = False
         lower = str(message or "").lower()
         if "stopped by user" in lower or "job stopped" in lower:
             self.statusMessage.emit("Boundary prediction stopped.")
@@ -9259,6 +9521,9 @@ class MultiSequenceOverviewPanel(QWidget):
         self._boundary_input = []
         self._rail.boundary_run_btn.setText("Run")
         self._end_window_job_progress()
+        if self._auto_run_start_pending:
+            self._auto_run_start_pending = False
+            QTimer.singleShot(0, self._on_auto_run_clicked)
 
     def _slider_ppb_bounds(self) -> tuple[float, float]:
         return self._bars.zoom_bounds(self._bars_viewport_width())
@@ -9410,7 +9675,7 @@ class MultiSequenceOverviewPanel(QWidget):
         reset_scroll = value <= 0 or ppb <= fit_ppb * 1.001
         anchor = None if reset_scroll else self._selection_zoom_anchor()
         self._sync_viewport_fill()
-        self._bars.set_pixels_per_base(ppb)
+        self._bars.set_pixels_per_base(ppb, live=True)
         if reset_scroll:
             self._bars_scroll.horizontalScrollBar().setValue(0)
         elif anchor is not None:
@@ -9596,6 +9861,13 @@ class MultiSequenceOverviewPanel(QWidget):
         if obj is bars_vp and event.type() == QEvent.Type.Resize:
             self._schedule_viewport_refit()
             return super().eventFilter(obj, event)
+        if event.type() == QEvent.Type.NativeGesture and isinstance(
+            event, QNativeGestureEvent
+        ):
+            if self._handle_pinch_gesture(obj, event):
+                event.accept()
+                return True
+            return super().eventFilter(obj, event)
         if event.type() != QEvent.Type.Wheel or not isinstance(event, QWheelEvent):
             return super().eventFilter(obj, event)
         names_vp = self._names_scroll.viewport()
@@ -9604,26 +9876,9 @@ class MultiSequenceOverviewPanel(QWidget):
         mods = event.modifiers() | QGuiApplication.keyboardModifiers()
         if mods & Qt.KeyboardModifier.ShiftModifier:
             # Handle zoom here — wheel is delivered to the viewport, not the canvas.
-            delta = event.angleDelta().y()
-            if delta == 0:
-                delta = event.angleDelta().x()
-            pixel = event.pixelDelta()
-            if delta == 0 and not pixel.isNull():
-                delta = int(pixel.y()) or int(pixel.x())
-            if delta != 0:
-                factor = _ZOOM_STEP if delta > 0 else 1.0 / _ZOOM_STEP
-                # Prefer selected-region center (single-seq parity); else cursor.
-                sel_anchor = self._selection_zoom_anchor()
-                if sel_anchor is not None:
-                    mid_bp, _view_x = sel_anchor
-                    anchor_x = self._bars.bp_to_x(float(mid_bp))
-                else:
-                    anchor_x = float(event.position().x()) + float(
-                        self._bars_scroll.horizontalScrollBar().value()
-                    )
-                self._bars.zoom_by(factor, anchor_x=anchor_x)
-                if sel_anchor is not None:
-                    self._center_selection_vertically()
+            factor = _shift_wheel_zoom_factor(event)
+            if factor is not None:
+                self._zoom_at_viewport_x(factor, float(event.position().x()))
             event.accept()
             return True
         # Trackpad: apply both axes. Prefer the dominant axis when both move.
@@ -9646,6 +9901,65 @@ class MultiSequenceOverviewPanel(QWidget):
             event.accept()
             return True
         return False
+
+    def _pinch_surfaces(self) -> tuple[QWidget, ...]:
+        return (
+            self._bars,
+            self._bars_scroll.viewport(),
+            self._names,
+            self._names_scroll.viewport(),
+            self._scale,
+        )
+
+    def _handle_pinch_gesture(self, obj, event: QNativeGestureEvent) -> bool:
+        """Two-finger trackpad pinch over names / bars / ruler zooms the view."""
+        if obj not in self._pinch_surfaces():
+            return False
+        kind = event.gestureType()
+        if kind in (
+            Qt.NativeGestureType.BeginNativeGesture,
+            Qt.NativeGestureType.EndNativeGesture,
+        ):
+            return True
+        if kind == Qt.NativeGestureType.SmartZoomNativeGesture:
+            # Two-finger double-tap: toggle fit ↔ letter-size zoom.
+            hbar = self._bars_scroll.horizontalScrollBar()
+            view_x = self._event_viewport_x(event)
+            self._on_scale_zoom_at(
+                view_x + float(hbar.value()), zoom_in=self._is_near_fit_zoom()
+            )
+            return True
+        if kind != Qt.NativeGestureType.ZoomNativeGesture:
+            return False
+        if self._bars.max_length() <= 0:
+            return True
+        factor = _pinch_zoom_factor(float(event.value()))
+        self._zoom_at_viewport_x(factor, self._event_viewport_x(event))
+        return True
+
+    def _event_viewport_x(self, event) -> float:
+        """Map an event's global position to bars-viewport x."""
+        vp = self._bars_scroll.viewport()
+        try:
+            return float(vp.mapFromGlobal(event.globalPosition().toPoint()).x())
+        except Exception:
+            return vp.width() / 2.0
+
+    def _zoom_at_viewport_x(self, factor: float, view_x: float) -> None:
+        """Zoom around a selected region if any, else the cursor at ``view_x``."""
+        sel_anchor = self._selection_zoom_anchor()
+        if sel_anchor is not None:
+            mid_bp, _view_x = sel_anchor
+            anchor_x = self._bars.bp_to_x(float(mid_bp))
+        else:
+            vp_w = float(self._bars_scroll.viewport().width())
+            view_x = max(0.0, min(vp_w, float(view_x)))
+            anchor_x = view_x + float(
+                self._bars_scroll.horizontalScrollBar().value()
+            )
+        self._bars.zoom_by(factor, anchor_x=anchor_x)
+        if sel_anchor is not None:
+            self._center_selection_vertically()
 
     def _on_zoom_changed(self, _ppb: float) -> None:
         self._sync_viewport_fill()

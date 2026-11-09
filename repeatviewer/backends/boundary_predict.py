@@ -44,7 +44,20 @@ POLY_LEN = 10
 # output consensus); they were not part of TEtrimmer's boundary MSA.
 TETRIMMER_ROW_PREFIXES = ("TEtrimmer_input_", "TEtrimmer_output_")
 
-TE_TYPE_CHOICES = ("Other", "LTR", "TIR", "LINE", "SINE")
+
+
+def te_type_from_name(name: str | Path) -> str:
+    """"LINE" / "SINE" when the MSA file name says so, else "Other".
+
+    Like TEtrimmer, only LINE and SINE change the boundary path (poly-A, and
+    for LINE the gap end-crop); every other type runs the default path.
+    """
+    stem = Path(str(name)).name
+    if "LINE" in stem:
+        return "LINE"
+    if "SINE" in stem:
+        return "SINE"
+    return "Other"
 
 _NUCL = ("a", "c", "g", "t")
 
@@ -57,6 +70,7 @@ class BoundaryPrediction:
     blast_coverage: tuple[int, int] | None = None
     terminal_repeat: tuple[int, int] | None = None
     terminal_repeat_type: str | None = None  # "LTR" / "TIR"
+    te_type: str | None = None  # path used: "LINE" / "SINE" / "Other"
     poly_a_end: int | None = None
     final: tuple[int, int] | None = None
     evaluation: str | None = None
@@ -673,6 +687,7 @@ def predict_boundaries(
             f"Ignored {len(sequences) - len(rows)} TEtrimmer input/output row(s)."
         )
     result.sequence_count = len(rows)
+    result.te_type = te_type
     is_line = te_type.upper().startswith("LINE")
     is_sine = te_type.upper().startswith("SINE")
 
