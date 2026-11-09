@@ -3785,8 +3785,12 @@ class ContigViewPanel(QWidget):
                 ("unused", "Not used", "Sequences that could not be placed"),
                 ("raw", "Aligner output", "The aligner's own output, for other tools")):
             name = self._data.get("details", {}).get(key)
-            if name:
-                add(label, details / name, tip)
+            if not name:
+                continue
+            # New runs keep PAF/SAM next to the .rvmap; older runs left it in _details.
+            sibling = self._path.parent / name
+            target = sibling if sibling.is_file() else details / name
+            add(label, target, tip)
         ref = Path(self._data.get("reference", ""))
         if ref.name:
             menu.addSeparator()

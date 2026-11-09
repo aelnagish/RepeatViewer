@@ -5187,8 +5187,9 @@ class MainWindow(
         rvmap = Path(result["rvmap"])
         created = [Path(p) for p in result["files"] if Path(p).is_file()]
         if self._current_folder:
-            # The .rvmap sits next to the input (green) and opens in the contig view
-            # (deep blue); everything else is in <input>_map_details.
+            # The .rvmap and selected aligner format (.paf / .sam) sit next to the
+            # input (green); the .rvmap opens in the contig view (deep blue).
+            # Report / tables / FASTA live in <stem>_details.
             self._refresh_subfolders_under(self._current_folder)
             self._populate_file_list(
                 self._current_folder,
@@ -5198,8 +5199,17 @@ class MainWindow(
             )
         if rvmap.is_file():
             self._auto_open_outputs([rvmap])
+        alignment = next(
+            (
+                p
+                for p in created
+                if p.parent == rvmap.parent and p.suffix.lower() in {".paf", ".sam"}
+            ),
+            None,
+        )
+        extra = f" + {alignment.name}" if alignment is not None else ""
         self._set_status_message(
-            f"Mapping completed — {rvmap.name} (report in {rvmap.stem}_details)",
+            f"Mapping completed — {rvmap.name}{extra} (report in {rvmap.stem}_details)",
             12000, override_file_link=True,
         )
 

@@ -17,10 +17,11 @@ like Geneious Prime's "Map to Reference", with additions for repeat work:
 
 Results follow the RepeatViewer naming rule (full input name, then a suffix):
 ``<input>_minimap.rvmap`` / ``<input>_hisat.rvmap`` next to the input (opens in
-the contig view) and a matching ``_details/`` folder with the report, consensus,
-mapped and unused sequences, variant / feature / read tables and the raw
-aligner output. A second run becomes ``…_minimap_2…`` / ``…_hisat_2…``; nothing
-is overwritten.
+the contig view), the selected aligner output beside it
+(``…_minimap.paf`` / ``…_minimap.sam`` / ``…_hisat.sam``), and a matching
+``_details/`` folder with the report, consensus, mapped and unused sequences,
+and variant / feature / read tables. A second run becomes ``…_minimap_2…`` /
+``…_hisat_2…``; nothing is overwritten.
 
 Pure functions (parsers, projection, consensus, variants, lift-over) have no Qt
 dependency and are tested in ``tests/test_map_reference.py``.
@@ -1357,6 +1358,18 @@ class OutputLayout:
     def path(self, suffix: str) -> Path:
         return self.details / f"{self.base}{suffix}"
 
+    def alignment(self, suffix: str) -> Path:
+        """Selected aligner format (``.paf`` / ``.sam``) next to the ``.rvmap``."""
+        ext = suffix if suffix.startswith(".") else f".{suffix}"
+        return self.parent / f"{self.base}{ext}"
+
+
+def _base_outputs_exist(parent: Path, base: str) -> bool:
+    """True when a previous run already claimed this base name."""
+    if (parent / f"{base}{RVMAP_SUFFIX}").exists():
+        return True
+    return any((parent / f"{base}{ext}").exists() for ext in (".paf", ".sam"))
+
 
 def plan_outputs(inputs: list[Path], *, engine: str | None = None) -> OutputLayout:
     """``<input>_minimap`` / ``_hisat`` (or ``_2``, ``_3`` …) and details folder."""
@@ -1368,7 +1381,7 @@ def plan_outputs(inputs: list[Path], *, engine: str | None = None) -> OutputLayo
     while True:
         base = stem if n == 1 else f"{stem}_{n}"
         details = parent / f"{base}_details"
-        if not (parent / f"{base}{RVMAP_SUFFIX}").exists():
+        if not _base_outputs_exist(parent, base):
             try:
                 details.mkdir(exist_ok=False)
                 return OutputLayout(parent, base, details)
@@ -1884,6 +1897,8 @@ def run_mapping(
 
     def _cleanup() -> None:
         layout.rvmap.unlink(missing_ok=True)
+        for ext in (".paf", ".sam"):
+            layout.alignment(ext).unlink(missing_ok=True)
         shutil.rmtree(layout.details, ignore_errors=True)
 
     try:
@@ -1929,16 +1944,16 @@ def _map(layout: OutputLayout, reference: Path, ref_lengths: dict[str, int],
             reference, queries, opts, info, work, commands, cancel
         )
         if out_fmt == MAP_MINIMAP2_OUT_SAM:
-            raw = layout.path(".sam")
+            raw = layout.alignment(".sam")
             shutil.move(str(aln), str(raw))
             records = iter_sam(raw)
         else:
-            raw = layout.path(".paf")
+            raw = layout.alignment(".paf")
             shutil.move(str(aln), str(raw))
             records = iter_paf(raw)
     elif engine == MAP_ENGINE_HISAT2:
         sam, version = run_hisat2_engine(reference, queries, opts, work, commands, say, cancel)
-        raw = layout.path(".sam")
+        raw = layout.alignment(".sam")
         shutil.move(str(sam), str(raw))
         records = iter_sam(raw)
         library = getattr(opts, "hisat2_library", MAP_HISAT2_RNA) or MAP_HISAT2_RNA
@@ -2349,8 +2364,19 @@ def _write_outputs(run: MapRun, layout: OutputLayout, info: InputInfo, created: 
     from repeatviewer.backends.sequence_features import save_annotations_multi
 
     o = run.opts
-    raw = next((layout.path(s) for s in (".aln.fa", ".paf", ".sam") if layout.path(s).is_file()),
-               None)
+    # Prefer the selected format next to the .rvmap; fall back to older runs that
+    # kept the aligner file only inside ``_details/``.
+    raw = next(
+        (
+            path
+            for path in (
+                *(layout.alignment(s) for s in (".paf", ".sam")),
+                *(layout.path(s) for s in (".aln.fa", ".paf", ".sam")),
+            )
+            if path.is_file()
+        ),
+        None,
+    )
     details: dict[str, str] = {}
 
     # Consensus, with the reference annotations moved to consensus coordinates.

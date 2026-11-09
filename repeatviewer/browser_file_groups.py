@@ -102,6 +102,11 @@ _TOOL_OUTPUT_SUFFIXES: tuple[str, ...] = (
     "_minimap.rvmap",
     "_hisat.rvmap",
     "_map.rvmap",
+    "_minimap.paf",
+    "_minimap.sam",
+    "_hisat.sam",
+    "_map.paf",
+    "_map.sam",
     "_iqtree.treefile",
     "_fastme.treefile",
     "_fasttree.treefile",
@@ -125,7 +130,7 @@ _NUMBERED_TREE_RE = re.compile(
     re.IGNORECASE,
 )
 _NUMBERED_MAP_RE = re.compile(
-    r"_(?:minimap|hisat|map)(?:_\d+)?\.rvmap$",
+    r"_(?:minimap|hisat|map)(?:_\d+)?\.(?:rvmap|paf|sam)$",
     re.IGNORECASE,
 )
 _NUMBERED_TEAID_RE = re.compile(r"_(?:p)?TEAid(?:_\d+)?\.html$", re.IGNORECASE)

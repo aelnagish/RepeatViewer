@@ -168,6 +168,7 @@ COMPACT_BUTTON_QSS = (
     " min-height: 16px; max-height: 16px; }"
     "QPushButton:hover { background: palette(midlight); }"
     "QPushButton:pressed { background: palette(mid); }"
+    "QPushButton:checked { background: palette(midlight); }"
     "QPushButton:disabled { color: palette(mid); }"
 )
 
@@ -871,7 +872,7 @@ class AnnotationZoomBar(QWidget):
     clean_requested = Signal()
     consensus_requested = Signal()
     coverage_requested = Signal()
-    # Overview toolbar "Ann": show/hide every annotation track at once.
+    # Overview toolbar "Feat": show/hide every feature track at once.
     annotations_toggled = Signal(bool)
     extract_requested = Signal()  # kept for callers; Extract is not on this bar
     filter_text_changed = Signal(str)
@@ -1031,19 +1032,19 @@ class AnnotationZoomBar(QWidget):
         # Cov is kept (signal + handler) but no longer offered in the toolbar.
         self._coverage_btn_offered = False
 
-        ann_btn = QPushButton("Ann", self._overview_host)
-        ann_btn.setCheckable(True)
-        ann_btn.setChecked(True)
-        ann_btn.setFixedHeight(_OVERVIEW_SELECT_FIT_HEIGHT)
-        style_compact_button(ann_btn)
-        ann_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        ann_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        ann_btn.setToolTip(
-            "Show or hide all annotation tracks at once. Which annotation "
-            "types are ticked under Displayed annotations is kept."
+        feat_btn = QPushButton("Feat", self._overview_host)
+        feat_btn.setCheckable(True)
+        feat_btn.setChecked(True)
+        feat_btn.setFixedHeight(_OVERVIEW_SELECT_FIT_HEIGHT)
+        style_compact_button(feat_btn)
+        feat_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        feat_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        feat_btn.setToolTip(
+            "Show or hide all feature tracks on the MSA. Which types are "
+            "ticked under Display → Displayed annotations is kept."
         )
-        ann_btn.toggled.connect(self.annotations_toggled.emit)
-        self._annotations_btn = ann_btn
+        feat_btn.toggled.connect(self.annotations_toggled.emit)
+        self._annotations_btn = feat_btn
 
         # Hidden: overview name jump still available via bind API / Find.
         self._name_filter = QLineEdit(self._overview_host)
@@ -1075,7 +1076,7 @@ class AnnotationZoomBar(QWidget):
             clean_btn,
             consensus_btn,
             coverage_btn,
-            ann_btn,
+            feat_btn,
         ):
             ov.addWidget(w, 0, Qt.AlignmentFlag.AlignVCenter)
         # Left-pack controls; sequence count sits on the right after stretch.
@@ -1107,7 +1108,7 @@ class AnnotationZoomBar(QWidget):
                 [clean_btn],
                 [consensus_btn],
                 [coverage_btn],
-                [ann_btn],
+                [feat_btn],
                 [self._sequence_count_label],
             ],
             spacing=6,
@@ -1120,7 +1121,7 @@ class AnnotationZoomBar(QWidget):
         self._overview_overflow.set_unit_allowed_by_widget(clean_btn, False)
         self._overview_overflow.set_unit_allowed_by_widget(consensus_btn, False)
         self._overview_overflow.set_unit_allowed_by_widget(coverage_btn, False)
-        self._overview_overflow.set_unit_allowed_by_widget(ann_btn, False)
+        self._overview_overflow.set_unit_allowed_by_widget(feat_btn, False)
         layout.addWidget(self._overview_host, 1)
 
         self._actions_btn = _make_preview_actions_button(
