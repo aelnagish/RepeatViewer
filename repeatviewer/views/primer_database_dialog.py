@@ -1,9 +1,9 @@
 """Tools > Primers and Probes > Database: the lab's primer inventory.
 
-One window for everything the lab knows about a primer: sequence and checks
-(Tm, hairpin, dimers), what it amplifies and in which organism, where the tube
-is (box, freezer, room), whether it is in stock and whether it worked, who
-ordered it and when, and the history of every change.
+One window for everything the lab knows about a primer: sequence and Tm, what
+it amplifies and in which organism, where the tube is (box, freezer, room),
+whether it is in stock and whether it worked, who ordered it and when, and the
+history of every change (History…).
 
 The database can be a folder on this computer or a shared folder (Sciebo):
 see :mod:`repeatviewer.backends.primers.inventory`.
@@ -57,7 +57,6 @@ from repeatviewer.backends.primers.thermo import (
     PrimerError,
     ThermoSettings,
     analyze_oligo,
-    heterodimer,
 )
 from repeatviewer.widgets.combo_boxes import NoWheelComboBox as QComboBox
 
@@ -92,6 +91,7 @@ _FORM: tuple[tuple[str, str, str], ...] = (
     ("note", "Note:", "line"),
 )
 _MULTI_SKIP = ("name", "sequence", "aliases")
+_FORM_FIELD_W = 300   # every form field the same width (two columns)
 
 
 def _one_decimal(value) -> str:
@@ -101,102 +101,37 @@ def _one_decimal(value) -> str:
         return str(value or "")
 
 
-# --------------------------------------------------------------------------
-# Plain-language checks
-# --------------------------------------------------------------------------
-
-OK, CAUTION, BAD = "ok", "caution", "bad"
-_MARK = {OK: ("✓", "#2e7d32"), CAUTION: ("⚠", "#b45309"), BAD: ("✗", "#b3261e")}
-
-
 def _e(text: str) -> str:
     import html
 
     return html.escape(str(text))
 
 
-def _dimer_verdict(dg: float, found: bool) -> tuple[str, str]:
-    if not found or dg > -6.0:
-        return OK, "weak, fine" if found else "none"
-    if dg > -9.0:
-        return CAUTION, "moderate: may give primer-dimer bands at low annealing temperature"
-    return BAD, "strong: likely primer-dimer bands"
+RECENT_KEY = "primers/database_window/recent"
+MAX_RECENT = 6
 
 
-def primer_verdicts(st) -> list[tuple[str, str, str]]:
-    """(status, check, text) rows for one primer.
-
-    Rules of thumb (as in common primer guides): dimers weaker than −6 kcal/mol
-    are harmless, −6 to −9 need care, stronger than −9 cause dimer bands;
-    a hairpin matters when it is stable at the annealing temperature; the last
-    five 3′ bases should not bind too strongly (ΔG above −9); GC 40–60 %.
-    """
-    rows = []
-    hp = st.hairpin
-    if not hp.found:
-        rows.append((OK, "Hairpin", "none"))
-    elif hp.tm and hp.tm < st.tm - 10 and hp.dg > -3.0:
-        rows.append((OK, "Hairpin", f"none that matters (melts at {hp.tm:.0f} °C)"))
-    elif hp.tm and hp.tm < st.tm - 5:
-        rows.append((CAUTION, "Hairpin", f"melts at {hp.tm:.0f} °C, close to annealing: "
-                     "use an annealing temperature well above it"))
-    else:
-        rows.append((BAD, "Hairpin", f"stable (ΔG {hp.dg:.1f}"
-                     + (f", melts at {hp.tm:.0f} °C" if hp.tm else "") + "): the primer folds"))
-    status, text = _dimer_verdict(st.self_dimer.dg, st.self_dimer.found)
-    rows.append((status, "Self-dimer", text + (f" ({st.self_dimer.dg:.1f})"
-                                               if st.self_dimer.found else "")))
-    if st.end_dg < -9.0:
-        rows.append((CAUTION, "3′ end", f"binds very strongly (ΔG {st.end_dg:.1f}): may prime "
-                     "at wrong sites"))
-    else:
-        rows.append((OK, "3′ end", f"normal (ΔG {st.end_dg:.1f})"))
-    lo, hi = 40, 60
-    if lo <= st.gc <= hi:
-        rows.append((OK, "GC", f"{st.gc:.0f} %"))
-    else:
-        rows.append((CAUTION, "GC", f"{st.gc:.0f} % (aim for {lo}–{hi} %)"))
-    other = [w for w in st.warnings if not w.startswith(("GC ", "very stable 3"))
-             and "dimer" not in w and "hairpin" not in w]
-    for w in other:
-        rows.append((CAUTION, "Note", w))
-    return rows
+def recent_databases() -> list[str]:
+    """Shared databases opened before (newest first), for the Database ▾ menu."""
+    raw = QSettings().value(RECENT_KEY, []) or []
+    if isinstance(raw, str):
+        raw = [raw]
+    return [str(x) for x in raw if str(x).strip()]
 
 
-def pair_verdicts(sa, sb, cross) -> list[tuple[str, str, str]]:
-    """Two primers in one reaction: their dimer and Tm difference."""
-    rows = []
-    status, text = _dimer_verdict(cross.dg, cross.found)
-    rows.append((status, "Together", text + (f" (cross-dimer {cross.dg:.1f})"
-                                             if cross.found else ", no cross-dimer")))
-    if sa is not None and sb is not None:
-        diff = abs(sa.tm - sb.tm)
-        if diff <= 2:
-            rows.append((OK, "Tm difference", f"{diff:.1f} °C"))
-        elif diff <= 5:
-            rows.append((CAUTION, "Tm difference", f"{diff:.1f} °C: anneal for the lower "
-                         f"one ({min(sa.tm, sb.tm):.1f} °C)"))
-        else:
-            rows.append((BAD, "Tm difference", f"{diff:.1f} °C: too far apart for one "
-                         "annealing temperature"))
-    return rows
+def remember_database(path: str) -> None:
+    if not path:
+        return
+    items = [path] + [p for p in recent_databases() if p != path]
+    QSettings().setValue(RECENT_KEY, items[:MAX_RECENT])
 
 
-def _verdict_table(rows) -> str:
-    out = ["<table cellspacing='0' cellpadding='2'>"]
-    for status, label, text in rows:
-        mark, color = _MARK[status]
-        out.append(f"<tr><td style='color:{color}'><b>{mark}</b></td>"
-                   f"<td style='padding-right:8px'>{_e(label)}</td><td>{_e(text)}</td></tr>")
-    out.append("</table>")
-    return "".join(out)
-
-
-def _drawing(title: str, struct) -> str:
-    tm = f", melts at {struct.tm:.0f} °C" if getattr(struct, "tm", 0) > 0 else ""
-    body = _e("\n".join(struct.lines)) if struct.lines else "(no drawing)"
-    return (f"<p style='color:palette(mid);margin-bottom:0'>{_e(title)}: ΔG {struct.dg:.1f} "
-            f"kcal/mol{tm}</p><pre style='font-size:11px;margin-top:2px'>{body}</pre>")
+def database_place_name(path: Path | str | None) -> str:
+    """Short name of a shared database: the folder that holds it ("Molbot")."""
+    if not path:
+        return "This Computer"
+    p = Path(path).expanduser()
+    return p.parent.name if p.name == inv.FOLDER_NAME and p.parent.name else p.name
 
 
 def lab_user_setting() -> str:
@@ -266,7 +201,6 @@ class PrimerDatabaseDialog(QDialog):
         self._filter.setClearButtonEnabled(True)
         self._filter.textChanged.connect(self._fill)
         self._organism = QComboBox(self)
-        self._organism.setMinimumWidth(180)
         self._organism.currentIndexChanged.connect(self._fill)
         self._status = QComboBox(self)
         self._status.addItem("Any status", _ALL)
@@ -274,9 +208,10 @@ class PrimerDatabaseDialog(QDialog):
             self._status.addItem(inv.STATUS_LABELS[v], v)
         self._status.currentIndexChanged.connect(self._fill)
         self._person = QComboBox(self)
-        self._person.setMinimumWidth(140)
         self._person.setToolTip("Show the primers ordered by one person")
         self._person.currentIndexChanged.connect(self._fill)
+        for box in (self._organism, self._person, self._status):
+            box.setFixedWidth(190)
         top = QHBoxLayout()
         top.setSpacing(8)
         top.addWidget(self._filter, 1)
@@ -284,25 +219,33 @@ class PrimerDatabaseDialog(QDialog):
         top.addWidget(self._person)
         top.addWidget(self._status)
 
-        self._where = QLabel(self)
-        self._where.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        self._where.setWordWrap(False)
-        self._where.setMinimumWidth(80)
-        self._where.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self._change_btn = QPushButton("Change…", self)
-        menu = QMenu(self._change_btn)
-        # Run after the menu has closed: a file chooser opened while the menu is
-        # still closing hands the focus back to the main window on macOS, and
-        # this window drops behind it.
-        later = lambda slot: (lambda: QTimer.singleShot(0, slot))  # noqa: E731
-        menu.addAction("Use a Shared Folder (Sciebo)…", later(self._use_shared_folder))
-        menu.addAction("Open Another Database…", later(self._open_other))
-        menu.addAction("Use the Database on This Computer", later(self._use_local))
-        menu.addSeparator()
-        menu.addAction("Your Name in the History…",
-                       later(lambda: self._ask_user(force=True)))
-        self._change_btn.setMenu(menu)
-
+        # ---- where the database is: one button, "Database: This Computer ▾"
+        self._place_btn = QPushButton(self)
+        self._place_btn.setToolTip("Where this database is: this computer, or a shared "
+                                   "folder (Sciebo) the lab uses together")
+        self._place_menu = QMenu(self._place_btn)
+        self._place_menu.aboutToShow.connect(self._fill_place_menu)
+        self._place_btn.setMenu(self._place_menu)
+        # Shown when the shared database chosen last time cannot be found.
+        self._missing_path = ""
+        self._missing = QFrame(self)
+        self._missing.setObjectName("DatabaseMissing")
+        self._missing.setStyleSheet("#DatabaseMissing { background: rgba(245, 158, 11, 0.16); "
+                                    "border: 1px solid rgba(180, 83, 9, 0.45); "
+                                    "border-radius: 6px; }")
+        ml = QHBoxLayout(self._missing)
+        ml.setContentsMargins(10, 6, 8, 6)
+        ml.setSpacing(8)
+        self._missing_text = QLabel(self._missing)
+        self._missing_text.setWordWrap(True)
+        retry = QPushButton("Try Again", self._missing)
+        retry.clicked.connect(self._retry_missing)
+        local = QPushButton("Use This Computer", self._missing)
+        local.clicked.connect(self._use_local)
+        ml.addWidget(self._missing_text, 1)
+        ml.addWidget(retry)
+        ml.addWidget(local)
+        self._missing.hide()
 
         # ---- table
         self._table = QTableWidget(0, len(_COLUMNS), self)
@@ -321,13 +264,15 @@ class PrimerDatabaseDialog(QDialog):
         hh.setSortIndicator(0, Qt.SortOrder.AscendingOrder)
         self._table.itemSelectionChanged.connect(self._on_selection)
 
-        # ---- form (left) and checks / history (right)
+        # ---- form: two columns of equal, compact fields; labels right-aligned in one width
         self._form_host = QWidget(self)
         grid = QGridLayout(self._form_host)
-        grid.setContentsMargins(0, 0, 8, 0)
-        grid.setHorizontalSpacing(8)
-        grid.setVerticalSpacing(4)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(6)
         self._fields: dict[str, QWidget] = {}
+        labels: list[QLabel] = []
+        wide_fields: list[QWidget] = []
         row = col = 0
         for key, label, kind in _FORM:
             w = self._make_field(key, kind)
@@ -337,17 +282,28 @@ class PrimerDatabaseDialog(QDialog):
                 row, col = row + 1, 0
             lab = QLabel(label, self._form_host)
             lab.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            labels.append(lab)
             grid.addWidget(lab, row, col * 2)
-            grid.addWidget(w, row, col * 2 + 1, 1, 3 if wide else 1)
+            align = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+            grid.addWidget(w, row, col * 2 + 1, 1, 3 if wide else 1, align)
             if wide:
+                wide_fields.append(w)
                 row, col = row + 1, 0
             else:
+                w.setFixedWidth(_FORM_FIELD_W)
                 col += 1
                 if col == 2:
                     row, col = row + 1, 0
-        grid.setColumnStretch(1, 1)
-        grid.setColumnStretch(3, 1)
+        label_w = max(lab.sizeHint().width() for lab in labels)
+        for lab in labels:
+            lab.setFixedWidth(label_w)
+        for w in wide_fields:
+            w.setFixedWidth(2 * _FORM_FIELD_W + label_w + 2 * grid.horizontalSpacing())
+        grid.setColumnStretch(4, 1)
         self._form_title = QLabel(self)
+        self._history_btn = QPushButton("History…", self)
+        self._history_btn.setToolTip("Every change to this primer: who, when, what")
+        self._history_btn.clicked.connect(self._show_history)
         self._save_btn = QPushButton("Save Changes", self)
         self._save_btn.setDefault(False)
         self._save_btn.clicked.connect(self._save_form)
@@ -355,48 +311,24 @@ class PrimerDatabaseDialog(QDialog):
         self._revert_btn.clicked.connect(self._on_selection)
         fb = QHBoxLayout()
         fb.addWidget(self._form_title, 1)
+        fb.addWidget(self._history_btn)
         fb.addWidget(self._revert_btn)
         fb.addWidget(self._save_btn)
         scroll = QScrollArea(self)
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
         scroll.setWidget(self._form_host)
-        left = QWidget(self)
-        ll = QVBoxLayout(left)
+        bottom = QWidget(self)
+        ll = QVBoxLayout(bottom)
         ll.setContentsMargins(0, 0, 0, 0)
         ll.addLayout(fb)
         ll.addWidget(scroll, 1)
-
-        self._details = QTextBrowser(self)
-        self._details.setOpenLinks(False)
-        self._details.setPlaceholderText(
-            "Select a primer to check it: hairpin, self-dimer, 3′ end, GC, and whether it "
-            "works with its partner.\n"
-            "Select two primers to check them together.\n"
-            "Select several to change their box, status … at once.")
-        self._show_drawings = QCheckBox("Show the structure drawings", self)
-        self._show_drawings.setChecked(
-            str(QSettings().value("primers/database_window/drawings", "false")).lower()
-            in ("1", "true"))
-        self._show_drawings.toggled.connect(self._drawings_toggled)
-        right = QWidget(self)
-        rl = QVBoxLayout(right)
-        rl.setContentsMargins(0, 0, 0, 0)
-        rl.setSpacing(4)
-        rl.addWidget(self._details, 1)
-        rl.addWidget(self._show_drawings)
-        bottom = QSplitter(Qt.Orientation.Horizontal, self)
-        bottom.addWidget(left)
-        bottom.addWidget(right)
-        bottom.setStretchFactor(0, 3)
-        bottom.setStretchFactor(1, 2)
-        bottom.setSizes([660, 480])
         split = QSplitter(Qt.Orientation.Vertical, self)
         split.addWidget(self._table)
         split.addWidget(bottom)
         split.setStretchFactor(0, 3)
         split.setStretchFactor(1, 2)
-        self._split_main, self._split_bottom = split, bottom
+        self._split_main = split
 
         # ---- buttons
         add = QPushButton("Add…", self)
@@ -432,18 +364,18 @@ class PrimerDatabaseDialog(QDialog):
         close.clicked.connect(self.close)
         bar = QHBoxLayout()
         bar.setSpacing(8)
+        bar.addWidget(self._place_btn)
+        bar.addSpacing(16)
         for b in (add, imp, exp, self._delete, dups, people, check):
             bar.addWidget(b)
-        bar.addSpacing(12)
-        bar.addWidget(self._where, 1)
-        bar.addWidget(self._change_btn)
-        bar.addSpacing(12)
+        bar.addStretch(1)
         bar.addWidget(close)
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(16, 14, 16, 14)
         lay.setSpacing(8)
         lay.addLayout(top)
+        lay.addWidget(self._missing)
         lay.addWidget(split, 1)
         lay.addLayout(bar)
 
@@ -451,6 +383,8 @@ class PrimerDatabaseDialog(QDialog):
         self._poll.setInterval(4000)
         self._poll.timeout.connect(self._poll_disk)
         self._poll.start()
+        if path and not inv.is_inventory_folder(path) and not Path(path).expanduser().is_file():
+            self._set_missing(str(path))
         self._refresh_where()
         self._refill_choices()
         self._fill()
@@ -469,11 +403,9 @@ class PrimerDatabaseDialog(QDialog):
             geo = st.value("geometry")
             if geo:
                 self.restoreGeometry(geo)
-            for key, w in (("split_main", self._split_main),
-                           ("split_bottom", self._split_bottom)):
-                v = st.value(key)
-                if v:
-                    w.restoreState(v)
+            v = st.value("split_main")
+            if v:
+                self._split_main.restoreState(v)
             header = st.value("columns")
             if header and self._table.horizontalHeader().restoreState(header):
                 self._columns_restored = self._table.columnCount() == len(_COLUMNS)
@@ -487,7 +419,6 @@ class PrimerDatabaseDialog(QDialog):
         st.beginGroup(self._LAYOUT_GROUP)
         st.setValue("geometry", self.saveGeometry())
         st.setValue("split_main", self._split_main.saveState())
-        st.setValue("split_bottom", self._split_bottom.saveState())
         st.setValue("columns", self._table.horizontalHeader().saveState())
         st.endGroup()
         st.sync()
@@ -506,9 +437,13 @@ class PrimerDatabaseDialog(QDialog):
 
     @staticmethod
     def _open(path) -> PrimerDatabase:
+        """The database at ``path``; the one on this computer when it cannot be opened
+        (the window then says so, see :meth:`_set_missing`)."""
+        if path and not inv.is_inventory_folder(path) and not Path(path).expanduser().is_file():
+            path = None
         try:
             db = inv.open_database(path)
-        except PrimerError:
+        except (PrimerError, OSError):
             db = inv.open_database(None)
         if isinstance(db, inv.PrimerInventory):
             try:
@@ -518,7 +453,10 @@ class PrimerDatabaseDialog(QDialog):
         return db
 
     def _switch_to(self, path: str) -> None:
+        self._set_missing("")
         self._db = self._open(path or None)
+        if path:
+            remember_database(path)
         self._stats_cache.clear()
         self._refresh_where()
         self._refill_choices()
@@ -526,28 +464,97 @@ class PrimerDatabaseDialog(QDialog):
         self._on_selection()
         self.databasePathChanged.emit(path)
 
-    def _refresh_where(self) -> None:
-        """Short line next to Change…; the full path is in the tooltip."""
+    def _set_missing(self, path: str) -> None:
+        """The shared database chosen last time is not there (Sciebo not synced,
+        folder renamed or offline): say so instead of quietly showing another one."""
+        self._missing_path = path
+        if path:
+            self._missing_text.setText(
+                f"<b>The shared database “{_e(database_place_name(path))}” cannot be found.</b> "
+                f"Sciebo may not have synced yet, or the folder was moved. Showing the database "
+                f"on this computer for now.")
+            self._missing_text.setToolTip(path)
+        self._missing.setVisible(bool(path))
+
+    def _retry_missing(self) -> None:
+        path = self._missing_path
+        if path and inv.is_inventory_folder(path):
+            self._switch_to(path)
+        elif path:
+            QMessageBox.information(self, "Primer Database",
+                                    f"Still not found:\n{path}")
+            self.bring_to_front()
+
+    def _shared(self) -> bool:
         db = self._inventory()
         if db is None:
-            self._where.setText("<span style='color:palette(mid)'>Database is an <b>older FASTA "
-                                "file</b></span>")
-            self._where.setToolTip(
-                f"Database: {self._db.path}\nAn older single FASTA file: only names and "
-                "sequences. Change… › Use the Database on This Computer, then Import this "
-                "FASTA, to keep locations and stock.")
-            return
-        shared = db.path.resolve() != inv.default_inventory_folder().resolve()
-        writers = db.writers()
-        place = "a shared folder" if shared else "this computer"
-        self._where.setText(f"<span style='color:palette(mid)'>Database is on <b>{place}</b>. "
-                            f"User: <b>{db.user}</b></span>")
-        self._where.setToolTip(
-            f"Database: {db.path}\n"
-            + ("A shared folder (Sciebo): changes from others appear after syncing."
-               if shared else "On this computer only. Change… › Use a Shared Folder to "
-               "share it with the lab.")
-            + (f"\n{len(writers)} people have made changes." if len(writers) > 1 else ""))
+            return True
+        return db.path.resolve() != inv.default_inventory_folder().resolve()
+
+    def _refresh_where(self) -> None:
+        """The Database ▾ button and the window title name the place."""
+        db = self._inventory()
+        if db is None:
+            place = Path(self._db.path).name
+            self._place_btn.setText(f"Database: {place}")
+            self._place_btn.setToolTip(
+                f"{self._db.path}\nAn older single FASTA file: only names and sequences. "
+                "Database ▾ › This Computer, then Import this FASTA, to keep locations and "
+                "stock.")
+        else:
+            place = database_place_name(db.path) if self._shared() else "This Computer"
+            self._place_btn.setText(f"Database: {place}")
+            writers = db.writers()
+            self._place_btn.setToolTip(
+                f"{db.path}\n"
+                + ("Shared folder: changes from others appear after syncing."
+                   if self._shared() else "On this computer only.")
+                + (f"\n{len(writers)} people have made changes." if len(writers) > 1 else "")
+                + f"\nYou are {db.user} in the history (Lab › Your name).")
+        self._update_title()
+
+    def _update_title(self, shown: int | None = None, total: int | None = None) -> None:
+        if total is None:
+            total = len(self._db.primers)
+        db = self._inventory()
+        place = (database_place_name(db.path) if db is not None and self._shared()
+                 else "This Computer" if db is not None else Path(self._db.path).name)
+        unit = "primer" if total == 1 else "primers"
+        count = (f"{shown} of {total} {unit} shown" if shown is not None and shown != total
+                 else f"{total} {unit}")
+        self.setWindowTitle(f"Primer Database · {place} · {count}")
+
+    def _fill_place_menu(self) -> None:
+        menu = self._place_menu
+        menu.clear()
+        # Run after the menu has closed: a file chooser opened while the menu is
+        # still closing hands the focus back to the main window on macOS, and
+        # this window drops behind it.
+        later = lambda slot: (lambda: QTimer.singleShot(0, slot))  # noqa: E731
+        current = str(Path(self._db.path).resolve())
+        local = menu.addAction("This Computer", later(self._use_local))
+        local.setCheckable(True)
+        local.setChecked(not self._shared())
+        recent = [p for p in recent_databases() if p]
+        if recent:
+            menu.addSeparator()
+            for path in recent:
+                act = menu.addAction(database_place_name(path),
+                                     later(lambda p=path: self._open_recent(p)))
+                act.setToolTip(path)
+                act.setCheckable(True)
+                try:
+                    act.setChecked(str(Path(path).expanduser().resolve()) == current)
+                except OSError:
+                    pass
+                act.setEnabled(inv.is_inventory_folder(path))
+        menu.addSeparator()
+        menu.addAction("Shared Database…", later(self._choose_shared))
+        import sys
+
+        reveal = "Show in Finder" if sys.platform == "darwin" else "Show in File Manager"
+        menu.addAction(reveal, self._reveal)
+        menu.setToolTipsVisible(True)
 
     def _poll_disk(self) -> None:
         db = self._inventory()
@@ -766,9 +773,7 @@ class PrimerDatabaseDialog(QDialog):
         self._filling = False
         total = len(rows)
         self._delete.setEnabled(bool(shown))
-        unit = "primer" if total == 1 else "primers"
-        self.setWindowTitle(f"Primer Database: {len(shown)} of {total} {unit} shown"
-                            if len(shown) != total else f"Primer Database: {total} {unit}")
+        self._update_title(len(shown), total)
         if wanted:
             self._on_selection()
 
@@ -904,7 +909,7 @@ class PrimerDatabaseDialog(QDialog):
                                      "them</span>")
         self._form_original = self._form_values()
         self._form_touched()
-        self._show_details()
+        self._history_btn.setEnabled(full and len(datas) == 1)
 
     @_keeps_front
     def _save_form(self) -> None:
@@ -945,73 +950,6 @@ class PrimerDatabaseDialog(QDialog):
         self._stats_cache.clear()
         self._refill_choices()
         self._fill(select_ids=list(self._form_ids))
-
-    # ------------------------------------------------------------ details
-
-    def _drawings_toggled(self, on: bool) -> None:
-        QSettings().setValue("primers/database_window/drawings", bool(on))
-        self._show_details()
-
-    def _partner_of(self, p: Primer, pairs: dict) -> Primer | None:
-        for name in pairs.get(p.name, []):
-            other = self._db.get(name)
-            if other is not None:
-                return other
-        return None
-
-    def _show_details(self) -> None:
-        sel = self._selected()
-        if not sel:
-            self._details.clear()
-            return
-        db = self._inventory()
-        pairs = inv.partners(self._db.primers)
-        drawings = self._show_drawings.isChecked()
-        parts: list[str] = []
-        if len(sel) >= 2:
-            a, b = sel[0], sel[1]
-            sa, sb = self._stats(a), self._stats(b)
-            cross = heterodimer(a.sequence, b.sequence, self._thermo)
-            parts.append(f"<h3>{_e(a.name)} + {_e(b.name)}</h3>")
-            parts.append(_verdict_table(pair_verdicts(sa, sb, cross)))
-            if drawings and cross.found:
-                parts.append(_drawing("Dimer between them", cross))
-        for p in sel[:2] if len(sel) >= 2 else sel[:1]:
-            st = self._stats(p)
-            parts.append(f"<h3>{_e(p.name)} <span style='color:palette(mid);font-weight:"
-                         f"normal'>{_e(KIND_LABELS.get(p.kind, p.kind))}</span></h3>")
-            if st is None:
-                parts.append(f"<p>Cannot analyse {_e(p.sequence)}.</p>")
-                continue
-            partner = self._partner_of(p, pairs) if len(sel) == 1 else None
-            rows = primer_verdicts(st)
-            if partner is not None:
-                sp = self._stats(partner)
-                if sp is not None:
-                    cross = heterodimer(p.sequence, partner.sequence, self._thermo)
-                    rows = [(s_, f"With {partner.name}" if lab == "Together" else lab, t)
-                            for s_, lab, t in pair_verdicts(st, sp, cross)] + rows
-            parts.append(_verdict_table(rows))
-            sup = p.extra.get("tm_supplier")
-            facts = [f"{st.binding_length} nt" + (f" + {len(p.tail)} nt tail" if p.tail else ""),
-                     f"Tm {st.tm:.1f} °C (Primer3)"
-                     + (f", {st.tm_min:.1f}–{st.tm_max:.1f} for the degenerate mix"
-                        if st.degeneracy > 1 else ""),
-                     f"supplier {_e(str(sup))} °C" if sup else "",
-                     f"GC {st.gc:.0f} %"]
-            parts.append("<p style='color:palette(mid)'>" + " · ".join(x for x in facts if x)
-                         + f"<br>Tm conditions: {_e(self._thermo.describe())}</p>")
-            if drawings:
-                for struct, title in ((st.hairpin, "Hairpin"), (st.self_dimer, "Self-dimer")):
-                    if struct.found:
-                        parts.append(_drawing(title, struct))
-        if db is not None and len(sel) == 1:
-            rec = db.records.get(sel[0].extra.get("id", ""))
-            if rec is not None and rec.history:
-                items = "".join(f"<li>{_e(inv.describe_change(ch, db))}</li>"
-                                for ch in reversed(rec.history[-30:]))
-                parts.append(f"<h3>History</h3><ul style='margin-left:-20px'>{items}</ul>")
-        self._details.setHtml("".join(parts))
 
     # ------------------------------------------------------------ actions
 
@@ -1162,55 +1100,89 @@ class PrimerDatabaseDialog(QDialog):
     # ------------------------------------------------------------ location
 
     @_keeps_front
-    def _use_shared_folder(self) -> None:
+    def _choose_shared(self) -> None:
+        """Open the lab's shared database, or make one in a shared folder."""
         start = str(Path.home() / "Sciebo") if (Path.home() / "Sciebo").is_dir() \
             else str(Path.home())
         folder = QFileDialog.getExistingDirectory(
-            self, "Choose the shared folder (for example in your Sciebo folder)", start)
+            self, "Choose the shared folder (for example your lab folder in Sciebo)", start)
         if not folder:
+            return
+        found = inv.find_inventory(folder)
+        if found is not None:
+            self._switch_to(str(found))
+            return
+        n = len(self._db.primers)
+        box = QMessageBox(self)
+        box.setWindowTitle("Shared Database")
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setText(f"There is no primer database in “{Path(folder).name}”. Make one there?")
+        box.setInformativeText(
+            "Everyone in the lab then chooses this folder with Database ▾ › Shared "
+            "Database… in their own Sciebo folder.")
+        copy = box.addButton(f"Make It and Copy My {n} Primers" if n else "Make It",
+                             QMessageBox.ButtonRole.AcceptRole)
+        empty = box.addButton("Make It Empty", QMessageBox.ButtonRole.AcceptRole) if n else None
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(copy)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked not in (copy, empty) or clicked is None:
+            return
+        if not self._ask_user():
             return
         try:
             target = inv.create_inventory(Path(folder))
-        except OSError as exc:
-            QMessageBox.warning(self, "Shared Folder", f"Cannot use {folder}:\n{exc}")
+            if clicked is copy and n:
+                inv.copy_into(self._db, inv.PrimerInventory(target))
+        except (OSError, PrimerError) as exc:
+            QMessageBox.warning(self, "Shared Database", f"Cannot use {folder}:\n{exc}")
             return
-        self._move_to(target)
+        self._switch_to(str(target))
 
-    @_keeps_front
-    def _open_other(self) -> None:
-        folder = QFileDialog.getExistingDirectory(
-            self, f"Choose a “{inv.FOLDER_NAME}” folder", str(Path.home()))
-        if not folder:
-            return
-        if not inv.is_inventory_folder(folder):
-            QMessageBox.information(self, "Open Database",
-                                    f"{folder} is not a primer database folder. Use "
-                                    "“Use a Shared Folder” to make one.")
-            return
-        self._switch_to(folder)
+    def _open_recent(self, path: str) -> None:
+        if inv.is_inventory_folder(path):
+            self._switch_to(path)
+        else:
+            self._set_missing(path)
 
     def _use_local(self) -> None:
         self._switch_to("")
 
+    def _reveal(self) -> None:
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(self._db.path))))
+
     @_keeps_front
-    def _move_to(self, target: Path) -> None:
-        if not self._ask_user():
+    def _show_history(self) -> None:
+        db = self._inventory()
+        ids = self._selected_ids()
+        if db is None or len(ids) != 1:
             return
-        dst = inv.PrimerInventory(target)
-        same = Path(self._db.path).resolve() == target.resolve()
-        if not same and self._db.primers:
-            ans = QMessageBox.question(
-                self, "Shared Folder",
-                f"Copy the {len(self._db.primers)} primers of the current database into "
-                f"{target}?\n\nPrimers already there (same sequence) are not copied twice.")
-            if ans == QMessageBox.StandardButton.Yes:
-                inv.copy_into(self._db, dst)
-        self._switch_to(str(target))
-        QMessageBox.information(
-            self, "Shared Folder",
-            f"The Primer Database is now\n{target}\n\nEveryone in the lab: Database › "
-            "Change… › Open Another Database…, and choose this folder in their own Sciebo "
-            "folder. Changes appear on the other computers once Sciebo has synced.")
+        rec = db.records.get(ids[0])
+        if rec is None:
+            return
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"History of {rec.data.get('name', '')}")
+        dlg.resize(560, 380)
+        view = QTextBrowser(dlg)
+        view.setOpenLinks(False)
+        items = "".join(f"<li>{_e(inv.describe_change(ch, db))}</li>"
+                        for ch in reversed(rec.history))
+        view.setHtml(f"<ul style='margin-left:-20px'>{items}</ul>" if items
+                     else "<p>No changes recorded.</p>")
+        close = QPushButton("Close", dlg)
+        close.setDefault(True)
+        close.clicked.connect(dlg.accept)
+        bar = QHBoxLayout()
+        bar.addStretch(1)
+        bar.addWidget(close)
+        lay = QVBoxLayout(dlg)
+        lay.addWidget(view, 1)
+        lay.addLayout(bar)
+        dlg.exec()
 
     @_keeps_front
     def _open_people(self) -> None:
@@ -1219,7 +1191,7 @@ class PrimerDatabaseDialog(QDialog):
             return
         if not self._before_write():
             return
-        dlg = ListsDialog(db, self)
+        dlg = ListsDialog(db, self, ask_user=lambda: self._ask_user(force=True))
         dlg.exec()
         self._refill_choices()
         self._fill()
@@ -2214,7 +2186,8 @@ class ListsDialog(QDialog):
 
     TABS = ("people", "places", "organism", "target")
 
-    def __init__(self, db: inv.PrimerInventory, parent: QWidget, *, start: str = "") -> None:
+    def __init__(self, db: inv.PrimerInventory, parent: QWidget, *, start: str = "",
+                 ask_user=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Lab")
         self.resize(900, 600)
@@ -2248,11 +2221,28 @@ class ListsDialog(QDialog):
         close.setDefault(True)
         close.clicked.connect(self.accept)
         bar = QHBoxLayout()
+        self._you = QLabel(self)
+        self._db = db
+        self._refresh_you()
+        bar.addWidget(self._you)
+        if ask_user is not None:
+            name = QPushButton("Change Your Name…", self)
+            name.setToolTip("The name written into the history of every change you make")
+
+            def _change() -> None:
+                ask_user()
+                self._refresh_you()
+
+            name.clicked.connect(_change)
+            bar.addWidget(name)
         bar.addStretch(1)
         bar.addWidget(close)
         lay = QVBoxLayout(self)
         lay.addWidget(tabs, 1)
         lay.addLayout(bar)
+
+    def _refresh_you(self) -> None:
+        self._you.setText(f"You are <b>{_e(self._db.user)}</b> in the history.")
 
 
 __all__ = ["AddPrimersDialog", "ListsDialog", "PeopleDialog", "ValueListPage", "PeopleField", "PrimerDatabaseDialog", "apply_lab_user_setting",

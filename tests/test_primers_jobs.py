@@ -78,10 +78,6 @@ def test_design_without_annotation_leaves_input_alone(data):
 
 @pytest.mark.parametrize("mode,attr,kw", [
     (dz.MODE_QPCR, "gene", {"pick_probe": True}),
-    (dz.MODE_BSP, "promoter", {"min_converted": 1}),
-    (dz.MODE_MSP, "promoter", {}),
-    (dz.MODE_CONSERVED, "te_aln", {}),
-    (dz.MODE_SPECIFIC, "te_aln", {"target_pattern": "TEfamB"}),
     (dz.MODE_LADDER, "monomers", {}),
     (dz.MODE_FISH, "monomers", {}),
 ])
@@ -92,43 +88,11 @@ def test_every_mode_runs_end_to_end(data, mode, attr, kw):
     assert payload["mode"] == mode
 
 
-def test_insertion_mode_uses_annotated_te(data):
-    from repeatviewer.backends.sequence_features import SequenceFeature, save_annotations_multi
-
-    save_annotations_multi(
-        data.locus,
-        features_by_id={"locus1": [SequenceFeature(data.te_start, data.te_end, "Gypsy_1", "LTR")]},
-        lengths_by_id={"locus1": len(data.locus_seq)},
-    )
-    main, _files, payload = pj.run_design([data.locus], _s(dz.MODE_INSERTION))
-    p = payload["pairs"][0]
-    assert p["extra"]["te_start"] == data.te_start and p["extra"]["te_end"] == data.te_end
-    gel_lanes = [lane["label"] for lane in payload["gel"]["lanes"]]
-    assert gel_lanes[-3:] == ["empty/empty", "empty/TE", "TE/TE"]
-
-
-def test_insertion_without_te_explains(data):
-    with pytest.raises(PrimerError, match="TE position"):
-        pj.run_design([data.locus], _s(dz.MODE_INSERTION), annotate=False)
-
-
-def test_msa_mode_needs_alignment(data):
-    with pytest.raises(PrimerError, match="not an alignment"):
-        pj.run_design([data.gene], _s(dz.MODE_CONSERVED))
-
-
 def test_qpcr_reference_gene_pairs(data):
     s = _s(dz.MODE_QPCR, pick_probe=False, reference_fasta=str(data.refgene))
     _main, _files, payload = pj.run_design([data.gene], s)
     groups = {p["group"] for p in payload["pairs"]}
     assert "reference" in groups and "" in groups
-
-
-def test_design_genome_check_drops_unspecific(data):
-    s = _s(dz.MODE_PCR, check_genome=True, genome_fasta=str(data.genome), genome_max_products=1)
-    _main, _files, payload = pj.run_design([data.gene], s)
-    assert payload["genome"]["records"] == 3
-    assert all(p["specificity"]["products"] <= 1 for p in payload["pairs"])
 
 
 def test_save_pairs_to_database(data, tmp_path):

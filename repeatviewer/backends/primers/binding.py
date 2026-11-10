@@ -9,9 +9,10 @@ Two search strategies give the same answer where both apply:
 * **Exhaustive** (inputs up to :data:`EXHAUSTIVE_MAX_BP`): every position is
   scored with numpy; mismatches are allowed anywhere, subject to the
   "last bases must match" rule.
-* **Seeded** (genomes): the primer's 3' end (its last *k* bases, which must
-  match anyway) is found with a regular expression, then each hit is scored.
-  This is how a 3 Gb genome is searched in seconds per primer.
+* **Seeded** (genomes): the primer's 3'-end *k*-mer is looked up in one pass
+  over the genome, in every version that has at most the allowed mismatches
+  outside the bases that must match, then each hit is scored. It therefore
+  finds exactly the sites the exhaustive search finds.
 
 Coordinates in results are 1-based, inclusive, on the template's top strand.
 """
@@ -19,7 +20,6 @@ Coordinates in results are 1-based, inclusive, on the template's top strand.
 from __future__ import annotations
 
 import gzip
-import re
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -35,7 +35,9 @@ from repeatviewer.backends.primers.thermo import (
 
 EXHAUSTIVE_MAX_BP = 3_000_000
 MIN_SEED = 6
-DEFAULT_SEED = 8
+DEFAULT_SEED = 8         # kept for older settings; the seed length is now chosen per run
+MAX_SEED = 12
+MAX_SEED_VARIANTS = 4096  # seed versions per primer and strand
 MAX_SITES_PER_PRIMER = 50_000
 MAX_PRODUCTS = 20_000
 CHUNK_BP = 4_000_000
@@ -209,51 +211,6 @@ def _score_positions(tmask: np.ndarray, pmask: np.ndarray, settings: SearchSetti
     return idx, mism[idx].astype(np.int32)
 
 
-def _seed_regex(seed: str) -> re.Pattern:
-    parts = []
-    for ch in seed.upper():
-        bases = IUPAC_BASES.get(ch, "ACGT")
-        # Template letters (ambiguity codes too, never N) sharing a base with the primer.
-        allowed = {code for code, members in IUPAC_BASES.items()
-                   if code != "N" and set(members) & set(bases)}
-        cls = "".join(sorted(allowed | {c.lower() for c in allowed}))
-        parts.append(f"[{cls}]")
-    return re.compile("(?=" + "".join(parts) + ")")
-
-
-def _seeded_positions(seq: str, tmask: np.ndarray, oriented: str, settings: SearchSettings,
-                      three_prime_at_end: bool) -> tuple[np.ndarray, np.ndarray]:
-    L = len(oriented)
-    k = max(MIN_SEED, settings.three_prime_exact, 1)
-    k = min(k, L)
-    if three_prime_at_end:
-        seed, offset = oriented[L - k:], L - k
-    else:
-        seed, offset = oriented[:k], 0
-    rx = _seed_regex(seed)
-    starts = []
-    cap = settings.max_sites_per_primer * 4
-    for m in rx.finditer(seq):
-        s = m.start() - offset
-        if 0 <= s <= len(seq) - L:
-            starts.append(s)
-            if len(starts) >= cap:
-                break
-    if not starts:
-        return np.empty(0, dtype=np.int64), np.empty(0, dtype=np.int32)
-    st = np.asarray(starts, dtype=np.int64)
-    pmask = encode_primer(oriented)
-    win = tmask[st[:, None] + np.arange(L)[None, :]]
-    mm = _mismatch_rows(win, pmask)
-    counts = mm.sum(axis=1)
-    keep = counts <= settings.max_mismatches
-    exact_k = min(settings.three_prime_exact, L)
-    if exact_k:
-        tail = mm[:, L - exact_k:] if three_prime_at_end else mm[:, :exact_k]
-        keep &= ~tail.any(axis=1)
-    return st[keep], counts[keep].astype(np.int32)
-
-
 def find_sites_in_sequence(primer_name: str, primer_seq: str, record_id: str, seq: str,
                            settings: SearchSettings, *, exhaustive: bool | None = None,
                            offset: int = 0) -> list[BindingSite]:
@@ -262,8 +219,15 @@ def find_sites_in_sequence(primer_name: str, primer_seq: str, record_id: str, se
     L = len(bind)
     if L == 0 or len(seq) < L:
         return []
-    tmask = encode_template(seq)
     use_exhaustive = exhaustive if exhaustive is not None else len(seq) <= EXHAUSTIVE_MAX_BP
+    if not use_exhaustive:
+        found = GenomeScanner([(primer_name, primer_seq)], settings).scan(record_id, seq)
+        if offset:
+            for site in found:
+                site.start += offset
+                site.end += offset
+        return found
+    tmask = encode_template(seq)
     sites: list[BindingSite] = []
     orientations = [("+", bind, True)]
     if settings.both_strands:
@@ -271,11 +235,8 @@ def find_sites_in_sequence(primer_name: str, primer_seq: str, record_id: str, se
         # first base is the primer's 3' end.
         orientations.append(("-", reverse_complement(bind), False))
     for strand, oriented, at_end in orientations:
-        if use_exhaustive:
-            pmask = encode_primer(oriented)
-            idx, mism = _score_positions(tmask, pmask, settings, at_end)
-        else:
-            idx, mism = _seeded_positions(seq, tmask, oriented, settings, at_end)
+        pmask = encode_primer(oriented)
+        idx, mism = _score_positions(tmask, pmask, settings, at_end)
         if len(idx) > settings.max_sites_per_primer:
             idx, mism = idx[: settings.max_sites_per_primer], mism[: settings.max_sites_per_primer]
         if len(idx) == 0:
@@ -509,23 +470,73 @@ class _SeedEntry:
     at_end: bool
 
 
+def seed_variants(seed: str, exact: int, max_mismatches: int, *, at_end: bool,
+                  limit: int | None = None) -> list[str]:
+    """Every plain-ACGT version of ``seed`` with at most ``max_mismatches``
+    substitutions outside its ``exact`` bases (at the 3' end: the last bases
+    when ``at_end``, else the first). IUPAC codes count as matching any of
+    their bases. Stops early (returns more than ``limit``) when it grows too big."""
+    from itertools import combinations, product
+
+    from repeatviewer.backends.primers.thermo import expand_iupac
+
+    k = len(seed)
+    ex = min(exact, k)
+    free = list(range(0, k - ex)) if at_end else list(range(ex, k))
+    out: set[str] = set()
+    for base in expand_iupac(seed.upper(), 4096):
+        for j in range(0, min(max_mismatches, len(free)) + 1):
+            for pos in combinations(free, j):
+                choices = [[b for b in "ACGT" if b != base[p]] for p in pos]
+                for subs in product(*choices):
+                    s = list(base)
+                    for p, b in zip(pos, subs):
+                        s[p] = b
+                    out.add("".join(s))
+                    if limit is not None and len(out) > limit:
+                        return sorted(out)
+    return sorted(out)
+
+
+def seed_variant_count(seed: str, exact: int, max_mismatches: int) -> int:
+    """How many versions :func:`seed_variants` makes (upper bound, quick)."""
+    from math import comb
+
+    from repeatviewer.backends.primers.thermo import degeneracy
+
+    f = max(0, len(seed) - min(exact, len(seed)))
+    return degeneracy(seed) * sum(comb(f, j) * 3 ** j
+                                  for j in range(0, min(max_mismatches, f) + 1))
+
+
 class GenomeScanner:
     """Find all primers' binding sites in one pass per sequence chunk.
 
-    Each primer is seeded by its 3' end (its last ``seed`` bases, or the first
-    ones of its reverse complement), which must match exactly. Seeds are found
-    for all primers at once through 2-bit k-mer hashes, then each candidate is
-    scored like the exhaustive search.
+    Each primer is seeded by its 3'-end k-mer (its last k bases, or the first
+    ones of its reverse complement). Every version of that k-mer with at most
+    the allowed mismatches outside the bases that must match is a seed, so a
+    site is found whatever its mismatches (same result as the exhaustive
+    search). k is the longest seed (up to 12) whose versions stay below
+    ``MAX_SEED_VARIANTS``: longer seeds mean fewer chance hits to score.
     """
 
     def __init__(self, primers: list[tuple[str, str]], settings: SearchSettings,
                  seed: int = DEFAULT_SEED) -> None:
+        del seed   # chosen here so that no site is missed
         self.settings = settings
-        self.k = max(MIN_SEED, min(12, max(int(seed), settings.three_prime_exact)))
+        binds = [(name, binding_part(pseq)) for name, pseq in primers]
+        shortest = min((len(b) for _n, b in binds if len(b) >= MIN_SEED), default=MIN_SEED)
+        exact, mm = settings.three_prime_exact, settings.max_mismatches
+        self.k = MIN_SEED
+        for k in range(min(MAX_SEED, shortest), MIN_SEED - 1, -1):
+            worst = max((seed_variant_count(b[len(b) - k:], exact, mm)
+                         for _n, b in binds if len(b) >= k), default=1)
+            if worst <= MAX_SEED_VARIANTS:
+                self.k = k
+                break
         self.entries: dict[int, list[_SeedEntry]] = {}
         self.max_len = 1
-        for name, pseq in primers:
-            bind = binding_part(pseq)
+        for name, bind in binds:
             if len(bind) < self.k:
                 continue
             self.max_len = max(self.max_len, len(bind))
@@ -536,7 +547,7 @@ class GenomeScanner:
                 L = len(oriented)
                 seed_seq, offset = ((oriented[L - self.k:], L - self.k) if at_end
                                     else (oriented[: self.k], 0))
-                for variant in _expand_seed(seed_seq):
+                for variant in seed_variants(seed_seq, exact, mm, at_end=at_end):
                     self.entries.setdefault(_hash_of(variant), []).append(
                         _SeedEntry(name, oriented, strand, offset, at_end))
         self._keys = np.asarray(sorted(self.entries), dtype=np.int64)
@@ -617,12 +628,6 @@ class GenomeScanner:
                                    start=lo + s + 1, end=lo + s + L, mismatches=int(c),
                                    mismatch_positions=positions, site=site))
         return out
-
-
-def _expand_seed(seed: str, limit: int = 64) -> list[str]:
-    from repeatviewer.backends.primers.thermo import expand_iupac
-
-    return expand_iupac(seed.upper(), limit)
 
 
 def search_records(primers: list[tuple[str, str]], records: Iterable[tuple[str, str]],

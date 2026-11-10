@@ -171,7 +171,12 @@ class PrimerActionsMixin:
         except Exception:  # noqa: BLE001 - only the name in the history
             pass
 
-    def _save_primer_options(self, opts: PrimerOptions) -> None:
+    def _save_primer_options(self, opts: PrimerOptions, *,
+                             database_path: str | None = None) -> None:
+        """Save the primer settings. Only the Database window chooses the database
+        (``database_path``); every other save keeps the current one."""
+        keep = self._primer_options.database_path if database_path is None else database_path
+        opts = replace(opts, database_path=keep)
         self._primer_options = opts
         save_primer_options(opts)
 
@@ -484,7 +489,7 @@ class PrimerActionsMixin:
         self._primer_database_dialog = dialog
 
         def _path_changed(new_path: str) -> None:
-            self._save_primer_options(replace(self._primer_options, database_path=new_path))
+            self._save_primer_options(self._primer_options, database_path=new_path)
             self._set_status_message(
                 f"Primer Database: {new_path or 'the database on this computer'}", 6000)
 

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import random
 
-import numpy as np
 import pytest
 
 primer3 = pytest.importorskip("primer3")
@@ -181,6 +180,36 @@ def test_seeded_and_exhaustive_agree():
            [(s.strand, s.start, s.mismatches) for s in b]
 
 
+@pytest.mark.parametrize("from_end", [4, 5, 6, 7, 8, 10, 15])
+def test_genome_search_finds_mismatches_inside_the_seed(from_end):
+    """The seeded genome search must find every site the exhaustive one finds,
+    including sites whose mismatch sits in the 3' k-mer used as the seed."""
+    rng = random.Random(from_end)
+    tpl = "".join(rng.choice("ACGT") for _ in range(30_000))
+    primer = "ACGTTGCAGGTCAATGCCTA"
+    i = len(primer) - from_end
+    site = primer[:i] + ("A" if primer[i] != "A" else "C") + primer[i + 1:]
+    tpl = _plant(tpl, 10_000, site)
+    tpl = _plant(tpl, 20_000, revcomp(site))
+    st = bd.SearchSettings(max_mismatches=2, three_prime_exact=3)
+    a = bd.find_sites_in_sequence("p", primer, "t", tpl, st, exhaustive=True)
+    b = bd.GenomeScanner([("p", primer)], st).scan("t", tpl)
+    c = bd.find_sites_in_sequence("p", primer, "t", tpl, st, exhaustive=False)
+    key = [(s.strand, s.start, s.mismatches) for s in a]
+    assert len(key) == 2
+    assert key == [(s.strand, s.start, s.mismatches) for s in b] == \
+           [(s.strand, s.start, s.mismatches) for s in c]
+
+
+def test_seed_versions():
+    assert bd.seed_variants("ACGT", 2, 0, at_end=True) == ["ACGT"]
+    one = bd.seed_variants("ACGT", 2, 1, at_end=True)
+    assert len(one) == 1 + 2 * 3 and all(v.endswith("GT") for v in one)
+    rc = bd.seed_variants("ACGT", 2, 1, at_end=False)
+    assert all(v.startswith("AC") for v in rc)
+    assert bd.seed_variant_count("ACGTACGTACGT", 3, 2) == 1 + 9 * 3 + 36 * 9
+
+
 def test_genome_scanner_finds_site_across_chunk_border(monkeypatch):
     monkeypatch.setattr(bd, "CHUNK_BP", 1000)
     rng = random.Random(9)
@@ -244,19 +273,25 @@ def _settings(mode: str, **kw) -> dz.DesignSettings:
     return dz.DesignSettings(mode=mode, **{**dz.mode_preset(mode), **kw})
 
 
-def test_pcr_pairs_sit_on_the_template_and_avoid_masks(data):
+def test_pcr_pairs_sit_on_the_template(data):
     (rid, seq), = _records(data.gene)
     s = _settings(dz.MODE_PCR)
-    excluded, sources = dz.mask_intervals(rid, seq, s)
-    assert "soft-masked (lower case)" in sources and "tandem repeats" in sources
-    run = dz.run_primer3(rid, seq, s, excluded=excluded)
+    run = dz.run_primer3(rid, seq, s)
     assert len(run.pairs) == s.num_return
     for p in run.pairs:
         _check_on_template(p, seq)
         assert p.product_size == p.reverse.end - p.forward.start + 1
-        for o in (p.forward, p.reverse):
-            assert not any(o.start - 1 < e and o.end > a for a, e in excluded), o.name
         assert abs(p.forward.tm - p.reverse.tm) <= s.max_tm_diff + 0.01
+
+
+def test_only_the_kept_modes_are_offered():
+    assert dz.DESIGN_MODES == (dz.MODE_PCR, dz.MODE_QPCR, dz.MODE_LADDER, dz.MODE_FISH)
+    assert dz.MODE_LABELS[dz.MODE_QPCR] == "qPCR"
+    listed = [m for _f, groups in dz.MODE_FAMILIES for _g, modes in groups for m in modes]
+    assert listed == [dz.MODE_PCR, dz.MODE_QPCR, dz.MODE_LADDER, dz.MODE_FISH, dz.MODE_PAINTING]
+    # settings saved with a removed mode open as Standard PCR
+    for old in ("bsp", "msp", "conserved", "specific", "insertion"):
+        assert dz.DesignSettings.from_dict({"mode": old, "mask_tandem": True}).mode == dz.MODE_PCR
 
 
 def test_target_and_tails(data):
@@ -282,115 +317,6 @@ def test_qpcr_probe_inside_product(data):
         assert p.forward.end < p.probe.start and p.probe.end < p.reverse.start
         assert p.probe.tm > p.forward.tm + 4
         _check_on_template(p, seq)
-
-
-def test_bsp_primers_avoid_cpg_and_cover_converted_c(data):
-    """Animal mode: only CG may be methylated, so only CG stays out of the primers."""
-    (rid, seq), = _records(data.promoter)
-    s = _settings(dz.MODE_BSP, methylation_system=dz.METH_ANIMAL)
-    run = dz.design_bsp(rid, seq, s, [])
-    assert run.pairs
-    conv = dz.bisulfite_convert(seq, keep_contexts={"CG"})
-    assert conv == dz.bisulfite_convert(seq, keep_cpg=True)
-    cpg = set(dz.cpg_positions(seq))
-    for p in run.pairs:
-        _check_on_template(p, conv)
-        for o in (p.forward, p.reverse):
-            assert not any(o.start - 1 <= i < o.end for i in cpg), o.name
-        assert p.extra["converted_c_forward"] >= s.min_converted
-        assert p.extra["converted_c_reverse"] >= s.min_converted
-        assert p.extra["methylation_system"] == dz.METH_ANIMAL
-
-
-def test_bsp_plant_mode_keeps_cg_and_chg_out_of_primers(data):
-    """Plant mode (default): CG and CHG may be methylated; only CHH counts as converted."""
-    (rid, seq), = _records(data.promoter)
-    assert dz.DesignSettings().methylation_system == dz.METH_PLANT
-    s = _settings(dz.MODE_BSP, min_converted=1)
-    run = dz.design_bsp(rid, seq, s, [])
-    assert run.pairs
-    keep = dz.methylatable_contexts(dz.METH_PLANT)
-    assert keep == {"CG", "CHG"}
-    conv = dz.bisulfite_convert(seq, keep_contexts=keep)
-    up = seq.upper()
-    for p in run.pairs:
-        _check_on_template(p, conv)
-        for o in (p.forward, p.reverse):
-            for i in range(o.start - 1, o.end):
-                assert dz.c_context(up, i) not in ("CG", "CHG"), (o.name, i)
-            # The G of a CpG is never the last base under the primer either.
-            assert not any(o.start - 1 <= i + 1 < o.end for i in dz.cpg_positions(seq))
-
-
-def test_bisulfite_contexts():
-    seq = "ACGTCAGTCATTCCGG"
-    #      0123456789012345
-    assert dz.c_context(seq, 1) == "CG"
-    assert dz.c_context(seq, 4) == "CHG"
-    assert dz.c_context(seq, 8) == "CHH"
-    assert dz.c_context(seq, 0) == ""
-    assert dz.c_context(seq, 12) == "CHG" and dz.c_context(seq, 13) == "CG"
-    assert dz.context_positions(seq, {"CHG"}) == [4, 12]
-    assert dz.bisulfite_convert(seq, keep_contexts=set()) == "ATGTTAGTTATTTTGG"
-    assert dz.bisulfite_convert(seq, keep_contexts={"CG", "CHG"}) == "ACGTCAGTTATTCCGG"
-    assert dz.converted_c_count(seq, 0, len(seq), {"CG", "CHG"}) == 1
-    assert dz.methylatable_contexts(dz.METH_ANIMAL) == {"CG"}
-    # Unknown saved values fall back to the defaults instead of breaking.
-    assert dz.DesignSettings(methylation_system="fungus").methylation_system == dz.METH_PLANT
-    assert dz.DesignSettings(msp_context="CHH").msp_context == "CG"
-
-
-def test_msp_gives_matching_m_and_u_pairs(data):
-    (rid, seq), = _records(data.promoter)
-    s = _settings(dz.MODE_MSP)
-    pairs = dz.design_msp(rid, seq, s)
-    assert pairs and len(pairs) % 2 == 0
-    meth = dz.bisulfite_convert(seq, keep_contexts=dz.methylatable_contexts(dz.METH_PLANT))
-    unmeth = dz.bisulfite_convert(seq, keep_contexts=set())
-    for m, u in zip(pairs[::2], pairs[1::2]):
-        assert (m.group, u.group) == ("M", "U")
-        assert (m.forward.start, m.reverse.end) == (u.forward.start, u.reverse.end)
-        _check_on_template(m, meth)
-        _check_on_template(u, unmeth)
-        # The forward 3' end sits on a CpG C.
-        assert seq.upper()[m.forward.end - 1:m.forward.end + 1] == "CG"
-
-
-def test_msp_chg_context(data):
-    (rid, seq), = _records(data.promoter)
-    pairs = dz.design_msp(rid, seq, _settings(dz.MODE_MSP, msp_context="CHG"))
-    assert pairs
-    up = seq.upper()
-    for m in pairs[::2]:
-        assert dz.c_context(up, m.forward.end - 1) == "CHG"
-        assert m.extra["msp_context"] == "CHG"
-
-
-def test_conserved_family_primers_cover_every_copy(data):
-    names, rows = zip(*_records(data.te_aln))
-    s = _settings(dz.MODE_CONSERVED)
-    pairs, info = dz.design_msa(list(names), list(rows), s)
-    assert pairs
-    best = pairs[0]
-    assert best.coverage["target_amplified"] == best.coverage["target_total"] == 12
-    # The primers really bind every ungapped copy.
-    st = bd.SearchSettings(max_mismatches=s.coverage_mismatches,
-                           three_prime_exact=s.coverage_three_prime_exact)
-    members = [(n, r.replace("-", "")) for n, r in zip(names, rows)]
-    sizes = dz.pair_bands_on(best, members, st)
-    assert len(sizes) >= 12
-
-
-def test_subfamily_specific_primers_skip_the_other_subfamily(data):
-    names, rows = zip(*_records(data.te_aln))
-    s = _settings(dz.MODE_SPECIFIC, target_pattern="TEfamA")
-    pairs, info = dz.design_msa(list(names), list(rows), s)
-    assert pairs and info["targets"] == 7
-    best = pairs[0]
-    assert best.coverage["target_amplified"] == 7
-    assert best.coverage["other_amplified"] <= round(0.1 * 5)
-    with pytest.raises(th.PrimerError):
-        dz.design_msa(list(names), list(rows), _settings(dz.MODE_SPECIFIC, target_pattern="nomatch"))
 
 
 def test_ladder_primers_face_outward(data):
@@ -426,44 +352,6 @@ def test_fish_probes_are_in_every_monomer(data):
     assert all(a[1] < b[0] for a, b in zip(spans, spans[1:])), "probes overlap"
 
 
-def test_te_insertion_trio(data):
-    s = _settings(dz.MODE_INSERTION)
-    seq = data.locus_seq
-    pairs, _explain = dz.design_insertion("locus1", seq, s, (data.te_start, data.te_end))
-    assert pairs
-    te_len = data.te_end - data.te_start + 1
-    p = pairs[0]
-    assert p.forward.end < data.te_start and p.reverse.start > data.te_end
-    assert p.extra["occupied_flank_product"] == p.extra["empty_product"] + te_len
-    te = p.extra["te_primer"]
-    assert data.te_start <= te["start"] and te["end"] <= data.te_start + 300
-    assert th.binding_part(te["sequence"]) == revcomp(seq[te["start"] - 1:te["end"]])
-    assert p.extra["te_product"] == te["end"] - p.forward.start + 1
-    assert [b["lane"] for b in p.bands] == ["empty/empty", "empty/TE", "TE/TE"]
-
-
-def test_genome_check_counts_products(data):
-    (rid, seq), = _records(data.gene)
-    s = _settings(dz.MODE_PCR, check_genome=True, genome_fasta=str(data.genome))
-    run = dz.run_primer3(rid, seq, s)
-    summary = dz.check_genome(run.pairs, s)
-    assert summary["records"] == 3
-    for p in run.pairs:
-        assert p.specificity["products"] >= 1
-        assert p.specificity["sites_forward"] >= 1
-
-
-def test_genome_check_counts_satellite_copies(data):
-    sat = dz.DesignedPair(rank=1, name="sat", template="x",
-                          forward=dz.make_oligo("Sat_F", data.sat_f, "forward"),
-                          reverse=dz.make_oligo("Sat_R", data.sat_r, "reverse"))
-    s = _settings(dz.MODE_PCR, genome_fasta=str(data.genome), genome_max_mismatches=3)
-    dz.check_genome([sat], s)
-    # 60 monomers on chr2 (2 % divergent): a ladder of many products.
-    assert sat.specificity["sites_forward"] > 40
-    assert sat.specificity["products"] > 40
-
-
 # --------------------------------------------------------------------------
 # Gel
 # --------------------------------------------------------------------------
@@ -479,8 +367,3 @@ def test_gel_ladder_choice_and_band_order():
     assert [b.size for b in bands] == [400, 201]
     svg = gel.gel_svg([gel.Lane("pair", bands)], ladder="100 bp")
     assert svg.startswith("<svg") and "pair" in svg
-
-
-def test_merge_intervals():
-    assert dz.merge_intervals([(5, 10), (0, 3), (9, 12)]) == [(0, 3), (5, 12)]
-    assert np.all(np.array(dz.lowercase_intervals("AAaaAAa")) == np.array([(2, 4), (6, 7)]))
