@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 from PySide6.QtCore import QRect, QSettings, QSize, Qt, QTimer, QUrl
 from PySide6.QtGui import QColor, QDesktopServices, QPalette
 from PySide6.QtWidgets import (
+    QGridLayout,
     QApplication,
     QCheckBox,
     QColorDialog,
@@ -442,6 +443,33 @@ class SettingsDialog(QDialog):
         self._settings = QSettings()
         self._plugin_registry = plugin_registry
 
+        from repeatviewer.widgets.file_list_columns import (
+            TOGGLEABLE_COLUMNS,
+            load_show_file_columns,
+            load_visible_file_columns,
+        )
+
+        self._show_columns = QCheckBox()
+        self._show_columns.setChecked(load_show_file_columns())
+        self._show_columns.setToolTip(
+            "Off (default): the Files panel shows only the file names.\n"
+            "On: it also shows the columns ticked below."
+        )
+        self._columns_grid = QWidget()
+        _columns_layout = QGridLayout(self._columns_grid)
+        _columns_layout.setContentsMargins(0, 0, 0, 0)
+        _columns_layout.setHorizontalSpacing(14)
+        _columns_layout.setVerticalSpacing(6)
+        self._column_checks: dict[int, QCheckBox] = {}
+        _visible_columns = load_visible_file_columns()
+        for _i, (_col, _label) in enumerate(TOGGLEABLE_COLUMNS.items()):
+            _cb = QCheckBox(_label)
+            _cb.setChecked(_col in _visible_columns)
+            _columns_layout.addWidget(_cb, _i // 3, _i % 3)
+            self._column_checks[_col] = _cb
+        self._columns_grid.setEnabled(self._show_columns.isChecked())
+        self._show_columns.toggled.connect(self._columns_grid.setEnabled)
+
         self._system_viewer = QCheckBox()
         self._system_viewer.setChecked(project.use_system_sequence_viewer)
         self._system_viewer.setToolTip(
@@ -720,6 +748,10 @@ class SettingsDialog(QDialog):
             ("Theme:", self._theme_mode),
             ("Accent colour:", accent_field),
         ])
+        files_columns = _group("Files columns", [
+            ("Show columns:", self._show_columns),
+            ("Columns:", self._columns_grid),
+        ])
         seq_tools = _group("Sequence tools", [
             ("Use system sequence viewer:", self._system_viewer),
         ])
@@ -804,6 +836,7 @@ class SettingsDialog(QDialog):
         content_v.setSpacing(10)
         for box in (
             appearance,
+            files_columns,
             seq_tools,
             files_preview,
             performance,
@@ -892,6 +925,17 @@ class SettingsDialog(QDialog):
 
     def apply_to_project(self) -> RepeatViewerProject:
         self._project.use_system_sequence_viewer = self._system_viewer.isChecked()
+        from repeatviewer.widgets.file_list_columns import (
+            ALWAYS_VISIBLE_COLUMNS,
+            save_show_file_columns,
+            save_visible_file_columns,
+        )
+
+        save_show_file_columns(self._show_columns.isChecked())
+        save_visible_file_columns(
+            set(ALWAYS_VISIBLE_COLUMNS)
+            | {col for col, cb in self._column_checks.items() if cb.isChecked()}
+        )
         self._project.batch_workers = self._batch_workers.value()
         save_browser_panel_font_size(self._browser_panel_font.value())
         save_preview_font_size(self._preview_text_font.value())

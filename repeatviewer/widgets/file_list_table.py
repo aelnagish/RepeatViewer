@@ -267,9 +267,9 @@ class FileListTableWidget(QTableWidget):
             lambda *_args: self.selectionSetChanged.emit()
         )
 
-        from repeatviewer.widgets.file_list_columns import load_visible_file_columns
+        from repeatviewer.widgets.file_list_columns import effective_visible_file_columns
 
-        self.apply_visible_columns(load_visible_file_columns())
+        self.apply_visible_columns(effective_visible_file_columns())
         self._restore_column_layout()
         self._place_images_column_once()
 
