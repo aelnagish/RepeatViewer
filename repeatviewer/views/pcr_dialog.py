@@ -131,12 +131,12 @@ class ProductMap(QWidget):
         self._lo, self._hi = 0.0, 1.0
         self._drag_x: float | None = None
         self._drag_lo = 0.0
-        self.setMinimumHeight(136)
+        self.setMinimumHeight(118)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.setFixedHeight(136)
+        self.setFixedHeight(118)
         self.setMouseTracking(True)
         self.grabGesture(Qt.GestureType.PinchGesture)
-        self.setToolTip("")
+        self.setToolTip("Scroll or pinch to zoom, drag to move, double-click to go back to the product.")
 
     # ---------------------------------------------------------------- data
 
@@ -336,16 +336,6 @@ class ProductMap(QWidget):
         if rxl < fxl + fw:
             lx = max(left, min(rxl + rw + 8, right - lw))
         p.drawText(QRectF(lx, line_y + 18, lw, 16), Qt.AlignmentFlag.AlignHCenter, lab)
-        p.setClipping(False)
-        p.setPen(muted)
-        where = f"{self._record}"
-        if len(self._spans) > 1:
-            where += f" · this size at {len(self._spans)} sites (thin bars)"
-        hint = "scroll or pinch to zoom · drag to move · double-click: back to product"
-        p.drawText(QRectF(left, self.height() - 16, width, 14), Qt.AlignmentFlag.AlignLeft,
-                   fm.elidedText(where, Qt.TextElideMode.ElideMiddle, int(width * 0.45)))
-        p.drawText(QRectF(left, self.height() - 16, width, 14), Qt.AlignmentFlag.AlignRight,
-                   fm.elidedText(hint, Qt.TextElideMode.ElideRight, int(width * 0.5)))
         p.end()
 
     # ---------------------------------------------------------------- input
@@ -470,10 +460,8 @@ class PcrWindow(QDialog):
         self.templates_list.setFixedHeight(76)
         pl.addWidget(self.templates_list)
         trow = QHBoxLayout()
-        hint = QLabel("Click FASTA files in the Files panel to add.", page)
-        hint.setStyleSheet("color: palette(placeholder-text);")
-        hint.setWordWrap(True)
-        trow.addWidget(hint, 1)
+        self.templates_list.setToolTip("Click FASTA files in the Files panel to add them.")
+        trow.addStretch(1)
         self.remove_template = QPushButton("Remove", page)
         trow.addWidget(self.remove_template)
         pl.addLayout(trow)
@@ -497,6 +485,7 @@ class PcrWindow(QDialog):
             b = QPushButton(pcr.MODE_LABELS[mode], page)
             b.setCheckable(True)
             b.setProperty("mode", mode)
+            b.setToolTip(MODE_NOTES.get(mode, ""))
             self.mode_group.addButton(b, i)
             (col1 if i % 2 == 0 else col2).addWidget(b)
         grid.addLayout(col1)
@@ -538,7 +527,7 @@ class PcrWindow(QDialog):
         self.mode_note.setWordWrap(True)
         self.mode_note.setStyleSheet("QLabel { border: 1px solid palette(mid); border-radius: 8px;"
                                      " padding: 8px; }")
-        pl.addWidget(self.mode_note)
+        self.mode_note.hide()
         pl.addStretch(1)
         self.tabs.addTab(page, "PCR")
 
@@ -653,7 +642,7 @@ class PcrWindow(QDialog):
         self.product_box.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.product_box.setStyleSheet("QLabel { border: 1px solid palette(mid); border-radius: 8px;"
                                        " padding: 8px; }")
-        rl.addWidget(self.product_box)
+        self.product_box.hide()
         self.copy_button = QPushButton("Copy Product Sequence", right)
         rl.addWidget(self.copy_button, 0, Qt.AlignmentFlag.AlignLeft)
         rl.addStretch(1)
