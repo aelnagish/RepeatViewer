@@ -19,3 +19,5 @@ packaging/macos/*.iconset/
 tmp_icons/
 basics_github
 RM_*/
+.venv/
+venv/
