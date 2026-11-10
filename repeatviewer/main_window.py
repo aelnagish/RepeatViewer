@@ -6001,21 +6001,33 @@ class MainWindow(
         tools_menu.addAction("Download from &NCBI", lambda: self._open_ncbi_download_dialog())
         tools_menu.addAction("Open in &AliView", self._open_selected_in_aliview)
         tools_menu.addSeparator()
-        self._populate_blast_menu(tools_menu.addMenu("&BLAST"))
-        self._populate_hmmer_menu(tools_menu.addMenu("&HMMER"))
+        # Grouped by task (10 Nov 2026): Search, Align, Curate, Annotate,
+        # Visualize, Mapping, Tree, Primers and Probes, Quantify.
+        search_menu = tools_menu.addMenu("&Search")
+        self._populate_blast_menu(search_menu.addMenu("&BLAST"))
+        self._populate_hmmer_menu(search_menu.addMenu("&HMMER"))
+        search_menu.addSeparator()
+        # Same window as File > Manage Database; the Ctrl+Shift+G shortcut
+        # stays on the File item only (one key on two items makes Qt ignore it).
+        search_menu.addAction("Define &Genome…", self._open_manage_references)
         self._populate_align_menu(tools_menu.addMenu("&Align"))
-        self._populate_tree_menu(tools_menu.addMenu("T&ree"))
+        curate_menu = tools_menu.addMenu("&Curate")
+        self._populate_extend_menu(curate_menu.addMenu("MSA &Extend"))
+        self._populate_msa_clean_menu(curate_menu.addMenu("MSA &Clean"))
+        self._populate_consensus_menu(curate_menu.addMenu("C&onsensus"))
+        self._populate_teaid_menu(curate_menu.addMenu("&TE-Aid"))
+        annotate_menu = tools_menu.addMenu("A&nnotate")
+        self._populate_te_annotation_menu(annotate_menu.addMenu("Sequence &Annotation"))
+        self._populate_tsd_search_menu(annotate_menu.addMenu("TSD &Search"))
+        visualize_menu = tools_menu.addMenu("&Visualize")
+        self._populate_flexidot_menu(visualize_menu.addMenu("&Dotplot"))
+        visualize_menu.addSeparator()
+        self._populate_te_visualization_menu(visualize_menu)
         self._populate_map_menu(tools_menu.addMenu("&Mapping"))
+        self._populate_tree_menu(tools_menu.addMenu("T&ree"))
         self._populate_primers_menu(tools_menu.addMenu("&Primers and Probes"))
-        self._populate_extend_menu(tools_menu.addMenu("MSA &Extend"))
-        self._populate_tsd_search_menu(tools_menu.addMenu("TSD &search"))
-        self._populate_teaid_menu(tools_menu.addMenu("&TE-Aid"))
-        self._populate_msa_clean_menu(tools_menu.addMenu("MSA &Clean"))
-        self._populate_consensus_menu(tools_menu.addMenu("&Consensus"))
-        self._populate_flexidot_menu(tools_menu.addMenu("&Dotplot"))
-        self._populate_te_annotation_menu(tools_menu.addMenu("Sequence &Annotation"))
-        tools_menu.addAction("Repeat &Quantify", self._open_repeat_quantify)
-        self._populate_te_visualization_menu(tools_menu.addMenu("&Visualization"))
+        quantify_menu = tools_menu.addMenu("&Quantify")
+        quantify_menu.addAction("Repeat &Quantify", self._open_repeat_quantify)
         tools_menu.addSeparator()
         # Build and fill these here, together with the other Tools submenus.
         # On macOS, Tools items added later in startup (after Workflows) do not
@@ -16365,7 +16377,7 @@ class MainWindow(
                 QMessageBox.warning(
                     self,
                     "HMM database required",
-                    "Select an HMM database under Tools → HMMER → Change HMMER parameters.\n\n"
+                    "Select an HMM database under Tools → Search → HMMER → Change HMMER parameters.\n\n"
                     "Add HMM profiles via File → Manage Database (HMM DNA / HMM Protein).",
                 )
                 return
