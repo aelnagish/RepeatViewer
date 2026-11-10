@@ -101,6 +101,7 @@ few people. Install the ones you need into a conda environment:
 | FastGA 1.5 or newer | Align → FastGA | `conda install -c bioconda fastga=1.5.1` |
 | HISAT2 2.2 or newer | Mapping short reads | `conda install -c conda-forge -c bioconda hisat2=2.2.3` |
 | FastME, FastTree | Tree with these methods | `conda install -c bioconda fastme fasttree` |
+| pysam or samtools | **Tools → Samtools**, sorting and indexing mapping results | `pip install pysam` (macOS, Linux); Windows: the [Win-NGS samtools bundle](https://github.com/win-ngs/samtools-windows-bundle/releases) |
 | bedtools | Some extraction steps | `conda install -c bioconda bedtools` |
 | AliView | **Tools → Open in AliView** | [ormbunkar.se/aliview](https://ormbunkar.se/aliview/) |
 | Chorus2 | Chromosome painting probes | see [Primers and PCR](12-primers.md) |

@@ -711,6 +711,7 @@ dialog_shot("dotplot", ("Tools", "Visualize", "Dotplot", "Change Dotplot paramet
 dialog_shot("msa_plot", ("Tools", "Visualize", "MSA plot"), files=["monomers"])
 dialog_shot("mapping", ("Tools", "Mapping", "Change Mapping parameters"), files=["reads"])
 dialog_shot("tree", ("Tools", "Tree", "Change Tree parameters"), files=["monomers"])
+dialog_shot("samtools", ("Tools", "Samtools", "Change Samtools parameters"), files=["sam"])
 dialog_shot("primer_design", ("Tools", "Primers and Probes", "Design"), files=["ltr"], size=(700, 860))
 dialog_shot("primer_map", ("Tools", "Primers and Probes", "Map"), files=["ltr"], size=(700, 860))
 dialog_shot("primer_database", ("Tools", "Primers and Probes", "Database"))
