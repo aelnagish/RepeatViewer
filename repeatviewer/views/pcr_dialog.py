@@ -65,6 +65,10 @@ PCR_HELP = (
     "<b>Mismatches per primer</b> and <b>3′ end exact</b> decide which sites count. "
     "<b>Expected yield</b> is relative: fewer mismatches, shorter products and repeated "
     "sites make more DNA.<br>"
+    "<b>The strip</b> above the table shows the product you click in the table: forward primer "
+    "(blue), reverse primer (orange) and the stretch between them. Small arrows on the line "
+    "are the other places the primers bind; thin bars are other sites that give the same size. Scroll or pinch to zoom, drag to move, double-click "
+    "to go back to the product.<br>"
     "Products are saved next to the first template (<b>…_PCR_….fa</b>, with the primers and "
     "the template's annotations); the table and the run's history go into <b>…_details</b>."
 )
@@ -97,95 +101,330 @@ class _YieldDelegate(QStyledItemDelegate):
         painter.restore()
 
 
+def _parse_location(text: str) -> tuple[str, int, int] | None:
+    """"rec:1,234-5,678" → (rec, 1234, 5678)."""
+    try:
+        rec, rng = str(text).rsplit(":", 1)
+        lo, hi = rng.replace(",", "").split("-", 1)
+        return rec, int(lo), int(hi)
+    except ValueError:
+        return None
+
+
 class ProductMap(QWidget):
-    """Products of the selected lane drawn on their template stretch."""
+    """One zoomable strip: the selected product and its two primers on the template.
+
+    Other products of the same sequence are drawn as faint bars for context.
+    Scroll or pinch to zoom, drag to move, double-click to go back to the product.
+    """
+
+    viewChanged = Signal()
+    RULER_H = 24
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self._products: list[pcr.PcrProduct] = []
+        self._others: list[tuple[int, int, pcr.PcrProduct]] = []
+        self._spans: list[tuple[int, int]] = []          # selected product, every site
         self._selected: pcr.PcrProduct | None = None
-        self._title = ""
-        self.setMinimumHeight(150)
+        self._record = ""
+        self._lens: dict[str, int] = {}
+        self._lo, self._hi = 0.0, 1.0
+        self._drag_x: float | None = None
+        self._drag_lo = 0.0
+        self.setMinimumHeight(136)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setFixedHeight(136)
+        self.setMouseTracking(True)
+        self.grabGesture(Qt.GestureType.PinchGesture)
+        self.setToolTip("")
+
+    # ---------------------------------------------------------------- data
+
+    def set_primer_lengths(self, primers: list[Primer]) -> None:
+        self._lens = {}
+        for pr in primers:
+            try:
+                self._lens[pr.name] = len(th.binding_part(th.clean_oligo(pr.sequence)))
+            except Exception:  # noqa: BLE001
+                self._lens[pr.name] = len(pr.sequence)
 
     def set_products(self, products: list[pcr.PcrProduct], selected: pcr.PcrProduct | None) -> None:
         real = [p for p in products if p.kind != "dimer" and p.record]
-        rec = selected.record if selected is not None and selected.record else (
-            real[0].record if real else "")
-        self._products = [p for p in real if p.record == rec][:12]
+        if selected is not None and (selected.kind == "dimer" or not selected.record):
+            selected = None
+        if selected is None and real:
+            selected = real[0]
         self._selected = selected
-        self._title = rec
-        rows = len(self._products)
-        self.setFixedHeight(70 + max(1, rows) * 16)
+        self._record = selected.record if selected is not None else ""
+        self._spans = []
+        if selected is not None:
+            for loc in selected.locations:
+                got = _parse_location(loc)
+                if got and got[0] == self._record:
+                    self._spans.append((got[1], got[2]))
+            if not self._spans:
+                self._spans = [(selected.start, selected.end)]
+        self._others = []
+        for p in real:
+            if p is selected or p.record != self._record:
+                continue
+            for loc in p.locations or [f"{p.record}:{p.start}-{p.end}"]:
+                got = _parse_location(loc)
+                if got and got[0] == self._record:
+                    self._others.append((got[1], got[2], p))
+        self.fit_product()
+
+    # ---------------------------------------------------------------- view
+
+    def _extent(self) -> tuple[float, float]:
+        pts = [x for s in self._spans for x in s] + [x for o in self._others for x in o[:2]]
+        if not pts:
+            return 0.0, 1.0
+        lo, hi = min(pts), max(pts)
+        pad = max(20.0, (hi - lo) * 0.04)
+        return lo - pad, hi + pad
+
+    def set_view(self, lo: float, hi: float) -> None:
+        span = max(20.0, hi - lo)
+        ext_lo, ext_hi = self._extent()
+        room = (ext_hi - ext_lo) * 0.5 + span
+        lo = max(ext_lo - room, min(lo, ext_hi + room - span))
+        self._lo, self._hi = lo, lo + span
         self.update()
+        self.viewChanged.emit()
+
+    def fit_product(self) -> None:
+        if not self._spans:
+            self._lo, self._hi = self._extent()
+            self.update()
+            return
+        a, b = self._spans[0]
+        pad = max(30.0, (b - a) * 0.35)
+        self.set_view(a - pad, b + pad)
+
+    def fit_all(self) -> None:
+        self.set_view(*self._extent())
+
+    def zoom(self, factor: float, at_x: float | None = None) -> None:
+        if factor <= 0:
+            return
+        left, width = self._plot()
+        frac = 0.5 if at_x is None else min(1.0, max(0.0, (at_x - left) / max(1.0, width)))
+        span = self._hi - self._lo
+        anchor = self._lo + frac * span
+        new = max(20.0, span / factor)
+        self.set_view(anchor - frac * new, anchor - frac * new + new)
+
+    def pan_pixels(self, dx: float) -> None:
+        _left, width = self._plot()
+        shift = -dx / max(1.0, width) * (self._hi - self._lo)
+        self.set_view(self._lo + shift, self._hi + shift)
+
+    def _plot(self) -> tuple[float, float]:
+        return 14.0, max(10.0, self.width() - 28.0)
+
+    def _x(self, bp: float) -> float:
+        left, width = self._plot()
+        return left + (bp - self._lo) / max(1e-9, self._hi - self._lo) * width
+
+    # ---------------------------------------------------------------- paint
 
     def paintEvent(self, event) -> None:  # noqa: N802
+        from PySide6.QtCore import QPointF
+
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         text = self.palette().color(self.foregroundRole())
         muted = QColor(text)
         muted.setAlpha(150)
-        if not self._products:
+        fm = p.fontMetrics()
+        if self._selected is None:
             p.setPen(muted)
             p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "No products to show")
             p.end()
             return
-        lo = min(x.start for x in self._products)
-        hi = max(x.end for x in self._products)
-        span = max(1, hi - lo)
-        lo -= int(span * 0.04)
-        hi += int(span * 0.04)
-        span = max(1, hi - lo)
-        left, right = 12.0, self.width() - 12.0
-        w = right - left
-
-        def X(pos: int) -> float:
-            return left + (pos - lo) / span * w
-
+        left, width = self._plot()
+        right = left + width
+        span = self._hi - self._lo
+        # ruler
+        step = _nice_step(span)
         p.setPen(muted)
-        p.drawText(QRectF(left, 2, w, 16), Qt.AlignmentFlag.AlignLeft,
-                   f"{self._title} · {lo:,}..{hi:,}")
-        p.setPen(QPen(text, 2))
-        p.drawLine(int(left), 34, int(right), 34)
-        # primer sites: starts (+) and ends (-) of the products
-        starts = sorted({x.start for x in self._products})
-        ends = sorted({x.end for x in self._products})
+        p.drawLine(QPointF(left, self.RULER_H - 6), QPointF(right, self.RULER_H - 6))
+        v = (int(self._lo // step) + 1) * step
+        while v <= self._hi:
+            x = self._x(v)
+            p.drawLine(QPointF(x, self.RULER_H - 10), QPointF(x, self.RULER_H - 6))
+            p.drawText(QRectF(x - 45, 2, 90, 14), Qt.AlignmentFlag.AlignHCenter, _fmt_bp(v, step))
+            v += step
+        p.setClipRect(QRectF(left, self.RULER_H, width, self.height()))
+        sel = self._selected
+        line_y = 62.0
+        # template
+        p.setPen(QPen(muted, 2))
+        p.drawLine(QPointF(left, line_y), QPointF(right, line_y))
+        # every other place a primer binds (from all products): small ticks on the template
         p.setPen(Qt.PenStyle.NoPen)
+        fwd_c = QColor(FORWARD_COLOR)
+        rev_c = QColor(REVERSE_COLOR)
+        fwd_c.setAlpha(150)
+        rev_c.setAlpha(150)
+        starts = {a for a, _b, _p in self._others} | {a for a, _b in self._spans[1:]}
+        ends = {b for _a, b, _p in self._others} | {b for _a, b in self._spans[1:]}
+        p.setBrush(fwd_c)
+        for pos in starts:
+            if self._lo <= pos <= self._hi:
+                x = self._x(pos)
+                p.drawPolygon([QPointF(x, line_y - 9), QPointF(x + 7, line_y - 5.5),
+                               QPointF(x, line_y - 2)])
+        p.setBrush(rev_c)
+        for pos in ends:
+            if self._lo <= pos <= self._hi:
+                x = self._x(pos)
+                p.drawPolygon([QPointF(x, line_y + 2), QPointF(x - 7, line_y + 5.5),
+                               QPointF(x, line_y + 9)])
+        # other sites that give the same size: thin bars, stacked so they don't overlap
+        rows_end: list[float] = []
+        thin = QColor("#3d6ea8")
+        thin.setAlpha(120)
+        p.setBrush(thin)
+        for a, b in sorted(self._spans[1:]):
+            row = next((i for i, e in enumerate(rows_end) if e < a), None)
+            if row is None:
+                if len(rows_end) >= 3:
+                    continue
+                rows_end.append(b)
+                row = len(rows_end) - 1
+            rows_end[row] = b
+            if b < self._lo or a > self._hi:
+                continue
+            xa, xb = self._x(a), self._x(b)
+            p.drawRect(QRectF(xa, line_y + 36 + row * 6, max(2.0, xb - xa), 3))
+        # the selected product (first site)
+        lf = self._lens.get(sel.forward, 20)
+        lr = self._lens.get(sel.reverse, 20)
+        a, b = self._spans[0]
+        xa, xb = self._x(a), self._x(b)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor("#3d6ea8"))
+        p.drawRect(QRectF(xa, line_y + 8, max(2.0, xb - xa), 8))
+        fx2 = max(xa + 10, self._x(a + lf))
+        rx1 = min(xb - 10, self._x(b - lr))
         p.setBrush(QColor(FORWARD_COLOR))
-        for s in starts:
-            x = X(s)
-            p.drawPolygon([self._pt(x, 22), self._pt(x + 9, 27), self._pt(x, 32)])
+        p.drawPolygon([QPointF(xa, line_y - 14), QPointF(fx2 - 6, line_y - 14),
+                       QPointF(fx2, line_y - 9), QPointF(fx2 - 6, line_y - 4),
+                       QPointF(xa, line_y - 4)])
         p.setBrush(QColor(REVERSE_COLOR))
-        for e in ends:
-            x = X(e)
-            p.drawPolygon([self._pt(x, 36), self._pt(x - 9, 41), self._pt(x, 46)])
-        y = 56
-        for prod in self._products:
-            x1, x2 = X(prod.start), X(prod.end)
-            c = QColor("#3d6ea8")
-            c.setAlphaF(max(0.25, min(1.0, prod.yield_ + 0.2)))
-            if prod.kind == "off-target":
-                c = QColor("#e0a12b")
-            p.setBrush(c)
-            p.setPen(Qt.PenStyle.NoPen)
-            p.drawRoundedRect(QRectF(x1, y, max(3.0, x2 - x1), 9), 2, 2)
-            if prod is self._selected:
-                p.setBrush(Qt.BrushStyle.NoBrush)
-                p.setPen(QPen(QColor("#7fb0ff"), 2))
-                p.drawRoundedRect(QRectF(x1 - 2, y - 2, max(3.0, x2 - x1) + 4, 13), 3, 3)
-            p.setPen(text)
-            label = f"{prod.size:,} bp" + (f" ({prod.label})" if prod.label else "")
-            if prod.sites > 1:
-                label += f" ×{prod.sites} sites"
-            p.drawText(QRectF(x2 + 6, y - 4, 220, 16), Qt.AlignmentFlag.AlignLeft, label)
-            y += 16
+        p.drawPolygon([QPointF(xb, line_y - 14), QPointF(rx1 + 6, line_y - 14),
+                       QPointF(rx1, line_y - 9), QPointF(rx1 + 6, line_y - 4),
+                       QPointF(xb, line_y - 4)])
+        p.setPen(text)
+        fname = sel.forward + (f" · {sel.mm_forward} mm" if sel.mm_forward else "")
+        rname = sel.reverse + (f" · {sel.mm_reverse} mm" if sel.mm_reverse else "")
+        fw = fm.horizontalAdvance(fname) + 4
+        rw = fm.horizontalAdvance(rname) + 4
+        fxl = max(left, min(xa, right - fw))
+        rxl = min(right - rw, max(xb - rw, left))
+        p.drawText(QRectF(fxl, line_y - 34, fw, 16), Qt.AlignmentFlag.AlignLeft, fname)
+        if rxl < fxl + fw:            # too close: put the reverse name under the bar
+            p.drawText(QRectF(rxl, line_y + 18, rw, 16), Qt.AlignmentFlag.AlignLeft, rname)
+        else:
+            p.drawText(QRectF(rxl, line_y - 34, rw, 16), Qt.AlignmentFlag.AlignLeft, rname)
+        lab = f"{sel.size:,} bp" + (f" · {sel.label}" if sel.label else "")
+        lw = fm.horizontalAdvance(lab) + 6
+        cx = (max(xa, left) + min(xb, right)) / 2
+        lx = max(left, min(cx - lw / 2, right - lw))
+        if rxl < fxl + fw:
+            lx = max(left, min(rxl + rw + 8, right - lw))
+        p.drawText(QRectF(lx, line_y + 18, lw, 16), Qt.AlignmentFlag.AlignHCenter, lab)
+        p.setClipping(False)
+        p.setPen(muted)
+        where = f"{self._record}"
+        if len(self._spans) > 1:
+            where += f" · this size at {len(self._spans)} sites (thin bars)"
+        hint = "scroll or pinch to zoom · drag to move · double-click: back to product"
+        p.drawText(QRectF(left, self.height() - 16, width, 14), Qt.AlignmentFlag.AlignLeft,
+                   fm.elidedText(where, Qt.TextElideMode.ElideMiddle, int(width * 0.45)))
+        p.drawText(QRectF(left, self.height() - 16, width, 14), Qt.AlignmentFlag.AlignRight,
+                   fm.elidedText(hint, Qt.TextElideMode.ElideRight, int(width * 0.5)))
         p.end()
 
-    @staticmethod
-    def _pt(x: float, y: float):
-        from PySide6.QtCore import QPointF
+    # ---------------------------------------------------------------- input
 
-        return QPointF(x, y)
+    def wheelEvent(self, event) -> None:  # noqa: N802
+        mods = event.modifiers()
+        pixel = event.pixelDelta()
+        angle = event.angleDelta()
+        trackpad = event.phase() != Qt.ScrollPhase.NoScrollPhase or not pixel.isNull()
+        x = event.position().x()
+        if mods & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier):
+            self.zoom(1.0015 ** (angle.y() or pixel.y()), x)
+        elif trackpad:
+            if abs(pixel.x()) > abs(pixel.y()):
+                self.pan_pixels(pixel.x())
+            else:
+                self.zoom(1.003 ** pixel.y(), x)
+        elif mods & (Qt.KeyboardModifier.ShiftModifier | Qt.KeyboardModifier.AltModifier):
+            self.pan_pixels((angle.y() or angle.x()) / 2)
+        else:
+            self.zoom(1.25 if angle.y() > 0 else 0.8, x)
+        event.accept()
+
+    def event(self, ev) -> bool:  # noqa: D401
+        from PySide6.QtCore import QEvent
+
+        if ev.type() == QEvent.Type.NativeGesture:
+            if ev.gestureType() == Qt.NativeGestureType.ZoomNativeGesture:
+                self.zoom(1.0 + ev.value(), ev.position().x())
+                return True
+            if ev.gestureType() == Qt.NativeGestureType.SmartZoomNativeGesture:
+                self.fit_product()
+                return True
+        if ev.type() == QEvent.Type.Gesture:
+            pinch = ev.gesture(Qt.GestureType.PinchGesture)
+            if pinch is not None:
+                self.zoom(pinch.scaleFactor())
+                return True
+        return super().event(ev)
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_x = event.position().x()
+            self._drag_lo = self._lo
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        if self._drag_x is None:
+            return
+        _left, width = self._plot()
+        span = self._hi - self._lo
+        lo = self._drag_lo - (event.position().x() - self._drag_x) / max(1.0, width) * span
+        self.set_view(lo, lo + span)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        self._drag_x = None
+        self.unsetCursor()
+
+    def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802
+        self.fit_product()
+
+
+def _nice_step(span: float, target: int = 7) -> float:
+    import math
+
+    raw = max(1.0, span / max(1, target))
+    mag = 10 ** math.floor(math.log10(raw))
+    for m in (1, 2, 5, 10):
+        if m * mag >= raw:
+            return m * mag
+    return 10 * mag
+
+
+def _fmt_bp(v: float, step: float) -> str:
+    if step >= 1_000_000:
+        return f"{v / 1e6:g} Mb"
+    if step >= 1_000:
+        return f"{v / 1e3:g} kb"
+    return f"{int(v):,}"
 
 
 class PcrWindow(QDialog):
@@ -356,9 +595,15 @@ class PcrWindow(QDialog):
         self.lane_combo.setMinimumWidth(220)
         lane_row.addWidget(self.lane_combo)
         lane_row.addStretch(1)
+        self.fit_product_button = QPushButton("Zoom to Product", mid)
+        self.fit_all_button = QPushButton("Show All Products", mid)
+        lane_row.addWidget(self.fit_product_button)
+        lane_row.addWidget(self.fit_all_button)
         ml.addLayout(lane_row)
         self.map = ProductMap(mid)
         ml.addWidget(self.map)
+        self.fit_product_button.clicked.connect(self.map.fit_product)
+        self.fit_all_button.clicked.connect(self.map.fit_all)
         cols = ["Product", "Size", "Where", "Mism. F / R", "Sites", "Expected yield", "Kind"]
         self.table = QTableWidget(0, len(cols), mid)
         self.table.setHorizontalHeaderLabels(cols)
@@ -588,6 +833,7 @@ class PcrWindow(QDialog):
         if result.warnings:
             sub.append("; ".join(result.warnings[:3]))
         self.sub.setText(" · ".join(x for x in sub if x))
+        self.map.set_primer_lengths(result.primers)
         doc = gd.gel_from_pcr(result)
         self.gel.set_doc(doc)
         self.gel_title.setText(f"<b>Quick gel</b> · {doc.agarose:.1f} % agarose")
