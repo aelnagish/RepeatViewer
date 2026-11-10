@@ -38,7 +38,7 @@ input file name with its extension, for example `reads.fa` →
 | `<tree>_traits.tsv` | Tree viewer | Trait table |
 | `<tree>_distances_patristic.tsv`, `_pdistance.tsv` | Tree viewer | Distance matrices |
 | `<genome>_repeat_quant_<date>/` | Repeat Quantify | Report and tables |
-| `<name>_bn_den_plot.html`, `_multi_dens_plot.html` | Genome density plot | Plot |
+| `<name>_bn_den_plot.html`, `_multi_dens_plot.html` | TE density plot | Plot |
 | `<name>_bn_div_plot.html`, `_multi_div_plot.html` | TE divergence plot | Plot |
 | `<name>_RM_abund_plot.html`, `_multi_abund_plot.html` | TE abundance plot | Plot |
 | `<name>_primers.html`, `<name>_primers_details/` | Primer Design | Report, primers, pairs, gel |

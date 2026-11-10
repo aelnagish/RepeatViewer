@@ -147,13 +147,19 @@ def capture_dialog(main, trigger, name: str, *, prepare=None, size=None,
                 prepare(w)
             except Exception:
                 traceback.print_exc()
-        save(w, name)
+        try:
+            save(w, name)
+        except RuntimeError:  # the window closed itself (for example after Run)
+            return
         result["w"] = w
         if close:
-            if isinstance(w, QDialog):
-                w.reject()
-            else:
-                w.close()
+            try:
+                if isinstance(w, QDialog):
+                    w.reject()
+                else:
+                    w.close()
+            except RuntimeError:  # already closed and deleted
+                pass
 
     QTimer.singleShot(700, grab_it)
     trigger()
@@ -608,6 +614,80 @@ def _export_menu(main, d):
                 if b.isVisible() and b.text() == "Export"), None)
     if btn is not None:
         capture_dialog(main, btn.click, "export_dialog")
+
+
+
+def set_genome(main, genome: Path) -> None:
+    """Make the demo genome the reference genome (only in this run's settings)."""
+    before = main._project.genome_file
+    main._project.genome_file = Path(genome)
+    main._on_genome_changed(before, Path(genome))
+    pump(0.5)
+
+
+def plot_shots(main, opener, dialog_name: str, result_name: str, size=None, height=None):
+    """Save a plot window, then run it and save the plot it opens in Preview."""
+    capture_dialog(main, opener, dialog_name, size=size)
+
+    def run(w):
+        click_button(w, "Run")
+
+    from PySide6.QtWidgets import QMessageBox
+
+    def close_messages():
+        for box in APP.topLevelWidgets():
+            if isinstance(box, QMessageBox) and box.isVisible():
+                print("  message:", box.text().replace("\n", " ")[:200])
+                box.done(0)
+
+    watch = QTimer()
+    watch.timeout.connect(close_messages)
+    watch.start(1500)
+
+    capture_dialog(main, opener, "_ignore", prepare=run, close=False)
+    for _ in range(60):
+        pump(0.5)
+        try:
+            if main._te_viz_input_dialog is None or not main._te_viz_input_dialog.isVisible():
+                break
+        except RuntimeError:  # the window was closed and deleted
+            break
+    pump(8.0)
+    watch.stop()
+    pv = preview(main)
+    save(pv, result_name, crop=(pv.width(), height) if height else None)
+    (IMG / "_ignore.png").unlink(missing_ok=True)
+
+
+def _plots_ready(main, d) -> bool:
+    if not d.get("hits"):
+        print("  no hit table in the demo folder")
+        return False
+    set_genome(main, d["genome"])
+    main._navigate_to_folder(d["folder"], open_preview=False)
+    pump(0.8)
+    return True
+
+
+@shot("density_plot")
+def _density_plot(main, d):
+    if _plots_ready(main, d):
+        plot_shots(main, lambda: main._open_te_density_plot_dialog(input_file=d["hits"]),
+                   "density_plot", "density_plot_result", size=(760, 720), height=340)
+
+
+@shot("divergence_plot")
+def _divergence_plot(main, d):
+    if _plots_ready(main, d):
+        plot_shots(main, lambda: main._open_te_divergence_plot_dialog(input_file=d["hits"]),
+                   "divergence_plot", "divergence_plot_result", height=440)
+
+
+@shot("abundance_plot")
+def _abundance_plot(main, d):
+    if _plots_ready(main, d):
+        plot_shots(main, lambda: main._open_te_abundance_plot_dialog(input_file=d["rm_out"]),
+                   "abundance_plot", "abundance_plot_result", height=480)
 
 
 dialog_shot("settings", ("File", "Setting"), size=(900, 680))

@@ -7,7 +7,7 @@
 <header class="topbar"><a class="brand" href="index.html">RepeatViewer <span>User Manual 1.1.0</span></a>
 <input id="search" type="search" placeholder="Search the manual" autocomplete="off">
 <a class="pdf" href="RepeatViewer_User_Manual.pdf">PDF</a></header>
-<div class="layout"><aside class="sidebar"><ol class="toc"><li><a href="01-introduction.html"><span class="num">1</span>Introduction</a></li><li><a href="02-installation.html"><span class="num">2</span>Installation</a></li><li><a href="03-quick-start.html"><span class="num">3</span>Quick start: one curation pass</a></li><li><a href="04-interface.html"><span class="num">4</span>The interface</a></li><li><a href="05-sequences.html"><span class="num">5</span>Sequences</a></li><li><a href="06-annotations.html"><span class="num">6</span>Annotations</a></li><li><a href="07-search.html"><span class="num">7</span>Search</a></li><li><a href="08-alignments.html"><span class="num">8</span>Alignments</a></li><li><a href="09-mapping.html"><span class="num">9</span>Mapping</a></li><li><a href="10-trees.html"><span class="num">10</span>Trees</a></li><li class="current"><a href="11-repeat-analysis.html"><span class="num">11</span>Repeat analysis</a><ul><li><a href="#te-aid">11.1 TE-Aid</a></li><li><a href="#dotplot">11.2 Dotplot</a></li><li><a href="#repeat-quantify">11.3 Repeat Quantify</a></li><li><a href="#genome-plots">11.4 Genome plots</a></li></ul></li><li><a href="12-primers.html"><span class="num">12</span>Primers and PCR</a></li><li><a href="13-automation.html"><span class="num">13</span>Automation</a></li><li><a href="14-settings.html"><span class="num">14</span>Settings</a></li><li><a href="15-reference.html"><span class="num">15</span>Reference</a></li></ol></aside>
+<div class="layout"><aside class="sidebar"><ol class="toc"><li><a href="01-introduction.html"><span class="num">1</span>Introduction</a></li><li><a href="02-installation.html"><span class="num">2</span>Installation</a></li><li><a href="03-quick-start.html"><span class="num">3</span>Quick start: one curation pass</a></li><li><a href="04-interface.html"><span class="num">4</span>The interface</a></li><li><a href="05-sequences.html"><span class="num">5</span>Sequences</a></li><li><a href="06-annotations.html"><span class="num">6</span>Annotations</a></li><li><a href="07-search.html"><span class="num">7</span>Search</a></li><li><a href="08-alignments.html"><span class="num">8</span>Alignments</a></li><li><a href="09-mapping.html"><span class="num">9</span>Mapping</a></li><li><a href="10-trees.html"><span class="num">10</span>Trees</a></li><li class="current"><a href="11-repeat-analysis.html"><span class="num">11</span>Repeat analysis</a><ul><li><a href="#te-aid">11.1 TE-Aid</a></li><li><a href="#dotplot">11.2 Dotplot</a></li><li><a href="#repeat-quantify">11.3 Repeat Quantify</a></li><li><a href="#genome-plots-te-density-divergence-and-abundance">11.4 Genome plots: TE density, divergence and abundance</a></li></ul></li><li><a href="12-primers.html"><span class="num">12</span>Primers and PCR</a></li><li><a href="13-automation.html"><span class="num">13</span>Automation</a></li><li><a href="14-settings.html"><span class="num">14</span>Settings</a></li><li><a href="15-reference.html"><span class="num">15</span>Reference</a></li></ol></aside>
 <main id="content"><div id="results" hidden></div><h1 id="repeat-analysis" class="chapter-title"><span class="chapter-label">Chapter 11</span>Repeat analysis</h1>
 <h2 id="te-aid"><span class="secnum">11.1</span>TE-Aid</h2>
 <p><strong>Toolbar: TE-Aid · Tools → Curate → TE-Aid</strong></p>
@@ -251,58 +251,175 @@ tables. The report has one row per family:</p>
 are merged into one row. Give every record a unique name. The genome BLAST
 index is kept between runs; <strong>File → Setting → General → Diagnostics → Clear
 cache</strong> removes it.</p>
-<h2 id="genome-plots"><span class="secnum">11.4</span>Genome plots</h2>
+<h2 id="genome-plots-te-density-divergence-and-abundance"><span class="secnum">11.4</span>Genome plots: TE density, divergence and abundance</h2>
 <p><strong>Toolbar: Visualization · Tools → Visualize</strong></p>
-<p>Three interactive plots of repeats along a genome. They need a reference genome
-(see <a href="07-search.html#manage-database">Manage Database</a>). The windows stay open
-while you click files in the Files panel to fill their fields.</p>
-<h3 id="genome-density-plot">Genome density plot</h3>
-<p>Where repeats sit along the chromosomes, in windows.</p>
+<p>Three interactive plots of repeats in a genome: where they sit along the
+chromosomes (<strong>TE density plot</strong>), how old they are (<strong>TE divergence plot</strong>),
+and which families dominate (<strong>TE abundance plot</strong>). The density plot needs a
+reference genome (see <a href="07-search.html#manage-database">Manage Database</a>). The
+windows stay open while you click files in the Files panel to fill their
+fields. The plots open in Preview; <strong>Open in browser</strong> shows them full size,
+and the panel on the right of each plot saves it as SVG or PDF.</p>
+<p>The inputs are a BLAST hit table of your TE library against the genome
+(<code>&lt;library&gt;_bn.txt</code>, from <a href="07-search.html#blast">BLAST</a>) or a RepeatMasker <code>.out</code>
+file. Library names in the form <code>name#class/family</code> (for example
+<code>Ty3_gypsy_demo#LTR/Gypsy</code>) let the plots group hits by class.</p>
+<h3 id="te-density-plot-genome-density-plot">TE density plot (Genome density plot)</h3>
+<p><strong>Tools → Visualize → Genome density plot</strong>, or click <strong>Visualization</strong> on the
+toolbar.</p>
+<p>Shows where repeats sit along the chromosomes, as stacked bars per window.</p>
+<figure id="fig-11-4"><img src="img/density_plot.png" alt="The TE density plot window, TE tab." width="760" loading="lazy"><figcaption><b>Figure 11.4.</b> The TE density plot window, TE tab.</figcaption></figure>
+<p>The window has a tab per kind of track (<strong>TE</strong>, <strong>Gene</strong>, <strong>Methylation</strong>) and
+<strong>Options</strong>:</p>
 <table>
 <thead>
 <tr>
+<th>Tab</th>
 <th>Input</th>
 <th>Accepts</th>
 </tr>
 </thead>
 <tbody>
 <tr>
+<td>TE</td>
+<td>Reference genome</td>
+<td>The project genome, or another FASTA DNA from Manage Database</td>
+</tr>
+<tr>
+<td></td>
 <td>TE masking file</td>
 <td>RepeatMasker <code>.out</code> or a BLAST hit table (<code>_bn.txt</code>)</td>
 </tr>
 <tr>
+<td></td>
 <td>TE consensus file</td>
-<td>The library FASTA</td>
+<td>The library FASTA (optional: lengths and classes of the families)</td>
 </tr>
 <tr>
-<td>Other annotation file</td>
+<td>Gene</td>
+<td>Annotation file</td>
 <td>GFF, GTF, BED or VCF (genes, for example)</td>
 </tr>
 <tr>
-<td>DNA methylation file</td>
-<td>Methylation coverage (Bismark <code>.cov</code>, modkit bedMethyl)</td>
+<td>Methylation</td>
+<td>Methylation file</td>
+<td>Bismark <code>.cov</code> or modkit bedMethyl</td>
 </tr>
 </tbody>
 </table>
-<p><strong>Add another …</strong> under each field adds more tracks; tracks are drawn in field
-order. Options: what the height shows (for example total TE length per window),
-colour by superfamily, separate strands, merge overlapping hits, a difference
-track between two TE sources, which annotation features to draw, minimum
-methylation coverage, window size, chromosome order and which chromosomes to
-show.</p>
+<p><strong>Add another …</strong> under each field adds more sources; tracks are drawn in
+field order, the first at the top.</p>
+<table>
+<thead>
+<tr>
+<th>Setting</th>
+<th>Default</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Window size</td>
+<td>100 kb</td>
+<td>Width of each bar along the chromosome</td>
+</tr>
+<tr>
+<td>Y axis content</td>
+<td>Total TE length (bp) per window</td>
+<td>What the bar height shows</td>
+</tr>
+<tr>
+<td>Color by</td>
+<td>TE order</td>
+<td>Colour the bars by order, superfamily or family</td>
+</tr>
+<tr>
+<td>Separate forward / reverse strands</td>
+<td>off</td>
+<td>One track per strand</td>
+</tr>
+<tr>
+<td>Collapse overlapped TEs</td>
+<td>off</td>
+<td>Count overlapping hits once</td>
+</tr>
+<tr>
+<td>Show TE difference track</td>
+<td>off</td>
+<td>With two TE sources: a track of where they differ</td>
+</tr>
+<tr>
+<td>Advanced, Options</td>
+<td></td>
+<td>Which annotation features to draw, minimum methylation coverage, chromosome order, which chromosomes to show, plot all track types together</td>
+</tr>
+</tbody>
+</table>
+<figure id="fig-11-5"><img src="img/density_plot_result.png" alt="A TE density plot of the demo genome: satellite arrays at the chromosome ends, LTR retrotransposons in the middle of each chromosome." width="994" loading="lazy"><figcaption><b>Figure 11.5.</b> A TE density plot of the demo genome: satellite arrays at the chromosome ends, LTR retrotransposons in the middle of each chromosome.</figcaption></figure>
+<p>In the plot, hover a bar for its numbers, drag to zoom into a region (the
+region can be saved as its own plot), and use the side panel to switch TE
+classes on and off, change the scale and save the figure.</p>
 <p><strong>Output:</strong> <code>&lt;name&gt;_bn_den_plot.html</code> (named after the source: <code>bn</code>, <code>RM</code>, …),
 <code>&lt;name&gt;_multi_dens_plot.html</code> for several sources, and <code>…_region.html</code> for a
 zoomed region.</p>
 <h3 id="te-divergence-plot">TE divergence plot</h3>
-<p>The age profile of a family: a histogram of divergence from the consensus
-(1 − identity). A sharp peak at low divergence means a recent burst; a broad
-distribution means long, older activity. Inputs: RepeatMasker <code>.out</code> or BLAST
-hit tables; setting: bin size. <strong>Output:</strong> <code>&lt;name&gt;_bn_div_plot.html</code> or
-<code>&lt;name&gt;_multi_div_plot.html</code>.</p>
+<p><strong>Tools → Visualize → TE divergence plot</strong></p>
+<p>The age profile of the repeats: a histogram of divergence from the consensus
+(1 − identity), stacked by class. A sharp peak at low divergence means a recent
+burst; a broad distribution means long, older activity.</p>
+<figure id="fig-11-6"><img src="img/divergence_plot.png" alt="The TE divergence plot window." width="560" loading="lazy"><figcaption><b>Figure 11.6.</b> The TE divergence plot window.</figcaption></figure>
+<table>
+<thead>
+<tr>
+<th>Setting</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>TE input files</td>
+<td>BLAST hit tables or RepeatMasker <code>.out</code> files</td>
+</tr>
+<tr>
+<td>Bin size</td>
+<td>Width of each histogram bar (0.005 = 0.5 % divergence)</td>
+</tr>
+</tbody>
+</table>
+<figure id="fig-11-7"><img src="img/divergence_plot_result.png" alt="A TE divergence plot of the demo genome: young copies near 0, older families further right." width="994" loading="lazy"><figcaption><b>Figure 11.7.</b> A TE divergence plot of the demo genome: young copies near 0, older families further right.</figcaption></figure>
+<p><strong>Output:</strong> <code>&lt;name&gt;_bn_div_plot.html</code>, or <code>&lt;name&gt;_multi_div_plot.html</code> for
+several sources.</p>
 <h3 id="te-abundance-plot">TE abundance plot</h3>
+<p><strong>Tools → Visualize → TE abundance plot</strong></p>
 <p>Which families dominate a genome: families ranked by the genome share they
-occupy, one curve per RepeatMasker <code>.out</code> file. Settings: Y axis (percent of
-genome, or bp) and the number of top families. <strong>Output:</strong>
-<code>&lt;name&gt;_RM_abund_plot.html</code> or <code>&lt;name&gt;_multi_abund_plot.html</code>.</p><nav class="pager"><a class="prev" href="10-trees.html"><small>Previous</small>Trees</a><a class="next" href="12-primers.html"><small>Next</small>Primers and PCR</a></nav></main></div>
+occupy, as a cumulative curve, one curve per RepeatMasker <code>.out</code> file. The
+table beside the plot lists the families with the bp and percent of the genome
+they occupy.</p>
+<figure id="fig-11-8"><img src="img/abundance_plot.png" alt="The TE abundance plot window." width="577" loading="lazy"><figcaption><b>Figure 11.8.</b> The TE abundance plot window.</figcaption></figure>
+<table>
+<thead>
+<tr>
+<th>Setting</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>RepeatMasker .out files</td>
+<td>One or more; each becomes a curve</td>
+</tr>
+<tr>
+<td>Y axis</td>
+<td>Percentage occupied in genome, or occupied bp</td>
+</tr>
+<tr>
+<td>Top families</td>
+<td>How many families to show, ranked by occupied bp</td>
+</tr>
+</tbody>
+</table>
+<figure id="fig-11-9"><img src="img/abundance_plot_result.png" alt="A TE abundance plot: the cumulative genome share of the demo families, largest first." width="994" loading="lazy"><figcaption><b>Figure 11.9.</b> A TE abundance plot: the cumulative genome share of the demo families, largest first.</figcaption></figure>
+<p><strong>Output:</strong> <code>&lt;name&gt;_RM_abund_plot.html</code>, or <code>&lt;name&gt;_multi_abund_plot.html</code> for
+several sources.</p><nav class="pager"><a class="prev" href="10-trees.html"><small>Previous</small>Trees</a><a class="next" href="12-primers.html"><small>Next</small>Primers and PCR</a></nav></main></div>
 <script src="search_index.js"></script><script src="manual.js"></script>
 </body></html>

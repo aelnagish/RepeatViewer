@@ -113,31 +113,61 @@ are merged into one row. Give every record a unique name. The genome BLAST
 index is kept between runs; **File → Setting → General → Diagnostics → Clear
 cache** removes it.
 
-## Genome plots
+## Genome plots: TE density, divergence and abundance
 
 **Toolbar: Visualization · Tools → Visualize**
 
-Three interactive plots of repeats along a genome. They need a reference genome
-(see [Manage Database](07-search.md#manage-database)). The windows stay open
-while you click files in the Files panel to fill their fields.
+Three interactive plots of repeats in a genome: where they sit along the
+chromosomes (**TE density plot**), how old they are (**TE divergence plot**),
+and which families dominate (**TE abundance plot**). The density plot needs a
+reference genome (see [Manage Database](07-search.md#manage-database)). The
+windows stay open while you click files in the Files panel to fill their
+fields. The plots open in Preview; **Open in browser** shows them full size,
+and the panel on the right of each plot saves it as SVG or PDF.
 
-### Genome density plot
+The inputs are a BLAST hit table of your TE library against the genome
+(`<library>_bn.txt`, from [BLAST](07-search.md#blast)) or a RepeatMasker `.out`
+file. Library names in the form `name#class/family` (for example
+`Ty3_gypsy_demo#LTR/Gypsy`) let the plots group hits by class.
 
-Where repeats sit along the chromosomes, in windows.
+### TE density plot (Genome density plot)
 
-| Input | Accepts |
-|-------|---------|
-| TE masking file | RepeatMasker `.out` or a BLAST hit table (`_bn.txt`) |
-| TE consensus file | The library FASTA |
-| Other annotation file | GFF, GTF, BED or VCF (genes, for example) |
-| DNA methylation file | Methylation coverage (Bismark `.cov`, modkit bedMethyl) |
+**Tools → Visualize → Genome density plot**, or click **Visualization** on the
+toolbar.
 
-**Add another …** under each field adds more tracks; tracks are drawn in field
-order. Options: what the height shows (for example total TE length per window),
-colour by superfamily, separate strands, merge overlapping hits, a difference
-track between two TE sources, which annotation features to draw, minimum
-methylation coverage, window size, chromosome order and which chromosomes to
-show.
+Shows where repeats sit along the chromosomes, as stacked bars per window.
+
+![The TE density plot window, TE tab.](img/density_plot.png)
+
+The window has a tab per kind of track (**TE**, **Gene**, **Methylation**) and
+**Options**:
+
+| Tab | Input | Accepts |
+|-----|-------|---------|
+| TE | Reference genome | The project genome, or another FASTA DNA from Manage Database |
+| | TE masking file | RepeatMasker `.out` or a BLAST hit table (`_bn.txt`) |
+| | TE consensus file | The library FASTA (optional: lengths and classes of the families) |
+| Gene | Annotation file | GFF, GTF, BED or VCF (genes, for example) |
+| Methylation | Methylation file | Bismark `.cov` or modkit bedMethyl |
+
+**Add another …** under each field adds more sources; tracks are drawn in
+field order, the first at the top.
+
+| Setting | Default | Meaning |
+|---------|---------|---------|
+| Window size | 100 kb | Width of each bar along the chromosome |
+| Y axis content | Total TE length (bp) per window | What the bar height shows |
+| Color by | TE order | Colour the bars by order, superfamily or family |
+| Separate forward / reverse strands | off | One track per strand |
+| Collapse overlapped TEs | off | Count overlapping hits once |
+| Show TE difference track | off | With two TE sources: a track of where they differ |
+| Advanced, Options | | Which annotation features to draw, minimum methylation coverage, chromosome order, which chromosomes to show, plot all track types together |
+
+![A TE density plot of the demo genome: satellite arrays at the chromosome ends, LTR retrotransposons in the middle of each chromosome.](img/density_plot_result.png)
+
+In the plot, hover a bar for its numbers, drag to zoom into a region (the
+region can be saved as its own plot), and use the side panel to switch TE
+classes on and off, change the scale and save the figure.
 
 **Output:** `<name>_bn_den_plot.html` (named after the source: `bn`, `RM`, …),
 `<name>_multi_dens_plot.html` for several sources, and `…_region.html` for a
@@ -145,15 +175,42 @@ zoomed region.
 
 ### TE divergence plot
 
-The age profile of a family: a histogram of divergence from the consensus
-(1 − identity). A sharp peak at low divergence means a recent burst; a broad
-distribution means long, older activity. Inputs: RepeatMasker `.out` or BLAST
-hit tables; setting: bin size. **Output:** `<name>_bn_div_plot.html` or
-`<name>_multi_div_plot.html`.
+**Tools → Visualize → TE divergence plot**
+
+The age profile of the repeats: a histogram of divergence from the consensus
+(1 − identity), stacked by class. A sharp peak at low divergence means a recent
+burst; a broad distribution means long, older activity.
+
+![The TE divergence plot window.](img/divergence_plot.png)
+
+| Setting | Meaning |
+|---------|---------|
+| TE input files | BLAST hit tables or RepeatMasker `.out` files |
+| Bin size | Width of each histogram bar (0.005 = 0.5 % divergence) |
+
+![A TE divergence plot of the demo genome: young copies near 0, older families further right.](img/divergence_plot_result.png)
+
+**Output:** `<name>_bn_div_plot.html`, or `<name>_multi_div_plot.html` for
+several sources.
 
 ### TE abundance plot
 
+**Tools → Visualize → TE abundance plot**
+
 Which families dominate a genome: families ranked by the genome share they
-occupy, one curve per RepeatMasker `.out` file. Settings: Y axis (percent of
-genome, or bp) and the number of top families. **Output:**
-`<name>_RM_abund_plot.html` or `<name>_multi_abund_plot.html`.
+occupy, as a cumulative curve, one curve per RepeatMasker `.out` file. The
+table beside the plot lists the families with the bp and percent of the genome
+they occupy.
+
+![The TE abundance plot window.](img/abundance_plot.png)
+
+| Setting | Meaning |
+|---------|---------|
+| RepeatMasker .out files | One or more; each becomes a curve |
+| Y axis | Percentage occupied in genome, or occupied bp |
+| Top families | How many families to show, ranked by occupied bp |
+
+![A TE abundance plot: the cumulative genome share of the demo families, largest first.](img/abundance_plot_result.png)
+
+**Output:** `<name>_RM_abund_plot.html`, or `<name>_multi_abund_plot.html` for
+several sources.
