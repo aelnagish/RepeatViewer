@@ -199,6 +199,12 @@ class PrimerActionsMixin:
         from PySide6.QtCore import QUrl
         from PySide6.QtGui import QDesktopServices
 
+        from repeatviewer.user_manual import manual_page, open_manual
+
+        # The chapter of the user manual replaces the separate primers page.
+        if manual_page("12-primers") is not None:
+            open_manual("12-primers")
+            return
         if not PRIMER_MANUAL.is_file():
             QMessageBox.warning(self, "Primers and Probes Manual",
                                 f"The manual is missing:\n{PRIMER_MANUAL}")

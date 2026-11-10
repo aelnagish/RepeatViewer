@@ -1,0 +1,445 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The interface · RepeatViewer User Manual</title>
+<link rel="stylesheet" href="manual.css">
+</head><body>
+<header class="topbar"><a class="brand" href="index.html">RepeatViewer <span>User Manual 1.1.0</span></a>
+<input id="search" type="search" placeholder="Search the manual" autocomplete="off">
+<a class="pdf" href="RepeatViewer_User_Manual.pdf">PDF</a></header>
+<div class="layout"><aside class="sidebar"><ol class="toc"><li><a href="01-introduction.html"><span class="num">1</span>Introduction</a></li><li><a href="02-installation.html"><span class="num">2</span>Installation</a></li><li><a href="03-quick-start.html"><span class="num">3</span>Quick start: one curation pass</a></li><li class="current"><a href="04-interface.html"><span class="num">4</span>The interface</a><ul><li><a href="#folders-panel">4.1 Folders panel</a></li><li><a href="#files-panel">4.2 Files panel</a></li><li><a href="#preview-panel">4.3 Preview panel</a></li><li><a href="#toolbar">4.4 Toolbar</a></li><li><a href="#status-bar">4.5 Status bar</a></li><li><a href="#the-edit-menu">4.6 The Edit menu</a></li><li><a href="#find-and-go-to">4.7 Find and Go To</a></li><li><a href="#keyboard-shortcuts">4.8 Keyboard shortcuts</a></li><li><a href="#how-every-tool-behaves">4.9 How every tool behaves</a></li></ul></li><li><a href="05-sequences.html"><span class="num">5</span>Sequences</a></li><li><a href="06-annotations.html"><span class="num">6</span>Annotations</a></li><li><a href="07-search.html"><span class="num">7</span>Search</a></li><li><a href="08-alignments.html"><span class="num">8</span>Alignments</a></li><li><a href="09-mapping.html"><span class="num">9</span>Mapping</a></li><li><a href="10-trees.html"><span class="num">10</span>Trees</a></li><li><a href="11-repeat-analysis.html"><span class="num">11</span>Repeat analysis</a></li><li><a href="12-primers.html"><span class="num">12</span>Primers and PCR</a></li><li><a href="13-automation.html"><span class="num">13</span>Automation</a></li><li><a href="14-settings.html"><span class="num">14</span>Settings</a></li><li><a href="15-reference.html"><span class="num">15</span>Reference</a></li></ol></aside>
+<main id="content"><div id="results" hidden></div><h1 id="the-interface" class="chapter-title"><span class="chapter-label">Chapter 4</span>The interface</h1>
+<p>The main window has three panels, a toolbar, a menu bar and a status bar. By
+default the Folders and Files panels sit on the left and the Preview panel on
+the right.</p>
+<figure id="fig-4-1"><img src="img/main_window.png" alt="The main window: menu bar and toolbar at the top, Folders and Files on the left, Preview on the right, status bar at the bottom." width="1280" loading="lazy"><figcaption><b>Figure 4.1.</b> The main window: menu bar and toolbar at the top, Folders and Files on the left, Preview on the right, status bar at the bottom.</figcaption></figure>
+<h2 id="folders-panel"><span class="secnum">4.1</span>Folders panel</h2>
+<p>Shows the folders you added (top-level folders) and their subfolders.</p>
+<table>
+<thead>
+<tr>
+<th>Control</th>
+<th>What it does</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>+</strong></td>
+<td>Add a folder as a new top-level folder</td>
+</tr>
+<tr>
+<td><strong>◀ ▶</strong></td>
+<td>Back and forward through folders you visited</td>
+</tr>
+<tr>
+<td><strong>↑</strong></td>
+<td>Go to the parent folder</td>
+</tr>
+<tr>
+<td><strong>Filter by name…</strong></td>
+<td>Show only folders whose name contains the text</td>
+</tr>
+<tr>
+<td><strong>×</strong></td>
+<td>Hide the panel (<strong>View → Folders</strong> shows it again)</td>
+</tr>
+</tbody>
+</table>
+<p>Each folder shows two numbers, for example <code>(3/6)</code>: files that pass the Files
+filter, out of all files in the folder.</p>
+<p>Right-click a folder to add or create folders, rename it, paste files into it,
+give it a colour, or remove a top-level folder from the list. Removing only
+hides it from the panel; nothing is deleted on disk.
+<strong>File → Restore deleted files</strong> brings removed top-level folders back, and
+<strong>⌘Z</strong> undoes the removal right away.</p>
+<h2 id="files-panel"><span class="secnum">4.2</span>Files panel</h2>
+<p>Lists the files of the selected folder. Click a file to open it in Preview.
+Select several files with <strong>⌘</strong>-click or <strong>Shift</strong>-click, or tick their boxes,
+for tools that take more than one input.</p>
+<figure id="fig-4-2"><img src="img/files_highlight.png" alt="The Files panel after a run: the input (light blue) and the new file (green)." width="226" loading="lazy"><figcaption><b>Figure 4.2.</b> The Files panel after a run: the input (light blue) and the new file (green).</figcaption></figure>
+<ul>
+<li><strong>Filter by name…</strong> shows only matching files.</li>
+<li><strong>Columns</strong> chooses extra columns: length, number of sequences, GC %, type,
+  description, modified date, size, colour and cytogenetic images. By default
+  only the name is shown; the default set is chosen in
+  <strong>File → Setting → General → Files columns</strong>.</li>
+<li>Related files sit together: a FASTA and the outputs made from it are grouped
+  by name, so <code>CroSat2.fa</code>, <code>CroSat2.fa_bn.txt</code> and <code>CroSat2.fa_bn.txt.fa</code>
+  appear one after another.</li>
+<li>Drag a GFF, GFF3, GTF or BED file onto a FASTA row to attach it as an
+  annotation (see <a href="06-annotations.html">Annotations</a>).</li>
+<li>Files can be dragged to other folders in the Folders panel, or to Finder and
+  other applications.</li>
+</ul>
+<p>Right-click a file for the actions that fit it:</p>
+<figure id="fig-4-3"><img src="img/files_context_menu.png" alt="The right-click menu of a FASTA file." width="230" loading="lazy"><figcaption><b>Figure 4.3.</b> The right-click menu of a FASTA file.</figcaption></figure>
+<table>
+<thead>
+<tr>
+<th>Item</th>
+<th>What it does</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Open in Preview / Open in Additional Tab</td>
+<td>Show the file in the current Preview tab, or in a new tab next to it</td>
+</tr>
+<tr>
+<td>Open in Text Editor</td>
+<td>Edit the file as plain text in Preview</td>
+</tr>
+<tr>
+<td>Find in this document…</td>
+<td>Open Find for this file (see <a href="#find-and-go-to">Find</a>)</td>
+</tr>
+<tr>
+<td>Rename</td>
+<td>Rename the file (<strong>F2</strong>)</td>
+</tr>
+<tr>
+<td>Add as BLAST Database…</td>
+<td>Index this FASTA for BLAST (see <a href="07-search.html#manage-database">Manage Database</a>)</td>
+</tr>
+<tr>
+<td>Add Annotation… / Export Annotation…</td>
+<td>Attach a GFF/BED file, or write the annotations to GFF3, GTF, BED or a figure</td>
+</tr>
+<tr>
+<td>Attach Cytogenetic Image…</td>
+<td>Link a microscope image (FISH, karyotype) to this sequence</td>
+</tr>
+<tr>
+<td>Extract Sequences from File</td>
+<td>Pick records from a multi-FASTA (see <a href="05-sequences.html">Sequences</a>)</td>
+</tr>
+<tr>
+<td>Separate Sequence into N Files / Folders</td>
+<td>Split a multi-FASTA, one record per file or folder</td>
+</tr>
+<tr>
+<td>Combine N Sequences to One File</td>
+<td>Merge the selected FASTA files</td>
+</tr>
+<tr>
+<td>New Folder with Selected Items</td>
+<td>Move the selection into a new folder</td>
+</tr>
+<tr>
+<td>Cut, Copy, Copy Path, Paste, Duplicate, Delete</td>
+<td>File operations; all can be undone</td>
+</tr>
+<tr>
+<td>Open in AliView</td>
+<td>Open an alignment in AliView</td>
+</tr>
+<tr>
+<td>Show in File Manager / Reveal in Finder</td>
+<td>Show the file in Finder or Explorer</td>
+</tr>
+<tr>
+<td>File Color</td>
+<td>Mark the file with a colour</td>
+</tr>
+</tbody>
+</table>
+<h2 id="preview-panel"><span class="secnum">4.3</span>Preview panel</h2>
+<p>Shows the selected file. What you see depends on the file type:</p>
+<table>
+<thead>
+<tr>
+<th>File</th>
+<th>View</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>FASTA, one sequence</td>
+<td><strong>Text</strong>, <strong>Overview</strong> (annotated map) and <strong>Dotplot (Self)</strong> sub-tabs</td>
+</tr>
+<tr>
+<td>FASTA, several sequences</td>
+<td>Overview of all records, one row each</td>
+</tr>
+<tr>
+<td>Aligned FASTA</td>
+<td>Alignment viewer (see <a href="08-alignments.html#the-alignment-viewer">Alignments</a>)</td>
+</tr>
+<tr>
+<td>Tree (<code>.treefile</code>, <code>.nwk</code>, <code>.newick</code>)</td>
+<td>Tree viewer (see <a href="10-trees.html">Trees</a>)</td>
+</tr>
+<tr>
+<td>SAM, BAM, CRAM, GFF, GTF, BED</td>
+<td>Genome browser (see <a href="09-mapping.html">Mapping</a>)</td>
+</tr>
+<tr>
+<td>PAF, <code>.1aln</code></td>
+<td>Alignment dotplot</td>
+</tr>
+<tr>
+<td><code>.rvgel</code></td>
+<td>In-silico gel (see <a href="12-primers.html">Primers and PCR</a>)</td>
+</tr>
+<tr>
+<td>HTML reports</td>
+<td>TE-Aid, tree and mapping reports, plots, shown live</td>
+</tr>
+<tr>
+<td>PDF, images, text, tables</td>
+<td>Shown as they are</td>
+</tr>
+</tbody>
+</table>
+<p>The <strong>Actions</strong> button in the Preview title bar has:</p>
+<ul>
+<li><strong>Reset scale</strong>: back to the default zoom.</li>
+<li><strong>Edit text</strong> / <strong>Save text</strong>: edit a text or FASTA file in place. If you
+  leave a file with unsaved typing, RepeatViewer asks whether to save it.</li>
+<li><strong>Duplicate window</strong>: a copy of the current Preview in its own window.</li>
+<li><strong>Split window</strong>: two Preview panes side by side, to compare two files.</li>
+</ul>
+<p>Right-click a Preview tab to open it in the right or left half of a split.
+<strong>Open in Additional Tab</strong> (right-click a file) keeps the current tab and adds
+another one, which is the quickest way to compare a before and an after.</p>
+<p>HTML reports have a zoom box and <strong>Open in browser</strong> in the title bar.</p>
+<h2 id="toolbar"><span class="secnum">4.4</span>Toolbar</h2>
+<p>The tools you use most, as buttons. The default set is BLAST, Align, Dotplot,
+TE-Aid, MSA Clean, MSA Extend, Consensus and Visualization. Choose which
+buttons appear, and in which order, in <strong>File → Setting → Toolbar</strong>.</p>
+<p>Most buttons do two things:</p>
+<ul>
+<li><strong>Click</strong>: run the tool on the selected files with your saved settings, or
+  open its window when it needs choices every time.</li>
+<li><strong>Right-click</strong>: the other of the two. What right-click does is set on the
+  <strong>Options</strong> tab of each tool's window ("Right-click action").</li>
+</ul>
+<p>Buttons with a small arrow open a menu (for example Visualization).</p>
+<h2 id="status-bar"><span class="secnum">4.5</span>Status bar</h2>
+<p>The bottom line of the window shows the name of the last previewed file (click
+it to show the file in Finder or Explorer), or the result of the last job.
+While a tool runs it shows <strong>Running <Tool>…</strong>, a blue progress bar and a
+<strong>Stop</strong> button. For files with many sequences the bar advances sequence by
+sequence and says how many are done and how many are left.</p>
+<h2 id="the-edit-menu"><span class="secnum">4.6</span>The Edit menu</h2>
+<p>The Edit menu acts on the panel you are working in: the Files panel, the
+Folders panel, the tree viewer, or the text field that has the cursor.</p>
+<figure id="fig-4-4"><img src="img/menu_edit.png" alt="The Edit menu." width="294" loading="lazy"><figcaption><b>Figure 4.4.</b> The Edit menu.</figcaption></figure>
+<p><strong>Undo and Redo</strong> (<strong>⌘Z</strong>, <strong>⇧⌘Z</strong>) cover file actions: delete, paste, move,
+overwrite, rename, Batch Rename, duplicate, and removing a folder from the
+list. A copy that you changed after it was made is never deleted by Undo. In a
+text being edited, Undo first undoes your typing.</p>
+<p><strong>Cut, Copy, Paste</strong> work on files in the Files and Folders panels, and on text
+in text fields.</p>
+<p><strong>Paste Reverse Complement</strong> (<strong>⇧⌘V</strong>) pastes the reverse complement of the DNA
+on the clipboard into a text field or a sequence being edited. IUPAC codes,
+case, gaps and line width are kept; FASTA headers get " reverse_complement"
+added. Protein on the clipboard is not pasted.</p>
+<p><strong>Rename…</strong> (<strong>F2</strong>) renames the selected file or folder.</p>
+<p><strong>Batch Rename…</strong> renames many files at once: find and replace (with <strong>Match
+Case</strong> and <strong>Regular Expression</strong>, where <code>\1</code> refers to a group), add a prefix
+or suffix, and keep the file extension (<code>.fa.gz</code> stays together). The table
+shows every new name before anything changes; names that are taken, repeated
+or invalid are shown in red and <strong>Rename</strong> stays off until all are fine.
+Annotation files, mapping records, file colours and image links follow their
+files. One Undo puts everything back.</p>
+<figure id="fig-4-5"><img src="img/batch_rename.png" alt="Batch Rename: the new names are shown before anything is renamed." width="640" loading="lazy"><figcaption><b>Figure 4.5.</b> Batch Rename: the new names are shown before anything is renamed.</figcaption></figure>
+<p><strong>Duplicate</strong> copies the selected files or folders. <strong>File Color</strong> marks files
+with a colour. <strong>Clear Highlights</strong> removes the blue and green job highlights.</p>
+<h2 id="find-and-go-to"><span class="secnum">4.7</span>Find and Go To</h2>
+<p><strong>Edit → Find in this document…</strong> (<strong>⌘F</strong>) searches the file in Preview.</p>
+<figure id="fig-4-6"><img src="img/find_hits.png" alt="Find with hits listed. The current hit is selected in the sequence view." width="470" loading="lazy"><figcaption><b>Figure 4.6.</b> Find with hits listed. The current hit is selected in the sequence view.</figcaption></figure>
+<ul>
+<li><strong>Sequence</strong>: a motif in <strong>Nucleotides</strong>, or in <strong>Protein (6 frames)</strong> (the
+  DNA is translated in all six frames).</li>
+<li><strong>Include reverse complement</strong> searches both strands.</li>
+<li><strong>Interpret IUPAC codes</strong>: R matches A or G, N matches anything, in the motif
+  and in the sequence.</li>
+<li><strong>Allow gaps in sequence</strong>: gaps in alignment rows are skipped, so a motif
+  is found across them.</li>
+<li><strong>Max mismatches</strong>: how many differences a hit may have.</li>
+<li><strong>Sequence names</strong> and <strong>Annotation names</strong>: also match record names and
+  feature names.</li>
+</ul>
+<p><strong>Find All</strong> lists every hit (up to 100,000). <strong>Find Next</strong> (<strong>F3</strong> or <strong>⌘G</strong>)
+and <strong>Find Previous</strong> (<strong>⇧F3</strong>) move through them; the view jumps to each hit
+and keeps your zoom when the letters are readable. <strong>Save Hits as
+Annotations…</strong> adds the hits as features. Large files are searched in the
+background with a progress bar and <strong>Stop</strong>. Closing Find removes the
+highlights.</p>
+<p>The same search is in the <strong>Find</strong> tab of the Overview side panel, for quick
+searches without a separate window.</p>
+<p><strong>Edit → Go To Position…</strong> (<strong>⌥⌘G</strong>) jumps to a position or range:
+<code>1200</code>, <code>1000-2000</code> or <code>scaffold_5:1000-2000</code>.</p>
+<h2 id="keyboard-shortcuts"><span class="secnum">4.8</span>Keyboard shortcuts</h2>
+<table>
+<thead>
+<tr>
+<th>macOS</th>
+<th>Windows / Linux</th>
+<th>Action</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>⇧⌘O</td>
+<td>Ctrl+Shift+O</td>
+<td>Add Folder</td>
+</tr>
+<tr>
+<td>⇧⌘N</td>
+<td>Ctrl+Shift+N</td>
+<td>New Folder</td>
+</tr>
+<tr>
+<td>⇧⌘G</td>
+<td>Ctrl+Shift+G</td>
+<td>Manage Database</td>
+</tr>
+<tr>
+<td>⌘,</td>
+<td>Ctrl+,</td>
+<td>Settings</td>
+</tr>
+<tr>
+<td>⌘Z</td>
+<td>Ctrl+Z</td>
+<td>Undo</td>
+</tr>
+<tr>
+<td>⇧⌘Z</td>
+<td>Ctrl+Y or Ctrl+Shift+Z</td>
+<td>Redo</td>
+</tr>
+<tr>
+<td>⌘X, ⌘C, ⌘V</td>
+<td>Ctrl+X, Ctrl+C, Ctrl+V</td>
+<td>Cut, Copy, Paste</td>
+</tr>
+<tr>
+<td>⇧⌘V</td>
+<td>Ctrl+Shift+V</td>
+<td>Paste Reverse Complement</td>
+</tr>
+<tr>
+<td>⌘A</td>
+<td>Ctrl+A</td>
+<td>Select All</td>
+</tr>
+<tr>
+<td>F2</td>
+<td>F2</td>
+<td>Rename</td>
+</tr>
+<tr>
+<td>⌘F</td>
+<td>Ctrl+F</td>
+<td>Find (in the Files or Folders panel: focus its filter box)</td>
+</tr>
+<tr>
+<td>F3 or ⌘G</td>
+<td>F3 or Ctrl+G</td>
+<td>Find Next</td>
+</tr>
+<tr>
+<td>⇧F3</td>
+<td>Shift+F3</td>
+<td>Find Previous</td>
+</tr>
+<tr>
+<td>⌥⌘G</td>
+<td>Ctrl+Alt+G</td>
+<td>Go To Position</td>
+</tr>
+<tr>
+<td>F5 or ⌘R</td>
+<td>F5</td>
+<td>Refresh the current folder</td>
+</tr>
+<tr>
+<td>Delete or Backspace</td>
+<td>Delete</td>
+<td>Delete the selected files (asks first; can be undone)</td>
+</tr>
+<tr>
+<td>⌘Q</td>
+<td>Ctrl+Q</td>
+<td>Quit</td>
+</tr>
+</tbody>
+</table>
+<p>In the sequence, alignment and tree views:</p>
+<table>
+<thead>
+<tr>
+<th>Input</th>
+<th>Overview, alignment, tree, dotplot</th>
+<th>Genome browser (mapping)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Scroll</td>
+<td>Move through the view</td>
+<td>Move through the view</td>
+</tr>
+<tr>
+<td>Shift + scroll</td>
+<td>Zoom around the mouse</td>
+<td>Scroll up and down through the rows</td>
+</tr>
+<tr>
+<td>⌘ + scroll, or pinch</td>
+<td></td>
+<td>Zoom around the mouse</td>
+</tr>
+<tr>
+<td>− / + buttons, slider</td>
+<td>Zoom</td>
+<td>Zoom</td>
+</tr>
+<tr>
+<td>Double-click empty space</td>
+<td>Fit the whole sequence or tree</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h2 id="how-every-tool-behaves"><span class="secnum">4.9</span>How every tool behaves</h2>
+<p>The same rules hold for every tool. Knowing them saves reading each tool's
+section closely.</p>
+<p><strong>Outputs land next to their input.</strong> A tool run on <code>/data/run2/CroSat2.fa</code>
+writes into <code>/data/run2/</code>. The next tool in the curation loop takes the last
+output as its input, so they belong together.</p>
+<p><strong>Output names keep the full input name.</strong> A suffix is added to the whole name,
+extension included: <code>CroSat2.fa</code> → <code>CroSat2.fa_mafft.fa</code>. You can always tell
+which file a result came from. Tools that make many files put only the main
+result next to the input and the rest into a <code>&lt;name&gt;_details</code> folder.</p>
+<p><strong>Nothing is overwritten.</strong> A second run on the same input writes <code>_2</code>, <code>_3</code>,
+and so on. When you name a file yourself and the name is taken, RepeatViewer
+asks whether to <strong>Overwrite</strong>, <strong>Cancel</strong> or <strong>Rename…</strong>.</p>
+<p><strong>Highlights show what happened.</strong> During a run the input files are blue and
+new files green. Afterwards the inputs are light blue, the new files green, and
+the main result opens in Preview, selected in deep blue.</p>
+<p><strong>Jobs run in the background.</strong> You can keep browsing and previewing while a
+tool runs. Several jobs can run at the same time, up to <strong>Max. parallel jobs</strong>
+in <strong>File → Setting → General → Performance</strong>. <strong>Stop</strong> in the status bar
+cancels.</p>
+<p><strong>Selection drives the tools.</strong> Tools act on the files selected in the Files
+panel. In each tool window, <strong>Inputs</strong> offers <strong>Use selected sequences</strong> or
+<strong>Define inputs</strong> (other files for this run only).</p>
+<p><strong>Click a file to fill a field.</strong> While a tool window is open, clicking a file in
+the Files panel fills the path field you are working on, for example a
+reference or a genome. <strong>Browse</strong> works too.</p>
+<p><strong>Windows look the same.</strong> Each tool window has the tabs of its programs plus an
+<strong>Options</strong> tab (what right-click runs, whether to show the process window,
+whether to use your own copy of the program). Buttons are always
+<strong>Restore Defaults</strong> and <strong>Advanced Settings ▸</strong> on the left, <strong>Cancel</strong>,
+<strong>Save</strong> and <strong>Run</strong> on the right. <strong>Save</strong> keeps the settings without running.
+Settings are remembered between sessions.</p>
+<p><strong>Every tool is in the Tools menu.</strong> Tools with many settings have two items:
+"… with default parameters" (run with the saved settings) and "Change …
+parameters" (open the window).</p>
+<figure id="fig-4-7"><img src="img/menu_tools.png" alt="The Tools menu, grouped by kind of work." width="330" loading="lazy"><figcaption><b>Figure 4.7.</b> The Tools menu, grouped by kind of work.</figcaption></figure><nav class="pager"><a class="prev" href="03-quick-start.html"><small>Previous</small>Quick start: one curation pass</a><a class="next" href="05-sequences.html"><small>Next</small>Sequences</a></nav></main></div>
+<script src="search_index.js"></script><script src="manual.js"></script>
+</body></html>

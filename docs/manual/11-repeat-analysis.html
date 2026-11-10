@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Repeat analysis · RepeatViewer User Manual</title>
+<link rel="stylesheet" href="manual.css">
+</head><body>
+<header class="topbar"><a class="brand" href="index.html">RepeatViewer <span>User Manual 1.1.0</span></a>
+<input id="search" type="search" placeholder="Search the manual" autocomplete="off">
+<a class="pdf" href="RepeatViewer_User_Manual.pdf">PDF</a></header>
+<div class="layout"><aside class="sidebar"><ol class="toc"><li><a href="01-introduction.html"><span class="num">1</span>Introduction</a></li><li><a href="02-installation.html"><span class="num">2</span>Installation</a></li><li><a href="03-quick-start.html"><span class="num">3</span>Quick start: one curation pass</a></li><li><a href="04-interface.html"><span class="num">4</span>The interface</a></li><li><a href="05-sequences.html"><span class="num">5</span>Sequences</a></li><li><a href="06-annotations.html"><span class="num">6</span>Annotations</a></li><li><a href="07-search.html"><span class="num">7</span>Search</a></li><li><a href="08-alignments.html"><span class="num">8</span>Alignments</a></li><li><a href="09-mapping.html"><span class="num">9</span>Mapping</a></li><li><a href="10-trees.html"><span class="num">10</span>Trees</a></li><li class="current"><a href="11-repeat-analysis.html"><span class="num">11</span>Repeat analysis</a><ul><li><a href="#te-aid">11.1 TE-Aid</a></li><li><a href="#dotplot">11.2 Dotplot</a></li><li><a href="#repeat-quantify">11.3 Repeat Quantify</a></li><li><a href="#genome-plots">11.4 Genome plots</a></li></ul></li><li><a href="12-primers.html"><span class="num">12</span>Primers and PCR</a></li><li><a href="13-automation.html"><span class="num">13</span>Automation</a></li><li><a href="14-settings.html"><span class="num">14</span>Settings</a></li><li><a href="15-reference.html"><span class="num">15</span>Reference</a></li></ol></aside>
+<main id="content"><div id="results" hidden></div><h1 id="repeat-analysis" class="chapter-title"><span class="chapter-label">Chapter 11</span>Repeat analysis</h1>
+<h2 id="te-aid"><span class="secnum">11.1</span>TE-Aid</h2>
+<p><strong>Toolbar: TE-Aid · Tools → Curate → TE-Aid</strong></p>
+<p>Makes an interactive HTML report for one consensus sequence, in the style of
+<a href="https://github.com/clemgoub/TE-Aid">TE-Aid</a>: its copies in the genome and how
+much of the consensus each covers, the coverage of the consensus by genomic
+hits, a self-dotplot, and the terminal repeats and ORFs. It is the clearest
+single view of whether a consensus is finished.</p>
+<figure id="fig-11-1"><img src="img/teaid.png" alt="The TE-Aid window." width="608" loading="lazy"><figcaption><b>Figure 11.1.</b> The TE-Aid window.</figcaption></figure>
+<table>
+<thead>
+<tr>
+<th>Section</th>
+<th>Setting</th>
+<th>Default</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Mode</td>
+<td>Single genome / Pangenome</td>
+<td>Single genome</td>
+<td>Search one genome, or every genome of a pangenome</td>
+</tr>
+<tr>
+<td></td>
+<td>Genome</td>
+<td>reference genome</td>
+<td>Or a saved BLAST database</td>
+</tr>
+<tr>
+<td>Settings</td>
+<td>Genome BLAST E-value</td>
+<td>0.0001</td>
+<td>Threshold for finding copies</td>
+</tr>
+<tr>
+<td></td>
+<td>Self BLAST word size</td>
+<td>6</td>
+<td>Seed length for the self comparison</td>
+</tr>
+<tr>
+<td></td>
+<td>Threads</td>
+<td></td>
+<td>For both BLAST runs</td>
+</tr>
+<tr>
+<td>Advanced</td>
+<td>Line transparency</td>
+<td></td>
+<td>Opacity of the hit lines</td>
+</tr>
+<tr>
+<td></td>
+<td>Full-/mid-length hits</td>
+<td></td>
+<td>Colour hits by length relative to the consensus</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Output:</strong> <code>&lt;name&gt;_TEAid.html</code> (one genome) or <code>&lt;name&gt;_pTEAid.html</code>
+(pangenome), shown in Preview.</p>
+<h2 id="dotplot"><span class="secnum">11.2</span>Dotplot</h2>
+<p><strong>Toolbar: Dotplot · Tools → Visualize → Dotplot</strong></p>
+<p>Compares sequences with themselves or with each other. The window has two
+engines.</p>
+<figure id="fig-11-2"><img src="img/dotplot.png" alt="The Dotplot window, Built-in tab." width="608" loading="lazy"><figcaption><b>Figure 11.2.</b> The Dotplot window, Built-in tab.</figcaption></figure>
+<p><strong>Built-in</strong> (fast, interactive):</p>
+<table>
+<thead>
+<tr>
+<th>Setting</th>
+<th>Default</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Mode</td>
+<td>Self comparison</td>
+<td><strong>Self</strong>: each file against itself (<code>&lt;name&gt;_self_dot.paf</code>). <strong>Pairwise</strong>: every sequence against every other (<code>&lt;first&gt;_multi_dot.paf</code>); with three or more sequences the self comparisons fill the diagonal</td>
+</tr>
+<tr>
+<td>Word size</td>
+<td>15</td>
+<td>Length of exact matches. Larger is faster and less sensitive</td>
+</tr>
+<tr>
+<td>Include reverse-complement matches</td>
+<td>on</td>
+<td>Show inverted repeats (TIRs) as well</td>
+</tr>
+</tbody>
+</table>
+<p>The result opens in the dotplot view, the same as the <strong>Dotplot (Self)</strong> tab of
+a sequence.</p>
+<p><strong>Flexidot</strong> writes publication-style dotplots with
+<a href="https://github.com/molbio-dresden/flexidot">Flexidot</a>, and shades the
+annotations:</p>
+<table>
+<thead>
+<tr>
+<th>Setting</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Mode</td>
+<td>One plot for all files, or one per file</td>
+</tr>
+<tr>
+<td>Output format (<code>-f</code>)</td>
+<td>HTML (interactive) or an image</td>
+</tr>
+<tr>
+<td>k-mer (<code>-k</code>), sequence type (<code>-t</code>)</td>
+<td>Word length; DNA or protein</td>
+</tr>
+<tr>
+<td>Show GFF features (<code>-g</code>)</td>
+<td>Shade the annotations</td>
+</tr>
+<tr>
+<td>Advanced: <code>-S</code>, <code>--max_n</code>, <code>-A</code></td>
+<td>Mismatches allowed in a word, maximum N content, line width</td>
+</tr>
+</tbody>
+</table>
+<p>With HTML output, clicking a region in the dotplot jumps the Overview of that
+sequence to the same position (this needs the RepeatViewer build of Flexidot,
+installed with RepeatViewer).</p>
+<p><strong>Outputs:</strong> <code>&lt;name&gt;_flexidot.html</code>, <code>&lt;name&gt;_flexidot.gff</code>,
+<code>&lt;name&gt;_flexidot_legend.png</code>.</p>
+<h2 id="repeat-quantify"><span class="secnum">11.3</span>Repeat Quantify</h2>
+<p><strong>Tools → Quantify → Repeat Quantify</strong></p>
+<p>Measures how much of a genome a library of monomers, satellites or TEs
+accounts for: copy numbers, arrays, genome fraction and divergence. Aimed at
+tandem repeats, where "how many copies, in how many arrays, and how much of the
+genome" is the question.</p>
+<figure id="fig-11-3"><img src="img/repeat_quantify.png" alt="The Repeat Quantify window." width="608" loading="lazy"><figcaption><b>Figure 11.3.</b> The Repeat Quantify window.</figcaption></figure>
+<p><strong>Inputs</strong>: the <strong>Library</strong> (the monomer or consensus FASTA) and the
+<strong>Genome</strong>. <strong>Add another genome</strong> runs the same library against several
+genomes, one report each. Click files in the Files panel to fill the fields.</p>
+<p><strong>Engines</strong>, one per tab: <strong>BLASTn</strong> (fast, bundled), <strong>RepeatMasker</strong>
+(installed separately; also gives a divergence landscape), or <strong>Both</strong>, side by
+side.</p>
+<table>
+<thead>
+<tr>
+<th>Setting</th>
+<th>Default</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>-word_size (BLASTn)</td>
+<td>11</td>
+<td>7 can make BLAST hang on large genomes</td>
+</tr>
+<tr>
+<td>-evalue (BLASTn)</td>
+<td>0.0001</td>
+<td></td>
+</tr>
+<tr>
+<td>-div (RepeatMasker)</td>
+<td>40 %</td>
+<td>Most divergence counted</td>
+</tr>
+<tr>
+<td>Sensitivity (RepeatMasker)</td>
+<td>Sensitive (<code>-s</code>)</td>
+<td>RepeatMasker speed preset</td>
+</tr>
+<tr>
+<td>Advanced: minimum identity, minimum coverage</td>
+<td>0 = none</td>
+<td><code>-perc_identity</code> and <code>-qcov_hsp_perc</code></td>
+</tr>
+</tbody>
+</table>
+<p><strong>Output</strong>: a new folder for each run, by default next to the genome:
+<code>&lt;genome&gt;_repeat_quant_&lt;date&gt;_&lt;time&gt;/</code>, with an HTML report and TSV and GFF
+tables. The report has one row per family:</p>
+<table>
+<thead>
+<tr>
+<th>Column</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>monomer_len</td>
+<td>Length of the library sequence (the period), bp</td>
+</tr>
+<tr>
+<td>copy_number</td>
+<td>covered_bp ÷ monomer length (a fraction when less than one monomer is covered)</td>
+</tr>
+<tr>
+<td>hits</td>
+<td>Number of alignment pieces</td>
+</tr>
+<tr>
+<td>arrays</td>
+<td>Hits merged into continuous blocks (about the number of array loci)</td>
+</tr>
+<tr>
+<td>covered_bp</td>
+<td>Genome bp covered, overlaps counted once</td>
+</tr>
+<tr>
+<td>%target</td>
+<td>covered_bp as a percentage of the genome</td>
+</tr>
+<tr>
+<td>mean_array_bp, max_array_bp</td>
+<td>Mean and longest array</td>
+</tr>
+<tr>
+<td>mean_identity</td>
+<td>Length-weighted mean identity to the library sequence (high = young or conserved)</td>
+</tr>
+<tr>
+<td>mean_divergence</td>
+<td>RepeatMasker Kimura divergence (high = old)</td>
+</tr>
+<tr>
+<td>scaffolds</td>
+<td>Number of genome sequences hit</td>
+</tr>
+</tbody>
+</table>
+<p>If a family name appears twice in the library, the report warns you: their hits
+are merged into one row. Give every record a unique name. The genome BLAST
+index is kept between runs; <strong>File → Setting → General → Diagnostics → Clear
+cache</strong> removes it.</p>
+<h2 id="genome-plots"><span class="secnum">11.4</span>Genome plots</h2>
+<p><strong>Toolbar: Visualization · Tools → Visualize</strong></p>
+<p>Three interactive plots of repeats along a genome. They need a reference genome
+(see <a href="07-search.html#manage-database">Manage Database</a>). The windows stay open
+while you click files in the Files panel to fill their fields.</p>
+<h3 id="genome-density-plot">Genome density plot</h3>
+<p>Where repeats sit along the chromosomes, in windows.</p>
+<table>
+<thead>
+<tr>
+<th>Input</th>
+<th>Accepts</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>TE masking file</td>
+<td>RepeatMasker <code>.out</code> or a BLAST hit table (<code>_bn.txt</code>)</td>
+</tr>
+<tr>
+<td>TE consensus file</td>
+<td>The library FASTA</td>
+</tr>
+<tr>
+<td>Other annotation file</td>
+<td>GFF, GTF, BED or VCF (genes, for example)</td>
+</tr>
+<tr>
+<td>DNA methylation file</td>
+<td>Methylation coverage (Bismark <code>.cov</code>, modkit bedMethyl)</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Add another …</strong> under each field adds more tracks; tracks are drawn in field
+order. Options: what the height shows (for example total TE length per window),
+colour by superfamily, separate strands, merge overlapping hits, a difference
+track between two TE sources, which annotation features to draw, minimum
+methylation coverage, window size, chromosome order and which chromosomes to
+show.</p>
+<p><strong>Output:</strong> <code>&lt;name&gt;_bn_den_plot.html</code> (named after the source: <code>bn</code>, <code>RM</code>, …),
+<code>&lt;name&gt;_multi_dens_plot.html</code> for several sources, and <code>…_region.html</code> for a
+zoomed region.</p>
+<h3 id="te-divergence-plot">TE divergence plot</h3>
+<p>The age profile of a family: a histogram of divergence from the consensus
+(1 − identity). A sharp peak at low divergence means a recent burst; a broad
+distribution means long, older activity. Inputs: RepeatMasker <code>.out</code> or BLAST
+hit tables; setting: bin size. <strong>Output:</strong> <code>&lt;name&gt;_bn_div_plot.html</code> or
+<code>&lt;name&gt;_multi_div_plot.html</code>.</p>
+<h3 id="te-abundance-plot">TE abundance plot</h3>
+<p>Which families dominate a genome: families ranked by the genome share they
+occupy, one curve per RepeatMasker <code>.out</code> file. Settings: Y axis (percent of
+genome, or bp) and the number of top families. <strong>Output:</strong>
+<code>&lt;name&gt;_RM_abund_plot.html</code> or <code>&lt;name&gt;_multi_abund_plot.html</code>.</p><nav class="pager"><a class="prev" href="10-trees.html"><small>Previous</small>Trees</a><a class="next" href="12-primers.html"><small>Next</small>Primers and PCR</a></nav></main></div>
+<script src="search_index.js"></script><script src="manual.js"></script>
+</body></html>

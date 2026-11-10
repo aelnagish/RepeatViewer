@@ -6058,10 +6058,30 @@ class MainWindow(
         )
 
         help_menu = self.menuBar().addMenu("&Help")
+        help_menu.addAction(f"{APP_DISPLAY_NAME} &Manual", self._open_user_manual)
+        help_menu.addAction(f"{APP_DISPLAY_NAME} Manual (PDF)", self._open_user_manual_pdf)
         help_menu.addAction("&Primers and Probes Manual", self._open_primers_manual)
+        help_menu.addSeparator()
         help_menu.addAction(f"&About {APP_DISPLAY_NAME}", self._show_about)
         self._connect_menu_operation_logging()
         self._rebuild_top_toolbar()
+
+    def _open_user_manual(self) -> None:
+        from repeatviewer.user_manual import open_manual
+
+        open_manual()
+
+    def _open_user_manual_pdf(self) -> None:
+        from repeatviewer.user_manual import MANUAL_PDF, open_manual
+
+        if not MANUAL_PDF.is_file():
+            QMessageBox.information(
+                self,
+                "User manual",
+                "The PDF manual is not included in this copy of "
+                f"{APP_DISPLAY_NAME}. The HTML manual opens instead.",
+            )
+        open_manual(pdf=True)
 
     # ------------------------------------------------------------ Edit menu
 
