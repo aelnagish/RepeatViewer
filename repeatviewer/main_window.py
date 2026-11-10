@@ -85,7 +85,6 @@ from PySide6.QtWidgets import (
 
 _BROWSER_DOCK_WIDTH = 480
 _BROWSER_FOLDER_TREE_WIDTH = 120
-_BROWSER_FILES_PREVIEW_SPLIT = (170, 210)
 
 
 class _ToolbarPopup(QWidget):
@@ -2745,25 +2744,52 @@ class MainWindow(
     def _build_file_columns_menu(self) -> None:
         from repeatviewer.widgets.file_list_columns import (
             TOGGLEABLE_COLUMNS,
+            load_show_file_columns,
             load_visible_file_columns,
         )
 
         self._file_columns_menu.clear()
         self._file_column_actions.clear()
+        show = load_show_file_columns()
+        show_action = self._file_columns_menu.addAction("Show Columns")
+        show_action.setCheckable(True)
+        show_action.setChecked(show)
+        show_action.toggled.connect(self._on_show_file_columns_toggled)
+        self._file_columns_menu.addSeparator()
         visible = load_visible_file_columns()
         for column, label in TOGGLEABLE_COLUMNS.items():
             action = self._file_columns_menu.addAction(label)
             action.setCheckable(True)
             action.setChecked(column in visible)
+            action.setEnabled(show)
             action.toggled.connect(
                 lambda checked, col=column: self._on_file_column_toggled(col, checked)
             )
             self._file_column_actions[column] = action
 
+    def _on_show_file_columns_toggled(self, checked: bool) -> None:
+        from repeatviewer.widgets.file_list_columns import save_show_file_columns
+
+        save_show_file_columns(checked)
+        for action in self._file_column_actions.values():
+            action.setEnabled(checked)
+        self._apply_file_columns_setting()
+
+    def _apply_file_columns_setting(self) -> None:
+        """Show the Files columns as saved (Columns menu or Preferences)."""
+        from repeatviewer.widgets.file_list_columns import (
+            effective_visible_file_columns,
+            metadata_columns_visible,
+        )
+
+        visible = effective_visible_file_columns()
+        self._file_list.apply_visible_columns(visible)
+        if metadata_columns_visible(visible):
+            QTimer.singleShot(0, self._fill_visible_file_metadata)
+
     def _on_file_column_toggled(self, column: int, checked: bool) -> None:
         from repeatviewer.widgets.file_list_columns import (
             load_visible_file_columns,
-            metadata_columns_visible,
             save_visible_file_columns,
         )
 
@@ -2773,9 +2799,7 @@ class MainWindow(
         else:
             visible.discard(column)
         save_visible_file_columns(visible)
-        self._file_list.apply_visible_columns(visible)
-        if checked and metadata_columns_visible(visible):
-            QTimer.singleShot(0, self._fill_visible_file_metadata)
+        self._apply_file_columns_setting()
 
     def _fill_visible_file_metadata(self) -> None:
         """Populate metadata columns after they are turned on or for stale rows.
@@ -3837,19 +3861,7 @@ class MainWindow(
             if title is not None:
                 title.raise_()
 
-        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self._dock_folders)
-        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self._dock_files)
-        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self._dock_preview)
-        self.splitDockWidget(
-            self._dock_folders,
-            self._dock_files,
-            Qt.Orientation.Horizontal,
-        )
-        self.splitDockWidget(
-            self._dock_files,
-            self._dock_preview,
-            Qt.Orientation.Vertical,
-        )
+        self._tile_browser_docks()
         self._dock_folders.setMinimumWidth(100)
         self._dock_files.setMinimumWidth(200)
         self._dock_preview.setMinimumWidth(200)
@@ -3864,43 +3876,34 @@ class MainWindow(
         if host is not None and self._preview_tabs is not None:
             self._preview_tabs.mount_file_tab_bar(host)
 
+    def _tile_browser_docks(self) -> None:
+        """Default arrangement: Folders above Files on the left, Preview on the right."""
+        for dock in (self._dock_folders, self._dock_files, self._dock_preview):
+            self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, dock)
+        self.splitDockWidget(self._dock_folders, self._dock_preview, Qt.Orientation.Horizontal)
+        self.splitDockWidget(self._dock_folders, self._dock_files, Qt.Orientation.Vertical)
+
     def _apply_default_browser_layout(self, *, force: bool = False) -> None:
         if self._dock_folders is None or self._dock_files is None or self._dock_preview is None:
             return
         width = max(self.width(), _BROWSER_DOCK_WIDTH)
         if force:
-            folder_w = _BROWSER_FOLDER_TREE_WIDTH
-        else:
-            folder_w = min(
-                max(_BROWSER_FOLDER_TREE_WIDTH, width // 6),
-                _BROWSER_FOLDER_TREE_WIDTH + 40,
-            )
-        if force:
             for dock in (self._dock_folders, self._dock_files, self._dock_preview):
                 dock.setFloating(False)
                 dock.show()
-            self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self._dock_folders)
-            self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self._dock_files)
-            self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self._dock_preview)
-            self.splitDockWidget(
-                self._dock_folders,
-                self._dock_files,
+            self._tile_browser_docks()
+            left_w = min(max(int(width * 0.22), 260), 380)
+            self.resizeDocks(
+                [self._dock_folders, self._dock_preview],
+                [left_w, max(200, width - left_w)],
                 Qt.Orientation.Horizontal,
             )
-            self.splitDockWidget(
-                self._dock_files,
-                self._dock_preview,
-                Qt.Orientation.Vertical,
-            )
-            self.resizeDocks([self._dock_folders], [folder_w], Qt.Orientation.Horizontal)
             height = max(self.height(), 600)
-            files_h, preview_h = _BROWSER_FILES_PREVIEW_SPLIT
-            total_h = max(files_h + preview_h, height - 120)
-            files_h = max(140, int(total_h * 0.32))
-            preview_h = max(200, total_h - files_h)
+            total_h = max(300, height - 120)
+            folders_h = max(140, int(total_h * 0.35))
             self.resizeDocks(
-                [self._dock_files, self._dock_preview],
-                [files_h, preview_h],
+                [self._dock_folders, self._dock_files],
+                [folders_h, max(140, total_h - folders_h)],
                 Qt.Orientation.Vertical,
             )
         else:
@@ -8138,6 +8141,8 @@ class MainWindow(
                 load_accent_color(),
             )
             self._project = dialog.apply_to_project()
+            self._build_file_columns_menu()
+            self._apply_file_columns_setting()
             self._align_options = load_align_options()
             self._persist_workspace()
             if dialog.appearance_signature() != old_appearance:

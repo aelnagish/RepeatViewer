@@ -43,7 +43,7 @@ DEFAULT_VISIBLE_COLUMNS = frozenset(
 def metadata_columns_visible(visible: set[int] | None = None) -> bool:
     """True when any optional metadata column is shown."""
     if visible is None:
-        visible = load_visible_file_columns()
+        visible = effective_visible_file_columns()
     # The images tick column is filled from the image store, not file metadata.
     return bool(set(visible) & (set(TOGGLEABLE_COLUMNS.keys()) - {COL_IMAGES}))
 
@@ -102,6 +102,40 @@ def save_visible_file_columns(columns: set[int]) -> None:
     s.beginGroup(FILES_SETTINGS_GROUP)
     s.setValue("visible_columns", ",".join(str(column) for column in visible))
     s.endGroup()
+
+
+_SHOW_COLUMNS_KEY = "show_columns"
+
+
+def load_show_file_columns() -> bool:
+    """Whether the optional Files columns are shown at all (Preferences > Files columns).
+
+    A new install starts with Name only. An install that already saved a
+    column choice keeps its columns, so nothing changes for existing users.
+    """
+    s = QSettings()
+    s.beginGroup(FILES_SETTINGS_GROUP)
+    raw = s.value(_SHOW_COLUMNS_KEY)
+    had_columns = s.contains("visible_columns")
+    s.endGroup()
+    if raw is None:
+        save_show_file_columns(had_columns)
+        return had_columns
+    return str(raw).lower() in {"1", "true"}
+
+
+def save_show_file_columns(show: bool) -> None:
+    s = QSettings()
+    s.beginGroup(FILES_SETTINGS_GROUP)
+    s.setValue(_SHOW_COLUMNS_KEY, bool(show))
+    s.endGroup()
+
+
+def effective_visible_file_columns() -> set[int]:
+    """Columns actually shown: the saved choice, or Name only when columns are off."""
+    if not load_show_file_columns():
+        return set(ALWAYS_VISIBLE_COLUMNS)
+    return load_visible_file_columns()
 
 
 def load_column_widths() -> dict[int, int]:
