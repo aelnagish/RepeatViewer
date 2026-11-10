@@ -32,6 +32,7 @@ APP_OUT = ROOT / "repeatviewer" / "assets" / "manuals" / "user_manual"
 PDF_NAME = "RepeatViewer_User_Manual.pdf"
 TITLE = "RepeatViewer User Manual"
 AUTHORS = "Abdullah Yusuf, Nusrat Sultana, Jiangzhao Qian, Tony Heitkam"
+AFFILIATION = "Molecular Botany, RWTH Aachen University, Aachen, Germany"
 
 try:
     import markdown
@@ -226,7 +227,7 @@ border-top:1px solid var(--line)}.pager a{display:block;max-width:48%}.pager sma
 .pager .next{text-align:right;margin-left:auto}
 #results{margin-bottom:28px;padding:12px 16px;border:1px solid var(--line);border-radius:8px;background:var(--side)}
 #results h4{margin:0 0 6px}#results ol{margin:0;padding-left:20px}#results p{margin:2px 0 8px;color:var(--muted);font-size:13px}
-.cover{padding:40px 0 10px}.cover h1{font-size:40px}.cover p.lead{font-size:18px;color:var(--muted)}.cover p.authors{font-size:16px;font-weight:500;margin:-8px 0 12px}
+.cover{padding:40px 0 10px}.cover h1{font-size:40px}.cover p.lead{font-size:18px;color:var(--muted)}.cover p.authors{font-size:16px;font-weight:500;margin:-8px 0 12px}.cover .affil{font-size:14px;font-weight:400;color:var(--muted)}
 .chapters{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:12px;margin-top:24px}
 .chapters a{display:block;padding:14px 16px;border:1px solid var(--line);border-radius:10px;color:var(--ink)}
 .chapters a:hover{border-color:var(--accent);text-decoration:none}.chapters small{display:block;color:var(--muted)}
@@ -262,6 +263,7 @@ a{color:#1f5fbf;text-decoration:none}
 .coverpage{height:250mm;display:flex;flex-direction:column;justify-content:center;page-break-after:always}
 .coverpage h1{font-size:34pt;margin:0 0 8pt}.coverpage .sub{font-size:14pt;color:#5f6368}
 .coverpage .authors{font-size:12pt;font-weight:500;margin-top:14pt}
+.coverpage .affil{font-size:10pt;color:#5f6368;margin-top:3pt}
 .coverpage img{width:100%;border:1px solid #dcdde1;border-radius:6pt;margin:24pt 0}
 .coverpage .meta{font-size:10pt;color:#5f6368}
 .tocpage{page-break-after:always}.tocpage h1{font-size:22pt}
@@ -323,7 +325,7 @@ def build(pdf: bool) -> None:
         f'<a href="{ch.page}"><small>Chapter {ch.num}</small>{html.escape(ch.title)}</a>'
         for ch in chapters)
     cover = (f'<div class="cover"><h1>RepeatViewer User Manual</h1>'
-             f'<p class="authors">{AUTHORS}</p>'
+             f'<p class="authors">{AUTHORS}<br><span class="affil">{AFFILIATION}</span></p>'
              f'<p class="lead">Version {ver}. A free desktop application for repetitive DNA: '
              f'transposable elements, satellites and the work around them.</p>'
              f'<figure><img src="img/main_window.png" alt="RepeatViewer" width="1000"></figure>'
@@ -393,6 +395,7 @@ def build_pdf(chapters: list[Chapter], ver: str) -> None:
 <title>{TITLE}</title><style>{PRINT_CSS}</style></head><body>
 <div class="coverpage"><h1>RepeatViewer</h1><div class="sub">User Manual · Version {ver}</div>
 <div class="authors">{AUTHORS}</div>
+<div class="affil">{AFFILIATION}</div>
 <img src="img/main_window.png" alt="">
 <div class="meta">{date.today():%B %Y} · github.com/qjiangzhao/RepeatViewer</div></div>
 <div class="tocpage"><h1>Contents</h1>{toc}</div>{body}</body></html>"""

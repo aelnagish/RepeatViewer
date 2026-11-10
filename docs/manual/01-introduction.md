@@ -50,13 +50,12 @@ folder of sequences and does not need TEtrimmer.
 ## Names
 
 The application is called **RepeatViewer**. The Python package and the command
-you type in a terminal are **`repeatviewer`**. Older material may call the
-project TEviewer.
+you type in a terminal are **`repeatviewer`**.
 
 ## Authors
 
 This manual was written by Abdullah Yusuf, Nusrat Sultana, Jiangzhao Qian and
-Tony Heitkam (Molecular Botany, RWTH Aachen University).
+Tony Heitkam (Molecular Botany, RWTH Aachen University, Aachen, Germany).
 
 ## How to read this manual
 
