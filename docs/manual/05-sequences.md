@@ -48,8 +48,9 @@ The side panel on the right has five tabs (click a tab again to hide the panel):
 - **Tracks**: **Show complement** (the second strand under the first), **Show
   translation** (amino acids in the reading frames you choose), **Split
   annotation by source** (one track per program or file that made the
-  features), and **Displayed annotations**: tick the feature types to show.
-  **Setting** chooses the colour of each type.
+  features), and **Displayed annotations**: **All**, then one tick per feature type in
+  its colour (LTR, ORF, TSD, PBS, domain …). **Setting** chooses the colour of
+  each type.
 - **Color**: the colour scheme for bases (**Nucleotide**) and amino acids
   (**Protein**, for example Clustal).
 - **Size**: font sizes of base and amino-acid letters, annotation labels and

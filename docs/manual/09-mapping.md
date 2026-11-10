@@ -35,6 +35,8 @@ If the mapper you chose is missing, the run stops with an install hint.
 | Secondaries | Primary only | Keep only the best place of each read, or also other equally good places (`-N 50`) |
 | Threads | CPU count | `-t` |
 | Output format | PAF | PAF (opens as a dotplot) or SAM (opens in the genome browser) |
+| Sort and index SAM outputs | off | Turn the SAM into a coordinate-sorted `*.sorted.bam` with a `.bai` index, so the genome browser reads it piece by piece instead of the whole file. Only for SAM output |
+| Delete SAM file after sort and index | off | Keep only the sorted BAM and its index, to save disk space |
 | Advanced: `-k`, `-w` | from the preset | Seed length and window |
 | Advanced: CIGAR / CS | on for PAF | `-c` and `--cs=long`; needed to show the differences |
 | Advanced: repetitive seeds | Default | **Keep more** (`-f 0.00002`) or **Keep all**: minimap2 ignores its most frequent seeds by default, which hides hits inside tandem arrays. Use Keep more for satellites |
@@ -56,6 +58,7 @@ Map modes:
 | Reads | Single-end | Or paired-end; R1 and R2 are paired by their file names |
 | Strandness | Unstranded | F or R (single-end), FR or RF (paired-end) |
 | Report | Best place only | Or up to 20 places (`-k 20`) |
+| Sort and index SAM outputs, Delete SAM file after sort and index | off | As for minimap2 (HISAT2 always writes SAM) |
 | Advanced | | `--dta`, minimum and maximum intron length, `--no-softclip` |
 
 ### Filters and outputs (Advanced Settings)
@@ -94,7 +97,8 @@ overwritten. No samtools or pysam is needed.
 ## The genome browser (SAM, BAM, CRAM)
 
 A SAM result opens in the genome browser. BAM and CRAM files from other tools,
-and GFF, GTF and BED files, open there too.
+and GFF, GTF and BED files, open there too. For large mappings, sort and index
+first (see [Samtools](#samtools-sort-index-convert)).
 
 ![A SAM result in the genome browser: features of the reference on top, coverage, then the reads (blue forward, pink reverse).](img/mapping_browser.png)
 
@@ -122,6 +126,34 @@ Side panel:
 | Coverage | Coverage track options |
 
 The browser is read-only: it shows, it does not edit.
+
+## Samtools: sort, index, convert
+
+**Tools → Samtools**
+
+Prepares alignment files (SAM, BAM, CRAM, also `.sam.gz`) from RepeatViewer's
+Mapping or from any other mapper, mostly so that large files open quickly in the
+genome browser. The menu has **Sort**, **Index** and **Convert** (run on the
+selected files with the saved settings) and **Change Samtools parameters**.
+
+![The Samtools window, Sort tab.](img/samtools.png)
+
+| Tab | Does | Output (next to the input) |
+|-----|------|----------------------------|
+| **Sort** | Sorts the alignments by position into a BAM. **Index after sort** (on by default) also builds the index | `<name>.sorted.bam` and `<name>.sorted.bam.bai` |
+| **Index** | Builds the index of a BAM or CRAM that is already sorted by position | `.bai` (BAM) or `.crai` (CRAM) |
+| **Convert** | Rewrites between SAM, BAM and CRAM without sorting (**Output format**, default BAM). Files already in that format are skipped. A CRAM may need its reference | `<name>.bam`, `.sam` or `.cram` |
+
+`<name>` is the file name without `.sam`, `.bam` or `.cram`. **Threads** is
+shared by the three tabs. With an index next to it, a BAM opens in the genome
+browser window by window, which is much faster for large mappings. Index files
+follow their BAM or CRAM when you rename it.
+
+Samtools work is done with **pysam** on macOS and Linux (`pip install pysam`),
+or with a samtools program on the PATH. On Windows, RepeatViewer uses the
+[Win-NGS samtools bundle](https://github.com/win-ngs/samtools-windows-bundle/releases):
+download and unzip it, then choose `samtools.exe` on the **Options** tab or add
+its folder to PATH.
 
 ## The dotplot (PAF)
 
