@@ -333,6 +333,26 @@ def is_inventory_folder(path: Path | str | None) -> bool:
     return p.is_dir() and ((p / MARKER).is_file() or (p / "log").is_dir())
 
 
+def find_inventory(folder: Path | str | None) -> Path | None:
+    """The database in ``folder``: the folder itself, or one inside it (one level
+    down), so choosing the lab's shared folder that holds it also works."""
+    if not folder:
+        return None
+    p = Path(folder).expanduser()
+    if is_inventory_folder(p):
+        return p
+    if not p.is_dir():
+        return None
+    named = p / FOLDER_NAME
+    if is_inventory_folder(named):
+        return named
+    try:
+        found = [c for c in sorted(p.iterdir()) if c.is_dir() and is_inventory_folder(c)]
+    except OSError:
+        return None
+    return found[0] if len(found) == 1 else None
+
+
 def create_inventory(parent: Path) -> Path:
     """Make (or reuse) ``<parent>/RepeatViewer Primer Database``."""
     parent = Path(parent).expanduser()

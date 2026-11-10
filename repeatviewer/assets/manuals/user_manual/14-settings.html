@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Settings · RepeatViewer User Manual</title>
+<link rel="stylesheet" href="manual.css">
+</head><body>
+<header class="topbar"><a class="brand" href="index.html">RepeatViewer <span>User Manual 1.1.0</span></a>
+<input id="search" type="search" placeholder="Search the manual" autocomplete="off">
+<a class="pdf" href="RepeatViewer_User_Manual.pdf">PDF</a></header>
+<div class="layout"><aside class="sidebar"><ol class="toc"><li><a href="01-introduction.html"><span class="num">1</span>Introduction</a></li><li><a href="02-installation.html"><span class="num">2</span>Installation</a></li><li><a href="03-quick-start.html"><span class="num">3</span>Quick start: one curation pass</a></li><li><a href="04-interface.html"><span class="num">4</span>The interface</a></li><li><a href="05-sequences.html"><span class="num">5</span>Sequences</a></li><li><a href="06-annotations.html"><span class="num">6</span>Annotations</a></li><li><a href="07-search.html"><span class="num">7</span>Search</a></li><li><a href="08-alignments.html"><span class="num">8</span>Alignments</a></li><li><a href="09-mapping.html"><span class="num">9</span>Mapping</a></li><li><a href="10-trees.html"><span class="num">10</span>Trees</a></li><li><a href="11-repeat-analysis.html"><span class="num">11</span>Repeat analysis</a></li><li><a href="12-primers.html"><span class="num">12</span>Primers and PCR</a></li><li><a href="13-automation.html"><span class="num">13</span>Automation</a></li><li class="current"><a href="14-settings.html"><span class="num">14</span>Settings</a><ul><li><a href="#general">14.1 General</a></li><li><a href="#toolbar">14.2 Toolbar</a></li></ul></li><li><a href="15-reference.html"><span class="num">15</span>Reference</a></li></ol></aside>
+<main id="content"><div id="results" hidden></div><h1 id="settings" class="chapter-title"><span class="chapter-label">Chapter 14</span>Settings</h1>
+<p><strong>File → Setting</strong> (<strong>⌘,</strong> on macOS) has two tabs: <strong>General</strong> and
+<strong>Toolbar</strong>. <strong>Save</strong> applies the changes; <strong>Restore defaults</strong> resets the tab.
+The path of the settings folder is shown at the bottom of the window.</p>
+<figure id="fig-14-1"><img src="img/settings.png" alt="Settings, General tab." width="900" loading="lazy"><figcaption><b>Figure 14.1.</b> Settings, General tab.</figcaption></figure>
+<h2 id="general"><span class="secnum">14.1</span>General</h2>
+<table>
+<thead>
+<tr>
+<th>Section</th>
+<th>Setting</th>
+<th>What it does</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Appearance</td>
+<td>Theme</td>
+<td>Auto (follows the system), Light or Dark</td>
+</tr>
+<tr>
+<td></td>
+<td>Accent colour</td>
+<td>The colour of selections and highlights</td>
+</tr>
+<tr>
+<td>Files columns</td>
+<td>Show columns</td>
+<td>Off: the Files panel shows only names. On: also the columns ticked below</td>
+</tr>
+<tr>
+<td></td>
+<td>Columns</td>
+<td>Length, number of sequences, GC %, type, description, modified, size, colour, cytogenetic images</td>
+</tr>
+<tr>
+<td>Sequence tools</td>
+<td>Use system sequence viewer</td>
+<td>Open alignments in an external viewer such as AliView, and where it is</td>
+</tr>
+<tr>
+<td>Files &amp; preview</td>
+<td>Folders / Files font</td>
+<td>Font size in the Folders and Files panels</td>
+</tr>
+<tr>
+<td></td>
+<td>Preview font: text</td>
+<td>Font size of the Text view</td>
+</tr>
+<tr>
+<td></td>
+<td>Preview zoom: HTML, PDF, image</td>
+<td>Default zoom for reports, PDFs and images</td>
+</tr>
+<tr>
+<td></td>
+<td>Default preview fit</td>
+<td>Fit window, fit width, or original size</td>
+</tr>
+<tr>
+<td></td>
+<td>Default preview tab</td>
+<td>Which view a FASTA opens in: Text, Overview or Dotplot (Self)</td>
+</tr>
+<tr>
+<td></td>
+<td>Show length and GC% in the preview</td>
+<td>Off makes large genome FASTA files open faster, because GC % needs every base</td>
+</tr>
+<tr>
+<td>Performance</td>
+<td>Threads for the UI</td>
+<td>Threads kept free so the window stays responsive; tools use the rest</td>
+</tr>
+<tr>
+<td></td>
+<td>Max. parallel jobs</td>
+<td>How many tool runs (or selected files) run at the same time</td>
+</tr>
+<tr>
+<td>Startup</td>
+<td>Reopen last folder</td>
+<td>Open the last folder and genome at start</td>
+</tr>
+<tr>
+<td></td>
+<td>Restore window size</td>
+<td>Restore the window size and position</td>
+</tr>
+<tr>
+<td></td>
+<td>Splash screen</td>
+<td>Show the start-up banner with tips</td>
+</tr>
+<tr>
+<td>External tools</td>
+<td>Conda env name or path</td>
+<td>The conda environment (on Windows: the WSL2 environment) with RepeatMasker, FastGA, HISAT2 and other external programs. <strong>Test</strong> shows which are found</td>
+</tr>
+<tr>
+<td>BLAST databases</td>
+<td>Base folder</td>
+<td>Where new BLAST indexes are written. <strong>Manage Database</strong> opens the database window</td>
+</tr>
+<tr>
+<td>Cytogenetic images</td>
+<td>Experimenter</td>
+<td>Your name, stored with images you attach</td>
+</tr>
+<tr>
+<td>Diagnostics</td>
+<td>Verbose logging</td>
+<td>Write detailed messages to the log file</td>
+</tr>
+<tr>
+<td></td>
+<td>Open log file, Open config folder</td>
+<td>Show the log and settings files</td>
+</tr>
+<tr>
+<td></td>
+<td>Copy diagnostics</td>
+<td>Copy the version, system and folder locations to the clipboard, for a bug report</td>
+</tr>
+<tr>
+<td></td>
+<td>Clear cache</td>
+<td>Delete cached data (such as BLAST indexes kept by Repeat Quantify); shows how much space it uses</td>
+</tr>
+</tbody>
+</table>
+<h2 id="toolbar"><span class="secnum">14.2</span>Toolbar</h2>
+<figure id="fig-14-2"><img src="img/settings_toolbar.png" alt="Settings, Toolbar tab." width="900" loading="lazy"><figcaption><b>Figure 14.2.</b> Settings, Toolbar tab.</figcaption></figure>
+<ul>
+<li>Drag the entries to change the button order.</li>
+<li><strong>Toolbar font size</strong> sets the size of the button labels.</li>
+<li><strong>Add buttons…</strong> adds any tool from the File, Sequence and Tools menus (for
+  example Mapping, Tree, Primers and Probes, NCBI Download, HMMER, AliView) or a
+  separator; <strong>Remove</strong> takes the selected button off.</li>
+<li><strong>Reset to default</strong> restores BLAST, Align, Dotplot, TE-Aid, MSA Clean, MSA
+  Extend, Consensus and Visualization.</li>
+</ul>
+<p>When the window is too narrow for all buttons, the rest move into a menu behind the
+arrow at the right end of the toolbar.</p><nav class="pager"><a class="prev" href="13-automation.html"><small>Previous</small>Automation</a><a class="next" href="15-reference.html"><small>Next</small>Reference</a></nav></main></div>
+<script src="search_index.js"></script><script src="manual.js"></script>
+</body></html>

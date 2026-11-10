@@ -65,9 +65,7 @@ from repeatviewer.job_options import (
     DIALOG_TAB_OPTIONS,
     PRIMER_DIALOG_TAB_CHORUS2,
     PRIMER_DIALOG_TAB_PRIMERS,
-    PRIMER_DIALOG_TAB_REGIONS,
     PRIMER_DIALOG_TAB_SELECTION,
-    PRIMER_DIALOG_TAB_SPECIFICITY,
     PRIMER_DIALOG_TABS,
     PRIMER_RIGHT_CLICK_RUN,
     PrimerOptions,
@@ -75,22 +73,29 @@ from repeatviewer.job_options import (
 )
 from repeatviewer.views.tool_dialogs import (
     TOOL_PARAMS_DIALOG_WIDTH_WIDE,
-    TOOL_PARAMS_FIELD_WIDTH,
     _form_section_separator,
+    settings_form_label_column_width,
     dialog_should_run,
     make_cancel_save_run_bar,
     make_process_output_box,
     sync_form_field_column_spacers,
 )
 from repeatviewer.widgets.combo_boxes import NoWheelComboBox as QComboBox
-from repeatviewer.widgets.help_button import field_with_help
 from repeatviewer.widgets.path_browse import PathBrowseRow
 from repeatviewer.widgets.spin_boxes import NoWheelDoubleSpinBox as QDoubleSpinBox
 from repeatviewer.widgets.spin_boxes import NoWheelSpinBox as QSpinBox
 
 _FASTA_SUFFIXES = {".fa", ".fasta", ".fna", ".fas", ".fsa", ".ffn", ".seq", ".aln", ".mfa"}
 _FASTA_FILTER = "FASTA (*.fa *.fasta *.fna *.fas *.fa.gz *.fasta.gz);;All files (*)"
-_SMALL = 78          # width of one number box in a Min / Opt / Max row
+# The form grid (same in Design and Map): every number box is BOX_W wide; a
+# Min / Opt / Max row is box, word, box, word, box; a two-value row (box "to"
+# box) uses the first two of those columns; everything else (lists, paths,
+# text) is FIELD_W wide, so all rows end on one line, and every "?" sits in
+# one column after it (rows without help keep the space).
+BOX_W = 96
+JOIN_W = 34
+GRID_GAP = 6
+FIELD_W = 3 * BOX_W + 2 * JOIN_W + 4 * GRID_GAP
 
 # 5' tails offered next to each primer (lower case = does not bind).
 TAIL_PRESETS: tuple[tuple[str, str], ...] = (
@@ -191,24 +196,16 @@ def _fill_grouped_modes(combo) -> None:
 
 MODE_HELP = (
     "<b>PCR primers</b><br>"
-    "<b>Standard PCR</b>: a primer pair by Primer3, kept out of repeats (Regions tab).<br>"
-    "<b>qPCR copy number</b>: short amplicons, matched Tm, optional hydrolysis probe; add a "
-    "single-copy reference gene to get a pair for ΔCt copy-number estimates.<br>"
+    "<b>Standard PCR</b>: a primer pair by Primer3 on the template.<br>"
+    "<b>qPCR</b>: short amplicons, matched Tm, optional hydrolysis probe; add a "
+    "single-copy reference gene to get a reference pair as well.<br>"
     "<b>Ladder PCR</b> (satellites): outward-facing primers in one monomer. A tandem array "
-    "then gives a ladder of 1×, 2×, 3× … monomer bands.<br>"
-    "<b>Conserved in a family</b> (TEs): on an alignment of copies, primers that catch "
-    "(nearly) all of them, degenerate where needed.<br>"
-    "<b>Subfamily-specific</b> (TEs): primers that catch the sequences whose names match "
-    "<i>Target sequences</i> and not the rest.<br>"
-    "<b>TE present or absent</b>: a flanking pair (empty site) and a primer inside the TE "
-    "(occupied site), to tell plants with and without the insertion apart.<br>"
-    "<b>Bisulfite (BSP)</b>: primers on the bisulfite-converted strand that avoid every C "
-    "that may be methylated, so methylated and unmethylated DNA amplify alike.<br>"
-    "<b>Methylation-specific (MSP)</b>: an M pair and a U pair at the same place, their 3′ "
-    "ends on a CG (or CHG) site.<br><br>"
+    "then gives a ladder of 1×, 2×, 3× … monomer bands.<br><br>"
     "<b>FISH probes</b><br>"
     "<b>Satellite repeat oligos</b>: 30–45 nt oligos found in every monomer / copy, without "
-    "hairpins, ready to order with a 5′ label."
+    "hairpins, ready to order with a 5′ label.<br>"
+    "<b>Chromosome painting</b>: single-copy oligo pools along whole chromosomes, made by "
+    "Chorus2."
 )
 INPUTS_HELP = (
     "<b>Use selected sequences</b> (default): design on the FASTA selected in the Files "
@@ -271,59 +268,16 @@ MAP_INPUTS_HELP = (
 )
 TEMPLATE_HELP = (
     "The FASTA the primers are designed on. Every sequence in the file is a template (up to "
-    "20).<br><b>MSA modes</b> (Conserved, Subfamily-specific): the file must be an "
-    "alignment.<br><b>Ladder / Satellite oligos</b>: a set of monomers or copies, aligned or "
-    "not.<br><b>BSP / MSP</b>: the genomic (unconverted) sequence; RepeatViewer converts it."
-)
-METHYLATION_HELP = (
-    "Which C may carry a methyl group, and so stay C after bisulfite treatment.<br>"
-    "<b>Plant</b> (default): CG and CHG are often fully methylated, CHH only partly. "
-    "Primers avoid C in CG and CHG; only CHH C count as converted.<br>"
-    "<b>Animal</b>: only CG is methylated; every other C counts as converted."
-)
-MSP_CONTEXT_HELP = (
-    "The C the 3′ end of the M and U primers sits on.<br>"
-    "<b>CG</b>: the classic MSP site (plants and animals).<br>"
-    "<b>CHG</b>: plants only; tests CHG methylation (CMT3 / KYP pathway)."
+    "20).<br><b>Ladder / Satellite oligos</b>: a set of monomers or copies, aligned or not."
 )
 COVERAGE_HELP = (
     "A primer counts as binding a sequence when it has at most <b>Mismatches tolerated</b> "
     "mismatches and its last three 3′ bases match. <b>Min coverage</b> is the share of "
-    "sequences a primer (and the pair) must bind."
-)
-DEGENERACY_HELP = (
-    "Where the copies differ, a position may use an IUPAC code (R = A/G, Y = C/T …) covering "
-    "every base seen in at least <b>Degenerate base ≥</b> of the sequences. <b>Max "
-    "degeneracy</b> caps how many plain primers the mix contains (e.g. 16 = up to four "
-    "two-fold positions)."
-)
-TARGET_HELP = (
-    "Names (or part of them) of the sequences to amplify, e.g. <code>TEfamA</code> or a "
-    "regular expression such as <code>^CroSat2_</code>. All other sequences in the alignment "
-    "must not be amplified."
-)
-TE_HELP = (
-    "Where the TE sits in the template (1-based). Leave 0 to use the longest repeat feature "
-    "annotated on the sequence. Primers are designed on the flanks (empty site) and inside "
-    "the first 300 bp of the TE (occupied site)."
-)
-MASK_HELP = (
-    "Primers are kept out of these regions; the product may still span them. This keeps "
-    "primers out of TEs and satellites, the commonest reason primers fail in repeat-rich "
-    "genomes."
-)
-MISPRIME_HELP = (
-    "A FASTA of repeats (your TE library, satellite monomers …). Primer3 rejects primers that "
-    "would prime on any of them (its mispriming library)."
+    "sequences a probe must bind."
 )
 GENOME_HELP = (
-    "Every primer of every pair is searched in this FASTA (both strands) and the products "
-    "each pair would make are counted, like Primer-BLAST but local. On large files the "
-    "search is seeded by the 3′ end: the last <b>3′ seed</b> bases must match exactly."
-)
-DROP_HELP = (
-    "Drop pairs that make more products than this in the genome. 1 = only pairs with a "
-    "single product. Untick for repeat primers, where many products are the point."
+    "Every primer is also searched in this FASTA (both strands, with the mismatches above) "
+    "and the products each pair would make are counted, like Primer-BLAST but local."
 )
 TAILS_HELP = (
     "A 5′ tail (adapter, promoter, restriction site with extra bases) added to the primer. "
@@ -333,8 +287,7 @@ TM_HELP = (
     "Thermodynamic model and reaction conditions for every Tm and ΔG (Primer3)."
 )
 PRODUCT_HELP = (
-    "Size range of the PCR product. For ladder PCR this is the smallest band; for TE "
-    "insertion the empty-site band."
+    "Size range of the PCR product. For ladder PCR this is the smallest band."
 )
 
 
@@ -344,7 +297,7 @@ PRODUCT_HELP = (
 
 
 class RangeEdit(QWidget):
-    """Min [–] Opt [–] Max number boxes on one row."""
+    """Min [–] opt [–] max number boxes on the form grid (or Min [–] to [–] Max)."""
 
     changed = Signal()
 
@@ -353,7 +306,7 @@ class RangeEdit(QWidget):
         super().__init__(parent)
         row = QHBoxLayout(self)
         row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(4)
+        row.setSpacing(GRID_GAP)
         self._boxes = []
         labels = ("Min", "Opt", "Max") if opt else ("Min", "Max")
         for i, lab in enumerate(labels):
@@ -366,15 +319,19 @@ class RangeEdit(QWidget):
             box.setSingleStep(step)
             if suffix:
                 box.setSuffix(suffix)
-            box.setFixedWidth(_SMALL)
+            box.setFixedWidth(BOX_W)
             box.setToolTip(lab)
             box.valueChanged.connect(lambda _v: self.changed.emit())
             if i:
-                dash = QLabel(lab.lower() if opt else "to", self)
-                dash.setEnabled(False)
-                row.addWidget(dash)
+                word = QLabel(lab.lower() if opt else "to", self)
+                word.setEnabled(False)
+                word.setFixedWidth(JOIN_W)
+                word.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                row.addWidget(word)
             row.addWidget(box)
             self._boxes.append(box)
+        n = len(labels)
+        self.setFixedWidth(n * BOX_W + (n - 1) * (JOIN_W + 2 * GRID_GAP))
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
 
     def values(self) -> tuple:
@@ -413,7 +370,6 @@ class ThermoBox:
             b.setDecimals(decimals)
             b.setSingleStep(step)
             b.setSuffix(suffix)
-            b.setFixedWidth(104)
             return b
 
         self.mono = conc(0, 2000, 5, " mM")
@@ -423,26 +379,12 @@ class ThermoBox:
         self.set_settings(ThermoSettings())
 
     def add_to(self, form: "_Form") -> list[QWidget]:
-        fields = [form.row("Formula:", self.formula, "Tm calculation", TM_HELP),
-                  form.row("Salt correction:", self.salt)]
-
-        def pair(a_label, a, b_label, b):
-            w = QWidget(self._parent)
-            h = QHBoxLayout(w)
-            h.setContentsMargins(0, 0, 0, 0)
-            h.setSpacing(6)
-            h.addWidget(a)
-            lab = QLabel(b_label, w)
-            lab.setFixedWidth(52)
-            lab.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            h.addWidget(lab)
-            h.addWidget(b)
-            h.addStretch(1)
-            return form.row(a_label, w, fixed=False)
-
-        fields.append(pair("Monovalent:", self.mono, "Oligo:", self.oligo))
-        fields.append(pair("Divalent:", self.di, "dNTPs:", self.dntp))
-        return fields
+        return [form.row("Formula:", self.formula, "Tm calculation", TM_HELP),
+                form.row("Salt correction:", self.salt),
+                form.row("Monovalent:", self.mono),
+                form.row("Divalent:", self.di),
+                form.row("dNTPs:", self.dntp),
+                form.row("Oligo:", self.oligo)]
 
     def settings(self) -> ThermoSettings:
         return ThermoSettings(
@@ -459,26 +401,24 @@ class ThermoBox:
         self.oligo.setValue(t.oligo_nM)
 
 
-class TailEdit(QWidget):
-    """Preset combo + editable tail sequence."""
+class TailEdit:
+    """Preset list + editable tail sequence, as two rows of the form grid."""
 
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.combo = QComboBox(self)
+    def __init__(self, parent: QWidget) -> None:
+        self.combo = QComboBox(parent)
         for label, seq in TAIL_PRESETS:
             self.combo.addItem(label, seq)
-        self.combo.setFixedWidth(170)
-        self.edit = QLineEdit(self)
+        self.edit = QLineEdit(parent)
         self.edit.setPlaceholderText("5′ tail (lower case)")
         self.edit.setFont(_mono_font())
         self.edit.setClearButtonEnabled(True)
-        row = QHBoxLayout(self)
-        row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(6)
-        row.addWidget(self.combo)
-        row.addWidget(self.edit, 1)
         self.combo.currentIndexChanged.connect(self._preset)
         self.edit.textEdited.connect(self._typed)
+
+    def add_to(self, form: "_Form", label: str, help_title: str | None = None,
+               help_text: str | None = None) -> list[QWidget]:
+        return [form.row(label, self.combo, help_title, help_text),
+                form.row("", self.edit)]
 
     def _preset(self, _i: int) -> None:
         seq = self.combo.currentData()
@@ -506,18 +446,64 @@ class TailEdit(QWidget):
 
 
 class _Form:
-    """QFormLayout helper: bold sections, separators, help, checkbox rows."""
+    """Form on the grid: right-aligned labels, fields of BOX_W or FIELD_W, one "?" column.
+
+    Every field sits in a cell of the same width, so the right edges and the
+    "?" buttons line up on every row of every tab.
+    """
 
     def __init__(self, host: QWidget) -> None:
         self.host = host
         self.form = QFormLayout(host)
         self.form.setContentsMargins(0, 0, 0, 0)
         self.form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self.form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        self.form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
         self.form.setHorizontalSpacing(12)
-        self.form.setVerticalSpacing(4)
-        self.spacers: list[QLabel] = []
+        self.form.setVerticalSpacing(6)
+        self.spacers: list[QWidget] = []
         self._first = True
+
+    @staticmethod
+    def _fit(widget: QWidget) -> None:
+        if isinstance(widget, (QSpinBox, QDoubleSpinBox)):
+            widget.setFixedWidth(BOX_W)
+        elif isinstance(widget, RangeEdit):
+            pass
+        else:
+            widget.setFixedWidth(FIELD_W)
+
+    def _cell(self, widget: QWidget, help_title: str | None, help_text: str | None) -> QWidget:
+        from repeatviewer.widgets.help_button import make_help_button
+
+        cell = QWidget(self.host)
+        row = QHBoxLayout(cell)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(GRID_GAP)
+        area = QWidget(cell)
+        area.setFixedWidth(FIELD_W)
+        al = QHBoxLayout(area)
+        al.setContentsMargins(0, 0, 0, 0)
+        al.setSpacing(0)
+        al.addWidget(widget, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        al.addStretch(1)
+        row.addWidget(area)
+        button = make_help_button(cell, help_title or "", help_text or "")
+        if not help_text:
+            # Keeps the "?" column: an invisible button that still takes its space.
+            policy = button.sizePolicy()
+            policy.setRetainSizeWhenHidden(True)
+            button.setSizePolicy(policy)
+            button.hide()
+        row.addWidget(button, 0, Qt.AlignmentFlag.AlignVCenter)
+        cell.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        cell.setProperty("gridField", widget)
+        return cell
+
+    def _label(self, text: str) -> QWidget:
+        lab = QLabel(text, self.host)
+        if not text:
+            self.spacers.append(lab)
+        return lab
 
     def section(self, title: str) -> list[QWidget]:
         out = []
@@ -533,43 +519,41 @@ class _Form:
 
     def row(self, label: str, widget: QWidget, help_title: str | None = None,
             help_text: str | None = None, *, fixed: bool = True) -> QWidget:
-        if fixed and isinstance(widget, (QComboBox, QSpinBox, QDoubleSpinBox)):
-            widget.setFixedWidth(TOOL_PARAMS_FIELD_WIDTH)
-        field = field_with_help(widget, help_title or label.rstrip(":"), help_text) \
-            if help_text else widget
-        self.form.addRow(label, field)
-        return field
+        del fixed   # every field follows the grid
+        self._fit(widget)
+        cell = self._cell(widget, help_title or label.rstrip(":"), help_text)
+        self.form.addRow(self._label(label), cell)
+        return cell
 
     def check(self, box: QWidget, help_title: str | None = None,
               help_text: str | None = None) -> QWidget:
-        spacer = QLabel("", self.host)
-        self.spacers.append(spacer)
-        field = field_with_help(box, help_title or "", help_text) if help_text else box
-        self.form.addRow(spacer, field)
-        return field
+        cell = self._cell(box, help_title or "", help_text)
+        self.form.addRow(self._label(""), cell)
+        return cell
 
-    def labelled(self, box: QWidget, widget: QWidget, help_title: str | None = None,
-                 help_text: str | None = None, *, box_width: int = 150) -> QWidget:
-        """Checkbox + its field in the field column (checkboxes line up, text on the
-        right of the box as everywhere in RepeatViewer)."""
+    def switch_row(self, box: QCheckBox, widget: QWidget, help_title: str | None = None,
+                   help_text: str | None = None) -> QWidget:
+        """A row whose label is a checkbox (``☐ Included region:``) turning the field on.
+
+        The checkbox (text right of the box, rule 16) is right-aligned in the label
+        column, so its field starts where every other field starts."""
         host = QWidget(self.host)
-        row = QHBoxLayout(host)
-        row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(6)
-        box.setFixedWidth(box_width)
-        row.addWidget(box)
-        if widget.sizePolicy().horizontalPolicy() == QSizePolicy.Policy.Fixed:
-            row.addWidget(widget)
-            host.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        else:
-            row.addWidget(widget, 1)
-        return self.check(host, help_title, help_text)
+        hl = QHBoxLayout(host)
+        hl.setContentsMargins(0, 0, 0, 0)
+        hl.setSpacing(0)
+        hl.addStretch(1)
+        hl.addWidget(box)
+        self.spacers.append(host)
+        self._fit(widget)
+        cell = self._cell(widget, help_title or box.text().rstrip(":"), help_text)
+        self.form.addRow(host, cell)
+        return cell
 
     def widget_row(self, widget: QWidget) -> QWidget:
-        spacer = QLabel("", self.host)
-        self.spacers.append(spacer)
-        self.form.addRow(spacer, widget)
-        return widget
+        widget.setFixedWidth(FIELD_W)
+        cell = self._cell(widget, None, None)
+        self.form.addRow(self._label(""), cell)
+        return cell
 
     def set_visible(self, field: QWidget, visible: bool) -> None:
         self.form.setRowVisible(field, visible)
@@ -579,7 +563,8 @@ def _path_row(parent: QWidget, placeholder: str, title: str, *, mode: str = "fil
               file_filter: str = _FASTA_FILTER) -> PathBrowseRow:
     row = PathBrowseRow(parent, placeholder=placeholder, browse_title=title, mode=mode,
                         file_filter=file_filter)
-    row.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+    row.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+    row.line_edit().setMinimumWidth(0)
     row.set_default_tooltip("Click a file in the Files panel to fill this path, or use Browse.")
     return row
 
@@ -652,6 +637,7 @@ class _TabbedToolDialog(QDialog):
 
     def _finish(self, bar: QWidget) -> None:
         self._layout.addWidget(bar, 0)
+        self._width = self._grid_width()
         self.resize(self._width, 400)
 
     def _on_tab(self, index: int) -> None:
@@ -667,8 +653,23 @@ class _TabbedToolDialog(QDialog):
         spacers = [s for f in self._forms for s in f.spacers]
         sync_form_field_column_spacers(self, spacers, [f.form for f in self._forms])
 
+    def _grid_width(self) -> int:
+        """Window width that fits the form grid exactly: label column, field, "?"."""
+        from repeatviewer.widgets.help_button import make_help_button
+
+        probe = make_help_button(None, "", "")
+        help_w = probe.sizeHint().width()
+        probe.deleteLater()
+        label_w = settings_form_label_column_width(self)
+        margins = self._layout.contentsMargins()
+        # room for the page's scroll bar, so a long page never covers the "?" column
+        bar = self.style().pixelMetric(self.style().PixelMetric.PM_ScrollBarExtent)
+        return (label_w + 12 + FIELD_W + GRID_GAP + help_w + 2 * 16 + bar
+                + margins.left() + margins.right())
+
     def _fit(self) -> None:
         self._sync_columns()
+        self._width = self._grid_width()
         scroll = self._stack.currentWidget()
         if scroll is None:
             return
@@ -729,10 +730,8 @@ class _TabbedToolDialog(QDialog):
 class PrimerDesignDialog(_TabbedToolDialog):
     """Design primers: mode, conditions, repeat-aware regions, genome check, options."""
 
-    (_TAB_PRIMERS, _TAB_REGIONS, _TAB_SPECIFICITY, _TAB_CHORUS2, _TAB_SELECTION,
-     _TAB_OPTIONS) = range(6)
-    _TAB_NAMES = (PRIMER_DIALOG_TAB_PRIMERS, PRIMER_DIALOG_TAB_REGIONS,
-                  PRIMER_DIALOG_TAB_SPECIFICITY, PRIMER_DIALOG_TAB_CHORUS2,
+    _TAB_PRIMERS, _TAB_CHORUS2, _TAB_SELECTION, _TAB_OPTIONS = range(4)
+    _TAB_NAMES = (PRIMER_DIALOG_TAB_PRIMERS, PRIMER_DIALOG_TAB_CHORUS2,
                   PRIMER_DIALOG_TAB_SELECTION, DIALOG_TAB_OPTIONS)
 
     def __init__(self, *, initial: PrimerOptions, files: list[Path] | None = None,
@@ -800,66 +799,17 @@ class PrimerDesignDialog(_TabbedToolDialog):
         self._reference.set_path(s.reference_fasta or None, emit=False)
         mrow((dz.MODE_QPCR,), "Reference gene:", self._reference, "Reference gene",
              "A single-copy gene (FASTA). A pair with the same Tm window is designed on it, "
-             "for copy number = 2^(Ct reference − Ct repeat) × reference copies.", fixed=False)
-        self._bs_strand = QComboBox(self)
-        self._bs_strand.addItem("Top strand", "top")
-        self._bs_strand.addItem("Bottom strand", "bottom")
-        _set_combo(self._bs_strand, s.bisulfite_strand)
-        self._meth_system = QComboBox(self)
-        for m in dz.METHYLATION_SYSTEMS:
-            self._meth_system.addItem(dz.METHYLATION_LABELS[m], m)
-        _set_combo(self._meth_system, s.methylation_system)
-        mrow((dz.MODE_BSP, dz.MODE_MSP), "Methylation:", self._meth_system, "Methylation",
-             METHYLATION_HELP)
-        self._msp_context = QComboBox(self)
-        for c in dz.MSP_CONTEXTS:
-            self._msp_context.addItem(c, c)
-        _set_combo(self._msp_context, s.msp_context)
-        mrow((dz.MODE_MSP,), "MSP 3′ end on:", self._msp_context, "MSP site", MSP_CONTEXT_HELP)
-        self._meth_system.currentIndexChanged.connect(self._sync_msp_context)
-        mrow((dz.MODE_BSP, dz.MODE_MSP), "Converted strand:", self._bs_strand, "Strand",
-             "After bisulfite treatment the two strands are no longer complementary: choose "
-             "which converted strand the primers amplify.")
-        self._min_conv = QSpinBox(self)
-        self._min_conv.setRange(0, 15)
-        self._min_conv.setValue(s.min_converted)
-        mrow((dz.MODE_BSP,), "Min converted C:", self._min_conv, "Converted C",
-             "Each primer must cover at least this many converted C (T after conversion), "
-             "so unconverted DNA is not amplified.<br>In <b>Plant</b> mode only CHH C count; "
-             "lower this (1 or 2) for GC-poor or CHG-rich regions.")
-        self._target_pattern = QLineEdit(s.target_pattern, self)
-        self._target_pattern.setPlaceholderText("e.g. TEfamA or ^CroSat2_")
-        self._target_pattern.setClearButtonEnabled(True)
-        mrow((dz.MODE_SPECIFIC,), "Target sequences:", self._target_pattern, "Target sequences",
-             TARGET_HELP, fixed=False)
+             "as the reference for relative quantification (ΔCt).")
         self._min_cov = QSpinBox(self)
         self._min_cov.setRange(10, 100)
         self._min_cov.setSuffix(" %")
         self._min_cov.setValue(int(round(s.min_coverage * 100)))
-        mrow((dz.MODE_CONSERVED, dz.MODE_SPECIFIC, dz.MODE_FISH), "Min coverage:", self._min_cov,
-             "Coverage", COVERAGE_HELP)
+        mrow((dz.MODE_FISH,), "Min coverage:", self._min_cov, "Coverage", COVERAGE_HELP)
         self._cov_mm = QSpinBox(self)
         self._cov_mm.setRange(0, 8)
         self._cov_mm.setValue(s.coverage_mismatches)
-        mrow((dz.MODE_CONSERVED, dz.MODE_SPECIFIC, dz.MODE_LADDER, dz.MODE_FISH),
-             "Mismatches tolerated:", self._cov_mm, "Coverage", COVERAGE_HELP)
-        self._max_off = QSpinBox(self)
-        self._max_off.setRange(0, 100)
-        self._max_off.setSuffix(" %")
-        self._max_off.setValue(int(round(s.max_off_target * 100)))
-        mrow((dz.MODE_SPECIFIC,), "Max off-target:", self._max_off, "Off-target",
-             "Largest share of the non-target sequences a pair may still amplify.")
-        self._max_deg = QSpinBox(self)
-        self._max_deg.setRange(1, 4096)
-        self._max_deg.setValue(s.max_degeneracy)
-        mrow((dz.MODE_CONSERVED, dz.MODE_SPECIFIC), "Max degeneracy:", self._max_deg,
-             "Degenerate primers", DEGENERACY_HELP)
-        self._deg_freq = QSpinBox(self)
-        self._deg_freq.setRange(1, 50)
-        self._deg_freq.setSuffix(" %")
-        self._deg_freq.setValue(int(round(s.degenerate_min_freq * 100)))
-        mrow((dz.MODE_CONSERVED, dz.MODE_SPECIFIC), "Degenerate base ≥:", self._deg_freq,
-             "Degenerate primers", DEGENERACY_HELP)
+        mrow((dz.MODE_LADDER, dz.MODE_FISH), "Mismatches tolerated:", self._cov_mm, "Coverage",
+             COVERAGE_HELP)
         self._fish_label = QComboBox(self)
         for lab in dz.FISH_LABELS:
             self._fish_label.addItem(lab, lab)
@@ -871,59 +821,22 @@ class PrimerDesignDialog(_TabbedToolDialog):
         self._fish_avoid.set_path(s.fish_avoid_fasta or None, emit=False)
         mrow((dz.MODE_FISH,), "Avoid:", self._fish_avoid, "Cross-hybridization",
              "Probes matching any of these sequences (with the mismatches tolerated) are "
-             "ranked last (e.g. the other satellite families).", fixed=False)
-        te_row = QWidget(self)
-        th = QHBoxLayout(te_row)
-        th.setContentsMargins(0, 0, 0, 0)
-        th.setSpacing(4)
-        self._te_start = QSpinBox(self)
-        self._te_end = QSpinBox(self)
-        for b, v in ((self._te_start, s.te_start), (self._te_end, s.te_end)):
-            b.setRange(0, 2_000_000_000)
-            b.setFixedWidth(110)
-            b.setSpecialValueText("auto")
-            b.setValue(v)
-        th.addWidget(self._te_start)
-        to = QLabel("to", self)
-        to.setEnabled(False)
-        th.addWidget(to)
-        th.addWidget(self._te_end)
-        te_row.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        self._te_feature = QComboBox(self)
-        self._te_feature.setEditable(True)
-        self._te_feature.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
-        self._te_feature.lineEdit().setPlaceholderText("Longest annotated repeat")
-        self._te_feature.setEditText(s.te_feature)
-        mrow((dz.MODE_INSERTION,), "TE feature:", self._te_feature, "TE feature",
-             "An annotated feature of the template to use as the TE (its name). Ignored when "
-             "TE position is set.")
-        mrow((dz.MODE_INSERTION,), "TE position:", te_row, "TE position", TE_HELP, fixed=False)
-        self._flank = QSpinBox(self)
-        self._flank.setRange(50, 5000)
-        self._flank.setSuffix(" bp")
-        self._flank.setValue(s.flank_max)
-        mrow((dz.MODE_INSERTION,), "Max flank distance:", self._flank, "Flank",
-             "How far from the TE ends the flanking primers may sit.")
+             "ranked last (e.g. the other satellite families).")
 
         self._conditions_title = f.section("Primer Conditions")[-1]
         self._size = RangeEdit(5, 60)
         self._size.set_values(s.size_min, s.size_opt, s.size_max)
-        self._size_field = f.row("Primer size:", self._size, "Primer size", "Length in bases (min, optimum, max).",
-              fixed=False)
+        self._size_field = f.row("Primer size:", self._size, "Primer size",
+                                 "Length in bases (min, optimum, max).")
         self._tm = RangeEdit(20, 95, decimals=1, step=0.5)
         self._tm.set_values(s.tm_min, s.tm_opt, s.tm_max)
-        f.row("Tm (°C):", self._tm, "Tm", "Melting temperature of the binding part.",
-              fixed=False)
+        f.row("Tm (°C):", self._tm, "Tm", "Melting temperature of the binding part.")
         self._gc = RangeEdit(0, 100, decimals=0, opt=False, suffix=" %")
         self._gc.set_values(s.gc_min, s.gc_max)
-        f.row("GC:", self._gc, fixed=False)
-        self._product = RangeEdit(10, 100_000, opt=False)
-        for b in self._product.boxes():
-            b.setFixedWidth(96)
-            b.setSuffix(" bp")
+        f.row("GC:", self._gc)
+        self._product = RangeEdit(10, 100_000, opt=False, suffix=" bp")
         self._product.set_values(s.product_min, s.product_max)
-        self._product_field = f.row("Product size:", self._product, "Product size", PRODUCT_HELP,
-                                    fixed=False)
+        self._product_field = f.row("Product size:", self._product, "Product size", PRODUCT_HELP)
         self._tm_diff = QDoubleSpinBox(self)
         self._tm_diff.setRange(0, 20)
         self._tm_diff.setDecimals(1)
@@ -957,137 +870,23 @@ class PrimerDesignDialog(_TabbedToolDialog):
                                       "(Primer3 default 9). Lower = less mispriming."))
         self._probe_size = RangeEdit(10, 60)
         self._probe_size.set_values(s.probe_size_min, s.probe_size_opt, s.probe_size_max)
-        self._adv_fields.append(f.row("Probe size:", self._probe_size, fixed=False))
+        self._adv_fields.append(f.row("Probe size:", self._probe_size))
         self._probe_tm = RangeEdit(30, 95, decimals=1, step=0.5)
         self._probe_tm.set_values(s.probe_tm_min, s.probe_tm_opt, s.probe_tm_max)
-        self._adv_fields.append(f.row("Probe Tm (°C):", self._probe_tm, fixed=False))
+        self._adv_fields.append(f.row("Probe Tm (°C):", self._probe_tm))
         self._fwd_tail = TailEdit(self)
         self._fwd_tail.set_tail(s.forward_tail)
-        self._adv_fields.append(f.row("Forward 5′ tail:", self._fwd_tail, "5′ tails", TAILS_HELP,
-                                      fixed=False))
+        self._adv_fields += self._fwd_tail.add_to(f, "Forward 5′ tail:", "5′ tails", TAILS_HELP)
         self._rev_tail = TailEdit(self)
         self._rev_tail.set_tail(s.reverse_tail)
-        self._adv_fields.append(f.row("Reverse 5′ tail:", self._rev_tail, fixed=False))
+        self._adv_fields += self._rev_tail.add_to(f, "Reverse 5′ tail:")
         self._adv_fields += f.section("Tm Calculation")
         self._thermo = ThermoBox(self)
         self._thermo.set_settings(s.thermo)
         self._adv_fields += self._thermo.add_to(f)
-        lay.addWidget(body)
+        lay.addWidget(body, 0, Qt.AlignmentFlag.AlignHCenter)
         self._primers_form = f
         self._add_page("Primers", page)
-
-        # ---------------- Regions tab
-        page, lay = _page(self)
-        body = QWidget(page)
-        g = _Form(body)
-        self._forms.append(g)
-        g.section("Regions")
-        self._use_target = QCheckBox("Target region (the product must span it)", self)
-        self._use_target.setChecked(bool(s.target_start and s.target_end))
-        g.check(self._use_target)
-        self._target = RangeEdit(1, 2_000_000_000, opt=False)
-        for b in self._target.boxes():
-            b.setFixedWidth(110)
-        self._target.set_values(s.target_start or 1, s.target_end or 1)
-        g.row("Target:", self._target, fixed=False)
-        self._use_included = QCheckBox("Included region (primers only inside it)", self)
-        self._use_included.setChecked(bool(s.included_start and s.included_end))
-        g.check(self._use_included)
-        self._included = RangeEdit(1, 2_000_000_000, opt=False)
-        for b in self._included.boxes():
-            b.setFixedWidth(110)
-        self._included.set_values(s.included_start or 1, s.included_end or 1)
-        g.row("Included:", self._included, fixed=False)
-        self._use_target.toggled.connect(self._target.setEnabled)
-        self._use_included.toggled.connect(self._included.setEnabled)
-        self._target.setEnabled(self._use_target.isChecked())
-        self._included.setEnabled(self._use_included.isChecked())
-        g.section("Repeat Masking")
-        self._mask_lower = QCheckBox("Avoid soft-masked (lower-case) bases", self)
-        self._mask_lower.setChecked(s.mask_lowercase)
-        g.check(self._mask_lower, "Repeat masking", MASK_HELP)
-        self._mask_feats = QCheckBox("Avoid repeats annotated on the sequence", self)
-        self._mask_feats.setChecked(s.mask_features)
-        g.check(self._mask_feats)
-        self._mask_types = QLineEdit(s.mask_feature_types, self)
-        self._mask_types.setPlaceholderText("all except ORF / domain / primers")
-        self._mask_types.setClearButtonEnabled(True)
-        g.row("Feature types:", self._mask_types, "Feature types",
-              "Comma-separated feature types to avoid (e.g. <code>LTR, TIR, tandem repeat</code>). "
-              "Empty = every annotated feature except ORFs, domains, genes and primers.",
-              fixed=False)
-        self._mask_tandem = QCheckBox("Avoid tandem repeats (found with pytrf)", self)
-        self._mask_tandem.setChecked(s.mask_tandem)
-        g.check(self._mask_tandem)
-        self._mask_file = _path_row(self, "RepeatMasker .out, GFF or BED (optional)",
-                                    "Choose a repeat annotation file",
-                                    file_filter="Repeat annotation (*.out *.gff *.gff3 *.bed);;"
-                                                "All files (*)")
-        self._mask_file.set_path(s.mask_file or None, emit=False)
-        g.row("Repeat file:", self._mask_file, "Repeat file",
-              "Repeats in this file (rows whose sequence name matches the template) are "
-              "avoided too.", fixed=False)
-        self._misprime = _path_row(self, "Repeat library FASTA (optional)",
-                                   "Choose a mispriming library")
-        self._misprime.set_path(s.mispriming_library or None, emit=False)
-        g.row("Mispriming library:", self._misprime, "Mispriming library", MISPRIME_HELP,
-              fixed=False)
-        lay.addWidget(body)
-        self._add_page("Regions", page)
-
-        # ---------------- Specificity tab
-        page, lay = _page(self)
-        body = QWidget(page)
-        h = _Form(body)
-        self._forms.append(h)
-        h.section("Genome Specificity")
-        self._check_genome = QCheckBox("Check every pair against a genome", self)
-        self._check_genome.setChecked(s.check_genome)
-        h.check(self._check_genome, "Genome check", GENOME_HELP)
-        self._genome = _path_row(self, "Genome FASTA: click it in Files, or Browse",
-                                 "Choose the genome FASTA")
-        genome = s.genome_fasta or (str(project_genome) if project_genome else "")
-        self._genome.set_path(genome or None, emit=False)
-        h.row("Genome:", self._genome, fixed=False)
-        self._g_mm = QSpinBox(self)
-        self._g_mm.setRange(0, 6)
-        self._g_mm.setValue(s.genome_max_mismatches)
-        h.row("Max mismatches:", self._g_mm, "Mismatches",
-              "Mismatches a primer may have and still count as binding.")
-        self._g_exact = QSpinBox(self)
-        self._g_exact.setRange(0, 15)
-        self._g_exact.setValue(s.genome_three_prime_exact)
-        h.row("3′ bases exact:", self._g_exact, "3′ end",
-              "The last bases at the 3′ end must match: mismatches there stop the polymerase.")
-        self._g_seed = QSpinBox(self)
-        self._g_seed.setRange(6, 12)
-        self._g_seed.setValue(s.genome_seed)
-        h.row("3′ seed:", self._g_seed, "Seed", GENOME_HELP)
-        self._g_maxprod = QSpinBox(self)
-        self._g_maxprod.setRange(50, 100_000)
-        self._g_maxprod.setSuffix(" bp")
-        self._g_maxprod.setValue(s.genome_max_product)
-        h.row("Max product size:", self._g_maxprod, "Product size",
-              "Products longer than this are not counted (they would not amplify well).")
-        drop_row = QWidget(self)
-        dr = QHBoxLayout(drop_row)
-        dr.setContentsMargins(0, 0, 0, 0)
-        dr.setSpacing(6)
-        self._drop = QCheckBox("Drop pairs with more than", self)
-        self._drop.setChecked(s.drop_unspecific)
-        self._drop_n = QSpinBox(self)
-        self._drop_n.setRange(1, 1_000_000)
-        self._drop_n.setValue(max(1, s.genome_max_products))
-        self._drop_n.setFixedWidth(_SMALL + 10)
-        dr.addWidget(self._drop)
-        dr.addWidget(self._drop_n)
-        dr.addWidget(QLabel("product(s)", self))
-        drop_row.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        h.check(drop_row, "Drop unspecific pairs", DROP_HELP)
-        self._check_genome.toggled.connect(self._sync_genome)
-        self._drop.toggled.connect(self._drop_n.setEnabled)
-        lay.addWidget(body)
-        self._add_page("Specificity", page)
 
         self._build_painting_pages(initial.painting_settings(), s, project_genome)
 
@@ -1110,16 +909,6 @@ class PrimerDesignDialog(_TabbedToolDialog):
         self._to_db.setChecked(initial.save_design_to_database)
         rl.addWidget(self._annotate)
         rl.addWidget(self._to_db)
-        db_row = QWidget(self)
-        dbl = QHBoxLayout(db_row)
-        dbl.setContentsMargins(0, 4, 0, 0)
-        dbl.setSpacing(6)
-        dbl.addWidget(QLabel("Primer Database:", self))
-        self._db_path = _path_row(self, "Default: the database on this computer",
-                                  "Choose the Primer Database folder", mode="directory")
-        self._db_path.set_path(initial.database_path or None, emit=False)
-        dbl.addWidget(self._db_path, 1)
-        rl.addWidget(db_row)
         process_box, self._show_process, self._close_process = make_process_output_box(
             self, tool_name="primer design", checked=initial.show_process_window,
             close_when_finished=initial.close_process_window_when_finished)
@@ -1146,43 +935,24 @@ class PrimerDesignDialog(_TabbedToolDialog):
         self._tab_bar.setCurrentIndex(index)
         self._apply_mode_rows()
         self._toggle_advanced(False)
-        self._sync_genome()
-        self._drop_n.setEnabled(self._drop.isChecked())
-        self._sync_msp_context()
         self._sync_inputs()
-        self._load_template_features()
 
     # ------------------------------------------------------------- behaviour
-
-    def _sync_msp_context(self, *_a) -> None:
-        """CHG as MSP site only makes sense for plants."""
-        plant = self._meth_system.currentData() == dz.METH_PLANT
-        model = self._msp_context.model()
-        idx = self._msp_context.findData("CHG")
-        item = model.item(idx) if hasattr(model, "item") else None
-        if item is not None:
-            flags = item.flags()
-            on = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
-            item.setFlags(flags | on if plant else flags & ~on)
-        if not plant and self._msp_context.currentData() == "CHG":
-            _set_combo(self._msp_context, "CG")
 
     def _sync_inputs(self, *_a) -> None:
         define = self._input_define.isChecked()
         self._primers_form.set_visible(self._template_label_field, not define)
         self._primers_form.set_visible(self._template_field, define)
         self._refresh_template_label()
-        self._load_template_features()
         if self.isVisible():
             QTimer.singleShot(0, self._fit)
 
     def _on_template_changed(self) -> None:
-        self._load_template_features()
+        pass
 
     def _all_path_rows(self) -> list[PathBrowseRow]:
-        return [self._template_row, self._reference, self._fish_avoid, self._mask_file,
-                self._misprime, self._genome, self._db_path, self._pt_genome, self._pt_input,
-                self._pt_bed, self._pt_fastq]
+        return [self._template_row, self._reference, self._fish_avoid, self._pt_genome,
+                self._pt_input, self._pt_bed, self._pt_fastq]
 
     def _on_tab(self, index: int) -> None:
         if hasattr(self, "_adv_btn"):
@@ -1199,8 +969,7 @@ class PrimerDesignDialog(_TabbedToolDialog):
         return self._painting()
 
     def _apply_tab_family(self, *, select: bool) -> None:
-        """Painting shows Chorus2 | Selection | Options; the rest Primers | Regions |
-        Specificity | Options."""
+        """Painting shows Chorus2 | Selection | Options; the rest Primers | Options."""
         paint = self._painting()
         was = self._tab_bar.currentIndex()
         first = self._TAB_CHORUS2 if paint else self._TAB_PRIMERS
@@ -1208,8 +977,7 @@ class PrimerDesignDialog(_TabbedToolDialog):
         self._tab_bar.setTabVisible(first, True)
         if was != self._TAB_OPTIONS or not select:
             self._tab_bar.setCurrentIndex(first)
-        for i in (self._TAB_PRIMERS, self._TAB_REGIONS, self._TAB_SPECIFICITY):
-            self._tab_bar.setTabVisible(i, not paint)
+        self._tab_bar.setTabVisible(self._TAB_PRIMERS, not paint)
         for i in (self._TAB_CHORUS2, self._TAB_SELECTION):
             self._tab_bar.setTabVisible(i, paint)
         if was == self._TAB_OPTIONS and select:
@@ -1340,7 +1108,7 @@ class PrimerDesignDialog(_TabbedToolDialog):
         srv.clicked.connect(self._copy_server_command)
         srv.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self._pt_server_field = c.check(srv, "Run on a server", PAINT_SERVER_HELP)
-        lay.addWidget(body)
+        lay.addWidget(body, 0, Qt.AlignmentFlag.AlignHCenter)
         self._paint_form = c
         self._add_page("Chorus2", page)
 
@@ -1385,7 +1153,7 @@ class PrimerDesignDialog(_TabbedToolDialog):
         self._pt_p3 = QLineEdit(ps.primer3, self)
         self._pt_p3.setPlaceholderText("None")
         g.row("3′ adapter:", self._pt_p3, fixed=False)
-        lay.addWidget(body)
+        lay.addWidget(body, 0, Qt.AlignmentFlag.AlignHCenter)
         self._select_form = g
         self._add_page("Selection", page)
 
@@ -1502,14 +1270,6 @@ class PrimerDesignDialog(_TabbedToolDialog):
         if self.isVisible():
             QTimer.singleShot(0, self._fit)
 
-    def _sync_genome(self, *_a) -> None:
-        on = self._check_genome.isChecked()
-        for w in (self._genome, self._g_mm, self._g_exact, self._g_seed, self._g_maxprod,
-                  self._drop, self._drop_n):
-            w.setEnabled(on)
-        if on:
-            self._drop_n.setEnabled(self._drop.isChecked())
-
     def _on_mode(self, _i: int) -> None:
         mode = str(self._mode.currentData())
         if self._paint_mode.currentIndex() != self._mode.currentIndex():
@@ -1589,25 +1349,8 @@ class PrimerDesignDialog(_TabbedToolDialog):
         self._fwd_tail.set_tail(s.forward_tail)
         self._rev_tail.set_tail(s.reverse_tail)
         self._thermo.set_settings(s.thermo)
-        self._mask_lower.setChecked(s.mask_lowercase)
-        self._mask_feats.setChecked(s.mask_features)
-        self._mask_types.setText(s.mask_feature_types)
-        self._mask_tandem.setChecked(s.mask_tandem)
-        self._g_mm.setValue(s.genome_max_mismatches)
-        self._g_exact.setValue(s.genome_three_prime_exact)
-        self._g_seed.setValue(s.genome_seed)
-        self._g_maxprod.setValue(s.genome_max_product)
-        self._drop.setChecked(s.drop_unspecific)
-        self._drop_n.setValue(max(1, s.genome_max_products))
         self._min_cov.setValue(int(round(s.min_coverage * 100)))
         self._cov_mm.setValue(s.coverage_mismatches)
-        self._max_off.setValue(int(round(s.max_off_target * 100)))
-        self._max_deg.setValue(s.max_degeneracy)
-        self._deg_freq.setValue(int(round(s.degenerate_min_freq * 100)))
-        self._min_conv.setValue(s.min_converted)
-        _set_combo(self._meth_system, s.methylation_system)
-        _set_combo(self._msp_context, s.msp_context)
-        self._flank.setValue(s.flank_max)
         self._apply_mode_rows()
 
     # ------------------------------------------------------------- inputs
@@ -1638,29 +1381,6 @@ class PrimerDesignDialog(_TabbedToolDialog):
         """Files-panel selection (used with Use selected sequences)."""
         self._templates = [Path(p) for p in files if _is_fasta(Path(p))]
         self._refresh_template_label()
-        self._load_template_features()
-
-    def _load_template_features(self) -> None:
-        """Annotated features of the template, offered as TE candidates."""
-        names: list[str] = []
-        files = self.template_files()
-        if files and files[0].is_file():
-            try:
-                feats = pj.record_features(files[0])
-            except Exception:  # noqa: BLE001 - a broken sidecar must not break the window
-                feats = {}
-            skip = {"primer_bind", "pcr product", "probe", "orf", "domain"}
-            for flist in feats.values():
-                for feat in sorted(flist, key=lambda x: x.start - x.end):
-                    if str(feat.feature_type).lower() not in skip and feat.name not in names:
-                        names.append(feat.name)
-        text = self._te_feature.currentText()
-        self._te_feature.blockSignals(True)
-        self._te_feature.clear()
-        self._te_feature.addItems(names[:200])
-        self._te_feature.setCurrentIndex(-1)
-        self._te_feature.setEditText(text)
-        self._te_feature.blockSignals(False)
 
     def apply_path_from_panel(self, path: Path) -> bool:
         """Files-panel click: fills the path field being edited, else the template
@@ -1685,7 +1405,6 @@ class PrimerDesignDialog(_TabbedToolDialog):
             return False
         if self._input_define.isChecked():
             self._template_row.set_path(resolved)
-            self._load_template_features()
         else:
             self.set_templates([resolved])
         return True
@@ -1701,8 +1420,6 @@ class PrimerDesignDialog(_TabbedToolDialog):
         pmin, pmax = self._product.values()
         psmin, psopt, psmax = self._probe_size.values()
         ptmin, ptopt, ptmax = self._probe_tm.values()
-        tgt = self._target.values() if self._use_target.isChecked() else (0, 0)
-        inc = self._included.values() if self._use_included.isChecked() else (0, 0)
 
         def path(row: PathBrowseRow) -> str:
             p = row.path()
@@ -1719,42 +1436,19 @@ class PrimerDesignDialog(_TabbedToolDialog):
             probe_size_min=psmin, probe_size_opt=psopt, probe_size_max=psmax,
             probe_tm_min=ptmin, probe_tm_opt=ptopt, probe_tm_max=ptmax,
             thermo=self._thermo.settings(),
-            target_start=tgt[0], target_end=tgt[1], included_start=inc[0], included_end=inc[1],
-            mask_lowercase=self._mask_lower.isChecked(), mask_features=self._mask_feats.isChecked(),
-            mask_feature_types=self._mask_types.text().strip(),
-            mask_tandem=self._mask_tandem.isChecked(), mask_file=path(self._mask_file),
-            mispriming_library=path(self._misprime),
-            check_genome=self._check_genome.isChecked(), genome_fasta=path(self._genome),
-            genome_max_mismatches=self._g_mm.value(),
-            genome_three_prime_exact=self._g_exact.value(), genome_seed=self._g_seed.value(),
-            genome_max_product=self._g_maxprod.value(),
-            genome_max_products=self._drop_n.value(), drop_unspecific=self._drop.isChecked(),
             forward_tail=self._fwd_tail.tail(), reverse_tail=self._rev_tail.tail(),
             reference_fasta=path(self._reference),
-            bisulfite_strand=str(self._bs_strand.currentData()),
-            min_converted=self._min_conv.value(),
-            methylation_system=str(self._meth_system.currentData()),
-            msp_context=str(self._msp_context.currentData()),
             min_coverage=self._min_cov.value() / 100.0,
-            max_degeneracy=self._max_deg.value(),
-            degenerate_min_freq=self._deg_freq.value() / 100.0,
             coverage_mismatches=self._cov_mm.value(),
-            target_pattern=self._target_pattern.text().strip(),
-            max_off_target=self._max_off.value() / 100.0,
             fish_label=str(self._fish_label.currentData()),
             fish_avoid_fasta=path(self._fish_avoid),
-            te_start=self._te_start.value(), te_end=self._te_end.value(),
-            te_feature=self._te_feature.currentText().strip(),
-            flank_max=self._flank.value(),
         )
 
     def options(self) -> PrimerOptions:
-        db = self._db_path.path()
         return replace(
             self._opts,
             design=self.design_settings().to_dict(),
             painting=self.painting_settings().to_dict(),
-            database_path=str(db) if db else "",
             right_click_action=PRIMER_RIGHT_CLICK_RUN,
             annotate_design=self._annotate.isChecked(),
             save_design_to_database=self._to_db.isChecked(),
@@ -1959,9 +1653,9 @@ class MapPrimersDialog(_TabbedToolDialog):
         grp.addButton(self._database)
         (self._database if ms.mode == pj.MAP_DATABASE else self._specific).setChecked(True)
         f.check(self._specific)
-        self._use_f = QCheckBox("Forward primer", self)
-        self._use_r = QCheckBox("Reverse primer", self)
-        self._use_p = QCheckBox("Probe", self)
+        self._use_f = QCheckBox("Forward:", self)
+        self._use_r = QCheckBox("Reverse:", self)
+        self._use_p = QCheckBox("Probe:", self)
         self._f = _PrimerField("forward", self._database_obj, self)
         self._r = _PrimerField("reverse", self._database_obj, self)
         self._p = _PrimerField("probe", self._database_obj, self)
@@ -1973,26 +1667,18 @@ class MapPrimersDialog(_TabbedToolDialog):
             field.set_text(text)
             field.setEnabled(on)
             box.toggled.connect(field.setEnabled)
-            self._spec_rows.append(f.labelled(box, field))
+            self._spec_rows.append(f.switch_row(box, field))
         f.check(self._database)
-        src = QWidget(self)
-        sl = QHBoxLayout(src)
-        sl.setContentsMargins(0, 0, 0, 0)
-        sl.setSpacing(6)
         self._src = QComboBox(self)
         self._src.addItem("Primer Database", "db")
         self._src.addItem("FASTA file", "file")
-        self._src.setFixedWidth(150)
-        self._src_file = _path_row(self, "Primers FASTA", "Choose a primers FASTA")
-        # Shares the row with the source combo: a smaller minimum keeps the window
-        # at the same width as Primer Design.
-        self._src_file.line_edit().setMinimumWidth(160)
+        self._src_field = f.row("Primers from:", self._src)
+        self._src_file = _path_row(self, "Primers FASTA: click it in Files, or Browse",
+                                   "Choose a primers FASTA")
         if ms.primer_file:
             self._src.setCurrentIndex(1)
             self._src_file.set_path(ms.primer_file, emit=False)
-        sl.addWidget(self._src)
-        sl.addWidget(self._src_file, 1)
-        self._src_field = f.row("Primers from:", src, fixed=False)
+        self._src_file_field = f.row("Primers FASTA:", self._src_file)
         kinds = QWidget(self)
         kl = QHBoxLayout(kinds)
         kl.setContentsMargins(0, 0, 0, 0)
@@ -2005,84 +1691,61 @@ class MapPrimersDialog(_TabbedToolDialog):
                      (self._s_p, ms.search_probe), (self._pairs_only, ms.pairs_only)):
             b.setChecked(v)
             kl.addWidget(b)
-        kinds.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        kl.addStretch(1)
         self._kinds_field = f.row("Search for:", kinds, "Search for",
                                   "Which saved primers to test. <b>Pairs only</b> keeps primers "
-                                  "that form a product with another saved primer.", fixed=False)
+                                  "that form a product with another saved primer.")
         # From the Database window: only the primers selected there.
         self._only_names: list[str] = list(ms.primer_names or [])
-        only = QWidget(self)
-        ol = QHBoxLayout(only)
-        ol.setContentsMargins(0, 0, 0, 0)
-        ol.setSpacing(8)
         self._only_label = QLabel(self)
         self._only_label.setWordWrap(True)
+        self._only_field = f.row("Testing:", self._only_label)
         self._only_all = QPushButton("Use All Saved Primers", self)
         self._only_all.clicked.connect(self._clear_only)
-        ol.addWidget(self._only_label, 1)
-        ol.addWidget(self._only_all)
-        self._only_field = f.row("Testing:", only, fixed=False)
+        self._only_all_field = f.check(self._only_all)
         self._specific.toggled.connect(self._sync)
         self._src.currentIndexChanged.connect(self._sync)
 
         f.section("Products")
 
-        def region(check_text, on, a, b):
+        def region(check_text, on, a, b, suffix=""):
             box = QCheckBox(check_text, self)
             box.setChecked(on)
-            rng = RangeEdit(1, 2_000_000_000, opt=False)
-            for x in rng.boxes():
-                x.setFixedWidth(110)
+            rng = RangeEdit(1, 2_000_000_000, opt=False, suffix=suffix)
             rng.set_values(a, b)
             rng.setEnabled(on)
             box.toggled.connect(rng.setEnabled)
-            f.labelled(box, rng)
+            f.switch_row(box, rng)
             return box, rng
 
-        self._use_inc, self._inc = region("Included region", ms.use_included,
+        self._use_inc, self._inc = region("Included region:", ms.use_included,
                                           ms.included_start, ms.included_end or 1)
-        self._use_tgt, self._tgt = region("Target region", ms.use_target, ms.target_start,
+        self._use_tgt, self._tgt = region("Target region:", ms.use_target, ms.target_start,
                                           ms.target_end)
-        self._use_prod, self._prod = region("Product size", ms.use_product_range,
-                                            ms.product_min, ms.product_max)
-        self._use_opt = QCheckBox("Optimal size", self)
+        self._use_prod, self._prod = region("Product size:", ms.use_product_range,
+                                            ms.product_min, ms.product_max, " bp")
+        self._use_opt = QCheckBox("Optimal size:", self)
         self._use_opt.setChecked(ms.use_optimal)
         self._opt = QSpinBox(self)
         self._opt.setRange(1, 1_000_000)
         self._opt.setValue(max(1, ms.optimal_size or 500))
-        self._opt.setFixedWidth(110)
         self._opt.setSuffix(" bp")
-        self._opt.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self._opt.setEnabled(ms.use_optimal)
         self._use_opt.toggled.connect(self._opt.setEnabled)
-        f.labelled(self._use_opt, self._opt, "Optimal product size",
-                   "Sort products by how close they are to this size.")
+        f.switch_row(self._use_opt, self._opt, "Optimal product size",
+                     "Sort products by how close they are to this size.")
 
         f.section("Mismatches")
-        mm_row = QWidget(self)
-        ml = QHBoxLayout(mm_row)
-        ml.setContentsMargins(0, 0, 0, 0)
-        ml.setSpacing(6)
         self._mm = QSpinBox(self)
         self._mm.setRange(0, 10)
         self._mm.setValue(ms.max_mismatches)
-        self._mm.setFixedWidth(_SMALL)
+        f.row("Max mismatches:", self._mm, "Mismatches",
+              "Mismatches a primer may have at a binding site.")
         self._exact = QSpinBox(self)
         self._exact.setRange(0, 15)
         self._exact.setValue(ms.three_prime_exact)
-        self._exact.setFixedWidth(_SMALL)
-        ml.addWidget(self._mm)
-        lab = QLabel("last", self)
-        lab.setEnabled(False)
-        ml.addWidget(lab)
-        ml.addWidget(self._exact)
-        lab2 = QLabel("3′ bases must match", self)
-        lab2.setEnabled(False)
-        ml.addWidget(lab2)
-        mm_row.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        f.row("Maximum mismatches:", mm_row, "Mismatches",
-              "Mismatches a primer may have at a binding site; mismatches in the last 3′ "
-              "bases stop extension, so those must match.", fixed=False)
+        f.row("3′ bases exact:", self._exact, "3′ end",
+              "The last bases at the 3′ end must match: mismatches there stop extension.")
 
         self._thermo_fields = f.section("Tm Calculation")
         self._thermo = ThermoBox(self)
@@ -2099,8 +1762,8 @@ class MapPrimersDialog(_TabbedToolDialog):
         self._genome.set_path(g or None, emit=False)
         self._genome.setEnabled(ms.check_genome)
         self._check_genome.toggled.connect(self._genome.setEnabled)
-        self._genome_fields.append(f.row("Genome:", self._genome, fixed=False))
-        lay.addWidget(body)
+        self._genome_fields.append(f.row("Genome:", self._genome))
+        lay.addWidget(body, 0, Qt.AlignmentFlag.AlignHCenter)
         self._form_main = f
         self._add_page("Map Primers", page)
 
@@ -2122,17 +1785,6 @@ class MapPrimersDialog(_TabbedToolDialog):
                                    self)
         self._annotate.setChecked(ms.annotate)
         rl.addWidget(self._annotate)
-        db_row = QWidget(self)
-        dbl = QHBoxLayout(db_row)
-        dbl.setContentsMargins(0, 4, 0, 0)
-        dbl.setSpacing(6)
-        dbl.addWidget(QLabel("Primer Database:", self))
-        self._db_path = _path_row(self, "Default: the database on this computer",
-                                  "Choose the Primer Database folder", mode="directory")
-        self._db_path.set_path(initial.database_path or None, emit=False)
-        self._db_path.line_edit().editingFinished.connect(self._reload_db)
-        dbl.addWidget(self._db_path, 1)
-        rl.addWidget(db_row)
         process_box, self._show_process, self._close_process = make_process_output_box(
             self, tool_name="primer mapping", checked=initial.show_process_window,
             close_when_finished=initial.close_process_window_when_finished)
@@ -2164,7 +1816,7 @@ class MapPrimersDialog(_TabbedToolDialog):
         return self._db
 
     def _reload_db(self) -> None:
-        p = self._db_path.path()
+        p = self._opts.database_path or None
         try:
             from repeatviewer.backends.primers.inventory import open_database
 
@@ -2194,24 +1846,26 @@ class MapPrimersDialog(_TabbedToolDialog):
 
     def _sync(self, *_a) -> None:
         spec = self._specific.isChecked()
-        only = bool(self._only_names) and not spec and self._src.currentData() != "file"
-        self._form_main.set_visible(self._only_field, only)
+        from_file = self._src.currentData() == "file"
+        only = bool(self._only_names) and not spec and not from_file
+        form = self._form_main
+        form.set_visible(self._only_field, only)
+        form.set_visible(self._only_all_field, only)
         if only:
             names = ", ".join(self._only_names[:6]) + (" …" if len(self._only_names) > 6 else "")
             self._only_label.setText(f"<b>{len(self._only_names)} selected in the Primer "
                                      f"Database</b>: {names}")
-        for w in (self._s_f, self._s_r, self._s_p, self._pairs_only):
-            w.setVisible(not only)
-        self._form_main.set_visible(self._kinds_field, not only)
+        form.set_visible(self._kinds_field, not only)
         for b, fld in ((self._use_f, self._f), (self._use_r, self._r), (self._use_p, self._p)):
             b.setEnabled(spec)
             fld.setEnabled(spec and b.isChecked())
         for w in (self._src, self._s_f, self._s_r, self._s_p, self._pairs_only):
             w.setEnabled(not spec)
-        self._src_file.setEnabled(not spec and self._src.currentData() == "file")
+        form.set_visible(self._src_file_field, from_file)
+        self._src_file.setEnabled(not spec)
         cons = self._test_on.currentData() == pj.TEST_ON_CONSENSUS
-        self._form_main.set_visible(self._cons_field, cons)
-        self._form_main.set_visible(self._cons_gaps_field, cons)
+        form.set_visible(self._cons_field, cons)
+        form.set_visible(self._cons_gaps_field, cons)
         if self.isVisible():
             QTimer.singleShot(0, self._fit)
 
@@ -2254,12 +1908,9 @@ class MapPrimersDialog(_TabbedToolDialog):
         resolved = Path(path).expanduser()
         if not resolved.is_file():
             return False
-        row = self._focused_path_row([self._seq_row, self._src_file, self._genome,
-                                      self._db_path])
+        row = self._focused_path_row([self._seq_row, self._src_file, self._genome])
         if row is not None:
             row.set_path(resolved)
-            if row is self._db_path:
-                self._reload_db()
             return True
         if not _is_fasta(resolved):
             return False
@@ -2301,10 +1952,8 @@ class MapPrimersDialog(_TabbedToolDialog):
         )
 
     def options(self) -> PrimerOptions:
-        db = self._db_path.path()
         return replace(
             self._opts, map=self.map_settings().to_dict(),
-            database_path=str(db) if db else "",
             map_right_click_action=PRIMER_RIGHT_CLICK_RUN,
             show_process_window=self._show_process.isChecked(),
             close_process_window_when_finished=self._close_process.isChecked(),

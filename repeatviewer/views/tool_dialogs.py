@@ -9966,7 +9966,7 @@ _TE_ANN_FEATURE_DETECTION_HELP = (
     "Thresholds (lengths, similarity, TSD / PBS settings, …) are under "
     "<b>Advanced Settings</b> → Feature detection settings. Threads are under "
     "<b>Settings</b> on this page (shared with Similarity annotation). The "
-    "process window is under <b>Options</b>. Tools → TSD search also writes a "
+    "process window is under <b>Options</b>. Tools → Annotate → TSD Search also writes a "
     "clustered text report."
 )
 _TE_ANN_SIMILARITY_HELP = (
@@ -10232,7 +10232,7 @@ class TeAnnotationDialog(QDialog):
                 check.setToolTip(
                     "Target site duplications near putative TE boundaries "
                     "(MSA only). Configure boundaries under Advanced → "
-                    "Feature detection settings / Tools → TSD search."
+                    "Feature detection settings / Tools → Annotate → TSD Search."
                 )
             elif mode == AutoAnnotationMode.PBS:
                 check.setToolTip(

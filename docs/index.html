@@ -272,7 +272,7 @@ h3 { font-size: 21px; line-height: 1.25; letter-spacing: -.01em; margin: 0 0 8px
       <a href="#features">Features</a>
       <a href="#install">Install</a>
       <a href="#faq">Questions</a>
-      <a href="https://github.com/qjiangzhao/RepeatViewer/blob/main/docs/MANUAL.md">Manual</a>
+      <a href="manual/index.html">Manual</a>
       <a class="gh" href="https://github.com/qjiangzhao/RepeatViewer">GitHub</a>
     </nav>
   </div>
@@ -788,15 +788,15 @@ pip install -e .</pre></li>
 
         <div role="tabpanel" id="panel-win" aria-labelledby="tab-win" hidden>
           <ol class="steps">
-            <li><p>Install <a href="https://www.python.org/downloads/">Python 3.10 or later</a> and tick <strong>Add python.exe to PATH</strong>. You also need Microsoft Visual Studio Build Tools with the C++ workload.</p></li>
+            <li><p>Install <a href="https://www.python.org/downloads/">Python 3.10 or later</a> from python.org (not the Python of Rtools, MSYS2 or Git for Windows) and tick <strong>Add python.exe to PATH</strong>. You also need Microsoft Visual Studio Build Tools with the C++ workload.</p></li>
             <li><p>Download the <a href="https://github.com/qjiangzhao/RepeatViewer/archive/refs/heads/main.zip">source ZIP</a>, unzip it into a folder you own (Documents works), and open PowerShell there.</p></li>
             <li><p>Create a virtual environment and install.</p>
-<pre class="code">python -m venv repeatviewer
-.\repeatviewer\Scripts\Activate.ps1
-python -m pip install -U pip
-pip install -e .</pre></li>
+<pre class="code">py -3 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -U pip
+.\.venv\Scripts\python.exe -m pip install -e .</pre>
+<p>Name the environment <code>.venv</code>, never <code>repeatviewer</code>: that is the name of the program's code folder.</p></li>
             <li><p>Start it.</p>
-<pre class="code">repeatviewer</pre></li>
+<pre class="code">.\.venv\Scripts\python.exe RepeatViewer.py</pre></li>
           </ol>
           <p class="meta">Use PowerShell with native Windows Python, not WSL. The <a href="https://github.com/qjiangzhao/RepeatViewer#windows">README</a> covers execution policy and other details.</p>
         </div>
@@ -880,7 +880,7 @@ pip install -e .</pre></li>
   <div class="wrap">
     <span>RepeatViewer, Chair of Molecular Botany, RWTH Aachen University</span>
     <nav aria-label="Footer">
-      <a href="https://github.com/qjiangzhao/RepeatViewer/blob/main/docs/MANUAL.md">User manual</a>
+      <a href="manual/index.html">User manual</a>
       <a href="https://github.com/qjiangzhao/RepeatViewer/issues">Report a bug</a>
       <a href="https://github.com/qjiangzhao/RepeatViewer">Source</a>
     </nav>

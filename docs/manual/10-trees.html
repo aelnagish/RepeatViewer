@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trees · RepeatViewer User Manual</title>
+<link rel="stylesheet" href="manual.css">
+</head><body>
+<header class="topbar"><a class="brand" href="index.html">RepeatViewer <span>User Manual 1.1.0</span></a>
+<input id="search" type="search" placeholder="Search the manual" autocomplete="off">
+<a class="pdf" href="RepeatViewer_User_Manual.pdf">PDF</a></header>
+<div class="layout"><aside class="sidebar"><ol class="toc"><li><a href="01-introduction.html"><span class="num">1</span>Introduction</a></li><li><a href="02-installation.html"><span class="num">2</span>Installation</a></li><li><a href="03-quick-start.html"><span class="num">3</span>Quick start: one curation pass</a></li><li><a href="04-interface.html"><span class="num">4</span>The interface</a></li><li><a href="05-sequences.html"><span class="num">5</span>Sequences</a></li><li><a href="06-annotations.html"><span class="num">6</span>Annotations</a></li><li><a href="07-search.html"><span class="num">7</span>Search</a></li><li><a href="08-alignments.html"><span class="num">8</span>Alignments</a></li><li><a href="09-mapping.html"><span class="num">9</span>Mapping</a></li><li class="current"><a href="10-trees.html"><span class="num">10</span>Trees</a><ul><li><a href="#building-a-tree">10.1 Building a tree</a></li><li><a href="#the-tree-viewer">10.2 The tree viewer</a></li></ul></li><li><a href="11-repeat-analysis.html"><span class="num">11</span>Repeat analysis</a></li><li><a href="12-primers.html"><span class="num">12</span>Primers and PCR</a></li><li><a href="13-automation.html"><span class="num">13</span>Automation</a></li><li><a href="14-settings.html"><span class="num">14</span>Settings</a></li><li><a href="15-reference.html"><span class="num">15</span>Reference</a></li></ol></aside>
+<main id="content"><div id="results" hidden></div><h1 id="trees" class="chapter-title"><span class="chapter-label">Chapter 10</span>Trees</h1>
+<h2 id="building-a-tree"><span class="secnum">10.1</span>Building a tree</h2>
+<p><strong>Tools → Tree</strong> (add the <strong>Tree</strong> button in <strong>File → Setting → Toolbar</strong>)</p>
+<p>Builds a phylogenetic tree from the selected FASTA files; several files are
+combined into one tree. RepeatViewer prepares and checks the input and writes
+the report; established programs do the computing:</p>
+<ul>
+<li><strong>MAFFT</strong> (bundled) aligns input that is not yet aligned.</li>
+<li><strong>IQ-TREE 3</strong> (bundled): maximum likelihood, the default.</li>
+<li><strong>FastME</strong> (minimum evolution, with bootstrap) and <strong>FastTree</strong>
+  (approximate maximum likelihood, for more than about 1,000 sequences): install
+  them yourself (see <a href="02-installation.html#optional-external-programs">Installation</a>).</li>
+</ul>
+<p>If the chosen program is missing, the run stops with an install hint; it never
+falls back silently to a weaker method.</p>
+<figure id="fig-10-1"><img src="img/tree.png" alt="The Tree window, IQ-TREE tab." width="608" loading="lazy"><figcaption><b>Figure 10.1.</b> The Tree window, IQ-TREE tab.</figcaption></figure>
+<p><strong>Tools → Tree → Tree with default parameters</strong> builds with the saved
+settings; <strong>Change Tree parameters</strong> opens the window. The window has a tab per
+program (<strong>IQ-TREE</strong>, <strong>FastME</strong>, <strong>FastTree</strong>) and <strong>Options</strong>.</p>
+<table>
+<thead>
+<tr>
+<th>Section</th>
+<th>Setting</th>
+<th>Default</th>
+<th>Why</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Alignment</td>
+<td>Alignment</td>
+<td>Align with MAFFT</td>
+<td>Input whose sequences all have the same length is used as an alignment as it is</td>
+</tr>
+<tr>
+<td></td>
+<td>Monomers: rotate satellite monomers to a common start</td>
+<td>off</td>
+<td>Satellite monomers cut from arrays start at different points of the repeat; rotating them first avoids false differences</td>
+</tr>
+<tr>
+<td></td>
+<td>Skip fragments</td>
+<td>70 % of the median length</td>
+<td>Shorter sequences (often 5′-truncated copies) are left out, listed in the report and saved to <code>.excluded.fa</code>. A grey line says how many. Use "of the longest" for monomers</td>
+</tr>
+<tr>
+<td>Settings</td>
+<td>Branch support</td>
+<td>SH-aLRT + UFBoot, 1000 each</td>
+<td>Shown as SH-aLRT/UFBoot; commonly trusted at 80 / 95 and above</td>
+</tr>
+<tr>
+<td></td>
+<td>Model</td>
+<td>ModelFinder, best by BIC</td>
+<td>The chosen model is named in the report</td>
+</tr>
+<tr>
+<td></td>
+<td>Methylation check</td>
+<td>Off</td>
+<td>Also build a tree without CG (or CG and CHG) positions and compare (see below)</td>
+</tr>
+<tr>
+<td></td>
+<td>Root</td>
+<td>Unrooted</td>
+<td>Or an <strong>Outgroup…</strong> (tick one or more sequences), or midpoint</td>
+</tr>
+<tr>
+<td></td>
+<td>Threads</td>
+<td>Settings value</td>
+<td>IQ-TREE picks the best number up to this</td>
+</tr>
+<tr>
+<td></td>
+<td>Fast search (<code>--fast</code>)</td>
+<td>off</td>
+<td>Quicker IQ-TREE search, for large sets</td>
+</tr>
+<tr>
+<td>Advanced</td>
+<td>MAFFT strategy, adjust direction, <code>--op</code> / <code>--ep</code>, independent searches (5), random seed (12345)</td>
+<td></td>
+<td>Several IQ-TREE searches are run and the best kept; the report says how many found the same tree. The seed is recorded so the run can be repeated exactly</td>
+</tr>
+</tbody>
+</table>
+<p>The <strong>?</strong> buttons next to the strategy, method and model explain the choices.
+Options that do not apply are greyed out.</p>
+<h3 id="input-checks">Input checks</h3>
+<ul>
+<li>Copies from the other strand are turned around before aligning (<strong>adjust
+  direction</strong>), so they do not look extremely divergent.</li>
+<li>Pairs of sequences that share almost no aligned positions stop distance
+  methods; other problems give warnings. If the median difference between
+  sequences is 50 % or more, the report asks whether the input is related at
+  all.</li>
+</ul>
+<h3 id="methylation-check">Methylation check</h3>
+<p>In plant repeats, cytosines in CG and CHG context are often methylated and
+mutate to T much faster than other positions. Such changes can group sequences
+by methylation history instead of descent. With <strong>Methylation check</strong> on,
+RepeatViewer also builds a tree without those positions (<code>_masked.treefile</code>),
+compares the two trees (normalised Robinson–Foulds distance) and lists the
+well-supported groups that change.</p>
+<h3 id="what-is-written">What is written</h3>
+<p>Like every tool, only the main result goes next to the input:</p>
+<table>
+<thead>
+<tr>
+<th>File</th>
+<th>Contents</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>&lt;input&gt;_iqtree.treefile</code></td>
+<td>The tree (Newick with support values), for FigTree, iTOL or ggtree. Opens in the tree viewer</td>
+</tr>
+<tr>
+<td><code>&lt;input&gt;_iqtree_details/</code></td>
+<td>Report (<code>_report.html</code>), alignment (<code>.aln.fa</code>), IQ-TREE report and log, names table (<code>.names.tsv</code>: tree names and original FASTA headers), methods paragraph with references (<code>_methods.txt</code>), program versions and command lines (<code>_commands.txt</code>)</td>
+</tr>
+</tbody>
+</table>
+<p>The engine is part of the name (<code>_iqtree</code>, <code>_fastme</code>, <code>_fasttree</code>); rotated or
+methylation-checked runs add <code>_rot</code>, <code>_cg</code> or <code>_cgchg</code>. A second run writes
+<code>_2</code>. If a run fails, nothing half-finished is left and the full log is saved
+as <code>&lt;input&gt;_iqtree_failed.log</code>, ready to send with a bug report.</p>
+<h2 id="the-tree-viewer"><span class="secnum">10.2</span>The tree viewer</h2>
+<p>A tree file (<code>.treefile</code>, <code>.nwk</code>, <code>.newick</code>, <code>.tree</code>) opens in the tree viewer.
+After a run the new tree opens there.</p>
+<figure id="fig-10-2"><img src="img/tree_options.png" alt="The tree viewer with the Layout, Tip names and Colour tips sections open." width="994" loading="lazy"><figcaption><b>Figure 10.2.</b> The tree viewer with the Layout, Tip names and Colour tips sections open.</figcaption></figure>
+<p>The bar above the tree has − / + and slider (zoom), <strong>Fit</strong> and <strong>Export</strong>
+(figure as SVG, PDF or PNG). Shift + scroll zooms; double-click empty space
+fits.</p>
+<h3 id="display-panel">Display panel</h3>
+<table>
+<thead>
+<tr>
+<th>Section</th>
+<th>Settings</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Layout</td>
+<td><strong>Layout</strong> (rectangular, circular, radial…), <strong>Order</strong> (as in file, or ladderized), <strong>Branches</strong> (proportional, equal, square root: changes only the drawing), <strong>Spread</strong> (space between tips), <strong>Angle</strong> (rotation of circular and radial trees), <strong>Flip</strong></td>
+</tr>
+<tr>
+<td>Tip names</td>
+<td><strong>Show</strong>, <strong>Align</strong> (all names on one line, with dotted leaders), <strong>Text</strong> (name, or name plus a trait), <strong>Max</strong> length (shorten long names from the end or the start), <strong>Font</strong></td>
+</tr>
+<tr>
+<td>Branches</td>
+<td>Support or length labels, digits, font, line weight, <strong>Hide crowded</strong> labels, <strong>Hide zeros</strong></td>
+</tr>
+<tr>
+<td>Collapse</td>
+<td>Collapse clades with low support, or whose tips are closer than a distance (display only)</td>
+</tr>
+<tr>
+<td>Colour tips</td>
+<td><strong>By</strong> a trait column; <strong>Trait table</strong> (create, reload, open in a spreadsheet app)</td>
+</tr>
+<tr>
+<td>Scale bar</td>
+<td>Show, length, font</td>
+</tr>
+<tr>
+<td>Statistics</td>
+<td>Tips, internal nodes, tree depth; <strong>Open run report</strong></td>
+</tr>
+</tbody>
+</table>
+<p>All view settings are saved with the tree (in a hidden <code>.view.json</code> next to it)
+and used in exported figures.</p>
+<h3 id="trait-table">Trait table</h3>
+<p>Tips can be coloured by any property: chromosome, array, subfamily,
+methylation level, FISH signal. <strong>Colour tips → Trait table → Create or
+update…</strong> writes <code>&lt;tree&gt;_traits.tsv</code> next to the tree (first column <code>name</code>).
+For trees built by RepeatViewer it is filled from the FASTA headers:
+<code>chromosome</code>, <code>start</code>, <code>end</code>, <code>strand</code>, <code>array</code> (copies closer than 10 kb), and
+optionally <code>methylation</code> from a Bismark <code>.cov</code> or modkit bedMethyl file. Add
+your own columns in a spreadsheet; they are kept when the table is updated.</p>
+<h3 id="editing">Editing</h3>
+<p>Click a branch to select a clade, or drag over tip names (⌘ adds to the
+selection). <strong>Edit</strong> (bottom of the panel), and right-click on the tree, offer:</p>
+<ul>
+<li><strong>Reroot on this clade</strong>, <strong>Midpoint root</strong>: support values stay on their
+  branches.</li>
+<li><strong>Swap branches</strong>, <strong>Collapse clade</strong> / <strong>Expand clade</strong>, <strong>Show only this
+  clade</strong>, <strong>Back to full tree</strong>, <strong>Expand all</strong>.</li>
+<li><strong>Colour clade…</strong>, <strong>Remove colour</strong>, <strong>Remove all colours</strong>.</li>
+<li><strong>Extract sequences</strong> of a clade (without gaps, or as aligned).</li>
+<li><strong>Show in alignment</strong> (also a double-click on a tip): opens the alignment the
+  tree was built from at that sequence.</li>
+<li><strong>Copy name</strong>, <strong>Copy original header</strong>.</li>
+<li><strong>Save tree (.treefile)</strong>, <strong>Distance matrix…</strong> (patristic distances from the
+  tree, or p-distances from the alignment; copy or save as TSV), <strong>Copy
+  Newick</strong>.</li>
+<li><strong>Undo</strong> / <strong>Redo</strong> (<strong>⌘Z</strong> / <strong>⇧⌘Z</strong>).</li>
+</ul>
+<p>The <strong>Find</strong> tab searches tip names and trait values and selects the hits.</p>
+<h3 id="the-report">The report</h3>
+<figure id="fig-10-3"><img src="img/tree_report.png" alt="The tree report: the tree, run details, warnings, methods text and citations." width="994" loading="lazy"><figcaption><b>Figure 10.3.</b> The tree report: the tree, run details, warnings, methods text and citations.</figcaption></figure>
+<p>The run report (<code>_report.html</code> in the details folder; <strong>Statistics → Open run
+report</strong>) shows the tree, the input and alignment numbers, the model, support
+and rooting, warnings, a methods paragraph you can paste into a paper, and the
+references to cite.</p><nav class="pager"><a class="prev" href="09-mapping.html"><small>Previous</small>Mapping</a><a class="next" href="11-repeat-analysis.html"><small>Next</small>Repeat analysis</a></nav></main></div>
+<script src="search_index.js"></script><script src="manual.js"></script>
+</body></html>

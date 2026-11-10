@@ -1,4 +1,4 @@
-"""Tools > Primers and Probes > PCR, Gel, Binding Sites, Bench Card for ``MainWindow``."""
+"""Tools > Primers and Probes > PCR (with gel, binding sites, bench card) for ``MainWindow``."""
 
 from __future__ import annotations
 
@@ -91,11 +91,8 @@ class PcrActionsMixin:
     # ------------------------------------------------------------- menu
 
     def _populate_pcr_menu_items(self, menu) -> None:
-        menu.addSeparator()
-        a = menu.addAction("PCR", lambda: self._open_pcr_window())
+        a = menu.addAction("In-silico PCR", lambda: self._open_pcr_window())
         a.setToolTip("In-silico PCR: products of the primers on the selected sequences")
-        a = menu.addAction("Binding Sites on Chromosomes", lambda: self._open_primer_genome_view([]))
-        a.setToolTip("Where primers bind across a genome, per chromosome")
 
     # ------------------------------------------------------------- PCR window
 
@@ -144,6 +141,8 @@ class PcrActionsMixin:
         win.openFileRequested.connect(
             lambda path, w=win: (self._step_aside(w), self._on_preview_open_requested(path)))
         win.benchCardRequested.connect(self._open_bench_card)
+        win.sitesRequested.connect(
+            lambda prims, genome, w=win: self._open_primer_genome_view(prims, genome=genome, parent=w))
 
         def _closed(*_a) -> None:
             if self._pcr_window is win:
@@ -300,19 +299,20 @@ class PcrActionsMixin:
 
     # ------------------------------------------------------------- genome view, bench card
 
-    def _open_primer_genome_view(self, primers: list) -> None:
+    def _open_primer_genome_view(self, primers: list, *, genome=None, parent=None) -> None:
+        """Binding Sites window: from the PCR window (Sites in Genome…) or the Primers tab."""
         if not self._primers_ready():
             return
         from repeatviewer.views.primer_genome_dialog import PrimerGenomeDialog
 
-        genome = None
-        try:
-            genome = self._genome_path_resolved()
-        except Exception:  # noqa: BLE001
-            genome = None
+        if genome is None:
+            try:
+                genome = self._genome_path_resolved()
+            except Exception:  # noqa: BLE001
+                genome = None
         if not primers:
             primers = self._primers_of_files(self._pcr_template_candidates())
-        dlg = PrimerGenomeDialog(primers, genome=genome, parent=self)
+        dlg = PrimerGenomeDialog(primers, genome=genome, parent=parent or self)
         dlg.setWindowFlag(Qt.WindowType.Tool, True)
         dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         dlg.fileWritten.connect(lambda p: self._show_new_output(Path(p)))

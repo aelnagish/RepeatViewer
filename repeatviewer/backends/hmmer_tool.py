@@ -78,7 +78,7 @@ def resolve_hmm_database(
                 "and enable the HMM checkbox for a .hmm / Dfam profile."
             )
         raise RuntimeError(
-            "Select an HMM database in Tools → HMMER → Change HMMER parameters."
+            "Select an HMM database in Tools → Search → HMMER → Change HMMER parameters."
         )
     for db in hmm_dbs:
         if db.name == wanted:

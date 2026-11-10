@@ -3182,14 +3182,10 @@ def save_map_options(opts: MapOptions) -> None:
 # --------------------------------------------------------------------------
 
 PRIMER_DIALOG_TAB_PRIMERS = "primers"
-PRIMER_DIALOG_TAB_REGIONS = "regions"
-PRIMER_DIALOG_TAB_SPECIFICITY = "specificity"
 PRIMER_DIALOG_TAB_CHORUS2 = "chorus2"
 PRIMER_DIALOG_TAB_SELECTION = "selection"
 PRIMER_DIALOG_TABS = (
     PRIMER_DIALOG_TAB_PRIMERS,
-    PRIMER_DIALOG_TAB_REGIONS,
-    PRIMER_DIALOG_TAB_SPECIFICITY,
     PRIMER_DIALOG_TAB_CHORUS2,
     PRIMER_DIALOG_TAB_SELECTION,
     DIALOG_TAB_OPTIONS,

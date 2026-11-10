@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Automation · RepeatViewer User Manual</title>
+<link rel="stylesheet" href="manual.css">
+</head><body>
+<header class="topbar"><a class="brand" href="index.html">RepeatViewer <span>User Manual 1.1.0</span></a>
+<input id="search" type="search" placeholder="Search the manual" autocomplete="off">
+<a class="pdf" href="RepeatViewer_User_Manual.pdf">PDF</a></header>
+<div class="layout"><aside class="sidebar"><ol class="toc"><li><a href="01-introduction.html"><span class="num">1</span>Introduction</a></li><li><a href="02-installation.html"><span class="num">2</span>Installation</a></li><li><a href="03-quick-start.html"><span class="num">3</span>Quick start: one curation pass</a></li><li><a href="04-interface.html"><span class="num">4</span>The interface</a></li><li><a href="05-sequences.html"><span class="num">5</span>Sequences</a></li><li><a href="06-annotations.html"><span class="num">6</span>Annotations</a></li><li><a href="07-search.html"><span class="num">7</span>Search</a></li><li><a href="08-alignments.html"><span class="num">8</span>Alignments</a></li><li><a href="09-mapping.html"><span class="num">9</span>Mapping</a></li><li><a href="10-trees.html"><span class="num">10</span>Trees</a></li><li><a href="11-repeat-analysis.html"><span class="num">11</span>Repeat analysis</a></li><li><a href="12-primers.html"><span class="num">12</span>Primers and PCR</a></li><li class="current"><a href="13-automation.html"><span class="num">13</span>Automation</a><ul><li><a href="#workflows">13.1 Workflows</a></li><li><a href="#plugins">13.2 Plugins</a></li><li><a href="#command-wrappers">13.3 Command wrappers</a></li><li><a href="#command-line">13.4 Command line</a></li></ul></li><li><a href="14-settings.html"><span class="num">14</span>Settings</a></li><li><a href="15-reference.html"><span class="num">15</span>Reference</a></li></ol></aside>
+<main id="content"><div id="results" hidden></div><h1 id="automation" class="chapter-title"><span class="chapter-label">Chapter 13</span>Automation</h1>
+<h2 id="workflows"><span class="secnum">13.1</span>Workflows</h2>
+<p><strong>Workflows → Design and manage your workflows</strong></p>
+<p>A workflow chains tools so that a multi-step pass runs as one action. If you
+always follow BLAST with MSA Extend and Align, make it a workflow and run it on
+many files at once. Each step uses that tool's saved settings, so set the
+parameters in the tool's own window first.</p>
+<figure id="fig-13-1"><img src="img/workflows.png" alt="The workflow designer with the built-in Blast-Extract-Extend-Align workflow." width="720" loading="lazy"><figcaption><b>Figure 13.1.</b> The workflow designer with the built-in Blast-Extract-Extend-Align workflow.</figcaption></figure>
+<ul>
+<li>The list on the left holds your workflows. <strong>New</strong>, <strong>Rename</strong>,
+  <strong>Duplicate</strong> and <strong>Delete</strong> manage them. <strong>Blast-Extract-Extend-Align
+  (BEEA)</strong> is built in.</li>
+<li>The right side lists the steps in the order they run. Add steps from the
+  <strong>Sequences</strong>, <strong>Tools</strong> and <strong>Plugins</strong> menus; <strong>Remove</strong> deletes the
+  selected step.</li>
+<li>Tick a step to keep its output files after the workflow finishes; unticked
+  intermediate files are removed. The last step's result is always kept.</li>
+<li><strong>Save</strong> stores the workflow. It then appears in the <strong>Workflows</strong> menu: select
+  files and choose it to run.</li>
+</ul>
+<p>Steps only connect when the output of one fits the input of the next (for
+example, BLAST makes FASTA that Align takes). Tools that make reports or plots
+(TE-Aid, Dotplot) end a workflow. Steps that need the genome do not run until a
+reference genome is set.</p>
+<h2 id="plugins"><span class="secnum">13.2</span>Plugins</h2>
+<p><strong>Tools → Plugin (Beta) → Manage plugin</strong></p>
+<p>Plugins add tools written in Python that use the same file selection, progress
+bar and output highlighting as the built-in ones. A plugin receives the
+selected files and the project (genome, databases, thread count) and returns
+the files it made.</p>
+<p><strong>Add</strong> installs a plugin package: a folder with a <code>pyproject.toml</code>, or a
+<code>.whl</code> file. Installed plugins appear under <strong>Tools → Plugin (Beta)</strong> and can be
+put on the toolbar.</p>
+<p>See <a href="https://github.com/qjiangzhao/RepeatViewer/blob/main/docs/PLUGINS.md">PLUGINS.md</a> for the programming interface and
+<a href="https://github.com/qjiangzhao/RepeatViewer/blob/main/docs/PLUGINS_TE_BENCHMARK.md">PLUGINS_TE_BENCHMARK.md</a> for a worked example;
+example plugins are in the repository's <code>examples/</code> folder.</p>
+<h2 id="command-wrappers"><span class="secnum">13.3</span>Command wrappers</h2>
+<p><strong>Tools → Command wrapper → Manage wrapper</strong></p>
+<p>A command wrapper turns any command line you use often into a RepeatViewer
+tool, without writing code. Click <strong>New</strong>, give the wrapper a unique name, an
+optional tooltip, and the command, using these placeholders:</p>
+<table>
+<thead>
+<tr>
+<th>Placeholder</th>
+<th>Filled with</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>${RV_INPUT}</code></td>
+<td>Full path of the first selected file</td>
+</tr>
+<tr>
+<td><code>${RV_INPUTS}</code></td>
+<td>Full paths of all selected files, separated by spaces</td>
+</tr>
+<tr>
+<td><code>${RV_GENOME}</code></td>
+<td>Full path of the reference genome (empty if none)</td>
+</tr>
+<tr>
+<td><code>${RV_FOLDER}</code></td>
+<td>The folder shown in the Files panel</td>
+</tr>
+<tr>
+<td><code>${RV_OUTDIR}</code></td>
+<td>Where to write: the folder of the selected file</td>
+</tr>
+<tr>
+<td><code>${RV_STEM}</code></td>
+<td>File name without its last extension (<code>TE123.fasta</code> → <code>TE123</code>)</td>
+</tr>
+<tr>
+<td><code>${RV_NAME}</code></td>
+<td>File name with its extension</td>
+</tr>
+</tbody>
+</table>
+<p>Example:</p>
+<pre><code>blastn -query ${RV_INPUT} -db ${RV_GENOME} -out ${RV_OUTDIR}/${RV_STEM}_b.txt -evalue 1e-5 -outfmt 6
+</code></pre>
+<p>You can also define your own variables (shown as fields when the wrapper
+runs) and declare which output files the command makes, so they are
+highlighted and opened like the outputs of built-in tools. Wrappers appear
+under <strong>Tools → Command wrapper</strong> and can go on the toolbar.</p>
+<figure id="fig-13-2"><img src="img/wrappers.png" alt="The command wrapper manager." width="640" loading="lazy"><figcaption><b>Figure 13.2.</b> The command wrapper manager.</figcaption></figure>
+<h2 id="command-line"><span class="secnum">13.4</span>Command line</h2>
+<pre><code class="language-bash">repeatviewer [-i FOLDER] [-g GENOME.fa]
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>-i</code>, <code>--input-dir</code></td>
+<td>Folder to open at start</td>
+</tr>
+<tr>
+<td><code>-g</code>, <code>--genome</code></td>
+<td>Reference genome FASTA</td>
+</tr>
+<tr>
+<td><code>--version</code></td>
+<td>Print the version and quit</td>
+</tr>
+</tbody>
+</table>
+<p>From a source folder, <code>python RepeatViewer.py</code> works too. Folders, layout,
+genome and settings are remembered between sessions, so the options are for
+scripted or repeated launches.</p><nav class="pager"><a class="prev" href="12-primers.html"><small>Previous</small>Primers and PCR</a><a class="next" href="14-settings.html"><small>Next</small>Settings</a></nav></main></div>
+<script src="search_index.js"></script><script src="manual.js"></script>
+</body></html>

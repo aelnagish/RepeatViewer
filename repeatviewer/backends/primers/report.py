@@ -290,29 +290,6 @@ def methods_text(d: dict) -> str:
             f"{s.get('tm_min')}–{s.get('tm_max')} °C (optimum {s.get('tm_opt')} °C), GC "
             f"{s.get('gc_min')}–{s.get('gc_max')} %, products {s.get('product_min')}–"
             f"{s.get('product_max')} bp; {d.get('thermo', '')}.")
-    if d.get("mode") in ("bsp", "msp"):
-        plant = s.get("methylation_system", "plant") == "plant"
-        ctx = "CG and CHG" if plant else "CG"
-        text += (f" Primers were designed on the in silico bisulfite-converted "
-                 f"{s.get('bisulfite_strand', 'top')} strand; C in {ctx} context was treated "
-                 f"as possibly methylated ({'plant' if plant else 'animal'} model)")
-        if d.get("mode") == "msp":
-            text += f", and MSP primer 3′ ends were placed on {s.get('msp_context', 'CG')} sites."
-        else:
-            text += " and kept out of the primers."
-    masked = [t for t in d.get("templates", []) if t.get("mask_sources")]
-    if masked:
-        kinds = sorted({k for t in masked for k in t["mask_sources"]})
-        text += f" Primers were kept out of {', '.join(kinds)}."
-    if s.get("mispriming_library"):
-        text += f" Mispriming was checked against {Path(s['mispriming_library']).name}."
-    if d.get("genome"):
-        g = d["genome"]
-        text += (f" Specificity was checked against {Path(g.get('genome', '')).name} "
-                 f"(≤ {s.get('genome_max_mismatches')} mismatches, last "
-                 f"{s.get('genome_three_prime_exact')} bases exact"
-                 + (f", {g.get('seed')}-nt 3′ seeds" if g.get("seeded") else "")
-                 + f", products ≤ {s.get('genome_max_product')} bp).")
     return text
 
 
@@ -327,14 +304,6 @@ def write_report(path: Path, d: dict) -> Path:
                ("Engine", d.get("engine", "")), ("Conditions", d.get("thermo", ""))]
     if d.get("mode_label"):
         details.insert(1, ("Mode", d["mode_label"]))
-    for t in d.get("templates", [])[:6]:
-        if t.get("mask_sources"):
-            parts = ", ".join(f"{k} {v:,} bp" for k, v in t["mask_sources"].items())
-            details.append((f"Masked in {t['id']}", parts))
-    info = d.get("info") or {}
-    if info.get("rows"):
-        details.append(("Alignment", f"{info['rows']} sequences, {info.get('columns', 0)} "
-                                     f"well-covered columns, {info.get('targets', 0)} targets"))
     detail_html = "".join(f"<tr><th>{e(k)}</th><td>{e(str(v))}</td></tr>" for k, v in details if v)
     gel = d.get("gel") or {}
     gel_html = ""
