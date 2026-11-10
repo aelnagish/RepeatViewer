@@ -614,16 +614,21 @@ class PcrWindow(QDialog):
         self.table.setItemDelegateForColumn(5, _YieldDelegate(self.table))
         ml.addWidget(self.table, 1)
         actions = QHBoxLayout()
-        self.gel_button = QPushButton("Open in a Gel", mid)
-        self.products_button = QPushButton("Open Products File", mid)
-        self.table_button = QPushButton("Show Table (TSV)", mid)
-        self.bench_button = QPushButton("Bench Card…", mid)
-        self.sites_button = QPushButton("Sites in Genome…", mid)
+        self.gel_button = QPushButton("Gel", mid)
+        self.gel_button.setToolTip("Open the products in a gel document you can edit and save")
+        self.products_button = QPushButton("Products File", mid)
+        self.products_button.setToolTip("Open the FASTA file with the product sequences")
+        self.table_button = QPushButton("Table", mid)
+        self.table_button.setToolTip("Open the products table (TSV)")
+        self.bench_button = QPushButton("Bench Card", mid)
+        self.bench_button.setToolTip("Mastermix, PCR program and expected gel for the bench")
+        self.sites_button = QPushButton("Sites in Genome", mid)
         self.sites_button.setToolTip(
             "Every place each primer binds in a genome (by default the first template), "
             "per chromosome. Useful for probes and single primers: no partner primer needed.")
         for b in (self.gel_button, self.products_button, self.table_button, self.bench_button,
                   self.sites_button):
+            b.setMinimumWidth(b.sizeHint().width())     # never cut the label (Mac fonts are wider)
             actions.addWidget(b)
         actions.addStretch(1)
         ml.addLayout(actions)
@@ -667,13 +672,12 @@ class PcrWindow(QDialog):
         self.run_button.clicked.connect(self._run)
         self.lane_combo.currentIndexChanged.connect(lambda _i: self._fill_table())
         self.table.itemSelectionChanged.connect(self._on_row)
-        self.gel_button.clicked.connect(lambda: self._result and self.openGelRequested.emit(self._result))
-        self.products_button.clicked.connect(self._open_products)
-        self.table_button.clicked.connect(self._open_table)
-        self.bench_button.clicked.connect(lambda: self._result and self.benchCardRequested.emit(self._result))
-        self.sites_button.clicked.connect(
-            lambda: self._primers and self.sitesRequested.emit(
-                list(self._primers), self._templates[0] if self._templates else None))
+        self._pending_action = ""
+        self.gel_button.clicked.connect(lambda: self._after_run("gel"))
+        self.products_button.clicked.connect(lambda: self._after_run("products"))
+        self.table_button.clicked.connect(lambda: self._after_run("table"))
+        self.bench_button.clicked.connect(lambda: self._after_run("bench"))
+        self.sites_button.clicked.connect(self._open_sites)
         self.copy_button.clicked.connect(self._copy_product)
         self.gel.laneClicked.connect(self._on_gel_lane)
 
@@ -737,7 +741,6 @@ class PcrWindow(QDialog):
             item.setToolTip(p.sequence)
             self.primers_list.addItem(item)
         self.run_button.setEnabled(bool(self._templates) and bool(self._primers))
-        self.sites_button.setEnabled(bool(self._primers))
 
     def apply_path_from_panel(self, path: Path) -> bool:
         from repeatviewer.primer_actions import is_primer_fasta
@@ -801,10 +804,11 @@ class PcrWindow(QDialog):
         self._result = result
         self._outputs = dict(outputs or {})
         has = result is not None
-        for b in (self.gel_button, self.bench_button):
-            b.setEnabled(has)
-        self.products_button.setEnabled(bool(self._outputs.get("fasta")))
-        self.table_button.setEnabled(bool(self._outputs.get("details")))
+        pending, self._pending_action = self._pending_action, ""
+        if has and pending:
+            from PySide6.QtCore import QTimer
+
+            QTimer.singleShot(0, lambda a=pending: self._do_action(a))
         self.copy_button.setEnabled(False)
         self.lane_combo.blockSignals(True)
         self.lane_combo.clear()
@@ -906,6 +910,45 @@ class PcrWindow(QDialog):
         p = getattr(self, "_current_product", None)
         if p is not None and p.sequence:
             QApplication.clipboard().setText(f">{p.forward}+{p.reverse}_{p.size}bp\n{p.sequence}\n")
+
+    def _missing(self, need_templates: bool = True) -> bool:
+        miss = []
+        if need_templates and not self._templates:
+            miss.append("a template (click a FASTA file in the Files panel)")
+        if not self._primers:
+            miss.append("primers")
+        if miss:
+            self.summary.setText(f"<b>Add {' and '.join(miss)} first</b>")
+            return True
+        return False
+
+    def _after_run(self, action: str) -> None:
+        """Gel / Products / Table / Bench Card: run the PCR first when there is no result."""
+        if self._result is not None:
+            self._do_action(action)
+            return
+        if self._missing():
+            return
+        self._pending_action = action
+        self._run()
+
+    def _do_action(self, action: str) -> None:
+        if self._result is None:
+            return
+        if action == "gel":
+            self.openGelRequested.emit(self._result)
+        elif action == "bench":
+            self.benchCardRequested.emit(self._result)
+        elif action == "products":
+            self._open_products()
+        elif action == "table":
+            self._open_table()
+
+    def _open_sites(self) -> None:
+        if self._missing(need_templates=False):
+            return
+        self.sitesRequested.emit(list(self._primers),
+                                 self._templates[0] if self._templates else None)
 
     def _open_products(self) -> None:
         f = self._outputs.get("fasta")
