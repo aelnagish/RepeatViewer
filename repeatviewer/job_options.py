@@ -1346,6 +1346,110 @@ def save_hmmer_options(opts: HmmerOptions) -> None:
     )
 
 
+# Tools → samtools (Sort / Index / Convert)
+SAMTOOLS_OP_SORT = "sort"
+SAMTOOLS_OP_INDEX = "index"
+SAMTOOLS_OP_CONVERT = "convert"
+SAMTOOLS_OPERATIONS = (SAMTOOLS_OP_SORT, SAMTOOLS_OP_INDEX, SAMTOOLS_OP_CONVERT)
+SAMTOOLS_DIALOG_TABS = SAMTOOLS_OPERATIONS + (DIALOG_TAB_OPTIONS,)
+DEFAULT_SAMTOOLS_INDEX_AFTER_SORT = True
+DEFAULT_SAMTOOLS_USE_SYSTEM = True
+# Convert tab: samtools view rewrites among these (input auto-detected).
+SAMTOOLS_CONVERT_BAM = "bam"
+SAMTOOLS_CONVERT_SAM = "sam"
+SAMTOOLS_CONVERT_CRAM = "cram"
+SAMTOOLS_CONVERT_FORMATS = (
+    SAMTOOLS_CONVERT_BAM,
+    SAMTOOLS_CONVERT_SAM,
+    SAMTOOLS_CONVERT_CRAM,
+)
+DEFAULT_SAMTOOLS_CONVERT_FORMAT = SAMTOOLS_CONVERT_BAM
+
+
+@dataclass
+class SamtoolsOptions:
+    """Tools → samtools: Sort, Index, Convert (Win-NGS on Windows, pysam elsewhere)."""
+
+    operation: str = SAMTOOLS_OP_SORT
+    num_threads: int = field(default_factory=_default_tool_threads)
+    index_after_sort: bool = DEFAULT_SAMTOOLS_INDEX_AFTER_SORT
+    convert_format: str = DEFAULT_SAMTOOLS_CONVERT_FORMAT
+    input_source: str = ALIGN_INPUT_SELECTED
+    input_paths: list[str] = field(default_factory=list)
+    last_dialog_tab: str = SAMTOOLS_OP_SORT
+    show_process_window: bool = DEFAULT_SHOW_PROCESS_WINDOW
+    close_process_window_when_finished: bool = DEFAULT_CLOSE_PROCESS_WINDOW_WHEN_FINISHED
+    use_system_samtools: bool = DEFAULT_SAMTOOLS_USE_SYSTEM
+    samtools_path: str = ""
+
+
+def _normalize_samtools_operation(raw: object) -> str:
+    value = str(raw or SAMTOOLS_OP_SORT).strip().lower()
+    if value in SAMTOOLS_OPERATIONS:
+        return value
+    return SAMTOOLS_OP_SORT
+
+
+def _normalize_samtools_convert_format(raw: object) -> str:
+    value = str(raw or DEFAULT_SAMTOOLS_CONVERT_FORMAT).strip().lower()
+    if value in SAMTOOLS_CONVERT_FORMATS:
+        return value
+    return DEFAULT_SAMTOOLS_CONVERT_FORMAT
+
+
+def load_samtools_options() -> SamtoolsOptions:
+    v = _load_settings_group("samtools")
+    tab = str(v.get("last_dialog_tab", SAMTOOLS_OP_SORT))
+    if tab not in SAMTOOLS_DIALOG_TABS:
+        tab = SAMTOOLS_OP_SORT
+    op = _normalize_samtools_operation(v.get("operation", tab))
+    return SamtoolsOptions(
+        operation=op,
+        num_threads=max(1, int(v.get("num_threads", _default_tool_threads()))),
+        index_after_sort=_to_bool(
+            v.get("index_after_sort"), DEFAULT_SAMTOOLS_INDEX_AFTER_SORT
+        ),
+        convert_format=_normalize_samtools_convert_format(v.get("convert_format")),
+        input_source=ALIGN_INPUT_SELECTED,
+        input_paths=[],
+        last_dialog_tab=tab if tab != DIALOG_TAB_OPTIONS else op,
+        show_process_window=_to_bool(
+            v.get("show_process_window"), DEFAULT_SHOW_PROCESS_WINDOW
+        ),
+        close_process_window_when_finished=_to_bool(
+            v.get("close_process_window_when_finished"),
+            DEFAULT_CLOSE_PROCESS_WINDOW_WHEN_FINISHED,
+        ),
+        use_system_samtools=_to_bool(
+            v.get("use_system_samtools"), DEFAULT_SAMTOOLS_USE_SYSTEM
+        ),
+        samtools_path=str(v.get("samtools_path", "") or "").strip(),
+    )
+
+
+def save_samtools_options(opts: SamtoolsOptions) -> None:
+    op = _normalize_samtools_operation(opts.operation)
+    tab = opts.last_dialog_tab
+    if tab not in SAMTOOLS_DIALOG_TABS:
+        tab = op
+    _save_settings_group(
+        "samtools",
+        {
+            "operation": op,
+            "num_threads": max(1, int(opts.num_threads)),
+            "index_after_sort": bool(opts.index_after_sort),
+            "convert_format": _normalize_samtools_convert_format(opts.convert_format),
+            "last_dialog_tab": tab,
+            "show_process_window": bool(opts.show_process_window),
+            "close_process_window_when_finished": bool(
+                opts.close_process_window_when_finished
+            ),
+            "use_system_samtools": bool(opts.use_system_samtools),
+            "samtools_path": str(opts.samtools_path or "").strip(),
+        },
+    )
+
+
 def save_blast_options(opts: BlastOptions) -> None:
     _save_settings_group(
         "blast",
@@ -2926,6 +3030,9 @@ class MapOptions:
     save_variants: bool = True
     lift_annotations: bool = True
     max_display_reads: int = 2000
+    # After SAM output: sort+index with samtools/pysam (disabled for minimap2 PAF).
+    sort_and_index_sam: bool = False
+    delete_sam_after_sort_index: bool = False
     # Options tab
     right_click_action: str = MAP_RIGHT_CLICK_RUN
     show_process_window: bool = DEFAULT_SHOW_PROCESS_WINDOW
@@ -3003,6 +3110,10 @@ def load_map_options() -> MapOptions:
         save_variants=_to_bool(v.get("save_variants"), d.save_variants),
         lift_annotations=_to_bool(v.get("lift_annotations"), d.lift_annotations),
         max_display_reads=_num("max_display_reads", d.max_display_reads, int, 50, 100_000),
+        sort_and_index_sam=_to_bool(v.get("sort_and_index_sam"), d.sort_and_index_sam),
+        delete_sam_after_sort_index=_to_bool(
+            v.get("delete_sam_after_sort_index"), d.delete_sam_after_sort_index
+        ),
         right_click_action=_pick("right_click_action", MAP_RIGHT_CLICK_ACTIONS,
                                  d.right_click_action),
         show_process_window=_to_bool(v.get("show_process_window"), d.show_process_window),
@@ -3054,6 +3165,8 @@ def save_map_options(opts: MapOptions) -> None:
             "save_variants": opts.save_variants,
             "lift_annotations": opts.lift_annotations,
             "max_display_reads": opts.max_display_reads,
+            "sort_and_index_sam": opts.sort_and_index_sam,
+            "delete_sam_after_sort_index": opts.delete_sam_after_sort_index,
             "right_click_action": opts.right_click_action,
             "show_process_window": opts.show_process_window,
             "close_process_window_when_finished": (

@@ -82,8 +82,9 @@ def _aligned(widget: QWidget, parent: QWidget) -> QWidget:
 
 
 def _companions_for(paths: list[Path]) -> dict[str, list[Path]]:
-    """Sidecars that follow each file: annotation JSON, and a mapping run record."""
+    """Sidecars that follow each file: annotations, run JSON, BAM/CRAM indexes."""
     from repeatviewer.backends.map_reference import alignment_run_json_companions
+    from repeatviewer.backends.samtools_tools import alignment_index_companions
     from repeatviewer.backends.sequence_features import companion_annotation_paths_for_fasta
 
     companions: dict[str, list[Path]] = {}
@@ -92,6 +93,7 @@ def _companions_for(paths: list[Path]) -> dict[str, list[Path]]:
         try:
             found.extend(companion_annotation_paths_for_fasta(path))
             found.extend(alignment_run_json_companions(path))
+            found.extend(alignment_index_companions(path))
         except OSError:
             found = []
         if found:
@@ -273,9 +275,17 @@ class BatchRenameDialog(QDialog):
             alignment_run_json_renames,
             is_run_json_file,
         )
+        from repeatviewer.backends.samtools_tools import (
+            alignment_index_renames,
+            is_alignment_index_file,
+        )
         from repeatviewer.backends.sequence_features import sidecar_path
 
-        found = [path for path in self._companion_files(old) if not is_run_json_file(path)]
+        found = [
+            path
+            for path in self._companion_files(old)
+            if not is_run_json_file(path) and not is_alignment_index_file(path)
+        ]
         pairs: list[tuple[Path, Path]] = []
         if found:
             # The first one found is the current sidecar; older names stay put.
@@ -283,6 +293,7 @@ class BatchRenameDialog(QDialog):
             if source != target:
                 pairs.append((source, target))
         pairs.extend(alignment_run_json_renames(old, new))
+        pairs.extend(alignment_index_renames(old, new))
         return pairs
 
     def _update_preview(self) -> None:

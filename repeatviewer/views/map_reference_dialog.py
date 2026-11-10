@@ -67,7 +67,7 @@ from repeatviewer.job_options import (
 )
 from repeatviewer.tool_citations import CITATION_MAPPING
 from repeatviewer.views.tool_dialogs import (
-    TOOL_PARAMS_DIALOG_WIDTH,
+    TOOL_PARAMS_DIALOG_WIDTH_WIDE,
     TOOL_PARAMS_FIELD_WIDTH,
     TeMultiInputFilesWidget,
     _form_section_separator,
@@ -81,7 +81,6 @@ from repeatviewer.views.tool_dialogs import (
     set_named_executable_status,
     set_path_checkbox_status,
     sync_form_field_column_spacers,
-    tool_params_dialog_width,
     system_path_executable_label,
 )
 from repeatviewer.widgets.combo_boxes import NoWheelComboBox as QComboBox
@@ -94,7 +93,12 @@ _FASTA_SUFFIXES = {".fa", ".fasta", ".fna", ".fas", ".faa", ".fsa", ".ffn", ".se
 _MAP_INPUTS_HELP = (
     "<b>Use selected sequences</b> (default): map the FASTA / FASTQ files selected in "
     "the Files panel when you click Run.<br><br>"
-    "<b>Define inputs</b>: choose different query files for this run only."
+    "<b>Define inputs</b>: choose different query files for this run only "
+    "(click in Files/Folders or Browse). Paths are not remembered next time.<br><br>"
+    "<b>Input format</b>: query FASTA or FASTQ "
+    "(<code>.fa</code>, <code>.fasta</code>, <code>.fna</code>, "
+    "<code>.fq</code>, <code>.fastq</code>, and gzipped variants). "
+    "The reference is chosen separately under <b>Reference</b>."
 )
 PRESET_INFO = (
     "minimap2 <b>-x</b> preset (applied before other options). Pick the preset that "
@@ -119,6 +123,18 @@ OUTPUT_FMT_INFO = (
     "(<code>--cs=long</code>) are under Advanced Settings.<br><br>"
     "<b>SAM</b>: <code>-a</code> with <code>--MD</code>. A <code>.sam.rv.json</code> "
     "run record opens in the genome browser and still applies if the SAM is later saved as BAM."
+)
+SORT_INDEX_SAM_INFO = (
+    "After mapping writes a SAM file, run samtools/pysam <b>sort</b> and "
+    "<b>index</b> to produce a coordinate-sorted <code>*.sorted.bam</code> and "
+    "<code>.bai</code>. The light genome browser can then open the BAM "
+    "window-by-window instead of parsing the whole SAM.<br><br>"
+    "Unavailable when Minimap2 Format is <b>PAF</b> (HISAT2 always writes SAM)."
+)
+DELETE_SAM_INFO = (
+    "After sort and index finish, delete the original SAM to save disk space. "
+    "The sorted BAM and index are kept. Only applies when "
+    "<b>Sort and index SAM outputs</b> is on."
 )
 CIGAR_INFO = (
     "PAF only: add a CIGAR string with <code>-c</code> (base-level alignment). "
@@ -222,7 +238,8 @@ def _is_fasta(path: Path) -> bool:
 class MapReferenceDialog(QDialog):
     """Map selected sequences or reads to a reference (Align-style engine tabs)."""
 
-    _DIALOG_WIDTH = TOOL_PARAMS_DIALOG_WIDTH
+    # Always wide: Reference PathBrowseRow is always visible (not only Define inputs).
+    _DIALOG_WIDTH = TOOL_PARAMS_DIALOG_WIDTH_WIDE
     _TAB_MINIMAP2 = 0
     _TAB_HISAT2 = 1
     _TAB_OPTIONS = 2
@@ -250,9 +267,15 @@ class MapReferenceDialog(QDialog):
             else None
         )
         # Saved reference if set; otherwise the project genome from File → Define genome.
+        # Always keep the absolute path in the field (not a short relative tail).
         initial_ref = str(opts.reference_fasta or "").strip()
         if not initial_ref and self._project_genome is not None:
             initial_ref = str(self._project_genome)
+        if initial_ref:
+            try:
+                initial_ref = str(Path(initial_ref).expanduser().resolve())
+            except OSError:
+                initial_ref = str(Path(initial_ref).expanduser())
 
         # --- shared controls -------------------------------------------------
         self._reference = PathBrowseRow(
@@ -496,6 +519,16 @@ class MapReferenceDialog(QDialog):
         self._threads.setRange(1, 256)
         self._threads.setValue(max(1, opts.threads))
 
+        self._sort_index_sam = QCheckBox("Sort and index SAM outputs", self)
+        self._sort_index_sam.setChecked(bool(getattr(opts, "sort_and_index_sam", False)))
+        self._sort_index_sam.setToolTip(SORT_INDEX_SAM_INFO)
+        self._delete_sam = QCheckBox("Delete SAM file after sort and index", self)
+        self._delete_sam.setChecked(
+            bool(getattr(opts, "delete_sam_after_sort_index", False))
+        )
+        self._delete_sam.setToolTip(DELETE_SAM_INFO)
+        self._sort_index_sam.toggled.connect(self._sync_sam_postprocess)
+
         for field in (
             self._hisat2_library,
             self._hisat2_reads,
@@ -616,6 +649,16 @@ class MapReferenceDialog(QDialog):
         form.addRow("Secondaries:", self._multi_mm_field)
         form.addRow("Report:", self._multi_hs_field)
         form.addRow("Threads:", self._threads)
+        self._sort_index_sam_field = field_with_help(
+            self._sort_index_sam, "Sort and index SAM", SORT_INDEX_SAM_INFO
+        )
+        self._sort_index_sam_label = QLabel("")
+        form.addRow(self._sort_index_sam_label, self._sort_index_sam_field)
+        self._delete_sam_field = field_with_help(
+            self._delete_sam, "Delete SAM after sort", DELETE_SAM_INFO
+        )
+        self._delete_sam_label = QLabel("")
+        form.addRow(self._delete_sam_label, self._delete_sam_field)
 
         # Minimap2 Output (FastGA-style Format + optional tags).
         self._mm_output_sep = _form_section_separator()
@@ -934,6 +977,7 @@ class MapReferenceDialog(QDialog):
             return
         # Swap which engine's Define-inputs list is shown.
         self._sync_inputs(resize=False)
+        self._sync_sam_postprocess()
         if on_hs:
             # Defer so the HISAT2 tab paints before any availability probe / reminder.
             QTimer.singleShot(0, self._remind_hisat2_if_needed)
@@ -1062,6 +1106,28 @@ class MapReferenceDialog(QDialog):
             # Sensible PAF defaults for the contig view.
             self._mm_cigar.setChecked(True)
             self._mm_cs.setChecked(True)
+        self._sync_sam_postprocess()
+
+    def _sync_sam_postprocess(self, *_args) -> None:
+        """Enable Sort/index for SAM outputs; grey out for Minimap2 PAF."""
+        if not hasattr(self, "_sort_index_sam"):
+            return
+        on_mm = (
+            hasattr(self, "_tab_bar")
+            and self._tab_bar.currentIndex() == self._TAB_MINIMAP2
+        )
+        paf = on_mm and str(self._mm_format.currentData()) == MAP_MINIMAP2_OUT_PAF
+        self._sort_index_sam.setEnabled(not paf)
+        if paf:
+            self._sort_index_sam.blockSignals(True)
+            self._sort_index_sam.setChecked(False)
+            self._sort_index_sam.blockSignals(False)
+        sort_on = self._sort_index_sam.isEnabled() and self._sort_index_sam.isChecked()
+        self._delete_sam.setEnabled(sort_on)
+        if not sort_on:
+            self._delete_sam.blockSignals(True)
+            self._delete_sam.setChecked(False)
+            self._delete_sam.blockSignals(False)
     def _active_define_inputs(self) -> TeMultiInputFilesWidget:
         if self._tab_bar.currentIndex() == self._TAB_HISAT2:
             return self._hs_define_inputs
@@ -1185,9 +1251,8 @@ class MapReferenceDialog(QDialog):
         self._engine_basic.adjustSize()
         content_h = self._engine_page_height(expanded=expanded)
         chrome = self._dialog_chrome_height()
-        width = tool_params_dialog_width(
-            define_inputs=self._input_define.isChecked()
-        )
+        # Always wide so the Reference path + Browse row is fully visible.
+        width = self._DIALOG_WIDTH
         self.setMinimumWidth(width)
         screen = self.screen().availableGeometry() if self.screen() else None
         max_h = screen.height() - 40 if screen is not None else 10_000
@@ -1251,6 +1316,9 @@ class MapReferenceDialog(QDialog):
         self._update_mm_output_extras()
         self._on_preset_changed()
         self._threads.setValue(max(1, d.threads))
+        self._sort_index_sam.setChecked(d.sort_and_index_sam)
+        self._delete_sam.setChecked(d.delete_sam_after_sort_index)
+        self._sync_sam_postprocess()
         self._set_combo(self._threshold, d.consensus_threshold)
         self._set_combo(self._no_cov, d.no_coverage)
         self._min_var.setValue(round(d.min_variant_freq * 100))
@@ -1359,6 +1427,12 @@ class MapReferenceDialog(QDialog):
             save_variants=self._save_variants.isChecked(),
             lift_annotations=self._lift.isChecked(),
             max_display_reads=self._display.value(),
+            sort_and_index_sam=(
+                self._sort_index_sam.isEnabled() and self._sort_index_sam.isChecked()
+            ),
+            delete_sam_after_sort_index=(
+                self._delete_sam.isEnabled() and self._delete_sam.isChecked()
+            ),
             right_click_action=MAP_RIGHT_CLICK_RUN,
             show_process_window=self._show_process_window.isChecked(),
             close_process_window_when_finished=(

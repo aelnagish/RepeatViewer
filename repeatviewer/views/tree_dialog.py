@@ -97,10 +97,13 @@ _ENGINE_TITLES = {
 
 INPUTS_INFO = (
     "<b>Use selected sequences</b> (default): build the tree from the FASTA "
-    "files selected in the Files panel.<br>"
-    "<b>Define inputs</b>: choose the FASTA files for this run only. Click a file "
-    "in the Files panel to fill a row, or use Browse. Several files are combined "
-    "into one tree."
+    "files selected in the Files panel when you click Run.<br><br>"
+    "<b>Define inputs</b>: choose the FASTA files for this run only "
+    "(click in Files/Folders or Browse). Several files are combined into one "
+    "tree. Paths are not remembered next time.<br><br>"
+    "<b>Input format</b>: nucleotide or protein FASTA "
+    "(<code>.fa</code>, <code>.fasta</code>, <code>.fna</code>, "
+    "<code>.faa</code>, …)."
 )
 THREADS_INFO = (
     "<b>Threads</b>: the most CPU threads to use.<br>"

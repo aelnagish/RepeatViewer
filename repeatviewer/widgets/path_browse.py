@@ -152,13 +152,22 @@ class PathBrowseRow(QWidget):
                 if self._elide_middle:
                     self._editing_full = True
                     self._apply_display()
-            elif et == QEvent.Type.FocusOut and self._elide_middle:
-                # Only commit when the field was showing the real path. Never
-                # replace ``_full_text`` with an already-elided display string.
-                if self._editing_full:
-                    self._full_text = self._path.text()
-                self._editing_full = False
-                self._apply_display()
+            elif et == QEvent.Type.FocusOut:
+                if self._elide_middle:
+                    # Only commit when the field was showing the real path. Never
+                    # replace ``_full_text`` with an already-elided display string.
+                    if self._editing_full:
+                        self._full_text = self._path.text()
+                    self._editing_full = False
+                    self._apply_display()
+                else:
+                    # setText leaves the caret at the end, so only a short tail of
+                    # a long absolute path is visible until something (e.g. an
+                    # Options tab round-trip) resets scroll. Keep the start shown.
+                    self._reveal_path_start()
+            elif et == QEvent.Type.Show:
+                if not self._path.hasFocus():
+                    self._reveal_path_start()
             elif et == QEvent.Type.Resize and self._elide_middle:
                 if not self._editing_full and not self._path.hasFocus():
                     self._apply_display()
@@ -168,6 +177,21 @@ class PathBrowseRow(QWidget):
         super().resizeEvent(event)
         if self._elide_middle and not self._path.hasFocus():
             self._apply_display()
+        elif not self._elide_middle and not self._path.hasFocus():
+            self._reveal_path_start()
+
+    def _reveal_path_start(self) -> None:
+        """Show a long path from the left when the field is not being edited."""
+        if self._elide_middle:
+            if not self._editing_full and not self._path.hasFocus():
+                self._apply_display()
+            return
+        if self._path.hasFocus():
+            return
+        # Defer one tick so layout/width is final after tab swaps / resize.
+        text = self._path.text()
+        if text:
+            self._path.setCursorPosition(0)
 
     def _on_editing_finished(self) -> None:
         if self._elide_middle and self._editing_full:
@@ -280,6 +304,7 @@ class PathBrowseRow(QWidget):
                 self._apply_display()
             else:
                 self._path.setText(text)
+                self._reveal_path_start()
         if emit:
             self.path_changed.emit()
 
@@ -291,7 +316,11 @@ class PathBrowseRow(QWidget):
         )
         if not text:
             return None
-        return Path(text).expanduser()
+        path = Path(text).expanduser()
+        try:
+            return path.resolve()
+        except OSError:
+            return path
 
     def text(self) -> str:
         if self._elide_middle:
@@ -304,6 +333,7 @@ class PathBrowseRow(QWidget):
             self._apply_display()
         else:
             self._path.setText(text)
+            self._reveal_path_start()
         if emit:
             self.path_changed.emit()
 

@@ -106,6 +106,17 @@ CITATION_TREE = (
     )
 )
 
+# Tools → samtools (pysam / Win-NGS samtools)
+CITATION_SAMTOOLS = _entry(
+    "samtools / HTSlib",
+    "Danecek P, Bonfield JK, Liddle J, Marshall J, Ohan V, Pollard MO, Whitwham A, "
+    "Keane T, McCarthy SA, Davies RM, Li H",
+    "2021",
+    "Twelve years of SAMtools and BCFtools",
+    "GigaScience 10:giab008",
+    "10.1093/gigascience/giab008",
+)
+
 # Mapping → Minimap2 / HISAT2
 CITATION_MAPPING = (
     _entry(

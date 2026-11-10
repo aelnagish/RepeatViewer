@@ -376,6 +376,7 @@ from repeatviewer.job_options import (
     load_align_options,
     load_blast_options,
     load_hmmer_options,
+    load_samtools_options,
     load_consensus_options,
     load_extend_options,
     load_fastga_options,
@@ -399,6 +400,7 @@ from repeatviewer.job_options import (
     save_align_options,
     save_blast_options,
     save_hmmer_options,
+    save_samtools_options,
     save_consensus_options,
     save_extend_options,
     save_fastga_options,
@@ -422,6 +424,7 @@ from repeatviewer.job_options import (
     TeLibraryBenchmarkOptions,
     TsdSearchOptions,
 )
+from repeatviewer.views.samtools_dialog import SamtoolsParamsDialog
 from repeatviewer.views.tool_dialogs import (
     AlignParamsDialog,
     BlastParamsDialog,
@@ -960,6 +963,66 @@ class TreeWorker(QObject):
             self.failed.emit(_format_cli_failure(exc))
 
 
+class SamtoolsWorker(QObject):
+    """Sort / index / convert SAM·BAM on a background thread."""
+
+    progress = Signal(int, str)
+    log_line = Signal(str)
+    finished = Signal(dict)
+    failed = Signal(str)
+
+    def __init__(
+        self,
+        files: list[Path],
+        *,
+        operation: str,
+        threads: int = 4,
+        index_after_sort: bool = True,
+        convert_format: str = "bam",
+        samtools_path: str = "",
+        use_system_samtools: bool = True,
+    ) -> None:
+        super().__init__()
+        self._files = list(files)
+        self._operation = operation
+        self._threads = threads
+        self._index_after_sort = index_after_sort
+        self._convert_format = convert_format
+        self._samtools_path = samtools_path
+        self._use_system = use_system_samtools
+
+    @Slot()
+    def run(self) -> None:
+        from repeatviewer.backends.samtools_tools import (
+            SamtoolsError,
+            run_samtools_operation,
+        )
+        from repeatviewer.external_process import process_log_sink
+
+        def _log(message: str) -> None:
+            self.log_line.emit(str(message))
+
+        try:
+            with process_log_sink(_log):
+                result = run_samtools_operation(
+                    self._operation,
+                    self._files,
+                    threads=self._threads,
+                    index_after_sort=self._index_after_sort,
+                    convert_format=self._convert_format,
+                    explicit_path=self._samtools_path or None,
+                    use_system=self._use_system,
+                    progress=self.progress.emit,
+                )
+            self.finished.emit(result)
+        except JobCancelledError:
+            self.failed.emit(CANCELLED_MESSAGE)
+        except SamtoolsError as exc:
+            self.failed.emit(str(exc))
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(_format_cli_failure(exc))
+
+
 class MapReferenceWorker(QObject):
     """Map sequences or reads to a reference off the UI thread (Tools → Map to Reference)."""
 
@@ -1004,6 +1067,7 @@ class MapReferenceWorker(QObject):
                 rvmap, files, report = run_mapping(
                     self._seq_files, self._options, progress=_progress, cancel=self._cancel
                 )
+                files = self._postprocess_sam_outputs(files, _progress)
             self.progress.emit(5, "Mapping finished.")
             self.finished.emit({"rvmap": str(rvmap), "files": [str(f) for f in files],
                                 "report": str(report)})
@@ -1013,6 +1077,56 @@ class MapReferenceWorker(QObject):
             self.failed.emit(str(exc))
         except Exception as exc:  # noqa: BLE001 - surface to the UI
             self.failed.emit(_format_cli_failure(exc))
+
+    def _postprocess_sam_outputs(self, files: list, progress) -> list[Path]:
+        """Optional sort+index (and delete SAM) after mapping writes SAM."""
+        from repeatviewer.backends.map_reference import MapReferenceError
+        from repeatviewer.backends.samtools_tools import SamtoolsError, sort_alignment
+
+        opts = self._options
+        if not bool(getattr(opts, "sort_and_index_sam", False)):
+            return [Path(p) for p in files]
+        out: list[Path] = []
+        delete_sam = bool(getattr(opts, "delete_sam_after_sort_index", False))
+        threads = max(1, int(getattr(opts, "threads", 4) or 4))
+        for raw in files:
+            path = Path(raw)
+            if path.suffix.lower() != ".sam" or not path.is_file():
+                out.append(path)
+                continue
+            if progress is not None:
+                progress(f"Sorting and indexing {path.name}…")
+            try:
+                created = sort_alignment(
+                    path,
+                    threads=threads,
+                    index_after=True,
+                    use_system=True,
+                )
+            except SamtoolsError as exc:
+                raise MapReferenceError(
+                    f"Mapping finished, but sort/index of {path.name} failed:\n{exc}"
+                ) from exc
+            out.extend(created)
+            if delete_sam:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError as exc:
+                    raise MapReferenceError(
+                        f"Sorted {path.name}, but could not delete the SAM:\n{exc}"
+                    ) from exc
+            else:
+                out.append(path)
+        # Preserve order / uniqueness while keeping Path objects.
+        seen: set[str] = set()
+        unique: list[Path] = []
+        for path in out:
+            key = str(path.resolve()) if path.exists() else str(path)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(path)
+        return unique
 
 
 class RepeatQuantifyWorker(QObject):
@@ -2403,12 +2517,14 @@ class MainWindow(
         self._create_folder_copy_files: list[Path] = []
         self._blast_params_dialog = None
         self._hmmer_params_dialog = None
+        self._samtools_params_dialog = None
         self._add_blast_database_dialog = None
         self._command_plugin_dialog: CommandPluginDesignerDialog | None = None
         self._plugin_run_dialog: UserCommandRunDialog | None = None
         self._msa_clean_options = load_msa_clean_options()
         self._blast_options = load_blast_options()
         self._hmmer_options = load_hmmer_options()
+        self._samtools_options = load_samtools_options()
         self._fastga_options = load_fastga_options()
         self._tree_options = load_tree_options()
         self._map_options = load_map_options()
@@ -5187,7 +5303,7 @@ class MainWindow(
         rvmap = Path(result["rvmap"])
         created = [Path(p) for p in result["files"] if Path(p).is_file()]
         if self._current_folder:
-            # The aligner file (.paf / .sam) sits next to the input. Its run
+            # The aligner file (.paf / .sam / .bam) sits next to the input. Its run
             # record (<alignment>.rv.json) stays hidden beside it. Report /
             # tables / FASTA live in <stem>_details.
             self._refresh_subfolders_under(self._current_folder)
@@ -5197,15 +5313,25 @@ class MainWindow(
                 source_files=getattr(self, "_last_job_source_files", []),
                 open_preview=False,
             )
+        # Prefer sorted BAM (after Sort and index) over raw SAM/PAF.
         alignment = next(
             (
                 p
                 for p in created
-                if p.parent == rvmap.parent and p.suffix.lower() in {".sam", ".paf"}
+                if p.parent == rvmap.parent and p.suffix.lower() == ".bam"
             ),
             None,
         )
-        # Open the alignment in the genome browser (SAM) or dotplot (PAF).
+        if alignment is None:
+            alignment = next(
+                (
+                    p
+                    for p in created
+                    if p.parent == rvmap.parent and p.suffix.lower() in {".sam", ".paf"}
+                ),
+                None,
+            )
+        # Open the alignment in the genome browser (BAM/SAM) or dotplot (PAF).
         # The run JSON is loaded beside that view; it is not a separate contig document.
         if alignment is not None and alignment.is_file():
             self._auto_open_outputs([alignment])
@@ -5846,6 +5972,14 @@ class MainWindow(
         menu.addSeparator()
         menu.addAction("Change HMMER parameters", self._change_hmmer_parameters)
 
+    def _populate_samtools_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
+        del skip_default
+        menu.addAction("Sort", lambda: self._run_samtools_operation("sort"))
+        menu.addAction("Index", lambda: self._run_samtools_operation("index"))
+        menu.addAction("Convert", lambda: self._run_samtools_operation("convert"))
+        menu.addSeparator()
+        menu.addAction("Change Samtools parameters", self._change_samtools_parameters)
+
     def _populate_te_visualization_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
         if not skip_default:
             menu.addAction("Genome density plot", self._open_te_density_plot_dialog)
@@ -6000,6 +6134,7 @@ class MainWindow(
         tools_menu.addSeparator()
         self._populate_blast_menu(tools_menu.addMenu("&BLAST"))
         self._populate_hmmer_menu(tools_menu.addMenu("&HMMER"))
+        self._populate_samtools_menu(tools_menu.addMenu("&Samtools"))
         self._populate_align_menu(tools_menu.addMenu("&Align"))
         self._populate_tree_menu(tools_menu.addMenu("T&ree"))
         self._populate_map_menu(tools_menu.addMenu("&Mapping"))
@@ -8558,12 +8693,14 @@ class MainWindow(
     def _is_hidden_browser_file(self, path: Path) -> bool:
         """True for files that must stay out of the Files panel (incl. job outputs)."""
         from repeatviewer.backends.map_reference import is_run_json_file
+        from repeatviewer.backends.samtools_tools import is_alignment_index_file
 
         return (
             is_repeatviewer_hits_cache_file(path)
             or is_sequence_map_hidden_file(path)
             or is_flexidot_extra_plot_file(path)
             or is_run_json_file(path)
+            or is_alignment_index_file(path)
             or self._is_blast_index_sidecar(path)
         )
 
@@ -10472,6 +10609,7 @@ class MainWindow(
             "_te_viz_input_dialog",
             "_blast_params_dialog",
             "_hmmer_params_dialog",
+            "_samtools_params_dialog",
         ):
             dialog = getattr(self, attr, None)
             if dialog is None or dialog is keep:
@@ -10502,6 +10640,7 @@ class MainWindow(
             "_te_viz_input_dialog",
             "_blast_params_dialog",
             "_hmmer_params_dialog",
+            "_samtools_params_dialog",
             "_find_dialog",
             "_manage_references_dialog",
             "_define_database_dialog",
@@ -10629,6 +10768,15 @@ class MainWindow(
             tab = persistable_dialog_tab(tab, first_tab=HMMER_DIALOG_TAB_PARAMETERS)
             self._hmmer_options = replace(self._hmmer_options, last_dialog_tab=tab)
             save_hmmer_options(self._hmmer_options)
+            return
+        if isinstance(dialog, SamtoolsParamsDialog):
+            from repeatviewer.job_options import SAMTOOLS_OP_SORT
+
+            tab = persistable_dialog_tab(tab, first_tab=SAMTOOLS_OP_SORT)
+            self._samtools_options = replace(
+                self._samtools_options, last_dialog_tab=tab, operation=tab
+            )
+            save_samtools_options(self._samtools_options)
             return
         if isinstance(dialog, TeDensityPlotDialog):
             from repeatviewer.job_options import TE_GENOME_MAP_DIALOG_TAB_TE
@@ -10886,6 +11034,7 @@ class MainWindow(
             self._sync_add_blast_database_dialog_from_files(panel_path)
             self._sync_blast_params_dialog_from_files(panel_path)
             self._sync_hmmer_params_dialog_from_files(panel_path)
+            self._sync_samtools_params_dialog_from_files(panel_path)
             self._sync_tree_trait_dialog_from_files(panel_path)
             self._sync_primer_check_dialog_from_files(panel_path)
             self._sync_pcr_window_from_files(panel_path)
@@ -11635,6 +11784,163 @@ class MainWindow(
         if dialog is None or not dialog.isVisible():
             return
         dialog.apply_folder_from_panel(folder)
+
+    def _sync_samtools_params_dialog_from_files(
+        self, clicked_path: Path | None = None
+    ) -> None:
+        dialog = self._samtools_params_dialog
+        if dialog is None or not dialog.isVisible() or clicked_path is None:
+            return
+        dialog.apply_path_from_panel(clicked_path)
+
+    def _change_samtools_parameters(self) -> None:
+        self._open_samtools_dialog()
+
+    def _open_samtools_dialog(self) -> None:
+        """Non-modal samtools parameters (Define inputs can take Files clicks)."""
+        if (
+            self._samtools_params_dialog is not None
+            and self._samtools_params_dialog.isVisible()
+        ):
+            self._dismiss_open_tool_dialogs(keep=self._samtools_params_dialog)
+            self._samtools_params_dialog.raise_()
+            self._samtools_params_dialog.activateWindow()
+            return
+        self._dismiss_open_tool_dialogs()
+        dialog = SamtoolsParamsDialog(initial=self._samtools_options, parent=self)
+        self._configure_app_floating_dialog(dialog)
+        self._samtools_params_dialog = dialog
+        dialog.finished.connect(self._on_samtools_params_dialog_finished)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _on_samtools_params_dialog_finished(self, result: int) -> None:
+        dialog = self._samtools_params_dialog
+        self._samtools_params_dialog = None
+        QTimer.singleShot(0, self._repair_browser_chrome)
+        if dialog is None:
+            return
+        if result != int(QDialog.DialogCode.Accepted):
+            self._remember_tool_dialog_tab(dialog)
+            return
+        self._samtools_options = dialog.options()
+        save_samtools_options(self._samtools_options)
+        if dialog.should_run():
+            from repeatviewer.job_options import ALIGN_INPUT_DEFINE
+
+            if dialog.input_source() == ALIGN_INPUT_DEFINE:
+                run_files = dialog.run_files()
+                if not run_files:
+                    QMessageBox.information(
+                        self,
+                        "No alignment inputs",
+                        "Add one or more SAM/BAM/CRAM files under Define inputs.",
+                    )
+                    return
+                self._start_samtools_job(run_files, self._samtools_options)
+            else:
+                self._run_samtools_operation(self._samtools_options.operation)
+        else:
+            self._set_status_message("Samtools settings saved", 4000)
+
+    def _selected_files_for_samtools(self) -> list[Path]:
+        from repeatviewer.backends.samtools_tools import is_alignment_path
+
+        files = [p for p in self._selected_files() if is_alignment_path(p)]
+        if not files:
+            QMessageBox.information(
+                self,
+                "Samtools",
+                "Select one or more SAM/BAM/CRAM files in the Files panel first.",
+            )
+        return files
+
+    def _run_samtools_operation(self, operation: str) -> None:
+        from dataclasses import replace
+
+        from repeatviewer.job_options import (
+            SAMTOOLS_OP_INDEX,
+            _normalize_samtools_operation,
+        )
+
+        op = _normalize_samtools_operation(operation)
+        self._samtools_options = replace(
+            self._samtools_options, operation=op, last_dialog_tab=op
+        )
+        save_samtools_options(self._samtools_options)
+        files = self._selected_files_for_samtools()
+        if not files:
+            return
+        if op == SAMTOOLS_OP_INDEX:
+            bad = [p for p in files if p.suffix.lower() not in {".bam", ".cram"}]
+            if bad:
+                QMessageBox.information(
+                    self,
+                    "Samtools Index",
+                    "Index needs sorted BAM or CRAM.\n"
+                    f"Not indexed: {', '.join(p.name for p in bad[:5])}\n"
+                    "Use Sort first for SAM files.",
+                )
+                files = [p for p in files if p not in bad]
+                if not files:
+                    return
+        self._start_samtools_job(files, self._samtools_options)
+
+    def _start_samtools_job(self, files: list[Path], options) -> None:
+        worker = SamtoolsWorker(
+            files,
+            operation=options.operation,
+            threads=options.num_threads,
+            index_after_sort=options.index_after_sort,
+            convert_format=getattr(options, "convert_format", "bam"),
+            samtools_path=options.samtools_path,
+            use_system_samtools=options.use_system_samtools,
+        )
+        title = f"Samtools {options.operation}"
+        self._attach_process_monitor(
+            worker,
+            title=title,
+            enabled=bool(options.show_process_window),
+            tool_key="samtools",
+            close_when_finished=bool(options.close_process_window_when_finished),
+        )
+        self._start_background_job(
+            worker,
+            job_title=title,
+            total_steps=100,
+            source_files=files,
+            on_finished=self._on_samtools_finished,
+            on_failed=self._on_samtools_failed,
+        )
+
+    @Slot(object)
+    def _on_samtools_finished(self, result) -> None:
+        created = [Path(p) for p in result.get("files", []) if Path(p).is_file()]
+        if self._current_folder:
+            self._refresh_subfolders_under(self._current_folder)
+            self._populate_file_list(
+                self._current_folder,
+                new_outputs=created,
+                source_files=getattr(self, "_last_job_source_files", []),
+                open_preview=False,
+            )
+        if created:
+            self._auto_open_outputs(created[:1])
+        shown = created[0].name if created else result.get("operation", "Samtools")
+        self._set_status_message(
+            f"Samtools finished — {shown}",
+            12000,
+            override_file_link=True,
+        )
+
+    @Slot(str)
+    def _on_samtools_failed(self, error: str) -> None:
+        if error.strip() == CANCELLED_MESSAGE:
+            return
+        QMessageBox.warning(
+            self, "Samtools failed", error.strip() or "Unknown error."
+        )
 
     def _sync_add_blast_database_dialog_from_files(
         self, clicked_path: Path | None = None
@@ -14001,6 +14307,7 @@ class MainWindow(
 
     def _rename_file(self, path: Path) -> None:
         from repeatviewer.backends.map_reference import alignment_run_json_renames
+        from repeatviewer.backends.samtools_tools import alignment_index_renames
         from repeatviewer.backends.sequence_features import (
             companion_annotation_renames_for_fasta,
         )
@@ -14026,6 +14333,7 @@ class MainWindow(
         if path.suffix.lower() in _FASTA_SUFFIXES:
             companion_renames = companion_annotation_renames_for_fasta(path, target)
         companion_renames.extend(alignment_run_json_renames(path, target))
+        companion_renames.extend(alignment_index_renames(path, target))
         blocked = [dst for _src, dst in companion_renames if dst.exists()]
         if blocked:
             QMessageBox.warning(
@@ -14649,8 +14957,12 @@ class MainWindow(
                 except OSError as exc:
                     failed.append(f"{comp.name}: {exc}")
             from repeatviewer.backends.map_reference import alignment_run_json_renames
+            from repeatviewer.backends.samtools_tools import alignment_index_renames
 
-            for comp, comp_dest in alignment_run_json_renames(src, dest):
+            for comp, comp_dest in (
+                *alignment_run_json_renames(src, dest),
+                *alignment_index_renames(src, dest),
+            ):
                 if comp_dest.exists():
                     continue
                 try:
@@ -14933,8 +15245,9 @@ class MainWindow(
             return None
 
     def _expand_paths_for_delete(self, paths: list[Path]) -> list[Path]:
-        """Include paired JSON sidecars: annotations with a FASTA, run record with an alignment."""
+        """Include paired sidecars: annotations, run JSON, and BAM/CRAM indexes."""
         from repeatviewer.backends.map_reference import alignment_run_json_companions
+        from repeatviewer.backends.samtools_tools import alignment_index_companions
 
         expanded: list[Path] = []
         seen: set[str] = set()
@@ -14947,6 +15260,7 @@ class MainWindow(
                 resolved,
                 *companion_annotation_files_for_delete(resolved),
                 *alignment_run_json_companions(resolved),
+                *alignment_index_companions(resolved),
             ]
             for candidate in candidates:
                 key = str(candidate)
@@ -15518,9 +15832,13 @@ class MainWindow(
                 problems.append(f"{dest.parent.name}: folder no longer there")
                 continue
             from repeatviewer.backends.map_reference import alignment_run_json_renames
+            from repeatviewer.backends.samtools_tools import alignment_index_renames
 
             companions = companion_annotation_paths_for_fasta(src)
-            run_pairs = alignment_run_json_renames(src, dest)
+            paired = (
+                *alignment_run_json_renames(src, dest),
+                *alignment_index_renames(src, dest),
+            )
             try:
                 if dest.exists():
                     if str(dest) not in overwrite:
@@ -15544,7 +15862,7 @@ class MainWindow(
                     place(comp, comp_dest)
                 except OSError as exc:
                     problems.append(f"{comp.name}: {exc}")
-            for comp, comp_dest in run_pairs:
+            for comp, comp_dest in paired:
                 if comp_dest == comp:
                     continue
                 try:
@@ -16105,9 +16423,10 @@ class MainWindow(
             src = raw.expanduser().resolve()
             if not src.is_file():
                 continue
-            # Move/copy annotation companions with the FASTA, and the mapping
-            # run record with its SAM / BAM / CRAM / PAF.
+            # Move/copy annotation companions with the FASTA, mapping run JSON,
+            # and BAM/CRAM indexes with the alignment.
             from repeatviewer.backends.map_reference import alignment_run_json_renames
+            from repeatviewer.backends.samtools_tools import alignment_index_renames
 
             companion_srcs = companion_annotation_paths_for_fasta(src)
             dest = self._resolve_transfer_destination(src, target_dir, mode=mode)
@@ -16131,7 +16450,10 @@ class MainWindow(
                 undo_files.append((src, dest))
                 created.append(dest)
                 sources.append(src)
-                run_pairs = alignment_run_json_renames(src, dest)
+                paired = (
+                    *alignment_run_json_renames(src, dest),
+                    *alignment_index_renames(src, dest),
+                )
                 for comp in companion_srcs:
                     # Keep canonical JSON sidecar name beside the new FASTA.
                     comp_dest = sidecar_path(dest)
@@ -16149,7 +16471,7 @@ class MainWindow(
                         created.append(comp_dest)
                     except OSError as exc:
                         failed.append(f"{comp.name}: {exc}")
-                for comp, comp_dest in run_pairs:
+                for comp, comp_dest in paired:
                     try:
                         if mode == "cut":
                             if comp_dest.exists() and comp_dest != comp:

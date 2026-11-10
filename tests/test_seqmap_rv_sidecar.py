@@ -99,6 +99,9 @@ def test_main_window_hides_seqmap_job_outputs(qapp) -> None:
     assert is_sequence_map_hidden_file(sidecar)
     assert host._is_hidden_browser_file(Path("reads.fa_minimap.sam.rv.json"))
     assert not host._is_hidden_browser_file(Path("reads.fa_minimap.sam"))
+    assert host._is_hidden_browser_file(Path("reads.sorted.bam.bai"))
+    assert host._is_hidden_browser_file(Path("reads.cram.crai"))
+    assert not host._is_hidden_browser_file(Path("reads.sorted.bam"))
 
 
 def test_empty_json_sidecar_does_not_restore_gff_features(tmp_path: Path) -> None:

@@ -4293,8 +4293,11 @@ _MAFFT_ADD_KEEPLENGTH_HELP = (
 _MAFFT_INPUTS_HELP = (
     "<b>Use selected sequences</b> (default): MAFFT uses the FASTA files that were "
     "selected in the Files panel when you click Run.<br><br>"
-    "<b>Define inputs</b>: choose different FASTA files. Paths are for "
-    "this run only and are not remembered next time."
+    "<b>Define inputs</b>: choose different FASTA files for this run only "
+    "(click in Files/Folders or Browse). Paths are not remembered next time.<br><br>"
+    "<b>Input format</b>: nucleotide or protein FASTA "
+    "(<code>.fa</code>, <code>.fasta</code>, <code>.fna</code>, "
+    "<code>.faa</code>, <code>.fas</code>, <code>.fsa</code>)."
 )
 _MAFFT_STRATEGY_HELP = (
     "MAFFT strategies trade speed for accuracy "
@@ -4366,8 +4369,11 @@ _MUSCLE_ADD_TO_MSA_HELP = (
 _MUSCLE_INPUTS_HELP = (
     "<b>Use selected sequences</b> (default): MUSCLE uses the FASTA files that were "
     "selected in the Files panel when you click Run.<br><br>"
-    "<b>Define inputs</b>: choose different FASTA files. Paths are for "
-    "this run only and are not remembered next time."
+    "<b>Define inputs</b>: choose different FASTA files for this run only "
+    "(click in Files/Folders or Browse). Paths are not remembered next time.<br><br>"
+    "<b>Input format</b>: nucleotide or protein FASTA "
+    "(<code>.fa</code>, <code>.fasta</code>, <code>.fna</code>, "
+    "<code>.faa</code>, <code>.fas</code>, <code>.fsa</code>)."
 )
 _MUSCLE_ALGORITHM_HELP = (
     "<b>Align (high accuracy)</b>: MUSCLE <b>-align</b>, the normal high-accuracy "
@@ -4397,8 +4403,10 @@ _FASTGA_MODE_HELP = (
 _FASTGA_INPUTS_HELP = (
     "<b>Use selected sequences</b> (default): FastGA uses the FASTA files that were "
     "selected in the Files panel when you click Run.<br><br>"
-    "<b>Define inputs</b>: choose different FASTA files. Paths are for "
-    "this run only and are not remembered next time."
+    "<b>Define inputs</b>: choose different FASTA files for this run only "
+    "(click in Files/Folders or Browse). Paths are not remembered next time.<br><br>"
+    "<b>Input format</b>: genome / assembly FASTA "
+    "(<code>.fa</code>, <code>.fasta</code>, <code>.fna</code>, …)."
 )
 _FASTGA_REFERENCE_HELP = (
     "The genome every query file is aligned to (the target columns of the PAF).<br><br>"
@@ -5637,8 +5645,12 @@ class PanGenomeBlastListWidget(QWidget):
 _HMMER_INPUTS_HELP = (
     "<b>Use selected sequences</b> (default): HMMER uses the FASTA files that "
     "were selected in the Files panel when you click Run.<br><br>"
-    "<b>Define inputs</b>: choose different FASTA files. Paths are "
-    "for this run only and are not remembered next time."
+    "<b>Define inputs</b>: choose different FASTA files for this run only "
+    "(click in Files/Folders or Browse). Paths are not remembered next time.<br><br>"
+    "<b>Input format</b>: nucleotide or protein FASTA "
+    "(<code>.fa</code>, <code>.fasta</code>, <code>.fna</code>, "
+    "<code>.faa</code>, …). Match the HMM database type "
+    "(DNA HMMs ↔ DNA; protein HMMs ↔ protein or translated ORFs)."
 )
 _HMMER_DATABASE_HELP = (
     "Profile HMM database from <b>File → Manage Database</b> (HMM DNA / HMM Protein). "
@@ -6957,17 +6969,17 @@ _KEEP_CURRENT = object()
 _BLAST_INPUTS_HELP = (
     "<b>Use selected sequences</b> (default): BLAST uses the FASTA files that were "
     "selected in the Files panel when you click Run.<br><br>"
-    "<b>Define inputs</b>: choose different FASTA files. Paths are for "
-    "this run only and are not remembered next time."
+    "<b>Define inputs</b>: choose different FASTA files for this run only "
+    "(click in Files/Folders or Browse). Paths are not remembered next time. "
+    "Each BLAST tab keeps its own Define-inputs list "
+    "(BLASTn, BLASTp, BLASTx, and Online BLAST are independent).<br><br>"
+    "<b>Input format</b>: nucleotide or protein FASTA "
+    "(<code>.fa</code>, <code>.fasta</code>, <code>.fna</code>, "
+    "<code>.faa</code>, <code>.fas</code>, <code>.fsa</code>). "
+    "BLASTn needs DNA; BLASTp needs protein; BLASTx needs DNA query."
 )
-_BLAST_DEFINE_INPUTS_HELP = (
-    "Choose FASTA files for this BLAST run instead of the Files panel "
-    "selection.<br><br>"
-    "Click a file in the Files panel to fill a row, or use <b>Browse</b>. "
-    "Paths are for this run only and are not remembered next time.<br><br>"
-    "Each BLAST tab keeps its own Define-inputs list (BLASTn, BLASTp, BLASTx, "
-    "and Online BLAST are independent)."
-)
+# Kept for older call sites; same body as `_BLAST_INPUTS_HELP`.
+_BLAST_DEFINE_INPUTS_HELP = _BLAST_INPUTS_HELP
 _BLAST_DATABASE_HELP = (
     "Subject database for the search.<br><br>"
     "BLASTn can use the project reference genome or a saved nucleotide BLAST "
@@ -7420,14 +7432,8 @@ class BlastParamsDialog(QDialog):
                 stretch=True,
             )
         )
-        inputs_radios_layout.addWidget(
-            field_with_help(
-                self._input_define,
-                "Define inputs",
-                _BLAST_DEFINE_INPUTS_HELP,
-                stretch=True,
-            )
-        )
+        # One Inputs "?" only (covers Use selected + Define + format).
+        inputs_radios_layout.addWidget(self._input_define)
         # Empty labels sized to Settings so radio dots line up with Database.
         self._inputs_radios_label = QLabel("")
         self._inputs_define_label = QLabel("")
@@ -8879,8 +8885,10 @@ _BUILTIN_DOTPLOT_MODE_HELP = (
 _BUILTIN_DOTPLOT_INPUTS_HELP = (
     "<b>Use selected sequences</b> (default): Built-in Dotplot uses the FASTA "
     "files selected in the Files panel when you click Run.<br><br>"
-    "<b>Define inputs</b>: choose different FASTA files. Paths are "
-    "for this run only and are not remembered next time."
+    "<b>Define inputs</b>: choose different FASTA files for this run only "
+    "(click in Files/Folders or Browse). Paths are not remembered next time.<br><br>"
+    "<b>Input format</b>: nucleotide FASTA "
+    "(<code>.fa</code>, <code>.fasta</code>, <code>.fna</code>, …)."
 )
 _BUILTIN_DOTPLOT_WORD_HELP = (
     "K-mer / word size for the built-in self-dotplot (same engine as Preview → "
@@ -8899,8 +8907,10 @@ _FLEXIDOT_MODE_HELP = (
 _FLEXIDOT_INPUTS_HELP = (
     "<b>Use selected sequences</b> (default): Flexidot uses the FASTA files that "
     "were selected in the Files panel when you click Run.<br><br>"
-    "<b>Define inputs</b>: choose different FASTA files. Paths are "
-    "for this run only and are not remembered next time."
+    "<b>Define inputs</b>: choose different FASTA files for this run only "
+    "(click in Files/Folders or Browse). Paths are not remembered next time.<br><br>"
+    "<b>Input format</b>: nucleotide FASTA "
+    "(<code>.fa</code>, <code>.fasta</code>, <code>.fna</code>, …)."
 )
 _FLEXIDOT_OUTPUT_FORMAT_HELP = (
     f"Flexidot output format (<code>-f</code>). HTML gives interactive dotplots "
@@ -9936,8 +9946,10 @@ _TE_ANNOTATION_ADVANCED_SCROLL_MAX_HEIGHT = 420
 _TE_ANN_INPUTS_HELP = (
     "<b>Use selected sequences</b> (default): Sequence Annotation uses the FASTA "
     "files that were selected in the Files panel when you click Run.<br><br>"
-    "<b>Define inputs</b>: choose different FASTA files. Paths are "
-    "for this run only and are not remembered next time."
+    "<b>Define inputs</b>: choose different FASTA files for this run only "
+    "(click in Files/Folders or Browse). Paths are not remembered next time.<br><br>"
+    "<b>Input format</b>: nucleotide FASTA "
+    "(<code>.fa</code>, <code>.fasta</code>, <code>.fna</code>, …)."
 )
 _TE_ANN_FEATURE_DETECTION_HELP = (
     "Detect sequence features without an external database:<br><br>"
@@ -11203,8 +11215,10 @@ class OrfPredictionParamsDialog(QDialog):
 _TEAID_INPUTS_HELP = (
     "<b>Use selected sequences</b> (default): TE-Aid uses the FASTA files that "
     "were selected in the Files panel when you click Run.<br><br>"
-    "<b>Define inputs</b>: choose different FASTA files. Paths are "
-    "for this run only and are not remembered next time."
+    "<b>Define inputs</b>: choose different FASTA files for this run only "
+    "(click in Files/Folders or Browse). Paths are not remembered next time.<br><br>"
+    "<b>Input format</b>: TE consensus FASTA "
+    "(<code>.fa</code>, <code>.fasta</code>, <code>.fna</code>, …)."
 )
 _TEAID_MODE_HELP = (
     "<b>Single genome</b>: BLAST the consensus against one reference genome "
@@ -12081,7 +12095,11 @@ class MsaCleanParamsDialog(QDialog):
         "<b>Use selected sequences</b> (default): clean the aligned FASTA files "
         "selected in the Files panel.<br><br>"
         "<b>Define inputs</b>: choose alignment files explicitly "
-        "(click in Files or Browse). Each file is cleaned separately."
+        "(click in Files/Folders or Browse). Each file is cleaned separately. "
+        "Paths are not remembered next time.<br><br>"
+        "<b>Input format</b>: aligned FASTA "
+        "(<code>.fa</code>, <code>.fasta</code>, <code>.aln</code>, …) "
+        "with the same length in every sequence."
     )
     _GAP_THRESHOLD_HELP = (
         "Columns whose gap proportion is <b>above</b> this value are removed "
@@ -15049,7 +15067,10 @@ from repeatviewer.widgets.residue_color_grid import ResidueColorGrid as _Residue
 _MSA_PLOT_INPUTS_HELP = (
     "<b>Use selected sequences</b> (default): plot the aligned FASTA selected in "
     "the Files panel when you click Run.<br><br>"
-    "<b>Define inputs</b>: choose a different aligned FASTA for this run only."
+    "<b>Define inputs</b>: choose a different aligned FASTA for this run only "
+    "(click in Files/Folders or Browse). Paths are not remembered next time.<br><br>"
+    "<b>Input format</b>: aligned FASTA "
+    "(<code>.fa</code>, <code>.fasta</code>, <code>.aln</code>, …)."
 )
 _MSA_PLOT_SEQ_TYPE_HELP = (
     "How residues are coloured. <b>Auto-detect</b> inspects the alignment; "
