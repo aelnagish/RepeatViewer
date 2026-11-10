@@ -1,0 +1,424 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Alignments · RepeatViewer User Manual</title>
+<link rel="stylesheet" href="manual.css">
+</head><body>
+<header class="topbar"><a class="brand" href="index.html">RepeatViewer <span>User Manual 1.1.0</span></a>
+<input id="search" type="search" placeholder="Search the manual" autocomplete="off">
+<a class="pdf" href="RepeatViewer_User_Manual.pdf">PDF</a></header>
+<div class="layout"><aside class="sidebar"><ol class="toc"><li><a href="01-introduction.html"><span class="num">1</span>Introduction</a></li><li><a href="02-installation.html"><span class="num">2</span>Installation</a></li><li><a href="03-quick-start.html"><span class="num">3</span>Quick start: one curation pass</a></li><li><a href="04-interface.html"><span class="num">4</span>The interface</a></li><li><a href="05-sequences.html"><span class="num">5</span>Sequences</a></li><li><a href="06-annotations.html"><span class="num">6</span>Annotations</a></li><li><a href="07-search.html"><span class="num">7</span>Search</a></li><li class="current"><a href="08-alignments.html"><span class="num">8</span>Alignments</a><ul><li><a href="#align">8.1 Align</a></li><li><a href="#the-alignment-viewer">8.2 The alignment viewer</a></li><li><a href="#msa-clean">8.3 MSA Clean</a></li><li><a href="#msa-extend">8.4 MSA Extend</a></li><li><a href="#consensus">8.5 Consensus</a></li><li><a href="#msa-plot">8.6 MSA plot</a></li><li><a href="#open-in-aliview">8.7 Open in AliView</a></li></ul></li><li><a href="09-mapping.html"><span class="num">9</span>Mapping</a></li><li><a href="10-trees.html"><span class="num">10</span>Trees</a></li><li><a href="11-repeat-analysis.html"><span class="num">11</span>Repeat analysis</a></li><li><a href="12-primers.html"><span class="num">12</span>Primers and PCR</a></li><li><a href="13-automation.html"><span class="num">13</span>Automation</a></li><li><a href="14-settings.html"><span class="num">14</span>Settings</a></li><li><a href="15-reference.html"><span class="num">15</span>Reference</a></li></ol></aside>
+<main id="content"><div id="results" hidden></div><h1 id="alignments" class="chapter-title"><span class="chapter-label">Chapter 8</span>Alignments</h1>
+<h2 id="align"><span class="secnum">8.1</span>Align</h2>
+<p><strong>Toolbar: Align · Tools → Align</strong></p>
+<p>Builds a multiple sequence alignment (MSA) with <strong>MAFFT</strong> or <strong>MUSCLE</strong> (both
+bundled), or a whole-genome style alignment with <strong>FastGA</strong>. The Tools menu has
+<strong>MAFFT</strong>, <strong>MUSCLE</strong> and <strong>FastGA</strong> (run with saved settings), <strong>Align all
+selected files in one MSA</strong>, and <strong>Change alignment parameters</strong> (the window).</p>
+<figure id="fig-8-1"><img src="img/align.png" alt="The Align window, MAFFT tab." width="608" loading="lazy"><figcaption><b>Figure 8.1.</b> The Align window, MAFFT tab.</figcaption></figure>
+<p>The window has the tabs <strong>MAFFT</strong>, <strong>MUSCLE</strong>, <strong>FastGA</strong> and <strong>Options</strong>;
+<strong>Run</strong> runs the tab you are on. <strong>Options</strong> sets what right-clicking the Align
+button runs.</p>
+<h3 id="mafft-and-muscle">MAFFT and MUSCLE</h3>
+<p><strong>Mode</strong>:</p>
+<ul>
+<li><strong>Combine selected sequences and align</strong>: all selected files go into one
+  alignment.</li>
+<li><strong>Align each selected file separately</strong>: one alignment per file.</li>
+<li><strong>Add sequences to an existing MSA</strong> (MAFFT): new sequences are added to an
+  alignment without realigning it (<code>--add</code>).</li>
+</ul>
+<table>
+<thead>
+<tr>
+<th>MAFFT setting</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Strategy</td>
+<td>FFT-NS-1, FFT-NS-2 (fast, progressive), L-INS-i, G-INS-i, E-INS-i (iterative, accurate, for up to a few hundred sequences), Auto, or Custom</td>
+</tr>
+<tr>
+<td>Sequence type</td>
+<td>Auto-detect, nucleotide or protein</td>
+</tr>
+<tr>
+<td>Threads</td>
+<td><code>--thread</code></td>
+</tr>
+<tr>
+<td>Advanced: <code>--retree</code>, <code>--maxiterate</code></td>
+<td>Guide-tree rebuilds and refinement cycles (Custom)</td>
+</tr>
+<tr>
+<td>Advanced: <code>--op</code>, <code>--ep</code></td>
+<td>Gap opening penalty and offset</td>
+</tr>
+<tr>
+<td>Advanced: <code>--reorder</code>, <code>--adjustdirectionaccurately</code></td>
+<td>Output order, and turning copies from the other strand</td>
+</tr>
+</tbody>
+</table>
+<p>Strategy meanings follow the
+<a href="https://mafft.cbrc.jp/alignment/software/algorithms/algorithms.html">MAFFT algorithms page</a>.
+For TE copies from both strands, switch on
+<code>--adjustdirectionaccurately</code>; otherwise reversed copies look extremely
+divergent.</p>
+<table>
+<thead>
+<tr>
+<th>MUSCLE setting</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Algorithm</td>
+<td><code>-align</code> (most accurate) or <code>-super5</code> (large sets)</td>
+</tr>
+<tr>
+<td>Threads</td>
+<td><code>-threads</code></td>
+</tr>
+<tr>
+<td>Advanced: guide tree permutation, perturbation seed</td>
+<td><code>-perm</code> and <code>-perturb</code></td>
+</tr>
+</tbody>
+</table>
+<p><strong>Outputs:</strong> one file aligned → <code>&lt;name&gt;_mafft.fa</code> / <code>&lt;name&gt;_muscle.fa</code>;
+combined → <code>&lt;name&gt;_cmafft.fa</code> / <code>&lt;name&gt;_cmuscle.fa</code>. The alignment opens in the
+alignment viewer.</p>
+<h3 id="fastga">FastGA</h3>
+<p>FastGA aligns large sequences (chromosomes, genomes) much faster than BLAST and
+writes alignments for a dotplot. It is not bundled; install <strong>FastGA 1.5 or
+newer</strong> (see <a href="02-installation.html#optional-external-programs">Installation</a>).
+On Windows it runs in WSL.</p>
+<table>
+<thead>
+<tr>
+<th>Mode</th>
+<th>Runs</th>
+<th>Output (next to the input)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Each file against itself</td>
+<td>one run per selected file</td>
+<td><code>&lt;file&gt;_FastGA.paf</code></td>
+</tr>
+<tr>
+<td>Selected files against each other</td>
+<td>every pair (A–B, A–C, B–C)</td>
+<td><code>&lt;first&gt;_multi_FastGA.paf</code></td>
+</tr>
+<tr>
+<td>Selected files against a reference</td>
+<td>one run per selected file</td>
+<td><code>&lt;file&gt;_FastGA_vs_&lt;reference&gt;.paf</code>, or with <strong>Write all into one file</strong> <code>&lt;first&gt;_multi_FastGA_vs_&lt;reference&gt;.paf</code></td>
+</tr>
+</tbody>
+</table>
+<p>For <strong>against a reference</strong>: select the files to compare, open the window, then
+click the reference in the Files panel (or <strong>Browse</strong>). The files compared are
+the ones selected when the window opened; the reference is skipped if it is
+among them. A grey line says what <strong>Run</strong> will do, for example
+"3 FASTA selected → 3 runs against genome.fa". The reference is indexed once
+and reused; with <strong>Keep genome index</strong> the index is kept in a hidden
+<code>.repeatviewer_fastga</code> folder next to the reference (about 14 GB per gigabase).</p>
+<table>
+<thead>
+<tr>
+<th>Setting</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Output format</td>
+<td>PAF variants, PSL, or binary <code>.1aln</code>. PAF and <code>.1aln</code> open as a dotplot</td>
+</tr>
+<tr>
+<td><code>-T</code> threads, <code>-i</code> min identity, <code>-l</code> min length</td>
+<td>Speed and filters</td>
+</tr>
+<tr>
+<td><code>-f</code> seed cutoff</td>
+<td>Seeds more frequent than this are dropped. RepeatViewer uses 200 (FastGA: 10) so repeats stay visible</td>
+</tr>
+<tr>
+<td><code>-c</code> / <code>-s</code></td>
+<td>Chain coverage and chain gap</td>
+</tr>
+<tr>
+<td>Symmetric seeding (<code>-S</code>)</td>
+<td>Result does not depend on the order of the files</td>
+</tr>
+<tr>
+<td>Use soft mask</td>
+<td>Seed only in upper-case bases</td>
+</tr>
+<tr>
+<td>Temp dir (<code>-P</code>)</td>
+<td>Where FastGA writes its large temporary files</td>
+</tr>
+</tbody>
+</table>
+<h2 id="the-alignment-viewer"><span class="secnum">8.2</span>The alignment viewer</h2>
+<p>An aligned FASTA opens in the alignment viewer: sequence names on the left
+(numbered), the alignment on the right with a ruler, coloured bases, and
+annotations under the rows.</p>
+<figure id="fig-8-2"><img src="img/msa_boundary.png" alt="The alignment viewer with the Boundary prediction section open." width="994" loading="lazy"><figcaption><b>Figure 8.2.</b> The alignment viewer with the Boundary prediction section open.</figcaption></figure>
+<p>The bar above the alignment:</p>
+<table>
+<thead>
+<tr>
+<th>Control</th>
+<th>What it does</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>− / + and slider</td>
+<td>Zoom</td>
+</tr>
+<tr>
+<td>Position … to …</td>
+<td>Shows the selected columns; type a range and click <strong>Select</strong> to zoom to it</td>
+</tr>
+<tr>
+<td><strong>Fit</strong></td>
+<td>Fit the longest row to the window</td>
+</tr>
+<tr>
+<td><strong>Clean</strong></td>
+<td>Open MSA Clean for this alignment</td>
+</tr>
+<tr>
+<td><strong>Cons</strong></td>
+<td>Open Consensus for this alignment</td>
+</tr>
+<tr>
+<td><strong>Cov</strong></td>
+<td>Build a consensus, BLAST it against the project genome and draw TE-Aid style coverage above the alignment</td>
+</tr>
+<tr>
+<td><strong>Feat</strong></td>
+<td>Show or hide all feature tracks</td>
+</tr>
+</tbody>
+</table>
+<p>Selecting:</p>
+<ul>
+<li>Click a name to select a row; <strong>⌘</strong>-click or <strong>Shift</strong>-click for more rows.</li>
+<li>Drag on the alignment to select a block of columns.</li>
+<li><strong>Delete</strong> removes the selected rows, or the selected columns (from the
+  selected rows or from all), after asking. <strong>⌘Z</strong> undoes it.</li>
+</ul>
+<p>Right-click a sequence name for <strong>Rename sequence</strong>, <strong>Set as reference</strong> (the
+row the others are compared with), <strong>Copy Sequence</strong> / <strong>Copy Sequence without
+gap</strong>, <strong>Extract Sequence</strong> / <strong>Extract Sequence without gap</strong>, <strong>Show
+self-dotplot</strong> and <strong>Add feature…</strong>.</p>
+<p>The side panel has the same tabs as for a single sequence (Display, Annotation,
+Find, Others, Primers). In the alignment viewer the Annotation tab adds
+<strong>Boundary prediction</strong>.</p>
+<h3 id="boundary-prediction">Boundary prediction</h3>
+<p>Suggests where the element starts and ends in the alignment, with the methods
+of TEtrimmer. The alignment is first cleaned (rare bases below 1 % become gaps;
+gappy or poorly conserved columns are removed), then:</p>
+<table>
+<thead>
+<tr>
+<th>Row</th>
+<th>How the boundary is found</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>LTR / TIR</strong></td>
+<td>The 0.7 consensus is BLASTed against itself. Direct repeats of at least 100 bp at both ends give an LTR, inverted repeats of at least 20 bp a TIR</td>
+</tr>
+<tr>
+<td><strong>MSA identity</strong></td>
+<td>Ends with low conservation are cut, then the boundary is the first and last 4-column window whose 0.8 consensus has no N</td>
+</tr>
+<tr>
+<td><strong>Genome Cov</strong></td>
+<td>The 0.7 consensus is BLASTed against the project genome; the boundary is where coverage rises above the background at each end. Needs a reference genome</td>
+</tr>
+<tr>
+<td><strong>PolyA</strong></td>
+<td>Only for files whose name contains LINE or SINE: a run of 10 or more A near the 3′ end, followed by unconserved sequence</td>
+</tr>
+</tbody>
+</table>
+<p>Click <strong>Run</strong>, then tick a row to draw its boundary as lines on the alignment.
+TSD Search with <strong>Auto detect</strong> uses these boundaries.</p>
+<h2 id="msa-clean"><span class="secnum">8.3</span>MSA Clean</h2>
+<p><strong>Toolbar: MSA Clean · Tools → Curate → MSA Clean</strong></p>
+<p>Removes the rows and columns that make an alignment of genomic copies hard to
+read. Three steps, each on its own tab, can be run alone or together
+(<strong>Tools → Curate → MSA Clean → Combined MSA clean</strong>).</p>
+<figure id="fig-8-3"><img src="img/msa_clean.png" alt="MSA Clean, Remove gappy columns tab." width="608" loading="lazy"><figcaption><b>Figure 8.3.</b> MSA Clean, Remove gappy columns tab.</figcaption></figure>
+<table>
+<thead>
+<tr>
+<th>Step</th>
+<th>Removes</th>
+<th>Main settings</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Remove gappy columns</strong></td>
+<td>Columns that are mostly gaps</td>
+<td>Gap threshold (0.80), similarity check gap threshold (0.40), similarity threshold (0.70), min nucleotides per column (5)</td>
+</tr>
+<tr>
+<td><strong>Clean with divergence</strong></td>
+<td>Rows too different from the alignment's consensus</td>
+<td>Divergence threshold, window size</td>
+</tr>
+<tr>
+<td><strong>Clean with gaps</strong></td>
+<td>Rows that are mostly gaps</td>
+<td>Gap proportion threshold</td>
+</tr>
+</tbody>
+</table>
+<p>Each step writes its own file, so you can see what each one removed and go back
+one step without redoing the others:</p>
+<table>
+<thead>
+<tr>
+<th>File</th>
+<th>Step</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>&lt;name&gt;_gap.fa</code></td>
+<td>Gappy columns removed</td>
+</tr>
+<tr>
+<td><code>&lt;name&gt;_rowdiv.fa</code></td>
+<td>Divergent rows removed</td>
+</tr>
+<tr>
+<td><code>&lt;name&gt;_rowgap.fa</code></td>
+<td>Gappy rows removed</td>
+</tr>
+</tbody>
+</table>
+<p>On the <strong>Options</strong> tab, <strong>Right-click action</strong> chooses which step (or the
+combined clean) runs when you right-click the toolbar button.</p>
+<h2 id="msa-extend"><span class="secnum">8.4</span>MSA Extend</h2>
+<p><strong>Toolbar: MSA Extend · Tools → Curate → MSA Extend</strong></p>
+<p>Adds genomic sequence to both ends of every copy in an alignment, so you can see
+whether the element continues beyond the current ends. This is how truncated
+ends and incomplete terminal repeats are recovered.</p>
+<figure id="fig-8-4"><img src="img/msa_extend.png" alt="MSA Extend." width="467" loading="lazy"><figcaption><b>Figure 8.4.</b> MSA Extend.</figcaption></figure>
+<table>
+<thead>
+<tr>
+<th>Setting</th>
+<th>Default</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Reference genome</td>
+<td>the project genome</td>
+<td>Where the flanking sequence comes from (a genome or pan-genome)</td>
+</tr>
+<tr>
+<td>Extend left of MSA</td>
+<td>1000 bp</td>
+<td>Bases added on the 5′ side</td>
+</tr>
+<tr>
+<td>Extend right of MSA</td>
+<td>1000 bp</td>
+<td>Bases added on the 3′ side</td>
+</tr>
+</tbody>
+</table>
+<p>The usual rhythm: extend, clean, look at the new ends, extend again, until the
+alignment ends where the copies stop agreeing.</p>
+<h2 id="consensus"><span class="secnum">8.5</span>Consensus</h2>
+<p><strong>Toolbar: Consensus · Tools → Curate → Consensus</strong></p>
+<p>Collapses an alignment into one sequence.</p>
+<figure id="fig-8-5"><img src="img/consensus.png" alt="Consensus." width="484" loading="lazy"><figcaption><b>Figure 8.5.</b> Consensus.</figcaption></figure>
+<table>
+<thead>
+<tr>
+<th>Setting</th>
+<th>Default</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Sequence type</td>
+<td>Auto-detect</td>
+<td>Nucleotide or protein</td>
+</tr>
+<tr>
+<td>Majority threshold</td>
+<td>0.80</td>
+<td>Fraction of rows that must agree for a base to be called</td>
+</tr>
+<tr>
+<td>Ambiguous base</td>
+<td>N</td>
+<td>Written where no base reaches the threshold (X for protein)</td>
+</tr>
+</tbody>
+</table>
+<p>Consensus needs an alignment (all rows the same length) or a single sequence; an
+unaligned multi-FASTA is refused with a message to align it first.</p>
+<p><strong>Output:</strong> the threshold is part of the name, for example
+<code>CroSat2.fa_mafft.fa_0.8_co.fa</code>, so consensus sequences at several thresholds
+can be compared in one folder.</p>
+<h2 id="msa-plot"><span class="secnum">8.6</span>MSA plot</h2>
+<p><strong>Tools → Visualize → MSA plot</strong> draws an overview image of an alignment for a
+figure: one coloured bar per row.</p>
+<figure id="fig-8-6"><img src="img/msa_plot.png" alt="MSA plot." width="608" loading="lazy"><figcaption><b>Figure 8.6.</b> MSA plot.</figcaption></figure>
+<table>
+<thead>
+<tr>
+<th>Setting</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Sequence type</td>
+<td>Auto-detect, nucleotide or protein</td>
+</tr>
+<tr>
+<td>Output format, Quality</td>
+<td>PNG (with DPI) or PDF</td>
+</tr>
+<tr>
+<td>Sequence height, Sequence distance</td>
+<td>Row height and space between rows, in cm</td>
+</tr>
+<tr>
+<td>Advanced</td>
+<td>Colours for each base or amino acid, with presets</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Output:</strong> <code>&lt;name&gt;_msa_plot.png</code> or <code>&lt;name&gt;_msa_plot.pdf</code>.</p>
+<h2 id="open-in-aliview"><span class="secnum">8.7</span>Open in AliView</h2>
+<p><strong>Tools → Open in AliView</strong> (or right-click a file) opens the alignment in
+<a href="https://ormbunkar.se/aliview/">AliView</a>, for editing by hand. Set AliView's
+location in <strong>File → Setting → General → Sequence tools</strong>.</p><nav class="pager"><a class="prev" href="07-search.html"><small>Previous</small>Search</a><a class="next" href="09-mapping.html"><small>Next</small>Mapping</a></nav></main></div>
+<script src="search_index.js"></script><script src="manual.js"></script>
+</body></html>

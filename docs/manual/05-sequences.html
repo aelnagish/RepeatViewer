@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sequences · RepeatViewer User Manual</title>
+<link rel="stylesheet" href="manual.css">
+</head><body>
+<header class="topbar"><a class="brand" href="index.html">RepeatViewer <span>User Manual 1.1.0</span></a>
+<input id="search" type="search" placeholder="Search the manual" autocomplete="off">
+<a class="pdf" href="RepeatViewer_User_Manual.pdf">PDF</a></header>
+<div class="layout"><aside class="sidebar"><ol class="toc"><li><a href="01-introduction.html"><span class="num">1</span>Introduction</a></li><li><a href="02-installation.html"><span class="num">2</span>Installation</a></li><li><a href="03-quick-start.html"><span class="num">3</span>Quick start: one curation pass</a></li><li><a href="04-interface.html"><span class="num">4</span>The interface</a></li><li class="current"><a href="05-sequences.html"><span class="num">5</span>Sequences</a><ul><li><a href="#viewing-a-sequence">5.1 Viewing a sequence</a></li><li><a href="#several-sequences-in-one-file">5.2 Several sequences in one file</a></li><li><a href="#sequence-operations">5.3 Sequence operations</a></li><li><a href="#download-from-ncbi">5.4 Download from NCBI</a></li></ul></li><li><a href="06-annotations.html"><span class="num">6</span>Annotations</a></li><li><a href="07-search.html"><span class="num">7</span>Search</a></li><li><a href="08-alignments.html"><span class="num">8</span>Alignments</a></li><li><a href="09-mapping.html"><span class="num">9</span>Mapping</a></li><li><a href="10-trees.html"><span class="num">10</span>Trees</a></li><li><a href="11-repeat-analysis.html"><span class="num">11</span>Repeat analysis</a></li><li><a href="12-primers.html"><span class="num">12</span>Primers and PCR</a></li><li><a href="13-automation.html"><span class="num">13</span>Automation</a></li><li><a href="14-settings.html"><span class="num">14</span>Settings</a></li><li><a href="15-reference.html"><span class="num">15</span>Reference</a></li></ol></aside>
+<main id="content"><div id="results" hidden></div><h1 id="sequences" class="chapter-title"><span class="chapter-label">Chapter 5</span>Sequences</h1>
+<h2 id="viewing-a-sequence"><span class="secnum">5.1</span>Viewing a sequence</h2>
+<p>Click a FASTA file with one sequence. Preview shows three sub-tabs.</p>
+<h3 id="text">Text</h3>
+<p>The sequence as text, with its length and GC content in the status line. Use
+<strong>Actions → Edit text</strong> to change it in place and <strong>Actions → Save text</strong> to
+save. The font size is set in <strong>File → Setting → General → Files &amp; preview</strong>.</p>
+<figure id="fig-5-1"><img src="img/preview_text.png" alt="The Text view." width="994" loading="lazy"><figcaption><b>Figure 5.1.</b> The Text view.</figcaption></figure>
+<h3 id="overview">Overview</h3>
+<p>A map of the sequence: a ruler, the bases (coloured, readable when you zoom
+in), and the annotations as arrows in tracks. LTRs, TIRs, TSDs, ORFs, domains
+and tandem repeats each have their own colour.</p>
+<figure id="fig-5-2"><img src="img/annotation_view.png" alt="The Overview of an LTR retrotransposon: LTRs (red), TSDs (blue ends), domains (blue arrows) and the gag-pol ORF (green)." width="994" loading="lazy"><figcaption><b>Figure 5.2.</b> The Overview of an LTR retrotransposon: LTRs (red), TSDs (blue ends), domains (blue arrows) and the gag-pol ORF (green).</figcaption></figure>
+<p>The bar above the map:</p>
+<ul>
+<li><strong>− / +</strong> and the slider zoom; <strong>Fit</strong> shows the whole sequence.</li>
+<li><strong>Position … to …</strong> shows the selected range; type numbers to select a range,
+  <strong>Select</strong> selects it.</li>
+<li><strong>Length</strong> and <strong>GC</strong> of the sequence.</li>
+</ul>
+<p>Click a feature to select it; drag on the ruler to select a range;
+double-click a position to zoom in to the bases. Hover a feature for its
+details.</p>
+<p>The side panel on the right has five tabs (click a tab again to hide the panel):</p>
+<table>
+<thead>
+<tr>
+<th>Tab</th>
+<th>Holds</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Display</strong></td>
+<td>What is drawn and how: tracks, colours, sizes</td>
+</tr>
+<tr>
+<td><strong>Annotation</strong></td>
+<td>Feature detection, similarity annotation, manual features, transfer, Delete, Restore, Export, Save (see <a href="06-annotations.html">Annotations</a>)</td>
+</tr>
+<tr>
+<td><strong>Find</strong></td>
+<td>Motif search in this sequence (see <a href="04-interface.html#find-and-go-to">Find</a>)</td>
+</tr>
+<tr>
+<td><strong>Others</strong></td>
+<td>Reserved for extra options</td>
+</tr>
+<tr>
+<td><strong>Primers</strong></td>
+<td>Primers on this sequence and PCR (see <a href="12-primers.html">Primers and PCR</a>)</td>
+</tr>
+</tbody>
+</table>
+<figure id="fig-5-3"><img src="img/rail_display.png" alt="The Display tab of the side panel." width="994" loading="lazy"><figcaption><b>Figure 5.3.</b> The Display tab of the side panel.</figcaption></figure>
+<p><strong>Display</strong> has three sections:</p>
+<ul>
+<li><strong>Tracks</strong>: <strong>Show complement</strong> (the second strand under the first), <strong>Show
+  translation</strong> (amino acids in the reading frames you choose), <strong>Split
+  annotation by source</strong> (one track per program or file that made the
+  features), and <strong>Displayed annotations</strong>: tick the feature types to show.
+  <strong>Setting</strong> chooses the colour of each type.</li>
+<li><strong>Color</strong>: the colour scheme for bases (<strong>Nucleotide</strong>) and amino acids
+  (<strong>Protein</strong>, for example Clustal).</li>
+<li><strong>Size</strong>: font sizes of base and amino-acid letters, annotation labels and
+  the ruler, and the thickness and spacing of annotation arrows.</li>
+</ul>
+<h3 id="dotplot-self">Dotplot (Self)</h3>
+<p>The sequence against itself. The main diagonal is the sequence matching
+itself. Short diagonals parallel to it in the corners are direct terminal
+repeats (LTRs); short lines at right angles are inverted repeats (TIRs);
+blocks of parallel lines are tandem repeats.</p>
+<figure id="fig-5-4"><img src="img/dotplot_self.png" alt="The self dotplot of the demo element." width="994" loading="lazy"><figcaption><b>Figure 5.4.</b> The self dotplot of the demo element.</figcaption></figure>
+<p>In the <strong>Display</strong> panel: <strong>Word size</strong> (length of exact matches drawn;
+smaller finds more and is noisier), <strong>Line width</strong>, <strong>Show reverse</strong> (inverted
+matches) and <strong>X</strong> / <strong>Y</strong> ranges with <strong>View</strong> to zoom to a region.
+<strong>Export</strong> saves the plot as a figure. Zooming and moving never recalculate the
+plot; only a new word size does.</p>
+<h2 id="several-sequences-in-one-file"><span class="secnum">5.2</span>Several sequences in one file</h2>
+<p>A FASTA with several records opens as an overview: one row per record, with the
+record names on the left and their annotations on the right, all on one ruler.
+Click a row to select a record; the side panel then works on that record.</p>
+<figure id="fig-5-5"><img src="img/multi_fasta.png" alt="A multi-FASTA overview of 24 satellite monomers." width="994" loading="lazy"><figcaption><b>Figure 5.5.</b> A multi-FASTA overview of 24 satellite monomers.</figcaption></figure>
+<p>To work on one record by itself, right-click the file and choose <strong>Separate
+Sequence into N Files</strong> (or <strong>Folders</strong>), or extract the records you want (see
+below).</p>
+<p>An aligned FASTA (all rows the same length, with gaps) opens in the alignment
+viewer instead; see <a href="08-alignments.html#the-alignment-viewer">Alignments</a>.</p>
+<h2 id="sequence-operations"><span class="secnum">5.3</span>Sequence operations</h2>
+<p>The <strong>Sequence</strong> menu holds operations that make new FASTA files.</p>
+<h3 id="new-sequence">New Sequence</h3>
+<p>Type or paste a sequence, give it a name (required), a description and an
+organism, choose <strong>Nucleotide (DNA)</strong> or <strong>Protein</strong>, and click <strong>OK</strong>. The file
+is written into the current folder (<code>.fa</code> for DNA, <code>.faa</code> for protein).</p>
+<figure id="fig-5-6"><img src="img/new_sequence.png" alt="New Sequence." width="720" loading="lazy"><figcaption><b>Figure 5.6.</b> New Sequence.</figcaption></figure>
+<h3 id="combine-sequences-to-one-file">Combine Sequences to One File</h3>
+<p>Select several FASTA files and merge them into one multi-FASTA, for example to
+put curated consensus sequences together into a library.</p>
+<h3 id="extract-sequences-from-file">Extract Sequences from File</h3>
+<p>Picks records out of a multi-FASTA.</p>
+<figure id="fig-5-7"><img src="img/extract_sequences.png" alt="Extract Sequences: tick the records to extract." width="870" loading="lazy"><figcaption><b>Figure 5.7.</b> Extract Sequences: tick the records to extract.</figcaption></figure>
+<ul>
+<li><strong>Pick from list</strong>: tick records (filter by name, <strong>Select all</strong>,
+  <strong>Select none</strong>).</li>
+<li><strong>From ID list</strong>: give a text file with one name per line. Large files are
+  read in the background.</li>
+<li><strong>Write all selected into one file</strong>: one output (<code>&lt;name&gt;_extr.fa</code>) or one
+  file per record.</li>
+<li><strong>Copy annotations for extracted sequences</strong>: the features of each record go
+  with it.</li>
+</ul>
+<h3 id="extract-subject-sequences-from-hit-table">Extract subject sequences from hit table</h3>
+<p>Select a BLAST hit table (<code>_bn.txt</code>) and choose this item (also on the table's
+right-click menu) to cut the hit regions out of the genome the search ran
+against. The genome is found from the link RepeatViewer writes next to BLAST
+results, then from the project genome; only if both are missing are you asked
+for it.</p>
+<h3 id="reverse-complement">Reverse Complement</h3>
+<p>Writes <code>&lt;name&gt;_rc.fa</code>. Candidates are often built on the wrong strand; check
+this before you curate the ends.</p>
+<h3 id="orf-prediction">ORF Prediction</h3>
+<p>Finds open reading frames and writes <code>&lt;name&gt;_orfs.fa</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Setting</th>
+<th>Default</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Min ORF length</td>
+<td>30 bp</td>
+<td>Shortest ORF reported</td>
+</tr>
+<tr>
+<td>Max ORF length</td>
+<td>10000 bp</td>
+<td>Longest ORF reported</td>
+</tr>
+<tr>
+<td>Add other start codons</td>
+<td>none</td>
+<td>Extra start codons besides ATG, for example <code>TTG, CTG</code></td>
+</tr>
+<tr>
+<td>Reading frames</td>
+<td>all six</td>
+<td>Which frames to search</td>
+</tr>
+</tbody>
+</table>
+<figure id="fig-5-8"><img src="img/orf_prediction.png" alt="ORF Prediction settings." width="466" loading="lazy"><figcaption><b>Figure 5.8.</b> ORF Prediction settings.</figcaption></figure>
+<p>ORFs are also found by <strong>Feature detection</strong> in the Overview, which is usually
+the better place to look at them.</p>
+<h3 id="translate">Translate</h3>
+<p>Writes the protein translation as <code>&lt;name&gt;_translated.faa</code>.</p>
+<h2 id="download-from-ncbi"><span class="secnum">5.4</span>Download from NCBI</h2>
+<p><strong>Tools → Download from NCBI</strong> searches NCBI and downloads sequences, proteins
+or whole genome assemblies into the current folder, like Geneious' NCBI search.</p>
+<figure id="fig-5-9"><img src="img/ncbi_download.png" alt="Download from NCBI." width="980" loading="lazy"><figcaption><b>Figure 5.9.</b> Download from NCBI.</figcaption></figure>
+<ol>
+<li>Choose the <strong>Database</strong>: Nucleotide, Protein or Genome Assembly.</li>
+<li>Type accessions (separated by spaces, commas or new lines; they are found and
+   ticked directly) or a search term. Entrez syntax works, for example
+   <code>Crocus[Organism] AND satellite</code>. GCA_/GCF_ accessions switch to Genome
+   Assembly by themselves.</li>
+<li>Narrow the search with <strong>Organism</strong>, <strong>Length</strong>, <strong>Molecule</strong> and <strong>RefSeq
+   only</strong>; click <strong>Search</strong>. Results load page by page as you scroll.</li>
+<li>Tick the records you want, choose the <strong>Format</strong> and whether to save <strong>One
+   file</strong> or <strong>One file per record</strong>, and click <strong>Run</strong>.</li>
+</ol>
+<table>
+<thead>
+<tr>
+<th>Database</th>
+<th>Formats</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Nucleotide</td>
+<td>FASTA (<code>.fa</code>), FASTA with NCBI annotations, GenBank (<code>.gb</code>)</td>
+</tr>
+<tr>
+<td>Protein</td>
+<td>FASTA (<code>.faa</code>), GenPept (<code>.gp</code>)</td>
+</tr>
+<tr>
+<td>Genome Assembly</td>
+<td>FASTA, optionally with the GFF3 annotation (<code>&lt;name&gt;.gff3</code>)</td>
+</tr>
+</tbody>
+</table>
+<p><strong>FASTA with NCBI annotations</strong> turns NCBI's feature table into RepeatViewer
+annotations, so the genes and features show in the Overview at once.</p>
+<p>File names: one record → <code>&lt;accession&gt;.fa</code>; several in one file → named after
+the search; genomes → <code>&lt;GCA accession&gt;_&lt;assembly name&gt;.fa</code>. If files with these
+names exist, you are asked whether to overwrite or skip them.</p>
+<p>Downloads run on their own, outside the normal job queue: each has its own
+progress bar and <strong>Stop</strong> button in the status bar, and other tools keep
+working. Further downloads wait in a queue.</p>
+<p>On the <strong>Options</strong> tab, an NCBI API key raises the request limit from 3 to 10
+per second, and the right-click action can download accessions copied to the
+clipboard with the saved settings.</p><nav class="pager"><a class="prev" href="04-interface.html"><small>Previous</small>The interface</a><a class="next" href="06-annotations.html"><small>Next</small>Annotations</a></nav></main></div>
+<script src="search_index.js"></script><script src="manual.js"></script>
+</body></html>

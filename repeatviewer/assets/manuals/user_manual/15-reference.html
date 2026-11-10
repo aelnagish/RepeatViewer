@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reference · RepeatViewer User Manual</title>
+<link rel="stylesheet" href="manual.css">
+</head><body>
+<header class="topbar"><a class="brand" href="index.html">RepeatViewer <span>User Manual 1.1.0</span></a>
+<input id="search" type="search" placeholder="Search the manual" autocomplete="off">
+<a class="pdf" href="RepeatViewer_User_Manual.pdf">PDF</a></header>
+<div class="layout"><aside class="sidebar"><ol class="toc"><li><a href="01-introduction.html"><span class="num">1</span>Introduction</a></li><li><a href="02-installation.html"><span class="num">2</span>Installation</a></li><li><a href="03-quick-start.html"><span class="num">3</span>Quick start: one curation pass</a></li><li><a href="04-interface.html"><span class="num">4</span>The interface</a></li><li><a href="05-sequences.html"><span class="num">5</span>Sequences</a></li><li><a href="06-annotations.html"><span class="num">6</span>Annotations</a></li><li><a href="07-search.html"><span class="num">7</span>Search</a></li><li><a href="08-alignments.html"><span class="num">8</span>Alignments</a></li><li><a href="09-mapping.html"><span class="num">9</span>Mapping</a></li><li><a href="10-trees.html"><span class="num">10</span>Trees</a></li><li><a href="11-repeat-analysis.html"><span class="num">11</span>Repeat analysis</a></li><li><a href="12-primers.html"><span class="num">12</span>Primers and PCR</a></li><li><a href="13-automation.html"><span class="num">13</span>Automation</a></li><li><a href="14-settings.html"><span class="num">14</span>Settings</a></li><li class="current"><a href="15-reference.html"><span class="num">15</span>Reference</a><ul><li><a href="#output-files">15.1 Output files</a></li><li><a href="#troubleshooting">15.2 Troubleshooting</a></li><li><a href="#citation">15.3 Citation</a></li><li><a href="#bundled-programs">15.4 Bundled programs</a></li></ul></li></ol></aside>
+<main id="content"><div id="results" hidden></div><h1 id="reference" class="chapter-title"><span class="chapter-label">Chapter 15</span>Reference</h1>
+<h2 id="output-files"><span class="secnum">15.1</span>Output files</h2>
+<p>All outputs are written next to their input unless noted. <code>&lt;name&gt;</code> is the full
+input file name with its extension, for example <code>reads.fa</code> →
+<code>reads.fa_mafft.fa</code>. A repeated run adds <code>_2</code>, <code>_3</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Pattern</th>
+<th>Made by</th>
+<th>Contents</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>&lt;name&gt;.seqmap_RV.json</code> (hidden)</td>
+<td>Every annotation</td>
+<td>The annotations of <code>&lt;name&gt;</code></td>
+</tr>
+<tr>
+<td><code>&lt;name&gt;.primers_RV.json</code> (hidden)</td>
+<td>Primers tab</td>
+<td>Primers kept with the sequence</td>
+</tr>
+<tr>
+<td><code>&lt;name&gt;_RV.gff3</code>, <code>.gtf</code>, <code>.bed</code></td>
+<td>Export</td>
+<td>Annotations</td>
+</tr>
+<tr>
+<td><code>&lt;name&gt;_annotation.pdf</code>, <code>.svg</code>, <code>.png</code></td>
+<td>Export</td>
+<td>Figure of the current view</td>
+</tr>
+<tr>
+<td><code>&lt;name&gt;_bn.txt</code> (<code>_bp</code>, <code>_bx</code>)</td>
+<td>BLAST</td>
+<td>Hit table</td>
+</tr>
+<tr>
+<td><code>&lt;name&gt;_bn.txt.fa</code></td>
+<td>BLAST</td>
+<td>Hit regions cut out of the genome</td>
+</tr>
+<tr>
+<td><code>&lt;name&gt;_bn.gff</code></td>
+<td>BLAST</td>
+<td>Hit positions (optional)</td>
+</tr>
+<tr>
+<td><code>&lt;name&gt;_obn.html</code>, <code>_obn.txt</code></td>
+<td>Online BLAST</td>
+<td>NCBI report and hit table</td>
+</tr>
+<tr>
+<td><code>&lt;name&gt;_hmmer.txt</code></td>
+<td>HMMER</td>
+<td>Hit table</td>
+</tr>
+<tr>
+<td><code>&lt;name&gt;_mafft.fa</code>, <code>&lt;name&gt;_muscle.fa</code></td>
+<td>Align, one file</td>
+<td>Alignment</td>
+</tr>
+<tr>
+<td><code>&lt;name&gt;_cmafft.fa</code>, <code>&lt;name&gt;_cmuscle.fa</code></td>
+<td>Align, combined</td>
+<td>Alignment of all selected files</td>
+</tr>
+<tr>
+<td><code>&lt;name&gt;_FastGA.paf</code>, <code>&lt;name&gt;_FastGA_vs_&lt;ref&gt;.paf</code>, <code>&lt;first&gt;_multi_FastGA.paf</code></td>
+<td>FastGA</td>
+<td>Alignments for the dotplot</td>
+</tr>
+<tr>
+<td><code>&lt;name&gt;_gap.fa</code></td>
+<td>MSA Clean</td>
+<td>Gappy columns removed</td>
+</tr>
+<tr>
+<td><code>&lt;name&gt;_rowdiv.fa</code></td>
+<td>MSA Clean</td>
+<td>Divergent rows removed</td>
+</tr>
+<tr>
+<td><code>&lt;name&gt;_rowgap.fa</code></td>
+<td>MSA Clean</td>
+<td>Gappy rows removed</td>
+</tr>
+<tr>
+<td><code>&lt;name&gt;_&lt;threshold&gt;_co.fa</code></td>
+<td>Consensus</td>
+<td>Consensus sequence</td>
+</tr>
+<tr>
+<td><code>&lt;name&gt;_extr.fa</code></td>
+<td>Extract Sequences</td>
+<td>Extracted records</td>
+</tr>
+<tr>
+<td><code>&lt;name&gt;_rc.fa</code></td>
+<td>Reverse Complement</td>
+<td>Reverse complement</td>
+</tr>
+<tr>
+<td><code>&lt;name&gt;_orfs.fa</code></td>
+<td>ORF Prediction</td>
+<td>ORFs</td>
+</tr>
+<tr>
+<td><code>&lt;name&gt;_translated.faa</code></td>
+<td>Translate</td>
+<td>Protein translation</td>
+</tr>
+<tr>
+<td><code>&lt;accession&gt;.fa</code>, <code>.gb</code>, <code>.faa</code>, <code>.gp</code></td>
+<td>Download from NCBI</td>
+<td>Downloaded records</td>
+</tr>
+<tr>
+<td><code>&lt;name&gt;_TEAid.html</code>, <code>&lt;name&gt;_pTEAid.html</code></td>
+<td>TE-Aid</td>
+<td>Report (one genome, pangenome)</td>
+</tr>
+<tr>
+<td><code>&lt;name&gt;_self_dot.paf</code>, <code>&lt;first&gt;_multi_dot.paf</code></td>
+<td>Dotplot, built-in</td>
+<td>Dotplot data</td>
+</tr>
+<tr>
+<td><code>&lt;name&gt;_flexidot.html</code>, <code>.gff</code>, <code>_legend.png</code></td>
+<td>Dotplot, Flexidot</td>
+<td>Dotplot and its legend</td>
+</tr>
+<tr>
+<td><code>&lt;name&gt;_msa_plot.png</code>, <code>.pdf</code></td>
+<td>MSA plot</td>
+<td>Alignment figure</td>
+</tr>
+<tr>
+<td><code>&lt;name&gt;_minimap.paf</code> or <code>.sam</code>, <code>&lt;name&gt;_minimap_details/</code></td>
+<td>Mapping</td>
+<td>Alignment; report, consensus, tables</td>
+</tr>
+<tr>
+<td><code>&lt;name&gt;_iqtree.treefile</code>, <code>&lt;name&gt;_iqtree_details/</code></td>
+<td>Tree</td>
+<td>Tree; report, alignment, logs</td>
+</tr>
+<tr>
+<td><code>&lt;tree&gt;_traits.tsv</code></td>
+<td>Tree viewer</td>
+<td>Trait table</td>
+</tr>
+<tr>
+<td><code>&lt;tree&gt;_distances_patristic.tsv</code>, <code>_pdistance.tsv</code></td>
+<td>Tree viewer</td>
+<td>Distance matrices</td>
+</tr>
+<tr>
+<td><code>&lt;genome&gt;_repeat_quant_&lt;date&gt;/</code></td>
+<td>Repeat Quantify</td>
+<td>Report and tables</td>
+</tr>
+<tr>
+<td><code>&lt;name&gt;_bn_den_plot.html</code>, <code>_multi_dens_plot.html</code></td>
+<td>Genome density plot</td>
+<td>Plot</td>
+</tr>
+<tr>
+<td><code>&lt;name&gt;_bn_div_plot.html</code>, <code>_multi_div_plot.html</code></td>
+<td>TE divergence plot</td>
+<td>Plot</td>
+</tr>
+<tr>
+<td><code>&lt;name&gt;_RM_abund_plot.html</code>, <code>_multi_abund_plot.html</code></td>
+<td>TE abundance plot</td>
+<td>Plot</td>
+</tr>
+<tr>
+<td><code>&lt;name&gt;_primers.html</code>, <code>&lt;name&gt;_primers_details/</code></td>
+<td>Primer Design</td>
+<td>Report, primers, pairs, gel</td>
+</tr>
+<tr>
+<td><code>&lt;name&gt;_primer_map.html</code></td>
+<td>Map Primers</td>
+<td>Binding sites and products</td>
+</tr>
+<tr>
+<td><code>&lt;name&gt;_PCR_&lt;primers&gt;.fa</code>, <code>…_details/</code></td>
+<td>In-silico PCR</td>
+<td>Products; tables and history</td>
+</tr>
+<tr>
+<td><code>&lt;name&gt;.rvgel</code></td>
+<td>In-silico PCR, gel</td>
+<td>Gel document</td>
+</tr>
+<tr>
+<td><code>&lt;genome&gt;_painting.html</code>, <code>_painting_details/</code></td>
+<td>Chromosome painting</td>
+<td>Report, probes, order file</td>
+</tr>
+<tr>
+<td><code>&lt;name&gt;_&lt;tool&gt;_failed.log</code></td>
+<td>Tree, Mapping</td>
+<td>Full log of a failed run</td>
+</tr>
+</tbody>
+</table>
+<h2 id="troubleshooting"><span class="secnum">15.2</span>Troubleshooting</h2>
+<p><strong>A tool says the genome is not set.</strong> Choose <strong>File → Manage Database…</strong>, add
+the genome FASTA as <strong>FASTA DNA</strong> and click <strong>Set as reference genome</strong>. BLAST,
+MSA Extend, TE-Aid, boundary prediction (Genome Cov) and the genome plots need
+it.</p>
+<p><strong>RepeatMasker, FastGA, HISAT2, FastME or FastTree is not found.</strong> They are not
+bundled. Install them into a conda environment (see
+<a href="02-installation.html#optional-external-programs">Installation</a>), enter that
+environment in <strong>File → Setting → General → External tools</strong>, and click
+<strong>Test</strong>. On Windows they must be in a WSL2 environment.</p>
+<p><strong>BLAST or Repeat Quantify is very slow.</strong> Check the word size: small values
+are much more sensitive and much slower on repetitive genomes. For Repeat
+Quantify, 11 is a good BLASTn default and 7 can make it hang. Also check
+<strong>Threads for the UI</strong> in <strong>File → Setting → General → Performance</strong>: a high
+value leaves few threads for the tools.</p>
+<p><strong>Minimap2 misses hits inside a satellite array.</strong> minimap2 ignores its most
+frequent seeds. In Mapping → <strong>Advanced Settings</strong>, set repetitive seeds to
+<strong>Keep more</strong>.</p>
+<p><strong>A mapping gives differences at 100 % identity.</strong> The reference has two
+records with the same name. Give every record a unique name.</p>
+<p><strong>A job cannot be stopped at once.</strong> <strong>Stop</strong> in the status bar cancels the
+running job; external programs may take a moment to end.</p>
+<p><strong>An HTML report is blank in Preview.</strong> Use <strong>Open in browser</strong> in the Preview
+title bar.</p>
+<p><strong>New outputs are not visible.</strong> Press <strong>F5</strong> to refresh, and check that you are
+looking at the folder of the input: outputs go there.</p>
+<p><strong>A Repeat Quantify report says a name appears twice in the library.</strong> Two
+records share a name; their hits were merged into one row. Rename them.</p>
+<p><strong>macOS refuses to open the app.</strong> For an unsigned build, right-click the app,
+choose <strong>Open</strong>, and confirm. This is needed only the first time.</p>
+<p><strong>Reporting a bug.</strong> <strong>File → Setting → General → Diagnostics → Copy
+diagnostics</strong> copies the version, system and folder locations. Switch on
+<strong>Verbose logging</strong>, repeat the problem, and attach the file from <strong>Open log
+file</strong>. For failed Tree and Mapping runs, attach the <code>_failed.log</code> next to the
+input.</p>
+<h2 id="citation"><span class="secnum">15.3</span>Citation</h2>
+<p>If RepeatViewer contributes to your work, please mention <strong>RepeatViewer</strong> for
+curation, analysis and visualisation, and cite <strong>TEtrimmer</strong> (<em>Nature
+Communications</em>, 2025) where its methods are used. Tool reports (Tree, Mapping,
+Primers) include a methods paragraph and the references of the programs they
+ran; cite those programs too.</p>
+<h2 id="bundled-programs"><span class="secnum">15.4</span>Bundled programs</h2>
+<p>BLAST+, MAFFT, MUSCLE, minimap2 and IQ-TREE are distributed with RepeatViewer
+under their own licences. The <code>NOTICE.md</code> file next to each program in
+<code>repeatviewer/backends/</code> gives its licence and source.</p><nav class="pager"><a class="prev" href="14-settings.html"><small>Previous</small>Settings</a><span></span></nav></main></div>
+<script src="search_index.js"></script><script src="manual.js"></script>
+</body></html>

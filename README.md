@@ -6,7 +6,7 @@ repetitive DNAs, especially transposable elements (TEs). It works on Linux, macO
 <p align="center">
   <a href="https://aelnagish.github.io/RepeatViewer/"><b>Website</b></a> ·
   <a href="#installation"><b>Install</b></a> ·
-  <a href="docs/MANUAL.md"><b>User manual</b></a>
+  <a href="docs/manual/"><b>User manual</b></a>
 </p>
 
 <p align="center">
@@ -77,63 +77,96 @@ full path to the env).
 ### Windows
 
 Install RepeatViewer with **native Windows Python** (not inside WSL). Follow these
-steps in **PowerShell** (Start → type `PowerShell`, or open Windows Terminal and choose a **PowerShell** tab — not Command Prompt and not Ubuntu/WSL).
+steps in **PowerShell** (Start, type `PowerShell`, or open Windows Terminal and choose a **PowerShell** tab; not Command Prompt and not Ubuntu/WSL).
 On Windows, it is recommended to place the repository in a user-writable directory, such as `Documents` or another personal project folder, rather than under `C:\Program Files`.
 
 #### 1. Prerequisites
 
-- [Python 3.10 or later](https://www.python.org/downloads/) for Windows  
-  During setup, enable **“Add python.exe to PATH”**.
+- [Python 3.10 or later](https://www.python.org/downloads/) for Windows, from **python.org**.
+  During setup, keep **"py launcher"** ticked and enable **"Add python.exe to PATH"**.
+  Other Pythons on the same computer (from Rtools, MSYS2, Git for Windows, Cygwin) do not work:
+  they create environments without a `Scripts` folder, and PySide6 cannot be installed in them.
+  The steps below use the `py` launcher, which always picks a python.org Python.
 - Microsoft Visual Studio Build Tools with the C++ workload are required to install orfipy, which is used as a dependency by this repository.
   The required build tools can be installed from a PowerShell terminal using:
-  ```bash
-  winget install -e --id Microsoft.VisualStudio.BuildTools --override "--passive --add Microsoft.VisualS"
+  ```powershell
+  winget install -e --id Microsoft.VisualStudio.BuildTools --override "--passive --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
   ```
 
 #### 2. Download RepeatViewer from GitHub
 
 1. Open https://github.com/qjiangzhao/RepeatViewer
-2. Click the green **Code** button → **Download ZIP**
-3. Unzip the archive (e.g. to `Downloads`). You should get a folder such as
+2. Click the green **Code** button, then **Download ZIP**
+3. Unzip the archive (e.g. to `Documents`). You should get a folder such as
    `RepeatViewer-main` (GitHub adds `-main` or a tag name to ZIP downloads).
 
 #### 3. Open PowerShell in that folder
 
+Adjust the path if you unzipped somewhere else:
+
 ```powershell
-# Adjust the path if you unzipped somewhere else
-cd Your_path_to_downloaded_RepeatViewer\RepeatViewer-main
+cd $HOME\Documents\RepeatViewer-main
 ```
 
-Confirm you are in the right place (`RepeatViewer.py` should be listed):
+Confirm you are in the right place (`RepeatViewer.py` and a `repeatviewer` folder should be listed):
 
 ```powershell
 dir
 ```
 
-Check that Python is available:
+Check that a python.org Python is available (this lists every Python the launcher can use):
 
 ```powershell
-python --version
+py -0p
 ```
+
+If the command is not found or the list is empty, install Python from python.org first (step 1).
 
 #### 4. Create a virtual environment and install with pip
 
 Always create a **virtual environment** first. It is the same idea as a named
-conda env (`conda create -n …`): an isolated place for packages. With venv, that
-“name” is simply a **folder** next to the project (here: `repeatviewer`).
+conda env (`conda create -n ...`): an isolated place for packages. With venv, that
+"name" is simply a **folder** next to the project, here `.venv`.
+
+> **Do not name the environment `repeatviewer`.** The project already has a folder
+> called `repeatviewer` that holds the program code. A venv with that name is written
+> into the code folder, and deleting it deletes RepeatViewer itself.
+
+Create the environment:
 
 ```powershell
-# Created a python environment
-python -m venv repeatviewer
+py -3 -m venv .venv
+```
 
-# Activate the python environment
-.\repeatviewer\Scripts\Activate.ps1
+Check it. This must print `win-amd64` (or `win-arm64`):
 
-# Install pip to python
-python -m pip install -U pip
+```powershell
+.\.venv\Scripts\python.exe -c "import sysconfig; print(sysconfig.get_platform())"
+```
 
-# Install all RepeatViewer required dependences
-pip install -e .
+If PowerShell says `.venv\Scripts\python.exe` does not exist, the environment was made by a
+non-Windows Python (see step 1). Remove only the `.venv` folder (`Remove-Item -Recurse -Force .venv`),
+install Python from python.org, and try again.
+
+Install RepeatViewer:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -U pip
+.\.venv\Scripts\python.exe -m pip install -e .
+```
+
+**Run**:
+
+```powershell
+.\.venv\Scripts\python.exe RepeatViewer.py
+```
+
+These commands call the environment's Python directly, so no activation is needed.
+If you prefer to activate it (then `repeatviewer` alone starts the app):
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+repeatviewer
 ```
 
 If PowerShell blocks script activation, run once:
@@ -142,24 +175,8 @@ If PowerShell blocks script activation, run once:
 Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
 ```
 
-Then activate again with `.\repeatviewer\Scripts\Activate.ps1`.
-
-Each new PowerShell session needs activation again before running RepeatViewer:
-
-```powershell
-cd Yours_path_to_donwloaded_RepeatViewer\RepeatViewer-main
-
-# Activate the python environment
-.\repeatviewer\Scripts\Activate.ps1
-```
-
-**Run** (with the env activated):
-
-```powershell
-repeatviewer
-```
-
-Or: `python RepeatViewer.py` from the RepeatViewer folder.
+Each new PowerShell session starts in your home folder: `cd` into the RepeatViewer folder again
+(step 3), then run or activate as above.
 
 #### 5. Optional — WSL2 + conda for RepeatMasker and FastGA
 
@@ -220,8 +237,7 @@ Background jobs show progress in the status bar; **Stop** cancels the active tas
 
 | Guide | Contents |
 |-------|----------|
-| [**Operations Manual**](docs/OPERATIONS_MANUAL.md) | Illustrated how-to: workspace, MSA Overview (Lens, selections), Dotplot, curation loop |
-| [User Manual](docs/MANUAL.md) | Full reference: tools, parameters, outputs, troubleshooting |
+| [User Manual](docs/manual/) | Illustrated manual: every tool, window and output ([PDF](docs/manual/RepeatViewer_User_Manual.pdf)); also under Help in the app |
 | [Plugins](docs/PLUGINS.md) | Extending RepeatViewer with plugins |
 
 ---

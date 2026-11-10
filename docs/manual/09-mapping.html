@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mapping · RepeatViewer User Manual</title>
+<link rel="stylesheet" href="manual.css">
+</head><body>
+<header class="topbar"><a class="brand" href="index.html">RepeatViewer <span>User Manual 1.1.0</span></a>
+<input id="search" type="search" placeholder="Search the manual" autocomplete="off">
+<a class="pdf" href="RepeatViewer_User_Manual.pdf">PDF</a></header>
+<div class="layout"><aside class="sidebar"><ol class="toc"><li><a href="01-introduction.html"><span class="num">1</span>Introduction</a></li><li><a href="02-installation.html"><span class="num">2</span>Installation</a></li><li><a href="03-quick-start.html"><span class="num">3</span>Quick start: one curation pass</a></li><li><a href="04-interface.html"><span class="num">4</span>The interface</a></li><li><a href="05-sequences.html"><span class="num">5</span>Sequences</a></li><li><a href="06-annotations.html"><span class="num">6</span>Annotations</a></li><li><a href="07-search.html"><span class="num">7</span>Search</a></li><li><a href="08-alignments.html"><span class="num">8</span>Alignments</a></li><li class="current"><a href="09-mapping.html"><span class="num">9</span>Mapping</a><ul><li><a href="#running-a-mapping">9.1 Running a mapping</a></li><li><a href="#what-is-written">9.2 What is written</a></li><li><a href="#the-genome-browser-sam-bam-cram">9.3 The genome browser (SAM, BAM, CRAM)</a></li><li><a href="#the-dotplot-paf">9.4 The dotplot (PAF)</a></li><li><a href="#the-report">9.5 The report</a></li></ul></li><li><a href="10-trees.html"><span class="num">10</span>Trees</a></li><li><a href="11-repeat-analysis.html"><span class="num">11</span>Repeat analysis</a></li><li><a href="12-primers.html"><span class="num">12</span>Primers and PCR</a></li><li><a href="13-automation.html"><span class="num">13</span>Automation</a></li><li><a href="14-settings.html"><span class="num">14</span>Settings</a></li><li><a href="15-reference.html"><span class="num">15</span>Reference</a></li></ol></aside>
+<main id="content"><div id="results" hidden></div><h1 id="mapping" class="chapter-title"><span class="chapter-label">Chapter 9</span>Mapping</h1>
+<p><strong>Tools → Mapping</strong> (add the <strong>Mapping</strong> button in <strong>File → Setting → Toolbar</strong>)</p>
+<p>Places reads, contigs or repeat copies on a reference and shows where they
+differ, like Geneious' <em>Map to Reference</em>. Typical uses: nanopore reads on a
+satellite array or a TE consensus, assembled contigs on a reference element,
+RNA-seq reads on a TE to see which parts are expressed.</p>
+<h2 id="running-a-mapping"><span class="secnum">9.1</span>Running a mapping</h2>
+<figure id="fig-9-1"><img src="img/mapping.png" alt="The Mapping window, Minimap2 tab." width="608" loading="lazy"><figcaption><b>Figure 9.1.</b> The Mapping window, Minimap2 tab.</figcaption></figure>
+<ol>
+<li>Select the reads or sequences to map in the Files panel (FASTA or FASTQ,
+   gzipped files too), or use <strong>Define inputs</strong>.</li>
+<li>Open the window and click the <strong>Reference</strong> FASTA in the Files panel (or
+   <strong>Browse</strong>). If a reference genome is set, it is filled in.</li>
+<li>Choose the mapper tab, check the settings, click <strong>Run</strong>.</li>
+</ol>
+<p>Two mappers:</p>
+<ul>
+<li><strong>minimap2</strong> (bundled, version 2.31): long reads (ONT, PacBio HiFi or CLR),
+  assembled contigs, cDNA and long RNA.</li>
+<li><strong>HISAT2</strong> (install it yourself, 2.2 or newer): short Illumina DNA or RNA-seq
+  reads, including spliced RNA. HISAT2 builds its index once and keeps it in a
+  hidden <code>.repeatviewer_hisat2</code> folder next to the reference.</li>
+</ul>
+<p>If the mapper you chose is missing, the run stops with an install hint.</p>
+<h3 id="minimap2-settings">Minimap2 settings</h3>
+<table>
+<thead>
+<tr>
+<th>Setting</th>
+<th>Default</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Map mode (<code>-x</code>)</td>
+<td>map-ont</td>
+<td>The minimap2 preset. Changing it fills <code>-k</code> and <code>-w</code></td>
+</tr>
+<tr>
+<td>Secondaries</td>
+<td>Primary only</td>
+<td>Keep only the best place of each read, or also other equally good places (<code>-N 50</code>)</td>
+</tr>
+<tr>
+<td>Threads</td>
+<td>CPU count</td>
+<td><code>-t</code></td>
+</tr>
+<tr>
+<td>Output format</td>
+<td>PAF</td>
+<td>PAF (opens as a dotplot) or SAM (opens in the genome browser)</td>
+</tr>
+<tr>
+<td>Advanced: <code>-k</code>, <code>-w</code></td>
+<td>from the preset</td>
+<td>Seed length and window</td>
+</tr>
+<tr>
+<td>Advanced: CIGAR / CS</td>
+<td>on for PAF</td>
+<td><code>-c</code> and <code>--cs=long</code>; needed to show the differences</td>
+</tr>
+<tr>
+<td>Advanced: repetitive seeds</td>
+<td>Default</td>
+<td><strong>Keep more</strong> (<code>-f 0.00002</code>) or <strong>Keep all</strong>: minimap2 ignores its most frequent seeds by default, which hides hits inside tandem arrays. Use Keep more for satellites</td>
+</tr>
+</tbody>
+</table>
+<p>Map modes:</p>
+<ul>
+<li><strong>Long genomic reads</strong>: <code>map-ont</code> (ONT), <code>map-pb</code> (PacBio CLR), <code>map-hifi</code>
+  (HiFi), <code>lr:hq</code> (nanopore Q20), <code>map-iclr</code> (Illumina Complete Long Reads).</li>
+<li><strong>RNA and cDNA</strong>: <code>splice</code> (long RNA or cDNA), <code>splice:hq</code> (Iso-Seq),
+  <code>splice:sr</code> (short RNA-seq).</li>
+<li><strong>Assemblies and short DNA</strong>: <code>asm5</code>, <code>asm10</code>, <code>asm20</code> (about 0.1, 1 and 5 %
+  divergence), <code>sr</code> (short genomic reads).</li>
+</ul>
+<h3 id="hisat2-settings">HISAT2 settings</h3>
+<table>
+<thead>
+<tr>
+<th>Setting</th>
+<th>Default</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Library</td>
+<td>RNA-seq (spliced)</td>
+<td>Or DNA-seq (<code>--no-spliced-alignment</code>)</td>
+</tr>
+<tr>
+<td>Reads</td>
+<td>Single-end</td>
+<td>Or paired-end; R1 and R2 are paired by their file names</td>
+</tr>
+<tr>
+<td>Strandness</td>
+<td>Unstranded</td>
+<td>F or R (single-end), FR or RF (paired-end)</td>
+</tr>
+<tr>
+<td>Report</td>
+<td>Best place only</td>
+<td>Or up to 20 places (<code>-k 20</code>)</td>
+</tr>
+<tr>
+<td>Advanced</td>
+<td></td>
+<td><code>--dta</code>, minimum and maximum intron length, <code>--no-softclip</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="filters-and-outputs-advanced-settings">Filters and outputs (Advanced Settings)</h3>
+<p>A placed read is kept only if it passes all filters: <strong>minimum identity</strong>
+(default 70 % of aligned columns match), <strong>minimum aligned length</strong> (25 bp) and
+<strong>minimum mapping quality</strong>. Reads that fail, or that do not map, are listed as
+not used, with the reason. Further settings choose the consensus threshold
+(majority by default), the minimum variant frequency in the variants table,
+which files to write, and whether to move the reference annotations onto the
+mapped reads.</p>
+<p>Reference names must be unique: mappers report hits by name, so two records
+with the same name would mix up their hits. RepeatViewer stops with a message if
+the reference has repeated names.</p>
+<h2 id="what-is-written"><span class="secnum">9.2</span>What is written</h2>
+<p>Only the mapper's own file is placed next to the input; everything else goes
+into <code>&lt;input&gt;_minimap_details/</code> (or <code>_hisat2_details/</code>):</p>
+<table>
+<thead>
+<tr>
+<th>File</th>
+<th>Contents</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>&lt;input&gt;_minimap.paf</code> or <code>.sam</code></td>
+<td>The mapper's alignment (opens in Preview)</td>
+</tr>
+<tr>
+<td><code>…_report.html</code></td>
+<td>Run report: numbers, coverage plot, features, most frequent differences, methods text, citations</td>
+</tr>
+<tr>
+<td><code>…_consensus.fa</code></td>
+<td>Consensus of the mapped reads, with the reference annotations moved onto it</td>
+</tr>
+<tr>
+<td><code>…_mapped.fa</code></td>
+<td>The placed reads, turned to the reference strand, with lifted annotations</td>
+</tr>
+<tr>
+<td><code>…_unused.fa</code></td>
+<td>Reads not placed, with the reason in the header</td>
+</tr>
+<tr>
+<td><code>…_variants.tsv</code>, <code>…_features.tsv</code>, <code>…_reads.tsv</code></td>
+<td>Every difference; every reference feature in every read; every placement</td>
+</tr>
+<tr>
+<td><code>…_methods.txt</code>, <code>…_commands.txt</code></td>
+<td>A methods paragraph and the exact command lines</td>
+</tr>
+</tbody>
+</table>
+<p>A hidden <code>&lt;alignment&gt;.rv.json</code> next to the alignment keeps the run record; it
+follows the alignment when you rename it. A second run writes <code>_2</code>; nothing is
+overwritten. No samtools or pysam is needed.</p>
+<h2 id="the-genome-browser-sam-bam-cram"><span class="secnum">9.3</span>The genome browser (SAM, BAM, CRAM)</h2>
+<p>A SAM result opens in the genome browser. BAM and CRAM files from other tools,
+and GFF, GTF and BED files, open there too.</p>
+<figure id="fig-9-2"><img src="img/mapping_browser.png" alt="A SAM result in the genome browser: features of the reference on top, coverage, then the reads (blue forward, pink reverse)." width="994" loading="lazy"><figcaption><b>Figure 9.2.</b> A SAM result in the genome browser: features of the reference on top, coverage, then the reads (blue forward, pink reverse).</figcaption></figure>
+<p>The navigation bar: back and forward, the file, the sequence (choose another
+reference sequence), the range shown (type a range to go there), − / + and
+slider, <strong>Select</strong>, <strong>Fit</strong>, <strong>Browser ▾</strong> and the side panel button.</p>
+<ul>
+<li>Reads are drawn as arrows, packed into rows, coloured by strand; differences
+  from the reference are marked on them.</li>
+<li>Above the reads: the reference ruler, its annotations and the coverage.</li>
+<li>Hover a read or a position for details; right-click for <strong>Copy Position</strong>,
+  <strong>Zoom to This</strong>, <strong>Zoom In</strong>, <strong>Zoom Out</strong>, <strong>Whole Sequence</strong>, and on a
+  read name <strong>Copy name</strong>, <strong>BLAST sequence…</strong>.</li>
+<li>The reference is the project genome when its names match the file;
+  otherwise choose one with <strong>Browser ▾ → Choose FASTA…</strong>. The choice is
+  remembered for the file.</li>
+</ul>
+<p>Side panel:</p>
+<table>
+<thead>
+<tr>
+<th>Section</th>
+<th>Settings</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Display</td>
+<td>Layout (Packed or one read per row), Sort by, Colour by (Strand, Identity, Mapping quality)</td>
+</tr>
+<tr>
+<td>Filters</td>
+<td>Min identity, Mapping quality, Hide secondary placements</td>
+</tr>
+<tr>
+<td>Annotations</td>
+<td>Show the reference features, per type</td>
+</tr>
+<tr>
+<td>Coverage</td>
+<td>Coverage track options</td>
+</tr>
+</tbody>
+</table>
+<p>The browser is read-only: it shows, it does not edit.</p>
+<h2 id="the-dotplot-paf"><span class="secnum">9.4</span>The dotplot (PAF)</h2>
+<p>A PAF result opens as an alignment dotplot: the reads and the reference along
+the axes, each hit as a line. The <strong>Display</strong> panel sets which pairs are shown
+(<strong>Compare</strong>), a name filter, line width and minimum length. This view is
+useful for seeing where long reads or contigs cross a repeat array.</p>
+<figure id="fig-9-3"><img src="img/mapping_view.png" alt="A PAF result as an alignment dotplot." width="994" loading="lazy"><figcaption><b>Figure 9.3.</b> A PAF result as an alignment dotplot.</figcaption></figure>
+<h2 id="the-report"><span class="secnum">9.5</span>The report</h2>
+<figure id="fig-9-4"><img src="img/mapping_report.png" alt="The mapping report: placed and reversed reads, mean identity, variant positions, coverage, and the state of each reference feature in the reads." width="994" loading="lazy"><figcaption><b>Figure 9.4.</b> The mapping report: placed and reversed reads, mean identity, variant positions, coverage, and the state of each reference feature in the reads.</figcaption></figure>
+<p>The report shows four numbers at the top (placed, reversed, mean identity,
+variant positions), the run details, the coverage along the reference with the
+features under it, and a table of the reference features with how often each
+is <strong>intact</strong>, <strong>changed</strong> (n differences), <strong>partial</strong> (only part covered) or
+<strong>lost</strong> (half or more deleted) in the reads. Then the most frequent
+differences, with their cytosine context (CG, CHG), where methylation-driven
+C→T changes are expected. The full list is in <code>…_variants.tsv</code>.</p><nav class="pager"><a class="prev" href="08-alignments.html"><small>Previous</small>Alignments</a><a class="next" href="10-trees.html"><small>Next</small>Trees</a></nav></main></div>
+<script src="search_index.js"></script><script src="manual.js"></script>
+</body></html>

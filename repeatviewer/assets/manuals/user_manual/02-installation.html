@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Installation · RepeatViewer User Manual</title>
+<link rel="stylesheet" href="manual.css">
+</head><body>
+<header class="topbar"><a class="brand" href="index.html">RepeatViewer <span>User Manual 1.1.0</span></a>
+<input id="search" type="search" placeholder="Search the manual" autocomplete="off">
+<a class="pdf" href="RepeatViewer_User_Manual.pdf">PDF</a></header>
+<div class="layout"><aside class="sidebar"><ol class="toc"><li><a href="01-introduction.html"><span class="num">1</span>Introduction</a></li><li class="current"><a href="02-installation.html"><span class="num">2</span>Installation</a><ul><li><a href="#macos-and-linux">2.1 macOS and Linux</a></li><li><a href="#windows">2.2 Windows</a></li><li><a href="#what-is-bundled">2.3 What is bundled</a></li><li><a href="#optional-external-programs">2.4 Optional external programs</a></li><li><a href="#updating">2.5 Updating</a></li></ul></li><li><a href="03-quick-start.html"><span class="num">3</span>Quick start: one curation pass</a></li><li><a href="04-interface.html"><span class="num">4</span>The interface</a></li><li><a href="05-sequences.html"><span class="num">5</span>Sequences</a></li><li><a href="06-annotations.html"><span class="num">6</span>Annotations</a></li><li><a href="07-search.html"><span class="num">7</span>Search</a></li><li><a href="08-alignments.html"><span class="num">8</span>Alignments</a></li><li><a href="09-mapping.html"><span class="num">9</span>Mapping</a></li><li><a href="10-trees.html"><span class="num">10</span>Trees</a></li><li><a href="11-repeat-analysis.html"><span class="num">11</span>Repeat analysis</a></li><li><a href="12-primers.html"><span class="num">12</span>Primers and PCR</a></li><li><a href="13-automation.html"><span class="num">13</span>Automation</a></li><li><a href="14-settings.html"><span class="num">14</span>Settings</a></li><li><a href="15-reference.html"><span class="num">15</span>Reference</a></li></ol></aside>
+<main id="content"><div id="results" hidden></div><h1 id="installation" class="chapter-title"><span class="chapter-label">Chapter 2</span>Installation</h1>
+<p>RepeatViewer runs on macOS, Linux and Windows and needs <strong>Python 3.10 or
+newer</strong>. Installing from the source code is the recommended way for now;
+ready-made packages for each system are in preparation.</p>
+<h2 id="macos-and-linux"><span class="secnum">2.1</span>macOS and Linux</h2>
+<p>Open <strong>Terminal</strong> and run:</p>
+<pre><code class="language-bash">git clone https://github.com/qjiangzhao/RepeatViewer.git
+cd RepeatViewer
+conda create -n repeatviewer &quot;python&gt;=3.10&quot; -y
+conda activate repeatviewer
+pip install -e .
+</code></pre>
+<p>Start RepeatViewer with:</p>
+<pre><code class="language-bash">conda activate repeatviewer
+repeatviewer
+</code></pre>
+<p>From the repository folder, <code>python RepeatViewer.py</code> works too.</p>
+<p><code>pip install -e .</code> also installs the RepeatViewer build of Flexidot, which makes
+the interactive HTML dotplots. The Flexidot on PyPI only writes images.</p>
+<h2 id="windows"><span class="secnum">2.2</span>Windows</h2>
+<p>Install with the normal Windows Python (not inside WSL), in <strong>PowerShell</strong> (not
+Command Prompt, not Ubuntu/WSL). Put RepeatViewer in a folder you can write to,
+such as <code>Documents</code>, not under <code>C:\Program Files</code>.</p>
+<ol>
+<li>Install <a href="https://www.python.org/downloads/">Python 3.10 or later</a> from
+   <strong>python.org</strong>. Keep <strong>py launcher</strong> ticked and tick <strong>Add python.exe to
+   PATH</strong>. Other Pythons (from Rtools, MSYS2, Git for Windows, Cygwin) do not
+   work: PySide6 cannot be installed in their environments.</li>
+<li>Install the Microsoft C++ Build Tools, needed by one dependency (orfipy).</li>
+<li>Download the repository from GitHub (<strong>Code → Download ZIP</strong>) and unzip it,
+   for example to <code>Documents\RepeatViewer-main</code>.</li>
+<li>In PowerShell, go to that folder, create an environment called <code>.venv</code>, and
+   install.</li>
+</ol>
+<p>The commands for steps 2 to 4:</p>
+<pre><code class="language-powershell">winget install -e --id Microsoft.VisualStudio.BuildTools --override &quot;--passive --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended&quot;
+</code></pre>
+<pre><code class="language-powershell">cd $HOME\Documents\RepeatViewer-main
+py -0p
+py -3 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -U pip
+.\.venv\Scripts\python.exe -m pip install -e .
+</code></pre>
+<p><code>py -0p</code> lists the python.org Pythons the launcher can use; if it is empty,
+install Python first. Start RepeatViewer with:</p>
+<pre><code class="language-powershell">.\.venv\Scripts\python.exe RepeatViewer.py
+</code></pre>
+<blockquote class="note">
+<p><strong>Do not name the environment <code>repeatviewer</code>.</strong> The project already has a
+folder called <code>repeatviewer</code> with the program code; an environment with that
+name is written into it, and deleting the environment deletes RepeatViewer.</p>
+</blockquote>
+<p>If <code>.venv\Scripts\python.exe</code> does not exist after step 4, the environment was
+made by a non-Windows Python. Remove the <code>.venv</code> folder, install Python from
+python.org, and try again. The README has the full Windows notes.</p>
+<h2 id="what-is-bundled"><span class="secnum">2.3</span>What is bundled</h2>
+<p>These programs ship inside RepeatViewer for macOS, Linux and Windows. You do not
+need to install them:</p>
+<table>
+<thead>
+<tr>
+<th>Program</th>
+<th>Used by</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>BLAST+ (blastn, blastp, blastx, makeblastdb, rpstblastn)</td>
+<td>BLAST, TE-Aid, Repeat Quantify, annotation</td>
+</tr>
+<tr>
+<td>MAFFT</td>
+<td>Align, Tree, boundary prediction</td>
+</tr>
+<tr>
+<td>MUSCLE</td>
+<td>Align</td>
+</tr>
+<tr>
+<td>minimap2 2.31</td>
+<td>Mapping</td>
+</tr>
+<tr>
+<td>IQ-TREE 3.1.4</td>
+<td>Tree</td>
+</tr>
+</tbody>
+</table>
+<p>Python libraries installed with RepeatViewer cover the rest: Primer3
+(primer design), pyhmmer (HMMER searches), pytrf (tandem repeats), orfipy
+(ORFs), Biopython.</p>
+<h2 id="optional-external-programs"><span class="secnum">2.4</span>Optional external programs</h2>
+<p>Some tools call programs that are too large to bundle or are only needed by a
+few people. Install the ones you need into a conda environment:</p>
+<table>
+<thead>
+<tr>
+<th>Program</th>
+<th>Needed for</th>
+<th>Install</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>RepeatMasker</td>
+<td>Repeat Quantify with the RepeatMasker engine</td>
+<td><code>conda install -c bioconda -c conda-forge repeatmasker</code></td>
+</tr>
+<tr>
+<td>FastGA 1.5 or newer</td>
+<td>Align → FastGA</td>
+<td><code>conda install -c bioconda fastga=1.5.1</code></td>
+</tr>
+<tr>
+<td>HISAT2 2.2 or newer</td>
+<td>Mapping short reads</td>
+<td><code>conda install -c conda-forge -c bioconda hisat2=2.2.3</code></td>
+</tr>
+<tr>
+<td>FastME, FastTree</td>
+<td>Tree with these methods</td>
+<td><code>conda install -c bioconda fastme fasttree</code></td>
+</tr>
+<tr>
+<td>bedtools</td>
+<td>Some extraction steps</td>
+<td><code>conda install -c bioconda bedtools</code></td>
+</tr>
+<tr>
+<td>AliView</td>
+<td><strong>Tools → Open in AliView</strong></td>
+<td><a href="https://ormbunkar.se/aliview/">ormbunkar.se/aliview</a></td>
+</tr>
+<tr>
+<td>Chorus2</td>
+<td>Chromosome painting probes</td>
+<td>see <a href="12-primers.html">Primers and PCR</a></td>
+</tr>
+</tbody>
+</table>
+<p>You can install them into the same <code>repeatviewer</code> environment, or keep them in
+a separate one. Either way, tell RepeatViewer where they are:
+<strong>File → Setting → General → External tools</strong>, enter the environment name
+(for example <code>repeatviewer</code>) or browse to the environment folder, and click
+<strong>Test</strong> to see which programs are found.</p>
+<ul>
+<li><strong>macOS and Linux</strong>: RepeatViewer adds that environment's <code>bin</code> folder to the
+  search path of every tool it runs. This matters most when RepeatViewer is not
+  started from a terminal, because then your shell's conda setup is not loaded.</li>
+<li><strong>Windows</strong>: the setting points at a conda environment <strong>inside WSL2</strong>. Linux
+  programs (RepeatMasker, FastGA) run through <code>wsl</code>; the bundled BLAST, MAFFT,
+  MUSCLE, minimap2 and IQ-TREE run natively.</li>
+</ul>
+<p>Most tool windows also have a <strong>Use … from the system PATH or defined Conda
+environment</strong> box on their <strong>Options</strong> tab, if you prefer your own copy of a
+bundled program.</p>
+<h2 id="updating"><span class="secnum">2.5</span>Updating</h2>
+<p>From the repository folder:</p>
+<pre><code class="language-bash">git pull
+pip install -e .
+</code></pre>
+<p>Run <code>pip install -e .</code> again after every update, because new versions sometimes
+add Python packages.</p><nav class="pager"><a class="prev" href="01-introduction.html"><small>Previous</small>Introduction</a><a class="next" href="03-quick-start.html"><small>Next</small>Quick start: one curation pass</a></nav></main></div>
+<script src="search_index.js"></script><script src="manual.js"></script>
+</body></html>

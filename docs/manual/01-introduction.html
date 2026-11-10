@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Introduction · RepeatViewer User Manual</title>
+<link rel="stylesheet" href="manual.css">
+</head><body>
+<header class="topbar"><a class="brand" href="index.html">RepeatViewer <span>User Manual 1.1.0</span></a>
+<input id="search" type="search" placeholder="Search the manual" autocomplete="off">
+<a class="pdf" href="RepeatViewer_User_Manual.pdf">PDF</a></header>
+<div class="layout"><aside class="sidebar"><ol class="toc"><li class="current"><a href="01-introduction.html"><span class="num">1</span>Introduction</a><ul><li><a href="#what-repeatviewer-is-for">1.1 What RepeatViewer is for</a></li><li><a href="#what-repeatviewer-is-not">1.2 What RepeatViewer is not</a></li><li><a href="#names">1.3 Names</a></li><li><a href="#authors">1.4 Authors</a></li><li><a href="#how-to-read-this-manual">1.5 How to read this manual</a></li></ul></li><li><a href="02-installation.html"><span class="num">2</span>Installation</a></li><li><a href="03-quick-start.html"><span class="num">3</span>Quick start: one curation pass</a></li><li><a href="04-interface.html"><span class="num">4</span>The interface</a></li><li><a href="05-sequences.html"><span class="num">5</span>Sequences</a></li><li><a href="06-annotations.html"><span class="num">6</span>Annotations</a></li><li><a href="07-search.html"><span class="num">7</span>Search</a></li><li><a href="08-alignments.html"><span class="num">8</span>Alignments</a></li><li><a href="09-mapping.html"><span class="num">9</span>Mapping</a></li><li><a href="10-trees.html"><span class="num">10</span>Trees</a></li><li><a href="11-repeat-analysis.html"><span class="num">11</span>Repeat analysis</a></li><li><a href="12-primers.html"><span class="num">12</span>Primers and PCR</a></li><li><a href="13-automation.html"><span class="num">13</span>Automation</a></li><li><a href="14-settings.html"><span class="num">14</span>Settings</a></li><li><a href="15-reference.html"><span class="num">15</span>Reference</a></li></ol></aside>
+<main id="content"><div id="results" hidden></div><h1 id="introduction" class="chapter-title"><span class="chapter-label">Chapter 1</span>Introduction</h1>
+<p>RepeatViewer is a free desktop application for working with repetitive DNA:
+transposable elements (TEs), satellite DNA and other repeats. It puts a file
+browser, a sequence viewer and a set of analysis tools in one window, so that
+the everyday loop of looking at a sequence, running a tool, checking the
+result and running the next tool happens in one place, without writing
+command lines by hand.</p>
+<figure id="fig-1-1"><img src="img/main_window.png" alt="The RepeatViewer main window. Left: the Folders and Files panels. Right: the Preview panel showing an annotated LTR retrotransposon, with the annotation side panel open." width="1280" loading="lazy"><figcaption><b>Figure 1.1.</b> The RepeatViewer main window. Left: the Folders and Files panels. Right: the Preview panel showing an annotated LTR retrotransposon, with the annotation side panel open.</figcaption></figure>
+<h2 id="what-repeatviewer-is-for"><span class="secnum">1.1</span>What RepeatViewer is for</h2>
+<p>Automated repeat pipelines produce candidate consensus sequences that are
+rarely ready to publish. Boundaries are wrong, terminal repeats are cut short,
+alignments contain fragments and unrelated copies, and classifications need
+checking. This last step is manual and repetitive: many small tool runs on the
+same files.</p>
+<p>RepeatViewer is built for that work. You point it at a folder, click a file to
+see it, run a tool from the toolbar, and the result appears in the same folder,
+highlighted, ready to be the input of the next step. Next to TE curation it
+covers the work around repeats in a plant genomics lab:</p>
+<ul>
+<li><strong>Sequences and annotations</strong>: view, annotate, edit and export features
+  (LTRs, TIRs, TSDs, domains, ORFs, tandem repeats), find motifs, transfer
+  annotations between sequences.</li>
+<li><strong>Search and alignment</strong>: BLAST (local and NCBI), HMMER, MAFFT, MUSCLE and
+  FastGA, with an alignment viewer and alignment cleaning.</li>
+<li><strong>Curation</strong>: MSA Extend, MSA Clean, Consensus, boundary prediction, TSD
+  search, TE-Aid reports.</li>
+<li><strong>Mapping</strong>: place reads or copies on a reference with minimap2 or HISAT2
+  and see where they differ.</li>
+<li><strong>Trees</strong>: build trees with IQ-TREE, FastME or FastTree and explore them in an
+  interactive tree viewer.</li>
+<li><strong>Repeat quantification and plots</strong>: copy numbers of satellites and TE
+  families in genomes, density, divergence and abundance plots, dotplots.</li>
+<li><strong>Primers and probes</strong>: design and test PCR primers and FISH probes, run
+  in-silico PCR and look at the expected gel.</li>
+<li><strong>Automation</strong>: workflows, plugins and command wrappers.</li>
+</ul>
+<h2 id="what-repeatviewer-is-not"><span class="secnum">1.2</span>What RepeatViewer is not</h2>
+<p>RepeatViewer does not discover TEs in a raw genome and does not build a TE
+library from scratch. That is the job of tools such as
+<a href="https://github.com/qjiangzhao/TEtrimmer">TEtrimmer</a>, of which RepeatViewer
+started as the interactive companion. RepeatViewer works equally well on any
+folder of sequences and does not need TEtrimmer.</p>
+<h2 id="names"><span class="secnum">1.3</span>Names</h2>
+<p>The application is called <strong>RepeatViewer</strong>. The Python package and the command
+you type in a terminal are <strong><code>repeatviewer</code></strong>.</p>
+<h2 id="authors"><span class="secnum">1.4</span>Authors</h2>
+<p>This manual was written by Abdullah Yusuf, Nusrat Sultana, Jiangzhao Qian and
+Tony Heitkam (Molecular Botany, RWTH Aachen University, Aachen, Germany).</p>
+<h2 id="how-to-read-this-manual"><span class="secnum">1.5</span>How to read this manual</h2>
+<p>The chapters follow the kind of work you do, not the order of the toolbar:</p>
+<table>
+<thead>
+<tr>
+<th>Chapter</th>
+<th>Covers</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><a href="02-installation.html">Installation</a></td>
+<td>Installing RepeatViewer and the optional external programs</td>
+</tr>
+<tr>
+<td><a href="03-quick-start.html">Quick start</a></td>
+<td>One complete curation pass, step by step</td>
+</tr>
+<tr>
+<td><a href="04-interface.html">The interface</a></td>
+<td>Panels, toolbar, Edit menu, Find, keyboard shortcuts, how every tool behaves</td>
+</tr>
+<tr>
+<td><a href="05-sequences.html">Sequences</a></td>
+<td>Viewing sequences, the Overview, sequence operations, NCBI downloads</td>
+</tr>
+<tr>
+<td><a href="06-annotations.html">Annotations</a></td>
+<td>Feature detection, editing, transfer, export, Sequence Annotation, TSD search</td>
+</tr>
+<tr>
+<td><a href="07-search.html">Search</a></td>
+<td>Manage Database, BLAST, Online BLAST, HMMER</td>
+</tr>
+<tr>
+<td><a href="08-alignments.html">Alignments</a></td>
+<td>Align, the alignment viewer, MSA Clean, MSA Extend, Consensus</td>
+</tr>
+<tr>
+<td><a href="09-mapping.html">Mapping</a></td>
+<td>Mapping reads or copies to a reference and reading the result</td>
+</tr>
+<tr>
+<td><a href="10-trees.html">Trees</a></td>
+<td>Building trees and the tree viewer</td>
+</tr>
+<tr>
+<td><a href="11-repeat-analysis.html">Repeat analysis</a></td>
+<td>TE-Aid, dotplots, Repeat Quantify, genome plots</td>
+</tr>
+<tr>
+<td><a href="12-primers.html">Primers and PCR</a></td>
+<td>Primer design, primers on a sequence, in-silico PCR, gels, the primer database</td>
+</tr>
+<tr>
+<td><a href="13-automation.html">Automation</a></td>
+<td>Workflows, plugins, command wrappers, command line</td>
+</tr>
+<tr>
+<td><a href="14-settings.html">Settings</a></td>
+<td>Preferences and the toolbar</td>
+</tr>
+<tr>
+<td><a href="15-reference.html">Reference</a></td>
+<td>Output files, troubleshooting, citation</td>
+</tr>
+</tbody>
+</table>
+<p>Conventions:</p>
+<ul>
+<li>Menu paths are written in bold with arrows: <strong>Tools → Align → MAFFT</strong>.</li>
+<li>Keyboard shortcuts are given for macOS first, then Windows and Linux:
+  <strong>⌘F</strong> / <strong>Ctrl+F</strong>.</li>
+<li>File names in output tables use <code>&lt;name&gt;</code> for the full name of the input file,
+  extension included.</li>
+<li>A round <strong>?</strong> button next to an option in any RepeatViewer window opens a
+  short help text for that option. This manual explains how the parts fit
+  together; the <strong>?</strong> texts give the detail for each setting.</li>
+</ul>
+<p>The screenshots were taken from synthetic demo data (a made-up Ty3/gypsy
+element, satellite monomers and simulated nanopore reads), so the numbers in
+them have no biological meaning.</p><nav class="pager"><span></span><a class="next" href="02-installation.html"><small>Next</small>Installation</a></nav></main></div>
+<script src="search_index.js"></script><script src="manual.js"></script>
+</body></html>
