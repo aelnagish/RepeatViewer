@@ -91,8 +91,7 @@ class PcrActionsMixin:
     # ------------------------------------------------------------- menu
 
     def _populate_pcr_menu_items(self, menu) -> None:
-        menu.addSeparator()
-        a = menu.addAction("PCR", lambda: self._open_pcr_window())
+        a = menu.addAction("In-silico PCR", lambda: self._open_pcr_window())
         a.setToolTip("In-silico PCR: products of the primers on the selected sequences")
 
     # ------------------------------------------------------------- PCR window

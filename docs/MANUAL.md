@@ -451,7 +451,7 @@ Writes the protein translation as `<name>_translated.faa`.
 
 ### BLAST
 
-**Toolbar: BLAST · Tools → Blast**
+**Toolbar: BLAST · Tools → Search → BLAST**
 
 Searches your sequences against the reference genome or a saved database.
 Three programs, each on its own tab: **BLASTn** (nucleotide), **BLASTp** and
@@ -537,7 +537,7 @@ combined sequences → `<name>_cmafft.fa` / `<name>_cmuscle.fa` (then
 
 ### MSA Clean
 
-**Toolbar: MSA Clean · Tools → MSA clean**
+**Toolbar: MSA Clean · Tools → Curate → MSA Clean**
 
 Removes the rows and columns that make a genomic-copy alignment unusable.
 Three steps, individually or combined:
@@ -570,7 +570,7 @@ one step without redoing the others.
 
 ### MSA Extend
 
-**Toolbar: MSA Extend · Tools → MSA Extend**
+**Toolbar: MSA Extend · Tools → Curate → MSA Extend**
 
 Extends an alignment outward by pulling flanking sequence from the genome.
 This is how you recover truncated boundaries and complete terminal repeats.
@@ -587,7 +587,7 @@ that no longer aligns.
 
 ### Consensus
 
-**Toolbar: Consensus · Tools → Consensus**
+**Toolbar: Consensus · Tools → Curate → Consensus**
 
 Collapses an alignment to a single sequence.
 
@@ -607,7 +607,7 @@ therefore coexist in one folder and be compared.
 
 ### TE-Aid
 
-**Toolbar: TE-Aid · Tools → TE-Aid**
+**Toolbar: TE-Aid · Tools → Curate → TE-Aid**
 
 An interactive HTML report for one consensus: self-alignment structure,
 terminal repeats, ORFs, and genome hit coverage in one page. This is the
@@ -631,7 +631,7 @@ rendered in the preview pane.
 
 ### Flexidot
 
-**Toolbar: Flexidot · Tools → Flexidot**
+**Toolbar: Flexidot · Tools → Visualize → Dotplot**
 
 Dotplots: self, pairwise, or all-against-all for a multi-FASTA. The parameters
 dialog follows the same layout as Align: **Mode**, **Inputs**, **Outputs**,
@@ -659,7 +659,7 @@ the RepeatViewer build of Flexidot.
 
 ### TSD search
 
-**Tools → TSD search**
+**Tools → Annotate → TSD Search**
 
 Finds target site duplications flanking an element in an alignment — direct
 repeats immediately outside the element boundary, and strong evidence that
@@ -679,7 +679,7 @@ widen the radius if nothing is found.
 
 ### TE annotation
 
-**Toolbar: TE annotation · Tools → TE annotation**
+**Toolbar: TE annotation · Tools → Annotate → Sequence Annotation**
 
 Classifies elements using the databases configured under **File → Define
 database**. Two annotation sources:
@@ -697,7 +697,7 @@ database** first.
 
 ### Repeat Quantify
 
-**Toolbar: Repeat Quantify · Tools → Repeat Quantify**
+**Toolbar: Repeat Quantify · Tools → Quantify → Repeat Quantify**
 
 Measures how much of a genome a library of monomers or satellites accounts
 for. Aimed at tandem repeats and satellites, where "how many copies and how
@@ -760,11 +760,11 @@ currently use.
 
 ### FastGA
 
-**Toolbar: FastGA · Tools → Align → FastGA · Tools → FastGA**
+**Toolbar: FastGA · Tools → Align → FastGA**
 
 Whole-genome alignment for large sequences, where BLAST is too slow. FastGA
 lives in the **Align** window, on its own **FastGA** tab; the FastGA button and
-**Tools → FastGA → Change FastGA parameters** open that tab. Requires FastGA
+**Tools → Align → Change alignment parameters** (FastGA tab) open that tab. Requires FastGA
 1.5 or newer from conda into a shared env, for example:
 
 ```bash
@@ -994,7 +994,7 @@ viewer**.
 
 ## 9. Visualization
 
-**Toolbar: Visualization · Tools → Visualization**
+**Toolbar: Visualization · Tools → Visualize**
 
 Interactive Preview / MSA Overview operation (Lens, row and column selection,
 zoom) is covered with screenshots in the
@@ -1064,7 +1064,7 @@ genome.
 
 ### MSA plot
 
-**Tools → Visualization → MSA plot** (or the MSA plot entry where exposed)
+**Tools → Visualize → MSA plot** (or the MSA plot entry where exposed)
 
 Overview image of an aligned FASTA. The dialog follows Align: **Inputs**,
 **Settings**, and collapsible **Advanced Settings** for residue colors.
