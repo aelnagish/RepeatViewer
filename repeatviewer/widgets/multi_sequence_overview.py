@@ -6581,7 +6581,7 @@ class MultiSequenceOverviewPanel(QWidget):
         rail.sequenceSortChanged.connect(self._on_sequence_sort_changed)
         rail.findRequested.connect(self._on_rail_find_requested)
         rail.panelCollapsedChanged.connect(self._on_rail_panel_collapsed_changed)
-        self._annotations_hidden = False  # toolbar "Ann" toggle
+        self._annotations_hidden = False  # toolbar "Feat" toggle
         self._find_items: list = []
         self._find_index: int = -1
         self._find_key: object | None = None
@@ -6932,17 +6932,34 @@ class MultiSequenceOverviewPanel(QWidget):
         self._save_overview_display_settings()
 
     def _on_show_annotation_track_changed(self, enabled: bool) -> None:
-        # Toolbar "Ann" off wins over the per-type checkboxes.
+        # Toolbar "Feat" off wins over the per-type checkboxes.
         self._bars.set_show_annotation_track(
             bool(enabled) and not self._annotations_hidden
         )
         self._sync_names_column()
 
     def _on_annotations_toggled(self, shown: bool) -> None:
-        """Toolbar "Ann": hide/show all annotation tracks, keeping type picks."""
+        """Toolbar "Feat": hide/show all feature tracks, keeping type picks."""
         self._annotations_hidden = not bool(shown)
         self._on_show_annotation_track_changed(
             self._rail.show_annotation_track.isChecked()
+        )
+
+    def _reveal_features_on_canvas(
+        self, kinds: list[str] | tuple[str, ...] | set[str] | None = None
+    ) -> None:
+        """After detection / add / transfer: show features even if Feat or Display hid them."""
+        if kinds:
+            self._rail.ensure_annotation_kinds_visible(kinds)
+        self._annotations_hidden = False
+        bar = self._header_zoom_bar
+        if bar is not None and hasattr(bar, "set_annotations_shown"):
+            bar.set_annotations_shown(True)
+        self._on_show_annotation_track_changed(
+            self._rail.show_annotation_track.isChecked()
+        )
+        self._bars.set_visible_annotation_kinds(
+            self._rail.visible_annotation_kinds()
         )
 
     def _on_annotation_track_kinds_changed(self, keys: object) -> None:
@@ -7809,12 +7826,8 @@ class MultiSequenceOverviewPanel(QWidget):
         self._annotations_dirty = True
         reveal_kinds = tuple(self._ann_reveal_kinds)
         self._refresh_features_after_edit()
-        # Show the kinds that were just predicted even if Tracks had them off.
-        if reveal_kinds:
-            self._rail.ensure_annotation_kinds_visible(reveal_kinds)
-            self._bars.set_visible_annotation_kinds(
-                self._rail.visible_annotation_kinds()
-            )
+        # Show predicted kinds even if Feat / Displayed annotations had them off.
+        self._reveal_features_on_canvas(reveal_kinds or None)
         skipped = list(getattr(result, "skipped_sequences", ()) or ())
         if skipped:
             headline, body = result.skipped_reminder_parts(kind=kind)
@@ -10439,6 +10452,13 @@ class MultiSequenceOverviewPanel(QWidget):
         self.annotationsSaved.emit(json_path)
         if _gff is not None:
             self.annotationsSaved.emit(_gff)
+        kinds = {
+            str(feat.feature_type or "").strip()
+            for feats in added.values()
+            for feat in feats
+            if str(feat.feature_type or "").strip()
+        }
+        self._reveal_features_on_canvas(kinds or None)
         return True
 
     def _current_region_for_add(self) -> tuple[int, int] | None:
@@ -10530,15 +10550,6 @@ class MultiSequenceOverviewPanel(QWidget):
                 )
             ]
         if self.add_features_and_save(new_by_id):
-            # Tick Display → Displayed annotations for this type (e.g. LTR).
-            kind = str(feat.feature_type or "").strip()
-            if kind:
-                ensure = getattr(self._rail, "ensure_annotation_kinds_visible", None)
-                if callable(ensure):
-                    ensure((kind,))
-                self._bars.set_visible_annotation_kinds(
-                    self._rail.visible_annotation_kinds()
-                )
             n = len(target_ids)
             self.statusMessage.emit(
                 f"Added “{feat.name}” to {n:,} sequence{'s' if n != 1 else ''}."

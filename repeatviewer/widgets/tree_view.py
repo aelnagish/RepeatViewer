@@ -1641,8 +1641,8 @@ class TreePanel(QWidget):
         panel = QWidget(self)
         pl = QVBoxLayout(panel)
         pl.setContentsMargins(10, 6, 10, 6)
-        # Half the old gap between section headers / dividers.
-        pl.setSpacing(4)
+        # Same gap as the sequence Display / Annotation option rows.
+        pl.setSpacing(6)
 
         def _add_section(sec: _Section) -> None:
             if pl.count() > 0:

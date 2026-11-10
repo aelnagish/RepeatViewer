@@ -241,15 +241,46 @@ def test_load_map_options_migrates_mafft_to_auto(monkeypatch):
     assert opts.min_identity == 0.7
 
 
+def test_find_run_json_follows_bam_rename(tmp_path):
+    sam = tmp_path / "reads.fa_minimap.sam"
+    record = mr.run_json_path(sam)
+    record.write_text('{"format":"repeatviewer-map","contigs":[]}')
+    bam = tmp_path / "reads.fa_minimap.bam"
+    assert mr.find_run_json(bam) == record
+    assert mr.find_run_json(tmp_path / "reads.fa_minimap.cram") == record
+    assert mr.alignment_for_run_json(record) is None
+    sam.write_text("@HD\tVN:1.6\n")
+    assert mr.alignment_for_run_json(record) == sam
+
+
+def test_run_json_rename_follows_sam_to_bam(tmp_path):
+    sam = tmp_path / "reads.fa_minimap.sam"
+    sam.write_text("@HD\tVN:1.6\n")
+    record = mr.run_json_path(sam)
+    record.write_text("{}")
+    bam = tmp_path / "elsewhere" / "reads.fa_minimap.bam"
+    assert mr.is_run_json_file(record)
+    assert not mr.is_run_json_file(sam)
+    assert mr.alignment_run_json_companions(sam) == [record]
+    assert mr.alignment_run_json_companions(tmp_path / "reads.fa") == []
+    assert mr.alignment_run_json_renames(sam, bam) == [(record, mr.run_json_path(bam))]
+    assert mr.alignment_run_json_renames(sam, sam) == []
+
+
 def test_plan_outputs_keeps_full_name_and_never_overwrites(tmp_path):
     q = tmp_path / "variant2.fa"
     q.write_text(">a\nACGT\n")
     first = mr.plan_outputs([q])
     assert first.rvmap.name == "variant2.fa_minimap.rvmap"
     assert first.details.name == "variant2.fa_minimap_details"
+    assert first.alignment(".paf").name == "variant2.fa_minimap.paf"
     first.rvmap.write_text("{}")
     second = mr.plan_outputs([q])
     assert second.base == "variant2.fa_minimap_2"
+    # A leftover aligner file next to a removed .rvmap also bumps the index.
+    (tmp_path / "variant2.fa_minimap_2.paf").write_text("paf")
+    third = mr.plan_outputs([q])
+    assert third.base == "variant2.fa_minimap_3"
 
 
 def test_pair_hisat2_queries_illumina_names(tmp_path):
@@ -425,10 +456,14 @@ def test_minimap2_satellite_end_to_end(tmp_path):
     if opts is None:
         pytest.skip("minimap2 not available")
     rvmap, files, report = mr.run_mapping([variants], opts)
-    assert rvmap.name == "variants.fa_minimap.rvmap" and rvmap.parent == tmp_path
+    assert rvmap.name == "variants.fa_minimap.paf.rv.json" and rvmap.parent == tmp_path
+    assert not (tmp_path / "variants.fa_minimap.rvmap").exists()
+    paf = tmp_path / "variants.fa_minimap.paf"
+    assert paf.is_file() and paf in files
     data = mr.load_rvmap(rvmap)
     assert data["engine"] == MAP_ENGINE_MINIMAP2
     assert data["summary"]["n_placed"] == 3 and data["summary"]["n_reversed"] == 1
+    assert data["details"]["raw"] == paf.name
     contig = data["contigs"][0]
     reads = {r["name"]: r for r in contig["reads"]}
     assert reads["v2"]["strand"] == "-"
@@ -439,6 +474,7 @@ def test_minimap2_satellite_end_to_end(tmp_path):
     details = tmp_path / data["details_dir"]
     for key in ("consensus", "mapped", "unused", "variants", "features", "reads", "report"):
         assert (details / data["details"][key]).is_file(), key
+    assert not (details / paf.name).exists()
     mapped = (details / data["details"]["mapped"]).read_text()
     assert ">v2_reversed " in mapped
     mapped_sidecar = sidecar_path(details / data["details"]["mapped"])
@@ -488,7 +524,7 @@ def test_read_mappers_end_to_end(tmp_path, engine):
     (tmp_path / "reads.fq").write_text("".join(f"@{n}\n{s}\n+\n{'I' * len(s)}\n"
                                                for n, s in reads))
     opts = MapOptions(reference_fasta=str(tmp_path / "g.fa"), engine=engine, threads=2)
-    rvmap, _files, _report = mr.run_mapping([tmp_path / "reads.fq"], opts)
+    rvmap, files, _report = mr.run_mapping([tmp_path / "reads.fq"], opts)
     data = json.loads(rvmap.read_text())
     assert data["engine"] == engine
     assert data["summary"]["n_placed"] >= 790
@@ -496,6 +532,11 @@ def test_read_mappers_end_to_end(tmp_path, engine):
     assert "nohit" in [u[0] for u in data["unused"]]
     contig = data["contigs"][0]
     assert contig["consensus"].count("N") < len(genome) * 0.05
+    tag = "minimap" if engine == MAP_ENGINE_MINIMAP2 else "hisat"
+    raw = tmp_path / f"reads.fq_{tag}.{'paf' if engine == MAP_ENGINE_MINIMAP2 else 'sam'}"
+    assert raw.is_file() and raw in files
+    assert rvmap == mr.run_json_path(raw)
+    assert mr.find_run_json(raw.with_suffix(".bam") if raw.suffix == ".sam" else raw) == rvmap
 
 
 def test_reference_lengths_line_by_line_and_fai(tmp_path):

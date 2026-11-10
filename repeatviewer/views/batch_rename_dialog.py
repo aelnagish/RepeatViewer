@@ -82,13 +82,16 @@ def _aligned(widget: QWidget, parent: QWidget) -> QWidget:
 
 
 def _companions_for(paths: list[Path]) -> dict[str, list[Path]]:
-    """Annotation sidecars (.seqmap_RV.json) that follow each FASTA."""
+    """Sidecars that follow each file: annotation JSON, and a mapping run record."""
+    from repeatviewer.backends.map_reference import alignment_run_json_companions
     from repeatviewer.backends.sequence_features import companion_annotation_paths_for_fasta
 
     companions: dict[str, list[Path]] = {}
     for path in paths:
+        found: list[Path] = []
         try:
-            found = companion_annotation_paths_for_fasta(path)
+            found.extend(companion_annotation_paths_for_fasta(path))
+            found.extend(alignment_run_json_companions(path))
         except OSError:
             found = []
         if found:
@@ -170,8 +173,9 @@ class BatchRenameDialog(QDialog):
         self._status.setWordWrap(True)
         self._status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         hint = QLabel(
-            "Annotation files (.seqmap_RV.json), file colors and cytogenetic image links "
-            "follow their file. Edit > Undo takes the whole rename back.",
+            "Annotation files (.seqmap_RV.json) and a mapping run record follow their file, "
+            "including when a SAM is renamed to BAM. File colors and cytogenetic image links "
+            "follow too. Edit > Undo takes the whole rename back.",
             self,
         )
         hint.setWordWrap(True)
@@ -265,14 +269,21 @@ class BatchRenameDialog(QDialog):
         return self._companions.get(str(path), [])
 
     def _companion_renames(self, old: Path, new: Path) -> list[tuple[Path, Path]]:
+        from repeatviewer.backends.map_reference import (
+            alignment_run_json_renames,
+            is_run_json_file,
+        )
         from repeatviewer.backends.sequence_features import sidecar_path
 
-        found = self._companion_files(old)
-        if not found:
-            return []
-        # The first one found is the current sidecar; older names stay put.
-        source, target = found[0], sidecar_path(new)
-        return [] if source == target else [(source, target)]
+        found = [path for path in self._companion_files(old) if not is_run_json_file(path)]
+        pairs: list[tuple[Path, Path]] = []
+        if found:
+            # The first one found is the current sidecar; older names stay put.
+            source, target = found[0], sidecar_path(new)
+            if source != target:
+                pairs.append((source, target))
+        pairs.extend(alignment_run_json_renames(old, new))
+        return pairs
 
     def _update_preview(self) -> None:
         self._plan = plan_batch_rename(

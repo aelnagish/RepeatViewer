@@ -282,6 +282,13 @@ _CONTIG_PREVIEW_SUFFIX = ".rvmap"
 _GEL_PREVIEW_SUFFIX = ".rvgel"
 
 
+def _is_light_browser_path(path: Path) -> bool:
+    """SAM / BAM / CRAM / GFF / GTF / BED: the light genome browser (with a Text view)."""
+    from repeatviewer.widgets.light_genome_browser import is_light_browser_file
+
+    return is_light_browser_file(path)
+
+
 def is_previewable_file(path: Path) -> bool:
     """Return True when RepeatViewer can show the file in the Preview panel."""
     resolved = path.expanduser()
@@ -292,6 +299,8 @@ def is_previewable_file(path: Path) -> bool:
     if suffix in (_CONTIG_PREVIEW_SUFFIX, _GEL_PREVIEW_SUFFIX):
         return True
     if is_bismark_cov_file(resolved):
+        return True
+    if _is_light_browser_path(resolved):
         return True
     if suffix in _UNSUPPORTED_PREVIEW_SUFFIXES:
         return False
@@ -316,6 +325,8 @@ def preview_path_priority(path: Path) -> int:
         return 2
     if suffix in (_CONTIG_PREVIEW_SUFFIX, _GEL_PREVIEW_SUFFIX):
         return 2
+    if _is_light_browser_path(path):
+        return 5
     if suffix == ".pdf":
         return 3
     if suffix in _IMAGE_PREVIEW_SUFFIXES:
@@ -1561,6 +1572,22 @@ class FilePreviewPage(QWidget):
         self._stack.setCurrentWidget(self._contig_panel)
         self._contig_panel.load(path)
 
+    def _show_light_browser(self, path: Path) -> None:
+        """SAM / BAM / GFF / GTF / BED: read-only genome browser (Browser / Text)."""
+        from repeatviewer.widgets.light_genome_browser import LightGenomeBrowserPanel
+
+        if getattr(self, "_light_browser", None) is None:
+            self._light_browser = LightGenomeBrowserPanel(self)
+            self._light_browser.setSizePolicy(
+                QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+            )
+            self._light_browser.openRequested.connect(self.openFileRequested.emit)
+            self._light_browser.fileWritten.connect(self.fileWritten.emit)
+            self._light_browser.blastRequested.connect(self.blastRequested.emit)
+            self._stack.addWidget(self._light_browser)
+        self._stack.setCurrentWidget(self._light_browser)
+        self._light_browser.load(path)
+
     def _show_gel(self, path: Path) -> None:
         """Draw an in-silico gel (.rvgel)."""
         from repeatviewer.widgets.gel_view import GelDocumentPanel
@@ -1604,7 +1631,8 @@ class FilePreviewPage(QWidget):
             return False
         current = self._stack.currentWidget()
         return current is not None and current in (
-            getattr(self, "_contig_panel", None), getattr(self, "_gel_panel", None))
+            getattr(self, "_contig_panel", None), getattr(self, "_gel_panel", None),
+            getattr(self, "_light_browser", None))
 
     def _ensure_dotplot_panel(self):
         """Create the dotplot panel on first use.
@@ -2513,6 +2541,19 @@ class FilePreviewPage(QWidget):
             return
         self._set_single_fasta_mode(False)
         suffix = path.suffix.lower()
+        if path.name.lower().endswith(".rv.json"):
+            from repeatviewer.backends.map_reference import alignment_for_run_json
+
+            target = alignment_for_run_json(path)
+            if target is not None and _is_light_browser_path(target):
+                self._show_light_browser(target)
+                return
+            if target is not None and target.suffix.lower() == ".paf":
+                self._show_alignment_dotplot(target)
+                return
+        if _is_light_browser_path(path):
+            self._show_light_browser(path)
+            return
         if not is_previewable_file(path):
             self._show_text(
                 f"Preview is not available for this file type ({suffix or 'unknown'}).\n\n"

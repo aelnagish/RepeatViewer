@@ -576,14 +576,16 @@ class _CollapsibleSection(QWidget):
         parent: QWidget | None = None,
         *,
         expanded: bool = True,
+        ruled: bool = False,
     ) -> None:
         super().__init__(parent)
         self.setMinimumWidth(0)
         self._expanded = bool(expanded)
+        self._ruled = bool(ruled)
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         # Match tree Display rail: compact header ↔ body / collapsed rows.
-        root.setSpacing(3)
+        root.setSpacing(0 if ruled else 3)
 
         self._header = QWidget(self)
         self._header.setObjectName("annotationSectionHeader")
@@ -592,8 +594,9 @@ class _CollapsibleSection(QWidget):
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
         )
         header_row = QHBoxLayout(self._header)
-        header_row.setContentsMargins(0, 0, 0, 0)
-        header_row.setSpacing(6)
+        # Ruled rows sit on a full-width hairline, like Tracks / Color / Size.
+        header_row.setContentsMargins(14, 8, 12, 8) if ruled else header_row.setContentsMargins(0, 0, 0, 0)
+        header_row.setSpacing(8 if ruled else 6)
 
         self._arrow = QLabel(self._header)
         self._arrow.setFixedWidth(12)
@@ -618,7 +621,7 @@ class _CollapsibleSection(QWidget):
 
         self._body = QWidget(self)
         self._body_layout = QVBoxLayout(self._body)
-        self._body_layout.setContentsMargins(0, 0, 0, 0)
+        self._body_layout.setContentsMargins(28, 0, 14, 10) if ruled else self._body_layout.setContentsMargins(0, 0, 0, 0)
         self._body_layout.setSpacing(3)
         self._body.setVisible(self._expanded)
         root.addWidget(self._body)
@@ -653,6 +656,17 @@ class _CollapsibleSection(QWidget):
         if event.button() == Qt.MouseButton.LeftButton:
             self.set_expanded(not self._expanded)
         event.accept()
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        super().paintEvent(event)
+        if not self._ruled:
+            return
+        painter = QPainter(self)
+        color = self.palette().color(QPalette.ColorRole.Mid)
+        color.setAlpha(170)
+        painter.setPen(QPen(color, 1))
+        painter.drawLine(0, 0, self.width(), 0)
+        painter.end()
 
 
 class _RotatedTabButton(QToolButton):
@@ -997,7 +1011,7 @@ class SequenceAnnotationRail(QWidget):
         layout = QVBoxLayout(page)
         # Same compact spacing as the tree Display rail.
         layout.setContentsMargins(10, 6, 10, 6)
-        layout.setSpacing(4)
+        layout.setSpacing(6)
         display_title, self._tracks_divider = _page_title_with_rule("Display", page)
         layout.addWidget(display_title)
 
@@ -1711,8 +1725,10 @@ class SequenceAnnotationRail(QWidget):
         page = QWidget()
         page.setMinimumWidth(0)
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(10, 8, 10, 10)
-        layout.setSpacing(8)
+        # Same gap between rows as Display (Tracks / Color / Size), for single
+        # sequence, MSA, and multi-sequence.
+        layout.setContentsMargins(10, 6, 10, 6)
+        layout.setSpacing(6)
 
         # Hidden compatibility alias — Add moved to "Manually add feature" below.
         self.add_feature_btn = QPushButton("Add", page)

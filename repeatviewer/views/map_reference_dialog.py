@@ -114,9 +114,11 @@ PRESET_INFO = (
     "<b>sr</b>: short genomic reads (no splicing)."
 )
 OUTPUT_FMT_INFO = (
-    "<b>PAF</b> (default): text alignment. CIGAR (<code>-c</code>) and CS "
-    "(<code>--cs=long</code>) are under Advanced Settings; the contig view needs CS.<br><br>"
-    "<b>SAM</b>: <code>-a</code> with <code>--MD</code> for the contig view."
+    "<b>PAF</b> (default): text alignment written next to the input, with a "
+    "<code>.paf.rv.json</code> run record. CIGAR (<code>-c</code>) and CS "
+    "(<code>--cs=long</code>) are under Advanced Settings.<br><br>"
+    "<b>SAM</b>: <code>-a</code> with <code>--MD</code>. A <code>.sam.rv.json</code> "
+    "run record opens in the genome browser and still applies if the SAM is later saved as BAM."
 )
 CIGAR_INFO = (
     "PAF only: add a CIGAR string with <code>-c</code> (base-level alignment). "
