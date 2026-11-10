@@ -389,18 +389,27 @@ class PrimerDatabaseDialog(QDialog):
         self._refill_choices()
         self._fill()
         self._on_selection()
+        self.resize(self._fitted_width(), 720)
         self._restore_layout()
 
     # ------------------------------------------------------------ window layout
 
     _LAYOUT_GROUP = "primers/database_window"
 
+    def _fitted_width(self) -> int:
+        """Window width that fits the form exactly (no empty band on the right)."""
+        bar = self.style().pixelMetric(self.style().PixelMetric.PM_ScrollBarExtent)
+        margins = self.layout().contentsMargins()
+        return (self._form_host.sizeHint().width() + bar + 8
+                + margins.left() + margins.right())
+
     def _restore_layout(self) -> None:
         """Size, position, splitters and column widths as the user left them."""
         st = QSettings()
         st.beginGroup(self._LAYOUT_GROUP)
         try:
-            geo = st.value("geometry")
+            # "geometry_v2": sizes saved while the check panel was there were too wide
+            geo = st.value("geometry_v2")
             if geo:
                 self.restoreGeometry(geo)
             v = st.value("split_main")
@@ -417,7 +426,7 @@ class PrimerDatabaseDialog(QDialog):
     def _save_layout(self) -> None:
         st = QSettings()
         st.beginGroup(self._LAYOUT_GROUP)
-        st.setValue("geometry", self.saveGeometry())
+        st.setValue("geometry_v2", self.saveGeometry())
         st.setValue("split_main", self._split_main.saveState())
         st.setValue("columns", self._table.horizontalHeader().saveState())
         st.endGroup()
