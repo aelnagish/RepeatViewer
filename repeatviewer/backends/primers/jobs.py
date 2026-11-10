@@ -21,7 +21,7 @@ from pathlib import Path
 
 from repeatviewer.backends.primers import binding as bd
 from repeatviewer.backends.primers import design as dz
-from repeatviewer.backends.primers.gel import Band, Lane, gel_svg, merge_bands, pick_ladder
+from repeatviewer.backends.primers.gel import Lane, gel_svg, merge_bands, pick_ladder
 from repeatviewer.backends.primers.oligos import (
     KIND_FORWARD,
     KIND_OLIGO,
@@ -165,7 +165,7 @@ def read_templates(path: Path, *, max_records: int | None = None) -> TemplateSet
 
 
 def record_features(path: Path) -> dict[str, list]:
-    """Annotations RepeatViewer keeps for this FASTA (used for repeat masking)."""
+    """Annotations RepeatViewer keeps for this FASTA."""
     try:
         from repeatviewer.backends.sequence_features import load_sequence_map_data
 
@@ -374,8 +374,6 @@ def _gel_from_pairs(pairs: list[dz.DesignedPair], lane_sizes: dict[str, list[int
     lanes: list[Lane] = []
     all_sizes: list[int] = []
     for p in pairs[:max_lanes]:
-        if p.bands:
-            continue
         sizes = lane_sizes.get(p.name) or ([p.product_size] if p.product_size else [])
         if not sizes:
             continue
@@ -386,14 +384,6 @@ def _gel_from_pairs(pairs: list[dz.DesignedPair], lane_sizes: dict[str, list[int
                     b.highlight = True
         lanes.append(Lane(label=p.name, bands=bands))
         all_sizes.extend(sizes)
-    # mode-specific allele lanes (TE insertion)
-    for p in pairs[:1]:
-        for b in p.bands:
-            lanes.append(Lane(label=b["lane"], bands=[Band(size=s, label=f"{s:,} bp",
-                                                          highlight=True)
-                                                     for s in b["sizes"]],
-                              note=p.name))
-            all_sizes.extend(b["sizes"])
     if not lanes:
         return {}
     return {"ladder": pick_ladder(all_sizes), "lanes": [lane.to_dict() for lane in lanes]}
@@ -415,9 +405,8 @@ def run_design(inputs: list[Path], s: dz.DesignSettings, *, progress: ProgressFn
     if not inputs:
         raise PrimerError("Select a FASTA file in the Files panel first.")
     _say(progress, "Reading templates")
-    whole = s.mode in dz.MSA_MODES or s.mode in (dz.MODE_LADDER, dz.MODE_FISH)
+    whole = s.mode in (dz.MODE_LADDER, dz.MODE_FISH)
     sets = [read_templates(p, max_records=None if whole else max_templates) for p in inputs]
-    misprime = dz.load_mispriming_library(s.mispriming_library)
     payload = _base_payload("design", f"{dz.MODE_LABELS[s.mode]}: {inputs[0].name}", inputs)
     payload["mode"] = s.mode
     payload["mode_label"] = dz.MODE_LABELS[s.mode]
@@ -429,148 +418,48 @@ def run_design(inputs: list[Path], s: dz.DesignSettings, *, progress: ProgressFn
     explain: list[str] = []
     annotations: dict[Path, dict[str, list]] = {}
 
-    if s.mode in dz.MSA_MODES:
-        ts = sets[0]
-        if not ts.aligned:
-            raise PrimerError(f"{ts.path.name} is not an alignment. Align it first "
-                              "(Tools → Align), then design on the aligned FASTA.")
-        _say(progress, f"Scoring windows across {len(ts.rows)} aligned sequences")
-        pairs, info = dz.design_msa(ts.names, ts.rows, s, progress=progress)
-        payload["info"] = {k: v for k, v in info.items() if k != "target_names"}
-        payload["info"]["target_names"] = info.get("target_names", [])
-        cons = info["consensus"]
-        payload["templates"].append(_template_entry("consensus", cons, file=str(ts.path),
-                                                    degenerate=info["degenerate_consensus"]))
-        members = ts.ungapped()
-        for p in pairs:
+    for ts in sets:
+        records = ts.ungapped()
+        if s.mode in (dz.MODE_LADDER, dz.MODE_FISH):
+            if ts.aligned:
+                rid, tseq = "consensus", bd.consensus(ts.rows)
+            else:
+                # the copy most like the others stands in for a consensus
+                short = [r for r in records if len(r[1]) <= 20_000] or records
+                rid, tseq = dz.representative_record(short)
+            payload["templates"].append(_template_entry(rid, tseq, file=str(ts.path)))
             _check(cancel)
-            lane_sizes[p.name] = dz.pair_bands_on(
-                p, members, bd.SearchSettings(max_mismatches=s.coverage_mismatches,
-                                              three_prime_exact=s.coverage_three_prime_exact))
-            if lane_sizes[p.name]:
-                lo, hi = min(lane_sizes[p.name]), max(lane_sizes[p.name])
-                p.extra["member_products"] = [lo, hi, len(lane_sizes[p.name])]
-        if not pairs:
-            explain.append("No window reached the coverage asked for. Lower \"Min coverage\", "
-                           "allow more degeneracy or mismatches, or widen the size / Tm range.")
-    else:
-        for ts in sets:
-            records = ts.ungapped()
-            feats = record_features(ts.path)
-            if s.mode in (dz.MODE_LADDER, dz.MODE_FISH):
-                if ts.aligned:
-                    rid, tseq = "consensus", bd.consensus(ts.rows)
-                else:
-                    # the copy most like the others stands in for a consensus
-                    short = [r for r in records if len(r[1]) <= 20_000] or records
-                    rid, tseq = dz.representative_record(short)
-                payload["templates"].append(_template_entry(rid, tseq, file=str(ts.path)))
-                _check(cancel)
-                if s.mode == dz.MODE_LADDER:
-                    want = s.num_return
-                    s.num_return = min(100, want * 4)
-                    try:
-                        run = dz.design_ladder(rid, tseq, s, misprime)
-                    finally:
-                        s.num_return = want
-                    explain.extend(run.explain)
-                    mono = len(tseq)
-                    long_arrays = [(n, q) for n, q in records if len(q) >= 3 * mono]
-                    for p in run.pairs:
-                        cov = 0
-                        st = bd.SearchSettings(max_mismatches=s.coverage_mismatches,
-                                               three_prime_exact=s.coverage_three_prime_exact)
-                        for n_, q in records:
-                            f = bd.find_sites_in_sequence("F", p.forward.sequence, n_, q + q, st)
-                            r = bd.find_sites_in_sequence("R", p.reverse.sequence, n_, q + q, st)
-                            cov += bool(f) and bool(r)
-                        p.coverage = {"target_total": len(records), "target_amplified": cov}
-                        if len(records) > 1:
-                            p.notes.append(f"both primers bind {cov}/{len(records)} input copies")
-                        if long_arrays:
-                            p.extra["_lane"] = dz.pair_bands_on(p, long_arrays[:5], st)
-                        else:
-                            sizes = []
-                            for size, w in dz.ladder_bands(p.product_size, mono):
-                                sizes.extend([size] * max(1, int(round(w * 7))))
-                            p.extra["_lane"] = sizes
-                            p.extra["simulated_array"] = 8
-                    # most conserved first: primers that sit in every monomer
-                    ranked = sorted(run.pairs, key=lambda q: (
-                        -q.coverage.get("target_amplified", 0), q.penalty))[:want]
-                    for p in dz.rerank(ranked, rename="LAD"):
-                        lane_sizes[p.name] = p.extra.pop("_lane", [])
-                        pairs.append(p)
-                else:
-                    avoid = []
-                    if s.fish_avoid_fasta and Path(s.fish_avoid_fasta).expanduser().is_file():
-                        avoid = list(bd.iter_fasta(Path(s.fish_avoid_fasta).expanduser()))
-                    members = records if len(records) > 1 else [(rid, tseq)]
-                    pairs.extend(dz.design_fish(rid, tseq, members, s, avoid, progress))
-                    if not pairs:
-                        explain.append("No probe passed the coverage / Tm / GC / hairpin "
-                                       "filters. Lower \"Min coverage\" or widen the length, "
-                                       "Tm or GC range.")
-                break   # one template set for these modes
-            for rid, seq in records:
-                _check(cancel)
-                _say(progress, f"Designing on {rid} ({len(seq):,} bp)")
-                excluded, sources = dz.mask_intervals(rid, seq, s, feats.get(rid))
-                target = included = None
-                if s.target_start and s.target_end and s.target_end >= s.target_start:
-                    target = (s.target_start - 1, s.target_end)
-                if s.included_start and s.included_end and s.included_end > s.included_start:
-                    included = (s.included_start - 1, s.included_end)
-                entry = _template_entry(rid, seq, file=str(ts.path),
-                                        masked=[list(x) for x in excluded],
-                                        mask_sources=sources,
-                                        target=list(target) if target else None,
-                                        included=list(included) if included else None)
-                payload["templates"].append(entry)
-                if s.mode == dz.MODE_BSP:
-                    run = dz.design_bsp(rid, seq, s, excluded, misprime)
-                    explain.extend(f"{rid}: {x}" for x in run.explain)
-                    found = run.pairs
-                elif s.mode == dz.MODE_MSP:
-                    found = dz.design_msp(rid, seq, s)
-                    if not found:
-                        explain.append(f"{rid}: no MSP pair. It needs {s.msp_context} sites near both "
-                                       "ends of a product in the size range; try a wider size / Tm range.")
-                elif s.mode == dz.MODE_INSERTION:
-                    te = _te_interval(s, feats.get(rid) or [], len(seq))
-                    entry["te"] = list(te)
-                    found, ex = dz.design_insertion(rid, seq, s, te, excluded, misprime)
-                    explain.extend(f"{rid}: {x}" for x in ex)
-                else:
-                    run = dz.run_primer3(rid, seq, s, excluded=excluded, target=target,
-                                         included=included, misprime_lib=misprime,
-                                         num_return=s.num_return * (4 if s.check_genome else 1),
-                                         pick_probe=s.pick_probe or None)
-                    found = run.pairs
-                    explain.extend(f"{rid}: {x}" for x in run.explain)
-                for p in found:
-                    lane_sizes[p.name] = dz.pair_bands_on(p, [(rid, seq)]) \
-                        if s.mode not in (dz.MODE_BSP, dz.MODE_MSP) else [p.product_size]
-                pairs.extend(found)
-                if annotate and found and s.mode not in dz.MSA_MODES:
-                    best = [p for p in found if p.group in ("", "M")][:1]
-                    feats_out = []
-                    for p in best:
-                        feats_out.extend(pair_features(p))
-                    annotations.setdefault(ts.path, {})[rid] = feats_out
-            if s.mode == dz.MODE_QPCR and s.reference_fasta:
-                pairs.extend(_design_reference(s, misprime, payload, lane_sizes, explain))
-    if s.check_genome and s.genome_fasta and pairs:
-        _check(cancel)
-        _say(progress, f"Checking {len(pairs)} pairs against {Path(s.genome_fasta).name}")
-        payload["genome"] = dz.check_genome(pairs, s, progress=progress, cancel=cancel)
-        pairs, dropped = dz.drop_unspecific(pairs, s)
-        if dropped:
-            payload["warnings"].append(
-                f"{dropped} pair(s) dropped: more than {s.genome_max_products} product(s) in "
-                f"{Path(s.genome_fasta).name}.")
-    if s.mode not in (dz.MODE_MSP,):
-        pairs = _trim_per_template(pairs, s.num_return)
+            if s.mode == dz.MODE_LADDER:
+                pairs.extend(_design_ladder(rid, tseq, records, s, lane_sizes, explain))
+            else:
+                avoid = []
+                if s.fish_avoid_fasta and Path(s.fish_avoid_fasta).expanduser().is_file():
+                    avoid = list(bd.iter_fasta(Path(s.fish_avoid_fasta).expanduser()))
+                members = records if len(records) > 1 else [(rid, tseq)]
+                pairs.extend(dz.design_fish(rid, tseq, members, s, avoid, progress))
+                if not pairs:
+                    explain.append("No probe passed the coverage / Tm / GC / hairpin "
+                                   "filters. Lower \"Min coverage\" or widen the length, "
+                                   "Tm or GC range.")
+            break   # one template set for these modes
+        for rid, seq in records:
+            _check(cancel)
+            _say(progress, f"Designing on {rid} ({len(seq):,} bp)")
+            payload["templates"].append(_template_entry(rid, seq, file=str(ts.path)))
+            run = dz.run_primer3(rid, seq, s, pick_probe=s.pick_probe or None)
+            found = run.pairs
+            explain.extend(f"{rid}: {x}" for x in run.explain)
+            for p in found:
+                lane_sizes[p.name] = dz.pair_bands_on(p, [(rid, seq)])
+            pairs.extend(found)
+            if annotate and found:
+                feats_out = []
+                for p in found[:1]:
+                    feats_out.extend(pair_features(p))
+                annotations.setdefault(ts.path, {})[rid] = feats_out
+        if s.mode == dz.MODE_QPCR and s.reference_fasta:
+            pairs.extend(_design_reference(s, payload, lane_sizes, explain))
+    pairs = _trim_per_template(pairs, s.num_return)
     payload["pairs"] = [p.to_dict() for p in pairs]
     payload["explain"] = explain
     payload["gel"] = _gel_from_pairs(pairs, lane_sizes)
@@ -602,23 +491,48 @@ def _trim_per_template(pairs: list[dz.DesignedPair], n: int) -> list[dz.Designed
     return out
 
 
-def _te_interval(s: dz.DesignSettings, feats: list, length: int) -> tuple[int, int]:
-    if s.te_start and s.te_end and s.te_end > s.te_start:
-        return int(s.te_start), int(min(s.te_end, length))
-    if s.te_feature:
-        for f in feats:
-            if f.name == s.te_feature or f.name.startswith(s.te_feature):
-                return int(f.start), int(f.end)
-    te_like = [f for f in feats if str(f.feature_type).lower() not in
-               ("primer_bind", "pcr product", "probe", "orf", "domain", "tsd", "pbs", "ppt")]
-    if te_like:
-        f = max(te_like, key=lambda x: x.end - x.start)
-        return int(f.start), int(f.end)
-    raise PrimerError("Set the TE position (TE start / end), or annotate the TE on the "
-                      "sequence first.")
+def _design_ladder(rid: str, tseq: str, records: list[tuple[str, str]], s: dz.DesignSettings,
+                   lane_sizes: dict[str, list[int]], explain: list[str]) -> list[dz.DesignedPair]:
+    """Ladder primers on the monomer ``tseq``, ranked by how many input copies they bind."""
+    want = s.num_return
+    s.num_return = min(100, want * 4)
+    try:
+        run = dz.design_ladder(rid, tseq, s)
+    finally:
+        s.num_return = want
+    explain.extend(run.explain)
+    mono = len(tseq)
+    long_arrays = [(n, q) for n, q in records if len(q) >= 3 * mono]
+    st = bd.SearchSettings(max_mismatches=s.coverage_mismatches,
+                           three_prime_exact=s.coverage_three_prime_exact)
+    for p in run.pairs:
+        cov = 0
+        for n_, q in records:
+            f = bd.find_sites_in_sequence("F", p.forward.sequence, n_, q + q, st)
+            r = bd.find_sites_in_sequence("R", p.reverse.sequence, n_, q + q, st)
+            cov += bool(f) and bool(r)
+        p.coverage = {"target_total": len(records), "target_amplified": cov}
+        if len(records) > 1:
+            p.notes.append(f"both primers bind {cov}/{len(records)} input copies")
+        if long_arrays:
+            p.extra["_lane"] = dz.pair_bands_on(p, long_arrays[:5], st)
+        else:
+            sizes = []
+            for size, w in dz.ladder_bands(p.product_size, mono):
+                sizes.extend([size] * max(1, int(round(w * 7))))
+            p.extra["_lane"] = sizes
+            p.extra["simulated_array"] = 8
+    # most conserved first: primers that sit in every monomer
+    ranked = sorted(run.pairs, key=lambda q: (
+        -q.coverage.get("target_amplified", 0), q.penalty))[:want]
+    out = []
+    for p in dz.rerank(ranked, rename="LAD"):
+        lane_sizes[p.name] = p.extra.pop("_lane", [])
+        out.append(p)
+    return out
 
 
-def _design_reference(s: dz.DesignSettings, misprime: dict, payload: dict,
+def _design_reference(s: dz.DesignSettings, payload: dict,
                       lane_sizes: dict[str, list[int]], explain: list[str]) -> list[dz.DesignedPair]:
     ref = Path(s.reference_fasta).expanduser()
     if not ref.is_file():
@@ -627,7 +541,7 @@ def _design_reference(s: dz.DesignSettings, misprime: dict, payload: dict,
     out = []
     for rid, seq in list(bd.iter_fasta(ref))[:1]:
         payload["templates"].append(_template_entry(rid, seq, file=str(ref), role="reference"))
-        run = dz.run_primer3(rid, seq.replace("-", ""), s, misprime_lib=misprime,
+        run = dz.run_primer3(rid, seq.replace("-", ""), s,
                              name_prefix="REF", pick_probe=s.pick_probe or None)
         explain.extend(f"{rid} (reference): {x}" for x in run.explain)
         for p in run.pairs:
@@ -896,10 +810,6 @@ def run_map(inputs: list[Path], ms: MapSettings, *, database_path: Path | None =
     if len(sites) > MAX_SITES_IN_FILE:
         payload["warnings"].append(f"{len(sites):,} binding sites: the first "
                                    f"{MAX_SITES_IN_FILE:,} are listed (all in the TSV).")
-    if large and settings.three_prime_exact < bd.DEFAULT_SEED:
-        payload["warnings"].append(
-            f"Large input ({total:,} bp): the last {max(bd.MIN_SEED, ms.genome_seed)} bases of "
-            "each primer had to match exactly.")
     lanes = []
     per_record: dict[str, list[int]] = {}
     for p in products:

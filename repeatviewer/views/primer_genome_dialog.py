@@ -106,6 +106,7 @@ class GenomeStrips(QWidget):
         self.setMouseTracking(True)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setMinimumWidth(500)
+        self.setFixedHeight(160)            # room for the hint before Find Sites
         self.grabGesture(Qt.GestureType.PinchGesture)
 
     # ---------------------------------------------------------------- data
@@ -218,7 +219,8 @@ class GenomeStrips(QWidget):
         if not self._records:
             p.setPen(text)
             p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter,
-                       "Choose a genome and press Find Sites")
+                       "Choose a genome (a FASTA file) and click Find Sites.\n"
+                       "Every place each primer binds is drawn here, one strip per sequence.")
             p.end()
             return
         left, width = self._plot()
@@ -373,7 +375,7 @@ class PrimerGenomeDialog(QDialog):
     def __init__(self, primers: list[Primer], *, genome: Path | None = None,
                  parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Binding Sites on Chromosomes")
+        self.setWindowTitle("Sites in Genome")
         self.setMinimumSize(1200, 760)
         self._primers = list(primers)
         self._records: list[pcr.RecordSites] = []
@@ -405,7 +407,7 @@ class PrimerGenomeDialog(QDialog):
         self.find_button.setDefault(True)
         top.addWidget(self.find_button)
         top.addStretch(1)
-        top.addWidget(make_help_button(self, "Binding Sites on Chromosomes", GENOME_HELP))
+        top.addWidget(make_help_button(self, "Sites in Genome", GENOME_HELP))
         root.addLayout(top)
 
         second = QHBoxLayout()

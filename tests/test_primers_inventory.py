@@ -340,7 +340,8 @@ def test_window_import_edit_filter_history(qapp, settings, shared):
     assert d._table.rowCount() == 0
     assert d.import_file(SHEET, confirm=False) == 28
     assert d._table.rowCount() == 28
-    assert "User: <b>Abdullah</b>" in d._where.text()
+    assert d._place_btn.text() == f"Database: {shared.parent.name}"
+    assert "You are Abdullah" in d._place_btn.toolTip()
     # Filters: organism and free text over every field.
     d._organism.setCurrentIndex(d._organism.findData("Nicotiana sp."))
     assert d._table.rowCount() == 4
@@ -361,10 +362,10 @@ def test_window_import_edit_filter_history(qapp, settings, shared):
     rec = d.database().record_by_name("pBV1_for")
     assert rec.get("tested") == "worked" and rec.get("anneal_temp") == "55"
     assert rec.get("box") == "BI-8"           # untouched fields stay
-    text = d._details.toPlainText()
-    assert "History" in text and "Abdullah: Tested = worked" in text
-    assert "supplier 53.7 °C" in text and "With pBV1_rev" in text
-    assert "Hairpin" in text and "Self-dimer" in text and "3′ end" in text
+    assert d._history_btn.isEnabled()
+    rec = d.database().record_by_name("pBV1_for")
+    assert any("Abdullah: Tested = worked" in inv.describe_change(ch, d.database())
+               for ch in rec.history)
     # Several at once: only the changed field is written to each.
     d._table.clearSelection()
     for name in ("ITS1-F", "ITS4"):
@@ -397,11 +398,12 @@ def test_window_sees_changes_from_others(qapp, settings, shared):
     other.add_records([{"name": "NewSat_F", "sequence": "ACGTGGTCAAGCTTGACCAA", "box": "Z1"}])
     d._poll_disk()
     assert d._table.rowCount() == 29
-    assert "2 people have made changes" in d._where.toolTip()   # Anna and Nici
+    assert "2 people have made changes" in d._place_btn.toolTip()   # Anna and Nici
     d.close()
 
 
-def test_window_find_duplicates_and_shared_move(qapp, settings, shared, tmp_path, monkeypatch):
+def test_window_find_duplicates_and_shared_database(qapp, settings, shared, tmp_path,
+                                                    monkeypatch):
     from PySide6.QtWidgets import QFileDialog, QMessageBox
 
     from repeatviewer.views.primer_database_dialog import PrimerDatabaseDialog
@@ -409,23 +411,57 @@ def test_window_find_duplicates_and_shared_move(qapp, settings, shared, tmp_path
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
     d = PrimerDatabaseDialog(None)
     assert isinstance(d.database(), inv.PrimerInventory)
-    assert "Database is on <b>this computer</b>" in d._where.text() and "On this computer only" in d._where.toolTip()
+    assert d._place_btn.text() == "Database: This Computer"
+    assert "This Computer" in d.windowTitle()
     d.add_primers([Primer("Loc_F", "ACGTGGTCAAGCTTGACCAA"), Primer("Loc_R", "TTGGTCAAGCTTGACCACGT")])
     moved = []
     d.databasePathChanged.connect(moved.append)
-    monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *a, **k: str(tmp_path / "Sciebo2"))
-    (tmp_path / "Sciebo2").mkdir()
-    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
-    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: None)
-    d._use_shared_folder()
-    target = tmp_path / "Sciebo2" / inv.FOLDER_NAME
-    assert moved == [str(target)] and sorted(d.database().names()) == ["Loc_F", "Loc_R"]
-    assert "<b>a shared folder</b>" in d._where.text() and "Sciebo" in d._where.toolTip()
-    # Loc_R is the reverse complement of Loc_F.
+    lab = tmp_path / "Molbot"
+    lab.mkdir()
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *a, **k: str(lab))
+    # No database there yet: make one and copy the primers.
     monkeypatch.setattr(QMessageBox, "exec", lambda self: 0)
+    monkeypatch.setattr(QMessageBox, "clickedButton", lambda self: self.buttons()[0])
+    d._choose_shared()
+    target = lab / inv.FOLDER_NAME
+    assert moved == [str(target)] and sorted(d.database().names()) == ["Loc_F", "Loc_R"]
+    assert d._place_btn.text() == "Database: Molbot"
+    # Choosing the lab folder again opens the database inside it (no question).
+    d._use_local()
+    d._choose_shared()
+    assert moved[-1] == str(target)
+    # Loc_R is the reverse complement of Loc_F.
     d._find_duplicates()
     assert len(d._selected_ids()) == 2
+    d._fill_place_menu()
+    texts = [a.text() for a in d._place_menu.actions()]
+    assert texts[0] == "This Computer" and "Molbot" in texts and "Shared Database…" in texts
     d.close()
+
+
+def test_missing_shared_database_is_shown(qapp, settings, tmp_path, monkeypatch):
+    from repeatviewer.views.primer_database_dialog import PrimerDatabaseDialog
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    gone = tmp_path / "Sciebo" / "Molbot" / inv.FOLDER_NAME
+    d = PrimerDatabaseDialog(gone)
+    assert not d._missing.isHidden() and "Molbot" in d._missing_text.text()
+    assert d._place_btn.text() == "Database: This Computer"
+    inv.create_inventory(gone.parent)       # Sciebo has synced
+    moved = []
+    d.databasePathChanged.connect(moved.append)
+    d._retry_missing()
+    assert d._missing.isHidden() and moved == [str(gone)]
+    assert d._place_btn.text() == "Database: Molbot"
+    d.close()
+
+
+def test_find_inventory_looks_one_level_down(tmp_path):
+    assert inv.find_inventory(tmp_path) is None
+    db = inv.create_inventory(tmp_path / "Lab")
+    assert inv.find_inventory(tmp_path / "Lab") == db
+    assert inv.find_inventory(db) == db
+    assert inv.find_inventory(tmp_path) is None   # two levels up: not searched
 
 
 # --------------------------------------------------------------------------
@@ -535,7 +571,7 @@ def test_window_people(qapp, settings, shared, monkeypatch):
     r = _row_of(d, "pBV1_for")
     assert d._table.item(r, _COL["tm"]).text().count(".") == 1
     assert d._table.item(r, _COL["tm_supplier"]).text() == "53.7"
-    assert d.windowTitle() == "Primer Database: 28 primers"
+    assert d.windowTitle().endswith(" · 28 primers")
     # People window: edit and mark as former.
     pd = PeopleDialog(db, d)
     assert pd._table.rowCount() == 5
@@ -595,9 +631,9 @@ def test_window_remembers_its_layout(qapp, settings, shared):
     d.show()
     d.resize(1100, 650)
     d._table.setColumnWidth(_COL["name"], 222)
-    d._split_bottom.setSizes([300, 500])
+    d._split_main.setSizes([300, 500])
     qapp.processEvents()
-    bottom = d._split_bottom.sizes()
+    bottom = d._split_main.sizes()
     d.close()
     e = PrimerDatabaseDialog(shared)
     e.show()
@@ -606,13 +642,13 @@ def test_window_remembers_its_layout(qapp, settings, shared):
     assert e._table.columnWidth(_COL["name"]) == 222
     e._fill()   # a refill keeps the user's column widths
     assert e._table.columnWidth(_COL["name"]) == 222
-    got = e._split_bottom.sizes()
+    got = e._split_main.sizes()
     assert abs(got[0] / sum(got) - bottom[0] / sum(bottom)) < 0.05
     e.close()
 
 
 # --------------------------------------------------------------------------
-# Lab lists and plain-language checks
+# Lab lists
 # --------------------------------------------------------------------------
 
 
@@ -639,25 +675,6 @@ def test_lists_add_rename_merge_remove(shared):
     assert ("Beta vulgaris", 2) in other.values("organism")
 
 
-def test_plain_language_checks():
-    from repeatviewer.backends.primers.thermo import ThermoSettings, analyze_oligo, heterodimer
-    from repeatviewer.views.primer_database_dialog import BAD, OK, pair_verdicts, primer_verdicts
-
-    t = ThermoSettings()
-    good = analyze_oligo("AGCACCACCAGAGAGGAAGTACAGT", t)
-    rows = {label: (status, text) for status, label, text in primer_verdicts(good)}
-    assert rows["Hairpin"][0] == OK and rows["Self-dimer"][0] == OK and rows["3′ end"][0] == OK
-    # A palindromic primer dimerizes strongly.
-    pal = analyze_oligo("GCGCGAATTCGCGCGAATTCGCGC", t)
-    rows = {label: status for status, label, _t in primer_verdicts(pal)}
-    assert rows["Self-dimer"] == BAD
-    a = analyze_oligo("AGCACCACCAGAGAGGAAGTACAGT", t)
-    b = analyze_oligo("ATAATTATAAATATTAAATTTATAT", t)
-    rows = {label: status for status, label, _t in pair_verdicts(
-        a, b, heterodimer(a.sequence, b.sequence, t))}
-    assert rows["Tm difference"] == BAD
-
-
 def test_lab_window(qapp, settings, shared, monkeypatch):
     from PySide6.QtWidgets import QInputDialog
 
@@ -665,7 +682,9 @@ def test_lab_window(qapp, settings, shared, monkeypatch):
 
     _imported(shared)
     d = PrimerDatabaseDialog(shared)
-    lab = ListsDialog(d.database(), d, start="places")
+    asked = []
+    lab = ListsDialog(d.database(), d, start="places", ask_user=lambda: asked.append(1))
+    assert "You are" in lab._you.text()
     assert [lab.tabs.tabText(i) for i in range(lab.tabs.count())] == [
         "People", "Places", "Organisms", "Targets"]
     assert lab.tabs.currentIndex() == 1

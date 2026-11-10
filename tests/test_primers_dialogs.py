@@ -17,7 +17,6 @@ from primer_testdata import make_data  # noqa: E402
 from repeatviewer.backends.primers import design as dz  # noqa: E402
 from repeatviewer.backends.primers import jobs as pj  # noqa: E402
 from repeatviewer.job_options import (  # noqa: E402
-    PRIMER_DIALOG_TAB_REGIONS,
     PRIMER_RIGHT_CLICK_RUN,
     PrimerOptions,
     load_primer_options,
@@ -88,20 +87,19 @@ def test_design_dialog_settings_round_trip(qapp, isolated_settings, data):
     from repeatviewer.views.primer_dialogs import PrimerDesignDialog
 
     start = dz.DesignSettings(
-        mode=dz.MODE_SPECIFIC, target_pattern="TEfamA", min_coverage=0.8, max_off_target=0.05,
-        forward_tail="gtaaaacgacggccagt", mask_tandem=False, mask_file=str(data.primers),
-        check_genome=True, genome_fasta=str(data.genome), genome_max_products=3,
-        target_start=10, target_end=50, num_return=7,
+        mode=dz.MODE_FISH, min_coverage=0.8, coverage_mismatches=2, fish_label="Cy5",
+        fish_avoid_fasta=str(data.primers), forward_tail="gtaaaacgacggccagt", num_return=7,
     )
     opts = PrimerOptions(design=start.to_dict(), right_click_action=PRIMER_RIGHT_CLICK_RUN,
-                         last_dialog_tab=PRIMER_DIALOG_TAB_REGIONS)
+                         database_path="/lab/db")
     d = PrimerDesignDialog(initial=opts, files=[data.te_aln])
-    assert d._tab_bar.currentIndex() == 1  # reopens on Regions
+    assert [d._tab_bar.tabText(i) for i in range(d._tab_bar.count())
+            if d._tab_bar.isTabVisible(i)] == ["Primers", "Options"]
     out = d.options()
+    assert out.database_path == "/lab/db"   # only the Database window changes it
     s = out.design_settings()
-    for key in ("mode", "target_pattern", "min_coverage", "max_off_target", "forward_tail",
-                "mask_tandem", "mask_file", "check_genome", "genome_fasta", "genome_max_products",
-                "target_start", "target_end", "num_return"):
+    for key in ("mode", "min_coverage", "coverage_mismatches", "fish_label",
+                "fish_avoid_fasta", "forward_tail", "num_return"):
         assert getattr(s, key) == pytest.approx(getattr(start, key)) if isinstance(
             getattr(start, key), float) else getattr(s, key) == getattr(start, key), key
     assert out.right_click_action == PRIMER_RIGHT_CLICK_RUN
@@ -155,8 +153,7 @@ def test_database_dialog_lists_and_analyses(qapp, isolated_settings, data):
     assert d._table.rowCount() == 4
     d._table.selectRow(0)
     qapp.processEvents()
-    text = d._details.toPlainText()
-    assert "Tm" in text and "Hairpin" in text and "Self-dimer" in text
+    assert d._form_ids and not hasattr(d, "_details")   # no check panel any more
     d._filter.setText("Sat")
     assert d._table.rowCount() == 2
 
@@ -277,29 +274,6 @@ def test_inputs_define_template(qapp, isolated_settings, data):
     assert [p.name for p in m.run_files()] == ["array.fa"]
 
 
-def test_methylation_fields(qapp, isolated_settings, data):
-    from repeatviewer.views.primer_dialogs import PrimerDesignDialog
-
-    d = PrimerDesignDialog(initial=PrimerOptions(), files=[data.promoter])
-    d.show()
-    form = d._primers_form.form
-    d._mode.setCurrentIndex(d._mode.findData(dz.MODE_MSP))
-    qapp.processEvents()
-    assert form.isRowVisible(d._meth_system.parentWidget()) or d._meth_system.isVisible()
-    assert d.design_settings().methylation_system == dz.METH_PLANT
-    _set = d._msp_context.findData("CHG")
-    d._msp_context.setCurrentIndex(_set)
-    assert d.design_settings().msp_context == "CHG"
-    # Animal: CHG is not offered, the site falls back to CG.
-    d._meth_system.setCurrentIndex(d._meth_system.findData(dz.METH_ANIMAL))
-    s = d.design_settings()
-    assert s.methylation_system == dz.METH_ANIMAL and s.msp_context == "CG"
-    d._mode.setCurrentIndex(d._mode.findData(dz.MODE_PCR))
-    qapp.processEvents()
-    assert not d._meth_system.isVisible()
-    d.close()
-
-
 def test_painting_mode_swaps_tabs_and_round_trips(qapp, isolated_settings, data, tmp_path):
     from repeatviewer.backends.primers import painting as pt
     from repeatviewer.views.primer_dialogs import PrimerDesignDialog
@@ -309,7 +283,7 @@ def test_painting_mode_swaps_tabs_and_round_trips(qapp, isolated_settings, data,
     qapp.processEvents()
     tabs = lambda: [d._tab_bar.tabText(i) for i in range(d._tab_bar.count())  # noqa: E731
                     if d._tab_bar.isTabVisible(i)]
-    assert tabs() == ["Primers", "Regions", "Specificity", "Options"]
+    assert tabs() == ["Primers", "Options"]
     d._mode.setCurrentIndex(d._mode.findData(dz.MODE_PAINTING))
     qapp.processEvents()
     assert tabs() == ["Chorus2", "Selection", "Options"]
