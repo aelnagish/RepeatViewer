@@ -443,10 +443,11 @@ def convert_alignment(
         progress(10, f"Converting {source.name} → {label_fmt}…")
     try:
         if backend == "pysam":
-            import pysam
-
-            pysam.view(
-                "-@", str(threads), *fmt_args, "-o", str(out), str(source)
+            _pysam_view_to_file(
+                source,
+                out,
+                fmt_args=fmt_args,
+                threads=threads,
             )
         else:
             assert exe is not None
@@ -457,6 +458,8 @@ def convert_alignment(
                 label=f"Converting {source.name}…",
             )
     except Exception as exc:  # noqa: BLE001 - surface as SamtoolsError
+        if isinstance(exc, SamtoolsError):
+            raise
         message = str(exc).strip() or repr(exc)
         if fmt == CONVERT_FORMAT_CRAM and (
             "reference" in message.lower() or "ref" in message.lower()
@@ -469,11 +472,53 @@ def convert_alignment(
         raise SamtoolsError(
             f"Convert {source.name} → {label_fmt} failed: {message}"
         ) from exc
-    if not out.is_file():
+    if not out.is_file() or out.stat().st_size <= 0:
         raise SamtoolsError(f"Convert finished but {out.name} was not created.")
     if progress is not None:
         progress(100, f"Converted → {out.name}")
     return [out]
+
+
+def _pysam_view_to_file(
+    source: Path,
+    out: Path,
+    *,
+    fmt_args: list[str],
+    threads: int,
+) -> None:
+    """Run ``pysam.view … -o out``.
+
+    pysam's default ``catch_stdout=True`` can swallow binary BAM/CRAM and leave
+    ``-o`` unwritten (call appears to succeed, no file on disk). Prefer
+    ``catch_stdout=False``; fall back to writing returned bytes if needed.
+    """
+    import pysam
+
+    args = ["-@", str(threads), *fmt_args, "-o", str(out), str(source)]
+    try:
+        pysam.view(*args, catch_stdout=False)
+    except TypeError:
+        # Older pysam: no catch_stdout kwarg — may return the file contents.
+        data = pysam.view(*args)
+        if out.is_file() and out.stat().st_size > 0:
+            return
+        if isinstance(data, (bytes, bytearray)) and data:
+            out.write_bytes(bytes(data))
+            return
+        if isinstance(data, str) and data:
+            # Text SAM from ``-h``; binary BAM must not go through str.
+            if "-b" in fmt_args or any(
+                a == "cram" or str(a).startswith("cram") for a in fmt_args
+            ):
+                raise SamtoolsError(
+                    "pysam.view returned text instead of writing a binary "
+                    f"file ({out.name}). Update pysam or install samtools."
+                )
+            out.write_text(data, encoding="utf-8")
+            return
+        raise SamtoolsError(
+            f"pysam.view did not write {out.name}."
+        ) from None
 
 
 def convert_to_bam(

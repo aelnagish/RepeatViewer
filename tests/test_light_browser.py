@@ -300,6 +300,55 @@ def test_one_per_row_names_and_menu(qapp, tmp_path, monkeypatch):
     panel.shutdown()
 
 
+def test_large_sam_is_refused_for_preview(tmp_path):
+    """Big SAMs must be sorted+indexed BAM; small ones still open in memory."""
+    small = tmp_path / "small.sam"
+    small.write_text(
+        "@SQ\tSN:chr1\tLN:1000\n"
+        "r1\t0\tchr1\t1\t60\t10M\t*\t0\t0\tAAAAAAAAAA\t*\n",
+        encoding="utf-8",
+    )
+    assert small.stat().st_size <= gt.SAM_OPEN_LIMIT
+    assert gt.open_track(small) is not None
+
+    large = tmp_path / "large.sam"
+    # Sparse file-sized payload without allocating huge strings in the test.
+    with large.open("wb") as fh:
+        fh.write(b"@SQ\tSN:chr1\tLN:1000\n")
+        fh.seek(gt.SAM_OPEN_LIMIT + 1)
+        fh.write(b"\n")
+    assert large.stat().st_size > gt.SAM_OPEN_LIMIT
+    with pytest.raises(gt.TrackError, match="Sort and index"):
+        gt.open_track(large)
+
+
+def test_small_bam_loads_fully_without_100kb_window(tmp_path):
+    """Small indexed BAM: all reads at any zoom; One per row can list the scaffold."""
+    pysam = pytest.importorskip("pysam")
+    sam = tmp_path / "reads.sam"
+    sam.write_text(
+        "@HD\tVN:1.6\tSO:coordinate\n"
+        "@SQ\tSN:chr1\tLN:5000000\n"
+        "r1\t0\tchr1\t100\t60\t10M\t*\t0\t0\tACGTACGTAC\t*\n"
+        "r2\t0\tchr1\t200\t60\t10M\t*\t0\t0\tACGTACGTAC\t*\n",
+        encoding="utf-8",
+    )
+    bam = tmp_path / "reads.bam"
+    pysam.view("-b", "-o", str(bam), str(sam), catch_stdout=False)
+    pysam.sort("-o", str(tmp_path / "reads.sorted.bam"), str(bam))
+    sorted_bam = tmp_path / "reads.sorted.bam"
+    pysam.index(str(sorted_bam))
+    assert sorted_bam.stat().st_size <= gt.BAM_FULL_LOAD_LIMIT
+    track = gt.open_track(sorted_bam)
+    assert isinstance(track, gt.SmallBamTrack)
+    assert track.read_window is None
+    assert track.reads_visible(0, 5_000_000)
+    assert len(track.index("chr1").items) == 2
+    # One per row is gated on read_window vs scaffold length; None → allowed.
+    window = getattr(track, "read_window", None)
+    assert not (window and 5_000_000 > int(window))
+
+
 def test_sam_length_mismatch_is_not_ok(tmp_path):
     """Same chromosome names but different @SQ / FASTA lengths → not a match."""
     ref = _fasta(tmp_path / "ref.fa", {"chr1": "A" * 1000, "chr2": "C" * 1000})
@@ -372,3 +421,46 @@ def test_preview_routes_genome_files_to_light_browser():
 
     for name in ("a.bam", "a.sam", "a.gff3", "a.gtf", "a.gff.gz", "a.cram"):
         assert is_previewable_file(Path(name)), name
+
+
+def test_coverage_cache_companions_follow_bam(tmp_path):
+    bam = tmp_path / "reads.sorted.bam"
+    bam.write_bytes(b"BAM")
+    cache = gt.coverage_cache_path(bam)
+    cache.write_bytes(b"NPZ")
+    assert gt.is_coverage_cache_file(cache)
+    assert gt.coverage_cache_companions(bam) == [cache]
+    new_bam = tmp_path / "other.bam"
+    assert gt.coverage_cache_renames(bam, new_bam) == [
+        (cache, gt.coverage_cache_path(new_bam))
+    ]
+    assert gt.coverage_cache_companions(tmp_path / "x.fa") == []
+
+
+def test_panel_offers_coverage_banner_when_track_needs_cache(qapp):
+    from repeatviewer.widgets import light_genome_browser as lgb
+
+    class _NeedsCache:
+        def needs_coverage_cache(self) -> bool:
+            return True
+
+        def reload_coverage_cache(self) -> bool:
+            return True
+
+    panel = lgb.LightGenomeBrowserPanel()
+    panel.resize(900, 200)
+    panel.show()
+    panel.path = Path("/tmp/reads.bam")
+    panel.canvas.track = _NeedsCache()
+    panel._banner.hide()
+    panel._maybe_offer_coverage_cache()
+    assert panel._banner.isVisible()
+    assert "Generate Coverage" in panel._banner_btn.text()
+
+    seen: list[Path] = []
+    panel.generateCoverageRequested.connect(seen.append)
+    panel._request_coverage_cache()
+    assert seen == [panel.path]
+    assert panel.reload_coverage_cache()
+    assert not panel._banner.isVisible()
+    panel.shutdown()

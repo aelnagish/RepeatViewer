@@ -742,6 +742,7 @@ class FilePreviewPage(QWidget):
     # Overview right-click → "Show self-dotplot": (file path, sequence id), new tab
     selfDotplotTabRequested = Signal(object, str)
     blastRequested = Signal(object)  # FASTA a preview sends to BLAST (contig view right-click)
+    generateCoverageRequested = Signal(object)  # BAM/CRAM → .rvcov.npz
     # Source FASTAs of a temporary multi-file preview, to combine into a real file.
     saveSelectionAsFileRequested = Signal(list)
     # Split Preview: Overview / Dotplot / Annotation selected a sequence id.
@@ -1584,6 +1585,9 @@ class FilePreviewPage(QWidget):
             self._light_browser.openRequested.connect(self.openFileRequested.emit)
             self._light_browser.fileWritten.connect(self.fileWritten.emit)
             self._light_browser.blastRequested.connect(self.blastRequested.emit)
+            self._light_browser.generateCoverageRequested.connect(
+                self.generateCoverageRequested.emit
+            )
             self._stack.addWidget(self._light_browser)
         self._stack.setCurrentWidget(self._light_browser)
         self._light_browser.load(path)
@@ -2980,6 +2984,7 @@ class PreviewTabWidget(QTabWidget):
     fileWritten = Signal(object)  # Path of a file written from a preview (e.g. tree export)
     openFileRequested = Signal(object)  # Path a preview asks to open (contig view → Results)
     blastRequested = Signal(object)  # FASTA a preview sends to BLAST (contig view right-click)
+    generateCoverageRequested = Signal(object)  # BAM/CRAM → .rvcov.npz
     # Source FASTAs of a temporary multi-file preview, to combine into a real file.
     saveSelectionAsFileRequested = Signal(list)
     # Active preview file path (``Path``) or ``None`` when no tab is open.
@@ -3367,6 +3372,7 @@ class PreviewTabWidget(QTabWidget):
         page.selfDotplotTabRequested.connect(self.open_self_dotplot_tab)
         page._dotplot_in_new_tab = True
         page.blastRequested.connect(self.blastRequested.emit)
+        page.generateCoverageRequested.connect(self.generateCoverageRequested.emit)
         page.saveSelectionAsFileRequested.connect(self.saveSelectionAsFileRequested.emit)
         self._wheel_zoom_filter.register_page(page)
 

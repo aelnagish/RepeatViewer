@@ -191,6 +191,7 @@ class FileListTableWidget(QTableWidget):
     export_annotation_requested = Signal(Path)
     cyto_images_requested = Signal(Path)             # open the image(s) of a sequence
     attach_cyto_image_requested = Signal(Path, list)  # FASTA, image paths ([] = ask)
+    generate_bam_coverage_requested = Signal(Path)  # BAM/CRAM → .rvcov.npz
     annotation_files_dropped = Signal(Path, list)  # FASTA, GFF/GTF/BED paths
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -1387,6 +1388,11 @@ class FileListTableWidget(QTableWidget):
                         menu.addAction(
                             "TE Divergence Plot",
                             lambda bt=path: self.blast_divergence_requested.emit(bt),
+                        )
+                    if path.suffix.lower() in {".bam", ".cram"}:
+                        menu.addAction(
+                            "Generate Coverage Cache…",
+                            lambda p=path: self.generate_bam_coverage_requested.emit(p),
                         )
                 else:
                     menu.addAction(

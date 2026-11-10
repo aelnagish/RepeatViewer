@@ -82,7 +82,10 @@ def _aligned(widget: QWidget, parent: QWidget) -> QWidget:
 
 
 def _companions_for(paths: list[Path]) -> dict[str, list[Path]]:
-    """Sidecars that follow each file: annotations, run JSON, BAM/CRAM indexes."""
+    """Sidecars that follow each file: annotations, run JSON, indexes, coverage."""
+    from repeatviewer.backends.light_browser.genome_tracks import (
+        coverage_cache_companions,
+    )
     from repeatviewer.backends.map_reference import alignment_run_json_companions
     from repeatviewer.backends.samtools_tools import alignment_index_companions
     from repeatviewer.backends.sequence_features import companion_annotation_paths_for_fasta
@@ -94,6 +97,7 @@ def _companions_for(paths: list[Path]) -> dict[str, list[Path]]:
             found.extend(companion_annotation_paths_for_fasta(path))
             found.extend(alignment_run_json_companions(path))
             found.extend(alignment_index_companions(path))
+            found.extend(coverage_cache_companions(path))
         except OSError:
             found = []
         if found:
@@ -271,6 +275,10 @@ class BatchRenameDialog(QDialog):
         return self._companions.get(str(path), [])
 
     def _companion_renames(self, old: Path, new: Path) -> list[tuple[Path, Path]]:
+        from repeatviewer.backends.light_browser.genome_tracks import (
+            coverage_cache_renames,
+            is_coverage_cache_file,
+        )
         from repeatviewer.backends.map_reference import (
             alignment_run_json_renames,
             is_run_json_file,
@@ -284,7 +292,9 @@ class BatchRenameDialog(QDialog):
         found = [
             path
             for path in self._companion_files(old)
-            if not is_run_json_file(path) and not is_alignment_index_file(path)
+            if not is_run_json_file(path)
+            and not is_alignment_index_file(path)
+            and not is_coverage_cache_file(path)
         ]
         pairs: list[tuple[Path, Path]] = []
         if found:
@@ -294,6 +304,7 @@ class BatchRenameDialog(QDialog):
                 pairs.append((source, target))
         pairs.extend(alignment_run_json_renames(old, new))
         pairs.extend(alignment_index_renames(old, new))
+        pairs.extend(coverage_cache_renames(old, new))
         return pairs
 
     def _update_preview(self) -> None:

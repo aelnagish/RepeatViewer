@@ -1219,16 +1219,23 @@ class LightBrowserCanvas(QWidget):
                 y = y_row + max(0, (row_px - bar_h) // 2)
                 rect = QRectF(x_lo, y, max(2.0, x_hi - x_lo), bar_h)
                 _draw_directed_feature(p, rect, col, forward=strand_s != "-")
+                if self._is_picked(it):
+                    self._paint_read_selection(p, rect)
             elif x_hi - x_lo < 2.5 or len(blocks) == 1:
                 rect = QRectF(x_lo, y, max(1.0, x_hi - x_lo), body_h)
                 self._read_body(p, rect, it.strand, col)
+                if self._is_picked(it):
+                    self._paint_read_selection(p, rect)
             else:
                 last = len(blocks) - 1
+                span = QRectF(x_lo, y, max(2.0, x_hi - x_lo), body_h)
                 for k, (s, e, _q) in enumerate(blocks):
                     rect = QRectF(self.x_of(s), y, max(1.0, (e - s) / self.bpp), body_h)
                     strand = it.strand if (k == last and it.strand == "+") or (
                         k == 0 and it.strand == "-") else ""
                     self._read_body(p, rect, strand, col)
+                if self._is_picked(it):
+                    self._paint_read_selection(p, span)
             hit_h = 13 if named is not None else body_h
             self._hits.append((QRectF(x_lo, y, max(2.0, x_hi - x_lo), hit_h), it))
             glyph_h = 13 if named is not None else body_h
@@ -1275,47 +1282,58 @@ class LightBrowserCanvas(QWidget):
         else:
             p.drawRect(rect)
 
+    def _paint_read_selection(self, p, rect: QRectF) -> None:
+        """Square outline around the selected read glyph (not the name-column arrow)."""
+        highlight = self.palette().color(self.palette().ColorRole.Highlight)
+        # Pad tiny glyphs so the box stays readable around the arrow tip.
+        pad = 2.0
+        side = max(rect.width(), rect.height()) + pad * 2
+        box = QRectF(
+            rect.center().x() - side / 2,
+            rect.center().y() - side / 2,
+            side,
+            side,
+        )
+        if rect.width() >= rect.height() + 4:
+            box = rect.adjusted(-pad, -pad, pad, pad)
+        p.save()
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(QPen(highlight, 1.5))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRoundedRect(box, 2, 2)
+        p.restore()
+
     def _paint_name_column(self, p, rows: list[tuple[object, float]], row_px: int,
                            fg: QColor) -> None:
         """Sequence name at the left of each one-per-row read."""
         if not rows:
             return
-        from repeatviewer.widgets.folder_tree_delegate import (
-            _contrasting_on,
-            _folder_hover_background,
-        )
+        from repeatviewer.widgets.folder_tree_delegate import _folder_hover_background
 
         fm = QFontMetrics(self._font)
         pal = self.palette()
         window = pal.color(pal.ColorRole.Window)
-        highlight = pal.color(pal.ColorRole.Highlight)
         hover_bg = _folder_hover_background(pal)
         p.setFont(self._font)
         for it, y in rows:
             rect = QRectF(0, y, NAME_W - 1, row_px)
             self._name_hits.append((rect, it))
             strand = str(getattr(it, "strand", "") or "")
-            picked = self._is_picked(it)
+            hovering = self._same_read(self._hover, it)
             p.fillRect(rect, window)
-            if picked or self._same_read(self._hover, it):
+            if hovering:
                 p.save()
                 p.setRenderHint(QPainter.RenderHint.Antialiasing)
                 p.setPen(Qt.PenStyle.NoPen)
-                p.setBrush(highlight if picked else hover_bg)
+                p.setBrush(hover_bg)
                 p.drawRoundedRect(rect.adjusted(1, 1, -1, -1), 4, 4)
                 p.restore()
-            if picked:
-                ink = pal.color(pal.ColorRole.HighlightedText)
-                if abs(ink.lightness() - highlight.lightness()) < 80:
-                    ink = _contrasting_on(highlight)
-                p.setPen(ink)
-            else:
-                p.setPen(QColor("#c0392b") if strand == "-" else QColor("#1f6fbf"))
+            arrow_box = QRectF(2, y + max(0.0, (row_px - 14) / 2), 14, 14)
+            p.setPen(QColor("#c0392b") if strand == "-" else QColor("#1f6fbf"))
             arrow = "←" if strand == "-" else ("→" if strand == "+" else "")
-            p.drawText(QRectF(2, y, 16, row_px),
+            p.drawText(arrow_box,
                        Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignCenter, arrow)
-            if not picked:
-                p.setPen(fg)
+            p.setPen(fg)
             name = str(getattr(it, "name", "") or "")
             label = fm.elidedText(name, Qt.TextElideMode.ElideMiddle, NAME_W - 26)
             p.drawText(QRectF(18, y, NAME_W - 26, row_px),
@@ -2425,6 +2443,7 @@ class LightGenomeBrowserPanel(QWidget):
     openRequested = Signal(object)
     fileWritten = Signal(object)
     blastRequested = Signal(object)
+    generateCoverageRequested = Signal(object)  # Path → build .rvcov.npz
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -3150,6 +3169,55 @@ class LightGenomeBrowserPanel(QWidget):
             length = res.lengths.get(chrom, 1)
             self._go(chrom, 0, length)
         self._update_reference_ui()
+        self._maybe_offer_coverage_cache()
+
+    def _maybe_offer_coverage_cache(self) -> None:
+        """Remind that large BAMs need ``.rvcov.npz`` for overview coverage."""
+        track = self.canvas.track
+        if track is None or not hasattr(track, "needs_coverage_cache"):
+            return
+        if not track.needs_coverage_cache():
+            return
+        if self.path is None:
+            return
+        # Keep a reference-mismatch banner if it is already showing.
+        if self._banner.isVisible():
+            return
+        self._show_coverage_banner()
+
+    def _show_coverage_banner(self) -> None:
+        text = (
+            "Large BAM: zoom to 100 kb or less for reads. "
+            "Generate a coverage cache for overview bars at wide zoom."
+        )
+        if text == self._banner_dismissed_text:
+            return
+        self._banner_label.setText(text)
+        self._banner_btn.setText("Generate Coverage…")
+        try:
+            self._banner_btn.clicked.disconnect()
+        except RuntimeError:
+            pass
+        self._banner_btn.clicked.connect(self._request_coverage_cache)
+        self._banner_btn.show()
+        self._banner.show()
+
+    def _request_coverage_cache(self) -> None:
+        if self.path is not None:
+            self.generateCoverageRequested.emit(self.path)
+
+    def reload_coverage_cache(self) -> bool:
+        """Reload ``.rvcov.npz`` into the open track after Generate coverage."""
+        track = self.canvas.track
+        reload = getattr(track, "reload_coverage_cache", None)
+        if not callable(reload):
+            return False
+        ok = bool(reload())
+        if ok:
+            self.canvas.update()
+            self._banner.hide()
+            self._set_browser_status("Coverage cache loaded — overview bars available.")
+        return ok
 
     def _update_reference_ui(self) -> None:
         res = self._result
@@ -3186,6 +3254,13 @@ class LightGenomeBrowserPanel(QWidget):
             self._banner.hide()
             return
         self._banner_label.setText(message)
+        self._banner_btn.setText("Choose Reference…")
+        try:
+            self._banner_btn.clicked.disconnect()
+        except RuntimeError:
+            pass
+        self._banner_btn.clicked.connect(self._choose_reference_file)
+        self._banner_btn.show()
         self._banner.show()
 
     def _dismiss_banner(self) -> None:

@@ -962,6 +962,47 @@ class TreeWorker(QObject):
             self.failed.emit(_format_cli_failure(exc))
 
 
+class BamCoverageWorker(QObject):
+    """Build ``*.bam.rvcov.npz`` for wide-zoom coverage in the light browser."""
+
+    progress = Signal(int, str)
+    log_line = Signal(str)
+    finished = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, bam: Path, *, threads: int = 4) -> None:
+        super().__init__()
+        self._bam = Path(bam)
+        self._threads = max(1, int(threads))
+
+    @Slot()
+    def run(self) -> None:
+        from repeatviewer.backends.light_browser.genome_tracks import (
+            TrackError,
+            build_bam_coverage,
+        )
+
+        def _progress(name: str, frac: float) -> None:
+            pct = max(0, min(99, int(100 * float(frac))))
+            self.progress.emit(pct, f"Coverage {name}…")
+            self.log_line.emit(f"{pct}%  {name}")
+
+        try:
+            out = build_bam_coverage(
+                self._bam,
+                threads=self._threads,
+                progress=_progress,
+            )
+            self.progress.emit(100, f"Wrote {Path(out).name}")
+            self.finished.emit(out)
+        except JobCancelledError:
+            self.failed.emit(CANCELLED_MESSAGE)
+        except TrackError as exc:
+            self.failed.emit(str(exc))
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(_format_cli_failure(exc))
+
+
 class SamtoolsWorker(QObject):
     """Sort / index / convert SAM·BAM on a background thread."""
 
@@ -2686,6 +2727,9 @@ class MainWindow(
         self._file_list.attach_cyto_image_requested.connect(self._attach_cyto_images)
         self._file_list.annotation_files_dropped.connect(self._import_dropped_annotations)
         self._file_list.cyto_images_requested.connect(self._open_cyto_images)
+        self._file_list.generate_bam_coverage_requested.connect(
+            self._generate_bam_coverage_cache
+        )
         from repeatviewer.widgets.cyto_images_ui import cyto_notifier
 
         cyto_notifier().changed.connect(self._on_cyto_images_changed)
@@ -3893,6 +3937,9 @@ class MainWindow(
         self._preview_tabs.saveSelectionAsFileRequested.connect(self._group_sequences)
         self._preview_tabs.openFileRequested.connect(self._on_preview_open_requested)
         self._preview_tabs.blastRequested.connect(self._on_preview_blast_requested)
+        self._preview_tabs.generateCoverageRequested.connect(
+            self._generate_bam_coverage_cache
+        )
         self._preview_tabs.dotplotRegionSelected.connect(self._on_dotplot_region_selected)
         self._preview_tabs.currentPathChanged.connect(
             self._on_preview_current_path_changed
@@ -8730,6 +8777,9 @@ class MainWindow(
     def _is_hidden_browser_file(self, path: Path) -> bool:
         """True for files that must stay out of the Files panel (incl. job outputs)."""
         from repeatviewer.backends.map_reference import is_run_json_file
+        from repeatviewer.backends.light_browser.genome_tracks import (
+            is_coverage_cache_file,
+        )
         from repeatviewer.backends.samtools_tools import is_alignment_index_file
 
         return (
@@ -8738,6 +8788,7 @@ class MainWindow(
             or is_flexidot_extra_plot_file(path)
             or is_run_json_file(path)
             or is_alignment_index_file(path)
+            or is_coverage_cache_file(path)
             or self._is_blast_index_sidecar(path)
         )
 
@@ -11893,6 +11944,100 @@ class MainWindow(
             )
         return files
 
+    def _generate_bam_coverage_cache(self, path: Path) -> None:
+        """Build ``<bam>.rvcov.npz`` for wide-zoom coverage (Files menu / Preview)."""
+        from repeatviewer.backends.light_browser.genome_tracks import (
+            bam_index_path,
+            coverage_cache_path,
+        )
+
+        path = Path(path).expanduser().resolve()
+        if path.suffix.lower() not in {".bam", ".cram"} or not path.is_file():
+            QMessageBox.information(
+                self,
+                "Generate coverage",
+                "Select a BAM or CRAM file first.",
+            )
+            return
+        if bam_index_path(path) is None:
+            QMessageBox.warning(
+                self,
+                "Generate coverage",
+                f"{path.name} has no index (.bai / .csi).\n\n"
+                "Use Tools → Samtools → Index (or Sort with Index after sort) first.",
+            )
+            return
+        existing = coverage_cache_path(path)
+        if existing.is_file():
+            reply = QMessageBox.question(
+                self,
+                "Generate coverage",
+                f"{existing.name} already exists.\n\nRebuild it?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+        threads = max(1, int(getattr(self._samtools_options, "num_threads", 4) or 4))
+        worker = BamCoverageWorker(path, threads=threads)
+        title = f"Coverage {path.name}"
+        self._attach_process_monitor(
+            worker,
+            title=title,
+            enabled=True,
+            tool_key="bam_coverage",
+            close_when_finished=True,
+        )
+        self._start_background_job(
+            worker,
+            job_title=title,
+            total_steps=100,
+            source_files=[path],
+            on_finished=self._on_bam_coverage_finished,
+            on_failed=self._on_bam_coverage_failed,
+        )
+
+    @Slot(object)
+    def _on_bam_coverage_finished(self, result) -> None:
+        out = Path(result) if result else None
+        if out is not None and out.is_file():
+            self._set_status_message(f"Coverage cache → {out.name}", 6000)
+            # Refresh an open light-browser preview of this BAM if present.
+            bam = out.with_name(out.name[: -len(".rvcov.npz")])
+            self._reload_bam_coverage_in_preview(bam)
+        else:
+            self._set_status_message("Coverage cache finished", 4000)
+
+    @Slot(str)
+    def _on_bam_coverage_failed(self, error: str) -> None:
+        if error.strip() == CANCELLED_MESSAGE:
+            return
+        QMessageBox.warning(self, "Generate coverage failed", error)
+
+    def _reload_bam_coverage_in_preview(self, bam: Path) -> None:
+        """If Preview is showing this BAM, reload ``.rvcov.npz`` into the track."""
+        from repeatviewer.widgets.light_genome_browser import LightGenomeBrowserPanel
+
+        tabs = getattr(self, "_preview_tabs", None)
+        if tabs is None:
+            return
+        try:
+            want = bam.expanduser().resolve()
+        except OSError:
+            return
+        for panel in tabs.findChildren(LightGenomeBrowserPanel):
+            path = getattr(panel, "path", None)
+            if path is None:
+                continue
+            try:
+                if Path(path).expanduser().resolve() != want:
+                    continue
+            except OSError:
+                continue
+            reload = getattr(panel, "reload_coverage_cache", None)
+            if callable(reload):
+                reload()
+
     def _run_samtools_operation(self, operation: str) -> None:
         from dataclasses import replace
 
@@ -14343,6 +14488,7 @@ class MainWindow(
             self._file_list.refresh_cyto_images()
 
     def _rename_file(self, path: Path) -> None:
+        from repeatviewer.backends.light_browser.genome_tracks import coverage_cache_renames
         from repeatviewer.backends.map_reference import alignment_run_json_renames
         from repeatviewer.backends.samtools_tools import alignment_index_renames
         from repeatviewer.backends.sequence_features import (
@@ -14371,6 +14517,7 @@ class MainWindow(
             companion_renames = companion_annotation_renames_for_fasta(path, target)
         companion_renames.extend(alignment_run_json_renames(path, target))
         companion_renames.extend(alignment_index_renames(path, target))
+        companion_renames.extend(coverage_cache_renames(path, target))
         blocked = [dst for _src, dst in companion_renames if dst.exists()]
         if blocked:
             QMessageBox.warning(
@@ -14993,12 +15140,16 @@ class MainWindow(
                     created.append(comp_dest)
                 except OSError as exc:
                     failed.append(f"{comp.name}: {exc}")
+            from repeatviewer.backends.light_browser.genome_tracks import (
+                coverage_cache_renames,
+            )
             from repeatviewer.backends.map_reference import alignment_run_json_renames
             from repeatviewer.backends.samtools_tools import alignment_index_renames
 
             for comp, comp_dest in (
                 *alignment_run_json_renames(src, dest),
                 *alignment_index_renames(src, dest),
+                *coverage_cache_renames(src, dest),
             ):
                 if comp_dest.exists():
                     continue
@@ -15282,7 +15433,10 @@ class MainWindow(
             return None
 
     def _expand_paths_for_delete(self, paths: list[Path]) -> list[Path]:
-        """Include paired sidecars: annotations, run JSON, and BAM/CRAM indexes."""
+        """Include paired sidecars: annotations, run JSON, BAM indexes, coverage."""
+        from repeatviewer.backends.light_browser.genome_tracks import (
+            coverage_cache_companions,
+        )
         from repeatviewer.backends.map_reference import alignment_run_json_companions
         from repeatviewer.backends.samtools_tools import alignment_index_companions
 
@@ -15298,6 +15452,7 @@ class MainWindow(
                 *companion_annotation_files_for_delete(resolved),
                 *alignment_run_json_companions(resolved),
                 *alignment_index_companions(resolved),
+                *coverage_cache_companions(resolved),
             ]
             for candidate in candidates:
                 key = str(candidate)
@@ -15868,6 +16023,9 @@ class MainWindow(
             if not dest.parent.is_dir():
                 problems.append(f"{dest.parent.name}: folder no longer there")
                 continue
+            from repeatviewer.backends.light_browser.genome_tracks import (
+                coverage_cache_renames,
+            )
             from repeatviewer.backends.map_reference import alignment_run_json_renames
             from repeatviewer.backends.samtools_tools import alignment_index_renames
 
@@ -15875,6 +16033,7 @@ class MainWindow(
             paired = (
                 *alignment_run_json_renames(src, dest),
                 *alignment_index_renames(src, dest),
+                *coverage_cache_renames(src, dest),
             )
             try:
                 if dest.exists():
@@ -16461,7 +16620,10 @@ class MainWindow(
             if not src.is_file():
                 continue
             # Move/copy annotation companions with the FASTA, mapping run JSON,
-            # and BAM/CRAM indexes with the alignment.
+            # BAM/CRAM indexes, and coverage caches with the alignment.
+            from repeatviewer.backends.light_browser.genome_tracks import (
+                coverage_cache_renames,
+            )
             from repeatviewer.backends.map_reference import alignment_run_json_renames
             from repeatviewer.backends.samtools_tools import alignment_index_renames
 
@@ -16490,6 +16652,7 @@ class MainWindow(
                 paired = (
                     *alignment_run_json_renames(src, dest),
                     *alignment_index_renames(src, dest),
+                    *coverage_cache_renames(src, dest),
                 )
                 for comp in companion_srcs:
                     # Keep canonical JSON sidecar name beside the new FASTA.

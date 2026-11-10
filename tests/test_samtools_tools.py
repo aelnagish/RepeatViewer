@@ -37,6 +37,15 @@ def test_convert_skips_same_format(tmp_path: Path) -> None:
         st.run_samtools_operation("convert", [sam], convert_format="sam")
 
 
+def test_convert_sam_to_bam_writes_file(tmp_path: Path) -> None:
+    pytest.importorskip("pysam")
+    sam = _write_mini_sam(tmp_path / "reads.sam")
+    created = st.convert_alignment(sam, output_format="bam", threads=2)
+    assert len(created) == 1
+    assert created[0].is_file() and created[0].stat().st_size > 0
+    assert created[0].name == "reads.bam"
+
+
 def test_is_alignment_path() -> None:
     assert st.is_alignment_path(Path("a.sam"))
     assert st.is_alignment_path(Path("a.bam"))

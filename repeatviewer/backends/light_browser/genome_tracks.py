@@ -14,16 +14,20 @@ of extra tracks, like a genome browser:
 
 Performance model
 -----------------
-Text formats (PAF, BLAST, SAM, GFF…) are read once into per-sequence interval
+Text formats (PAF, BLAST, GFF…) are read once into per-sequence interval
 indexes (sorted numpy arrays), so a window query is two binary searches,
 whatever the file size. Coverage comes from a fixed 64 bp bin profile built
 once per sequence with ``np.add.at``.
 
-BAM / CRAM are never read whole when they are indexed: with pysam (macOS /
-Linux) only the visible window is fetched, padded and cached, and reads are
-only fetched below ``BAM_READ_WINDOW``. Wider views show coverage from a
-``.rvcov.npz`` cache built once in the background (``build_bam_coverage``), or
-a hint to zoom in. Without pysam (Windows wheels do not exist) a small BAM
+SAM is the same in-memory path, but only for small files
+(≤ ``SAM_OPEN_LIMIT`` on disk). Larger SAMs are refused: Sort + Index to BAM
+(Tools → Samtools, or Mapping → Sort and index SAM outputs) and open the BAM.
+
+BAM / CRAM: small files (≤ ``BAM_FULL_LOAD_LIMIT``) are loaded entirely into
+memory like a small SAM — reads and One per row work at any zoom. Larger
+indexed files use pysam window fetch: reads only below ``BAM_READ_WINDOW``;
+wider views show coverage from a ``.rvcov.npz`` cache (``build_bam_coverage``)
+or a zoom hint. Without pysam (Windows wheels do not exist) a small BAM
 (< ``BAM_MEMORY_LIMIT``) is decoded by a pure-Python reader into memory, and a
 larger one gets a clear message. ``samtools`` on PATH is used for CRAM.
 
@@ -52,9 +56,16 @@ KIND_VARIANT = "variant"         # VCF: variant sites and each sample's genotype
 KIND_JUNCTION = "junction"       # splice junctions of an RNA-seq BAM's reads
 
 COV_BIN = 64                     # bp per bin of the in-memory coverage profile
-BAM_READ_WINDOW = 100_000        # wider than this: coverage only for BAM / CRAM
+BAM_READ_WINDOW = 100_000        # wider than this: coverage only for large BAM / CRAM
+# On-disk BAM/CRAM at or below this size: full in-memory load (no 100 kb window).
+BAM_FULL_LOAD_LIMIT = 25_000_000  # 25 MB
 BAM_MEMORY_LIMIT = 300_000_000   # bytes: pure-Python BAM reader loads files up to this
 BAM_FETCH_LIMIT = 50_000         # reads kept per fetched window (downsampled beyond)
+# SAM is parsed entirely into memory. Past this on-disk size the preview refuses
+# and asks for a sorted+indexed BAM (avoids freezing on large mapping SAMs).
+# Gzipped SAM (.sam.gz) uses a lower limit because it expands on read.
+SAM_OPEN_LIMIT = 50_000_000          # 50 MB plain .sam
+SAM_GZ_OPEN_LIMIT = 15_000_000       # 15 MB .sam.gz (~50 MB uncompressed)
 SESSION_SUFFIX = ".rvgb"
 SESSION_FORMAT = "repeatviewer-browser"
 
@@ -1092,6 +1103,36 @@ def _reference_codes(reference: str) -> np.ndarray:
     return _REF_CODES[1]
 
 
+def sam_open_limit_bytes(path: Path) -> int:
+    """Max on-disk size for opening a SAM in the light browser (in-memory parse)."""
+    name = Path(path).name.lower()
+    if name.endswith(".sam.gz"):
+        return SAM_GZ_OPEN_LIMIT
+    return SAM_OPEN_LIMIT
+
+
+def _refuse_large_sam(path: Path) -> None:
+    """Raise :class:`TrackError` when a SAM is too large for SamTrack."""
+    path = Path(path)
+    try:
+        size = path.stat().st_size
+    except OSError as exc:
+        raise TrackError(f"Cannot read {path.name}: {exc}") from exc
+    limit = sam_open_limit_bytes(path)
+    if size <= limit:
+        return
+    size_mb = size / (1024 * 1024)
+    limit_mb = limit / (1024 * 1024)
+    raise TrackError(
+        f"{path.name} is {size_mb:.1f} MB (limit {limit_mb:.0f} MB for SAM).\n\n"
+        "Large SAM files are loaded entirely into memory and can freeze the "
+        "window.\n\n"
+        "Sort and index to BAM first, then open the BAM in Preview:\n"
+        "• Tools → Samtools → Sort (with Index after sort), or\n"
+        "• Mapping → Sort and index SAM outputs."
+    )
+
+
 class SamTrack(Track):
     format = "sam"
 
@@ -1099,6 +1140,7 @@ class SamTrack(Track):
 
     def __init__(self, path: Path, name: str | None = None) -> None:
         super().__init__(path, name)
+        _refuse_large_sam(self.path)
         by_chrom: dict[str, list[TrackItem]] = {}
         kept = 0
         header: list[str] = []
@@ -1140,6 +1182,36 @@ def bam_index_path(path: Path) -> Path | None:
 
 def coverage_cache_path(path: Path) -> Path:
     return path.with_name(path.name + ".rvcov.npz")
+
+
+def is_coverage_cache_file(path: Path) -> bool:
+    """True for ``*.bam.rvcov.npz`` / ``*.cram.rvcov.npz`` (hidden in Files)."""
+    return Path(path).name.lower().endswith(".rvcov.npz")
+
+
+def coverage_cache_companions(path: Path) -> list[Path]:
+    """Existing coverage cache beside a BAM/CRAM."""
+    path = Path(path)
+    if path.suffix.lower() not in {".bam", ".cram"}:
+        return []
+    cache = coverage_cache_path(path)
+    return [cache] if cache.is_file() else []
+
+
+def coverage_cache_renames(old: Path, new: Path) -> list[tuple[Path, Path]]:
+    """Keep ``.rvcov.npz`` named beside the new BAM/CRAM."""
+    old, new = Path(old), Path(new)
+    if old.suffix.lower() not in {".bam", ".cram"}:
+        return []
+    src = coverage_cache_path(old)
+    if not src.is_file():
+        return []
+    dst = coverage_cache_path(new)
+    try:
+        same = src.resolve() == dst.resolve()
+    except OSError:
+        same = src == dst
+    return [] if same else [(src, dst)]
 
 
 class _WindowCache:
@@ -1590,8 +1662,84 @@ def _prepare_tile(items: list, s0: int, tile: int, keep=None) -> list:
     return out
 
 
+class SmallBamTrack(Track):
+    """Small BAM / CRAM: load all mapped reads into memory (no 100 kb window).
+
+    Used when the file is ≤ ``BAM_FULL_LOAD_LIMIT``. One per row and whole-
+    chromosome views work like a small SAM.
+    """
+
+    format = "bam"
+    read_window = None
+    SEQ_BUDGET = 300_000_000
+    HTS_THREADS = 2
+
+    def __init__(
+        self,
+        path: Path,
+        name: str | None = None,
+        *,
+        reference_fasta: Path | None = None,
+    ) -> None:
+        super().__init__(path, name)
+        import pysam
+
+        kw: dict = {}
+        if self.path.suffix.lower() == ".cram" and reference_fasta:
+            kw["reference_filename"] = str(reference_fasta)
+        try:
+            bam = pysam.AlignmentFile(
+                str(self.path),
+                "rc" if self.path.suffix.lower() == ".cram" else "rb",
+                threads=self.HTS_THREADS,
+                **kw,
+            )
+        except (OSError, ValueError) as exc:
+            raise TrackError(f"Cannot open {self.path.name}: {exc}") from exc
+        if not bam.has_index():
+            bam.close()
+            raise TrackError(
+                f"{self.path.name} has no index (.bai / .csi). "
+                "Sort and index it first (samtools sort, samtools index)."
+            )
+        by_chrom: dict[str, list[TrackItem]] = {}
+        kept = 0
+        try:
+            for chrom in bam.references:
+                items: list[TrackItem] = []
+                for a in bam.fetch(chrom):
+                    if a.is_unmapped:
+                        continue
+                    keep_seq = kept < self.SEQ_BUDGET
+                    it = _from_pysam(a)
+                    if not keep_seq:
+                        it.seq = ""
+                    else:
+                        kept += len(it.seq or "")
+                    items.append(it)
+                if items:
+                    by_chrom[chrom] = items
+            try:
+                self.read_groups = {
+                    str(g.get("ID")): {k: str(v) for k, v in g.items() if k != "ID"}
+                    for g in bam.header.to_dict().get("RG", [])
+                    if "ID" in g
+                }
+            except (AttributeError, ValueError):
+                self.read_groups = {}
+        finally:
+            bam.close()
+        if not by_chrom:
+            raise TrackError(f"No mapped reads found in {self.path.name}.")
+        if kept >= self.SEQ_BUDGET:
+            self.warnings.append(
+                "Large file: differences are shown for the first reads only."
+            )
+        self._chroms = {c: ChromIndex(v) for c, v in by_chrom.items()}
+
+
 class IndexedBamTrack(Track):
-    """BAM / CRAM with an index, read window by window through pysam."""
+    """Large BAM / CRAM with an index, read window by window through pysam."""
 
     format = "bam"
     read_window = BAM_READ_WINDOW
@@ -1641,6 +1789,15 @@ class IndexedBamTrack(Track):
                                 for g in self._bam.header.to_dict().get("RG", []) if "ID" in g}
         except (AttributeError, ValueError):
             self.read_groups = {}
+
+    def reload_coverage_cache(self) -> bool:
+        """Reload ``.rvcov.npz`` after Generate coverage (returns True if loaded)."""
+        self._cov_cache = load_coverage_cache(self.path)
+        return self._cov_cache is not None
+
+    def needs_coverage_cache(self) -> bool:
+        """True when wide zoom has no coverage cache yet (large BAM path)."""
+        return self._cov_cache is None
 
     def chrom_names(self) -> list[str]:
         return list(self._lengths)
@@ -2192,32 +2349,103 @@ def bam_tags(buf: bytes) -> dict[str, object]:
 # Coverage cache for BAM (built once, read at wide zoom)
 
 
-def build_bam_coverage(path: Path, *, bin_size: int = 1000,
-                       progress: Callable[[str, float], None] | None = None,
-                       cancel: Callable[[], bool] | None = None) -> Path:
+def _coverage_profile_one_chrom(
+    path: str,
+    name: str,
+    length: int,
+    bin_size: int,
+    *,
+    hts_threads: int = 2,
+) -> tuple[str, np.ndarray]:
+    """Mean depth bins for one reference (own pysam handle — thread-safe)."""
+    import pysam
+
+    n = -(-length // bin_size)
+    diff = np.zeros(n * bin_size + 1, dtype=np.int32)
+    with pysam.AlignmentFile(path, "rb", threads=max(1, int(hts_threads))) as bam:
+        if not bam.has_index():
+            raise TrackError(
+                f"{Path(path).name} has no index (.bai / .csi). "
+                "Sort and index it before building coverage."
+            )
+        for a in bam.fetch(name):
+            if a.is_unmapped or a.is_secondary or a.is_supplementary:
+                continue
+            for s, e in a.get_blocks():
+                if s < 0:
+                    continue
+                if s < len(diff):
+                    diff[s] += 1
+                end_i = min(e, len(diff) - 1)
+                if end_i >= 0:
+                    diff[end_i] -= 1
+    depth = np.cumsum(diff[: n * bin_size])
+    return name, depth.reshape(n, bin_size).mean(axis=1).astype(np.float32)
+
+
+def build_bam_coverage(
+    path: Path,
+    *,
+    bin_size: int = 1000,
+    threads: int | None = None,
+    progress: Callable[[str, float], None] | None = None,
+    cancel: Callable[[], bool] | None = None,
+) -> Path:
     """Mean depth per ``bin_size`` bin for every sequence of a BAM, saved as
-    ``<bam>.rvcov.npz``. Uses pysam when present, else the pure-Python reader."""
-    path = Path(path)
+    ``<bam>.rvcov.npz``.
+
+    With pysam, chromosomes are processed in parallel (each worker opens its own
+    handle — same rule as GenomeFlow / IndexedBamTrack prefetch). Without pysam,
+    the pure-Python reader walks the file once.
+    """
+    import os
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    path = Path(path).expanduser().resolve()
+    if not path.is_file():
+        raise TrackError(f"Input not found: {path}")
     profiles: dict[str, np.ndarray] = {}
     if pysam_available():
         import pysam
 
         with pysam.AlignmentFile(str(path), "rb") as bam:
-            total = sum(bam.lengths) or 1
-            done = 0
-            for name, length in zip(bam.references, bam.lengths):
-                n = -(-length // bin_size)
-                diff = np.zeros(n * bin_size + 1, dtype=np.int32)
-                for a in bam.fetch(name) if bam.has_index() else ():
-                    if cancel is not None and cancel():
-                        raise TrackError("Cancelled.")
-                    if a.is_unmapped or a.is_secondary or a.is_supplementary:
-                        continue
-                    for s, e in a.get_blocks():
-                        diff[s] += 1
-                        diff[min(e, len(diff) - 1)] -= 1
-                depth = np.cumsum(diff[:n * bin_size])
-                profiles[name] = depth.reshape(n, bin_size).mean(axis=1).astype(np.float32)
+            if not bam.has_index():
+                raise TrackError(
+                    f"{path.name} has no index (.bai / .csi). "
+                    "Sort and index it before building coverage."
+                )
+            chroms = list(zip(bam.references, bam.lengths))
+        total = sum(length for _n, length in chroms) or 1
+        workers = int(threads) if threads is not None else (os.cpu_count() or 4)
+        workers = max(1, min(workers, max(1, len(chroms)), 8))
+        done = 0
+        # One AlignmentFile per worker thread (htslib is not share-safe).
+        with ThreadPoolExecutor(
+            max_workers=workers, thread_name_prefix="rvcov"
+        ) as pool:
+            futures = {
+                pool.submit(
+                    _coverage_profile_one_chrom,
+                    str(path),
+                    name,
+                    int(length),
+                    int(bin_size),
+                ): (name, int(length))
+                for name, length in chroms
+            }
+            for fut in as_completed(futures):
+                if cancel is not None and cancel():
+                    for pending in futures:
+                        pending.cancel()
+                    raise TrackError("Cancelled.")
+                name, length = futures[fut]
+                try:
+                    chrom, profile = fut.result()
+                except Exception as exc:  # noqa: BLE001
+                    raise TrackError(
+                        f"Coverage failed on {name}: {exc}"
+                    ) from exc
+                profiles[chrom] = profile
                 done += length
                 if progress:
                     progress(name, done / total)
@@ -2233,6 +2461,8 @@ def build_bam_coverage(path: Path, *, bin_size: int = 1000,
         for chrom, spans in by.items():
             arr = np.array(spans, dtype=np.int64)
             profiles[chrom] = coverage_bins(arr[:, 0], arr[:, 1], bin_size)
+            if progress:
+                progress(chrom, 1.0)
     out = coverage_cache_path(path)
     np.savez_compressed(out, __bin__=np.array([bin_size]), __mtime__=np.array(
         [path.stat().st_mtime]), **profiles)
@@ -2712,10 +2942,18 @@ def open_track(path: Path, *, reference_names: Iterable[str] = (),
     elif kind == "paf":
         track = PafTrack(path)
     elif kind == "sam":
+        _refuse_large_sam(path)
         track = SamTrack(path)
     elif kind == "bam":
         if pysam_available():
-            track = IndexedBamTrack(path, reference_fasta=reference_fasta)
+            try:
+                size = path.stat().st_size
+            except OSError:
+                size = BAM_FULL_LOAD_LIMIT + 1
+            if size <= BAM_FULL_LOAD_LIMIT:
+                track = SmallBamTrack(path, reference_fasta=reference_fasta)
+            else:
+                track = IndexedBamTrack(path, reference_fasta=reference_fasta)
         elif path.suffix.lower() == ".cram":
             raise TrackError("CRAM files need pysam (macOS / Linux: pip install pysam).")
         else:
