@@ -139,7 +139,11 @@ def paths(folder: Path) -> dict:
             "gel": next(folder.glob("*.rvgel"), None),
             "aln": next(folder.glob("satellite_monomers.fa_*_details/*.aln.fa"), None),
             "tree_report": next(folder.glob("satellite_monomers.fa_*_details/*_report.html"), None),
-            "map_report": next(folder.glob("ont_reads.fa_*_details/*_report.html"), None)}
+            "map_report": next(folder.glob("ont_reads.fa_*_details/*_report.html"), None),
+            "genome": folder / "demo_genome.fa", "library": folder / "te_library.fa",
+            "genes": folder / "demo_genes.gff3",
+            "hits": next(folder.glob("te_library.fa_*.txt"), None),
+            "rm_out": folder / "demo_genome.fa.out"}
 
 
 def build(folder: Path, *, run_tools: bool = True, say=print) -> dict:
@@ -170,6 +174,8 @@ def build(folder: Path, *, run_tools: bool = True, say=print) -> dict:
     run_mapping([out["reads"]], sopts)
     say("Placing demo primers and running in-silico PCR…")
     make_primers_and_pcr(out)
+    say("Building a demo genome and its repeat hit tables…")
+    make_genome(out, folder)
     out.update({k: v for k, v in paths(folder).items() if k not in out or out[k] is None})
     return out
 
@@ -200,6 +206,93 @@ def make_primers_and_pcr(out: dict) -> None:
     doc = gd.gel_from_pcr(result)
     doc.title = Path(written["fasta"]).stem
     doc.save(out["array"].parent / f"{doc.title}{gd.GEL_SUFFIX}")
+
+
+def make_genome(out: dict, folder: Path) -> None:
+    """A small three-chromosome genome with Ty3 copies of different ages, SatA
+    arrays near the chromosome ends, genes, and the hit tables the genome plots read."""
+    import platform
+
+    from repeatviewer.backends.gui_functions import blast, check_database
+
+    ltr = _read_seq(out["ltr"])
+    sat = _read_seq(out["array"])[400:-400]
+    unit = sat[: len(sat) // 12]
+    # (name#class, consensus, copies per Mb, typical divergence, where on the chromosome)
+    families = [
+        ("Ty3_gypsy_demo#LTR/Gypsy", ltr[300:-300], 9, 0.03, "middle"),
+        ("Copia_demo#LTR/Copia", _rand(4800), 6, 0.08, "middle"),
+        ("LINE_demo#LINE/L1", _rand(6000), 4, 0.15, "any"),
+        ("CACTA_demo#DNA/CACTA", _rand(3500), 3, 0.10, "any"),
+        ("MITE_demo#DNA/MITE", _rand(350), 25, 0.12, "arms"),
+        ("Helitron_demo#RC/Helitron", _rand(2500), 4, 0.18, "arms"),
+    ]
+    genes: list[tuple[str, int, int, str]] = []
+    chroms = []
+    for name, size in (("chr1", 3_000_000), ("chr2", 2_400_000), ("chr3", 1_800_000)):
+        seq = list(_rand(size))
+        mb = size / 1e6
+        # Satellite arrays near both ends (subtelomeric).
+        for start in (40_000, size - 160_000):
+            arr = "".join(_mutate(unit, 0.04) for _ in range(RNG.randrange(250, 600)))
+            seq[start:start + len(arr)] = arr
+        for _fam, cons, per_mb, div, where in families:
+            for _ in range(int(per_mb * mb)):
+                piece = cons if RNG.random() < 0.6 else cons[RNG.randrange(0, len(cons) // 2):]
+                copy = _mutate(piece, max(0.002, RNG.gauss(div, div / 3)))
+                if RNG.random() < 0.5:
+                    copy = _revcomp(copy)
+                if where == "middle":
+                    pos = int(RNG.triangular(200_000, size - 200_000, size / 2))
+                elif where == "arms":
+                    pos = int(RNG.choice([RNG.uniform(200_000, size * 0.35),
+                                          RNG.uniform(size * 0.65, size - 200_000)]))
+                else:
+                    pos = RNG.randrange(200_000, size - 200_000)
+                seq[pos:pos + len(copy)] = copy
+        for _ in range(int(40 * mb)):
+            g0 = RNG.randrange(200_000, size - 200_000)
+            genes.append((name, g0, g0 + RNG.randrange(1500, 6000), RNG.choice("+-")))
+        chroms.append((name, "".join(seq)))
+    genome = _write_fasta(folder / "demo_genome.fa", chroms)
+    with (folder / "demo_genes.gff3").open("w") as fh:
+        fh.write("##gff-version 3\n")
+        for i, (c, a, b, st) in enumerate(sorted(genes), 1):
+            fh.write(f"{c}\tdemo\tgene\t{a}\t{b}\t.\t{st}\t.\tID=gene{i:03d};Name=gene{i:03d}\n")
+    library = _write_fasta(folder / "te_library.fa",
+                           [(f, c) for f, c, *_ in families] + [("SatA#Satellite", unit)])
+    out["genome"], out["library"] = genome, library
+
+    os_type = platform.system()
+    db = check_database(str(genome), os_type=os_type)
+    _bed, table = blast(str(library), db, str(folder), e_value=1e-10, os_type=os_type,
+                        num_threads=2, bed_file=True)
+    out["hits"] = Path(table)
+    _write_repeatmasker_out(Path(table), folder / "demo_genome.fa.out")
+    out["rm_out"] = folder / "demo_genome.fa.out"
+
+
+def _write_repeatmasker_out(table: Path, out_path: Path) -> None:
+    """A RepeatMasker-style .out from the BLAST hits (for the abundance plot)."""
+    import csv
+
+    rows = []
+    with table.open() as fh:
+        for r in csv.DictReader(fh, delimiter="\t"):
+            rows.append(r)
+    with out_path.open("w") as fh:
+        fh.write("   SW   perc perc perc  query      position in query           "
+                 "matching       repeat              position in  repeat\n")
+        fh.write("score   div. del. ins.  sequence    begin     end    (left)    "
+                 "repeat         class/family         begin  end (left)   ID\n\n")
+        for i, r in enumerate(rows, 1):
+            q, cls = r["qseqid"].split("#", 1) if "#" in r["qseqid"] else (r["qseqid"], "Unknown")
+            s, e = sorted((int(r["sstart"]), int(r["send"])))
+            div = 100 - float(r["pident"])
+            strand = "+" if int(r["sstart"]) < int(r["send"]) else "C"
+            fh.write(f"{int(float(r['bitscore'])):6d} {div:5.1f} 0.0 0.0  {r['sseqid']:<10} "
+                     f"{s:>9} {e:>9} (0) {strand} {q:<14} {cls:<20} "
+                     f"{r['qstart']:>5} {r['qend']:>5} (0) {i:5d}\n")
 
 
 if __name__ == "__main__":
