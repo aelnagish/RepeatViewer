@@ -264,7 +264,7 @@ class PrimersPanel(QWidget):
         il.addLayout(snap_row)
         self.fix_button = QPushButton("Fix Mismatches to Match Template", self.inspector)
         self.edit_button = QPushButton("Edit Primer…", self.inspector)
-        self.genome_button = QPushButton("Show Sites on Chromosomes…", self.inspector)
+        self.genome_button = QPushButton("Sites in Genome…", self.inspector)
         for b in (self.fix_button, self.edit_button, self.genome_button):
             b.setMinimumWidth(0)
             b.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)

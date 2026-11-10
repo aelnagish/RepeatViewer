@@ -69,6 +69,8 @@ PCR_HELP = (
     "(blue), reverse primer (orange) and the stretch between them. Small arrows on the line "
     "are the other places the primers bind; thin bars are other sites that give the same size. Scroll or pinch to zoom, drag to move, double-click "
     "to go back to the product.<br>"
+    "<b>Sites in Genome…</b> shows every place each primer binds in a genome, also sites "
+    "without a partner primer (probes, primer background). No PCR run needed.<br>"
     "Products are saved next to the first template (<b>…_PCR_….fa</b>, with the primers and "
     "the template's annotations); the table and the run's history go into <b>…_details</b>."
 )
@@ -423,6 +425,7 @@ class PcrWindow(QDialog):
     openGelRequested = Signal(object)                  # PcrResult
     openFileRequested = Signal(object)                 # Path
     benchCardRequested = Signal(object)                # PcrResult
+    sitesRequested = Signal(object, object)            # primers, genome Path | None
 
     def __init__(self, settings: pcr.PcrSettings, *, templates: list[Path] | None = None,
                  primers: list[Primer] | None = None, database_path: Path | None = None,
@@ -615,7 +618,12 @@ class PcrWindow(QDialog):
         self.products_button = QPushButton("Open Products File", mid)
         self.table_button = QPushButton("Show Table (TSV)", mid)
         self.bench_button = QPushButton("Bench Card…", mid)
-        for b in (self.gel_button, self.products_button, self.table_button, self.bench_button):
+        self.sites_button = QPushButton("Sites in Genome…", mid)
+        self.sites_button.setToolTip(
+            "Every place each primer binds in a genome (by default the first template), "
+            "per chromosome. Useful for probes and single primers: no partner primer needed.")
+        for b in (self.gel_button, self.products_button, self.table_button, self.bench_button,
+                  self.sites_button):
             actions.addWidget(b)
         actions.addStretch(1)
         ml.addLayout(actions)
@@ -663,6 +671,9 @@ class PcrWindow(QDialog):
         self.products_button.clicked.connect(self._open_products)
         self.table_button.clicked.connect(self._open_table)
         self.bench_button.clicked.connect(lambda: self._result and self.benchCardRequested.emit(self._result))
+        self.sites_button.clicked.connect(
+            lambda: self._primers and self.sitesRequested.emit(
+                list(self._primers), self._templates[0] if self._templates else None))
         self.copy_button.clicked.connect(self._copy_product)
         self.gel.laneClicked.connect(self._on_gel_lane)
 
@@ -726,6 +737,7 @@ class PcrWindow(QDialog):
             item.setToolTip(p.sequence)
             self.primers_list.addItem(item)
         self.run_button.setEnabled(bool(self._templates) and bool(self._primers))
+        self.sites_button.setEnabled(bool(self._primers))
 
     def apply_path_from_panel(self, path: Path) -> bool:
         from repeatviewer.primer_actions import is_primer_fasta
