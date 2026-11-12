@@ -451,9 +451,11 @@ class NcbiDownloadDialog(QDialog):
         if idx >= 0:
             combo.setCurrentIndex(idx)
 
+    def prepare_for_show(self) -> None:
+        self._fit_to_current_tab()
+
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
-        QTimer.singleShot(0, self._fit_to_current_tab)
 
     def _on_tab_changed(self, index: int) -> None:
         self._stack.setCurrentIndex(index)

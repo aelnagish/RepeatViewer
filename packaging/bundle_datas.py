@@ -64,6 +64,15 @@ def _add_icons(datas: list[tuple[str, str]]) -> None:
         datas.append((str(manuals), "repeatviewer/assets/manuals"))
 
 
+def _add_database(datas: list[tuple[str, str]]) -> None:
+    """Ship bundled motif / reference FASTA under ``repeatviewer/database/``.
+
+    Required for PBS feature detection (Neumann2019 motif FASTA) in packaged
+    apps; without this the .app looks for the file and every sequence is skipped.
+    """
+    _add_tree(datas, PKG / "database", "repeatviewer/database")
+
+
 def collect_datas_for(target: str) -> list[tuple[str, str]]:
     """Collect bundled tool datas for ``macos``, ``linux``, or ``windows``.
 
@@ -200,6 +209,7 @@ def collect_datas_for(target: str) -> list[tuple[str, str]]:
 
     _add_aliview(datas)
     _add_icons(datas)
+    _add_database(datas)
     return datas
 
 
@@ -208,13 +218,16 @@ def collect_annotation_python_deps() -> tuple[
     list,
     list[str],
 ]:
-    """Collect orfipy + pyhmmer + primer3 for PyInstaller (full package trees, no tests).
+    """Collect orfipy + pyhmmer + primer3 (+ pysam on macOS/Linux) for PyInstaller.
 
     Binary extensions alone are not enough: a ``pyhmmer/`` folder of ``.so`` files
     shadows the pure-Python package in PYZ and ``import pyhmmer`` fails at runtime.
     ``collect_all`` also misses some Cython extensions (e.g. ``pyhmmer.platform.*``)
     and orfipy's ``ahocorasick`` dependency — those are added explicitly.
+    ``pysam`` enables large indexed BAM browsing; skip on Windows (no wheels).
     """
+    import sys
+
     from PyInstaller.utils.hooks import collect_all
 
     datas: list[tuple[str, str]] = []
@@ -231,7 +244,11 @@ def collect_annotation_python_deps() -> tuple[
             kept.append((src, dest))
         return kept
 
-    for pkg in ("pyhmmer", "orfipy", "primer3"):
+    pkgs = ["pyhmmer", "orfipy", "primer3"]
+    if sys.platform != "win32":
+        pkgs.append("pysam")
+        hidden.append("pysam")
+    for pkg in pkgs:
         try:
             pkg_datas, pkg_binaries, pkg_hidden = collect_all(pkg)
         except Exception as exc:  # noqa: BLE001

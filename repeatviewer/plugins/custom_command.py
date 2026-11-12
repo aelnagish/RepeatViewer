@@ -570,6 +570,8 @@ class UserCommandPlugin(RepeatViewerPlugin):
         self._active_run_dialog = dialog
         if parent is not None:
             parent._plugin_run_dialog = dialog
+        from repeatviewer.views.dialog_polish import prepare_params_dialog_for_show
+
         dialog.setModal(False)
         dialog.setWindowModality(Qt.WindowModality.NonModal)
         # Parent stacking keeps the dialog above RepeatViewer while the user
@@ -577,6 +579,7 @@ class UserCommandPlugin(RepeatViewerPlugin):
         dialog.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, False)
         loop = QEventLoop()
         dialog.finished.connect(loop.quit)
+        prepare_params_dialog_for_show(dialog)
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
@@ -1380,9 +1383,11 @@ class UserCommandRunDialog(QDialog):
         kind = f"{mode} (output)" if affixed_name in self._outputs else mode
         form.addRow(f"{label} ({kind}):", row)
 
+    def prepare_for_show(self) -> None:
+        self._fit_to_content()
+
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
-        QTimer.singleShot(0, self._fit_to_content)
         QTimer.singleShot(0, self._focus_first_field)
 
     def _focus_first_field(self) -> None:

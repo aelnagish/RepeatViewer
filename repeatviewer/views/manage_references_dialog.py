@@ -790,9 +790,11 @@ class AddDatabaseDialog(QDialog):
         self._show_annotation.toggled.connect(self._sync_annotation_name_hint)
         self._sync_type_fields()
 
+    def prepare_for_show(self) -> None:
+        self._fit_dialog_to_contents()
+
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
-        QTimer.singleShot(0, self._fit_dialog_to_contents)
         QTimer.singleShot(0, self._path_row.focus_field)
 
     def _keep_in_front(self) -> None:
@@ -2281,6 +2283,8 @@ class ManageReferencesDialog(QDialog):
             initial = DB_KIND_CDD
         # Parent to Manage Database so Add stacks above it via Qt parenting —
         # never WindowStaysOnTopHint (that covers Safari / Finder / …).
+        from repeatviewer.views.dialog_polish import prepare_params_dialog_for_show
+
         dialog = AddDatabaseDialog(
             self._project, initial_kind=initial, section=section, parent=self
         )
@@ -2289,6 +2293,7 @@ class ManageReferencesDialog(QDialog):
         dialog.setWindowModality(Qt.WindowModality.NonModal)
         self._add_dialog = dialog
         dialog.finished.connect(self._on_add_finished)
+        prepare_params_dialog_for_show(dialog)
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()

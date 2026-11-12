@@ -636,3 +636,107 @@ def test_overflow_hider_survives_deleted_overview_width_source(
     hider.clear_width_sources()
     assert hider._width_sources == []
     host.close()
+
+
+def test_open_pdf_leaves_split_without_clearing_fasta_preference(
+    qapp: QApplication, tmp_path: Path, monkeypatch
+) -> None:
+    """Split is remembered per FASTA shape; PDF opens single-pane."""
+    from repeatviewer.widgets import preview_tabs as pt
+
+    saved: list[dict] = []
+    monkeypatch.setattr(
+        pt,
+        "save_preview_split_preference",
+        lambda kind, *, enabled, left, right: saved.append(
+            {"kind": kind, "enabled": enabled, "left": left, "right": right}
+        ),
+    )
+    monkeypatch.setattr(
+        pt, "load_preview_split_preference", lambda kind: (True, 1, 2)
+    )
+
+    fasta = tmp_path / "msa.fa"
+    fasta.write_text(">a\nACGTACGTAC\n>b\nTGCATGCATG\n", encoding="utf-8")
+    pdf = tmp_path / "report.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n1 0 obj<<>>endobj\ntrailer<<>>\n")
+
+    host = QWidget()
+    layout = QVBoxLayout(host)
+    tabs = PreviewTabWidget()
+    layout.addWidget(tabs, stretch=1)
+    host.resize(900, 500)
+    host.show()
+    qapp.processEvents()
+
+    assert tabs.open_file(fasta, replace=False) is True
+    assert tabs.open_split_with_tabs(1, 2) is True
+    assert tabs.is_split_active()
+    assert any(row.get("enabled") for row in saved)
+    saved.clear()
+
+    assert tabs.open_file(pdf, replace=True) is True
+    assert not tabs.is_split_active()
+    # Leaving for PDF must not write enabled=False for the FASTA shape.
+    assert not any(row.get("enabled") is False for row in saved)
+
+    assert tabs.open_file(fasta, replace=True) is True
+    assert tabs.is_split_active()  # remembered multi split comes back
+
+    tabs._close_inline_split()
+    from PySide6.QtTest import QTest
+
+    QTest.qWait(200)
+    host.close()
+    tabs.close()
+
+
+def test_sync_does_not_force_matching_displayed_annotations(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    """Sync left/right keeps Displayed annotations independent per pane."""
+    from repeatviewer.backends.sequence_features import SequenceFeature
+
+    path = tmp_path / "sync_ann.fa"
+    path.write_text(">a\nACGTACGTAC\n>b\nTGCATGCATG\n", encoding="utf-8")
+
+    host = QWidget()
+    layout = QVBoxLayout(host)
+    tabs = PreviewTabWidget()
+    layout.addWidget(tabs, stretch=1)
+    host.resize(1000, 560)
+    host.show()
+    qapp.processEvents()
+
+    assert tabs.open_file(path, replace=False) is True
+    assert tabs.open_split_with_tabs(1, 1) is True
+    split = tabs._inline_split
+    assert isinstance(split, PreviewSplitWindow)
+    from PySide6.QtTest import QTest
+
+    QTest.qWait(300)
+    split._setup_view_link()
+    left = split._left.overview_panel()
+    right = split._right.overview_panel()
+    assert left is not None and right is not None
+    assert not hasattr(split, "_on_linked_annotation_kinds")
+
+    feats = [SequenceFeature(1, 4, "x", feature_type="LTR")]
+    for panel in (left, right):
+        panel._rail.set_available_annotation_kinds(feats)
+        panel._rail.apply_visible_annotation_kinds(frozenset({"LTR"}))
+
+    left._rail.sync_split_views.setChecked(True)
+    qapp.processEvents()
+    assert split._link_enabled
+
+    # Turn annotations off on the left only — right must stay on.
+    left._rail.annotation_kinds_all_check.setChecked(False)
+    qapp.processEvents()
+    assert left._rail.visible_annotation_kinds() == frozenset()
+    assert right._rail.visible_annotation_kinds() == frozenset({"LTR"})
+
+    tabs._close_inline_split()
+    QTest.qWait(200)
+    host.close()
+    tabs.close()

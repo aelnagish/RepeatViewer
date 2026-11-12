@@ -71,3 +71,24 @@ def test_quick_metadata_fills_size_for_gff(tmp_path: Path) -> None:
     assert meta.modified_text != "—"
     assert meta.length_text == "—"
     assert meta.sequence_count_text == "—"
+
+
+def test_msa_fasta_metadata_shows_column_count(tmp_path: Path) -> None:
+    """Equal-length multi-FASTA (MSA): Length = alignment width."""
+    fasta = tmp_path / "aln.fa"
+    fasta.write_text(">a\nACGT--ACGT\n>b\nACGTA-ACGT\n>c\nACGTACACGT\n")
+    meta = enrich_fasta_metadata(fasta)
+    assert meta.sequence_count_text == "3"
+    assert meta.length_text == "10"
+    assert meta.sort_length == 10.0
+    assert meta.gc_text == "—"
+
+
+def test_unequal_multi_fasta_metadata_omits_length(tmp_path: Path) -> None:
+    """Unaligned multi-FASTA keeps Length empty (no single column count)."""
+    fasta = tmp_path / "multi.fa"
+    fasta.write_text(">a\nACGT\n>b\nACGTACGTACGT\n")
+    meta = enrich_fasta_metadata(fasta)
+    assert meta.sequence_count_text == "2"
+    assert meta.length_text == "—"
+    assert meta.sort_length == -1.0

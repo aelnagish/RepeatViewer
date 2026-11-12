@@ -1768,7 +1768,10 @@ class IndexedBamTrack(Track):
         # neighbouring tiles are decoded ahead in a worker (own pysam handle), so panning
         # rarely waits for the BAM
         import threading
-        from concurrent.futures import ThreadPoolExecutor
+        # Import the concrete submodule: on Python 3.15, a function-local
+        # ``from concurrent.futures import ThreadPoolExecutor`` can stay a
+        # non-callable ``lazy_import`` proxy after pysam has been loaded.
+        import concurrent.futures.thread as _cf_thread
 
         self._open_args = (str(self.path), "rc" if self.path.suffix.lower() == ".cram"
                            else "rb", kw)
@@ -1776,7 +1779,9 @@ class IndexedBamTrack(Track):
         self._pending: dict = {}
         self._local = threading.local()
         # two workers: the tile under the view is decoded while a neighbour still is
-        self._pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="bam-prefetch")
+        self._pool = _cf_thread.ThreadPoolExecutor(
+            max_workers=2, thread_name_prefix="bam-prefetch"
+        )
         self.on_tile_ready = None   # called (from a worker) when a tile is decoded
         self._nonblocking = 0       # > 0 while the view draws: never wait long for a tile
         self._deadline = 0.0
@@ -1859,7 +1864,6 @@ class IndexedBamTrack(Track):
             return hit
         if deadline is not None:
             import time
-            from concurrent.futures import TimeoutError as _Timeout
 
             if fut is None:
                 self._prefetch(key, t)
@@ -1872,7 +1876,7 @@ class IndexedBamTrack(Track):
                 return None
             try:
                 return fut.result(timeout=max(0.0, deadline - time.monotonic()))
-            except _Timeout:
+            except TimeoutError:
                 return None
             except Exception:  # noqa: BLE001 - decode it here instead
                 pass
@@ -2399,7 +2403,8 @@ def build_bam_coverage(
     the pure-Python reader walks the file once.
     """
     import os
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import concurrent.futures as _cf
+    import concurrent.futures.thread as _cf_thread
 
     path = Path(path).expanduser().resolve()
     if not path.is_file():
@@ -2420,7 +2425,8 @@ def build_bam_coverage(
         workers = max(1, min(workers, max(1, len(chroms)), 8))
         done = 0
         # One AlignmentFile per worker thread (htslib is not share-safe).
-        with ThreadPoolExecutor(
+        # Use concurrent.futures.thread (not a lazy from-import) — see IndexedBamTrack.
+        with _cf_thread.ThreadPoolExecutor(
             max_workers=workers, thread_name_prefix="rvcov"
         ) as pool:
             futures = {
@@ -2433,7 +2439,7 @@ def build_bam_coverage(
                 ): (name, int(length))
                 for name, length in chroms
             }
-            for fut in as_completed(futures):
+            for fut in _cf.as_completed(futures):
                 if cancel is not None and cancel():
                     for pending in futures:
                         pending.cancel()

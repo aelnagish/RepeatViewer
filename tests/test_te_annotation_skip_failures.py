@@ -61,8 +61,8 @@ def test_batch_skips_failed_sequence_and_continues(tmp_path: Path, monkeypatch) 
     )
     # Force sequential so progress ordering is irrelevant.
     monkeypatch.setattr(
-        "repeatviewer.backends.te_annotation_batch._annotation_parallel_sequences",
-        lambda _n: 1,
+        "repeatviewer.backends.te_annotation_batch._annotation_parallel_and_threads",
+        lambda _n, threads: (1, max(1, int(threads))),
     )
 
     result = run_te_annotation_on_fasta(

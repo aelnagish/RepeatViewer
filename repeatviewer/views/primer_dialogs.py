@@ -461,7 +461,7 @@ class _Form:
         self.form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
         self.form.setHorizontalSpacing(12)
-        self.form.setVerticalSpacing(6)
+        self.form.setVerticalSpacing(4)  # match BLAST Inputs / Settings forms
         self.spacers: list[QWidget] = []
         self._first = True
 
@@ -575,6 +575,7 @@ def _page(parent: QWidget) -> tuple[QWidget, QVBoxLayout]:
     page = QWidget(parent)
     page.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
     lay = QVBoxLayout(page)
+    # Top 10 matches BLAST Inputs form under the tab bar.
     lay.setContentsMargins(16, 10, 16, 10)
     lay.setSpacing(4)
     lay.setAlignment(Qt.AlignmentFlag.AlignTop)
@@ -617,7 +618,9 @@ class _TabbedToolDialog(QDialog):
         self._forms: list[_Form] = []
         self._layout = QVBoxLayout(self)
         self._layout.setContentsMargins(22, 18, 22, 16)
-        self._layout.setSpacing(8)
+        # Match BLAST: no extra gap under the tab underline; page top margin
+        # (10) is the only padding before "Inputs".
+        self._layout.setSpacing(0)
         self._layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         self._layout.addWidget(self._tab_bar, 0)
         self._layout.addWidget(self._stack, 0)
@@ -638,6 +641,7 @@ class _TabbedToolDialog(QDialog):
         return self._tab_bar.count() - 1
 
     def _finish(self, bar: QWidget) -> None:
+        self._layout.addSpacing(8)  # same as BLAST button-bar gap
         self._layout.addWidget(bar, 0)
         self._width = self._grid_width()
         self.resize(self._width, 400)
@@ -683,9 +687,14 @@ class _TabbedToolDialog(QDialog):
         screen = self.screen() or QApplication.primaryScreen()
         avail = screen.availableGeometry() if screen is not None else None
         if avail is not None:
-            chrome = (self._tab_bar.sizeHint().height() + 2 * self._layout.spacing()
-                      + self._layout.contentsMargins().top()
-                      + self._layout.contentsMargins().bottom() + 44 + 40)
+            chrome = (
+                self._tab_bar.sizeHint().height()
+                + 8  # spacing before button bar
+                + self._layout.contentsMargins().top()
+                + self._layout.contentsMargins().bottom()
+                + 44
+                + 40
+            )
             room = max(240, avail.height() - chrome)
         else:
             room = wanted
@@ -701,10 +710,13 @@ class _TabbedToolDialog(QDialog):
             if top != frame.top():
                 self.move(frame.left(), top)
 
+    def prepare_for_show(self) -> None:
+        self._on_tab(self._tab_bar.currentIndex())
+        self._fit()
+
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
-        self._on_tab(self._tab_bar.currentIndex())
-        QTimer.singleShot(0, self._fit)
+        # Tab/size already applied in prepare_for_show — only clear path focus.
         QTimer.singleShot(0, self._clear_path_focus)
 
     def _clear_path_focus(self) -> None:

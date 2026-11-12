@@ -32,6 +32,12 @@ from repeatviewer.job_options import (
     TE_GENOME_MAP_DENSITY_HIT_COUNT,
     TE_GENOME_MAP_DENSITY_TE_LENGTH,
 )
+from repeatviewer.backends.html_kinds import (  # noqa: F401
+    GENOME_MAP_HTML_SUFFIX,
+    GENOME_MAP_REGION_HTML_SUFFIX,
+    _LEGACY_GENOME_MAP_SUFFIXES,
+    is_genome_map_html_file,
+)
 from repeatviewer.backends.bismark_cov import (
     METH_SUBTRACK_CG_COVERAGE_PCT,
     METH_SUBTRACK_CG_COVERED,
@@ -4780,17 +4786,6 @@ def find_blast_table_for_query(query_fasta: Path) -> Path | None:
     return None
 
 
-GENOME_MAP_HTML_SUFFIX = "_den_plot.html"
-GENOME_MAP_REGION_HTML_SUFFIX = "_den_plot_region.html"
-# Legacy suffixes kept for preview detection of older outputs.
-_LEGACY_GENOME_MAP_SUFFIXES = (
-    "_density_plot.html",
-    "_density_plot_region.html",
-    "_genome_map.html",
-    "_genome_map_region.html",
-)
-
-
 def te_hit_source_tag(path: Path) -> str:
     """Return ``RM`` or a BLAST tag (``bn``, ``b``, …) for TE hit-table naming."""
     name = path.name.lower()
@@ -4829,21 +4824,6 @@ def te_plot_output_suffix(
 def is_blast_table_file(path: Path) -> bool:
     """True if ``path`` looks like a BLAST hit table from RepeatViewer/Blast."""
     return strip_blast_table_suffix(path.name) is not None
-
-
-def is_genome_map_html_file(path: Path) -> bool:
-    name = path.name.lower()
-    if not name.endswith((".html", ".htm")):
-        return False
-    if "_dens_plot" in name or "_den_plot" in name or "_density_plot" in name:
-        return True
-    return (
-        name.endswith(GENOME_MAP_HTML_SUFFIX)
-        or name.endswith(GENOME_MAP_REGION_HTML_SUFFIX)
-        or any(name.endswith(suffix) for suffix in _LEGACY_GENOME_MAP_SUFFIXES)
-        or "_blast_genome_map" in name
-        or "_genome_map" in name
-    )
 
 
 def is_divergence_plot_html_file(path: Path) -> bool:

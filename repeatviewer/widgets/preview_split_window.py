@@ -47,6 +47,7 @@ class _SplitPreviewPane(QWidget):
         source_tabs: PreviewTabWidget,
         parent: QWidget | None = None,
         initial_fasta_tab: int = -1,
+        initial_overview_view_state: dict | None = None,
     ) -> None:
         super().__init__(parent)
         self.setMinimumWidth(_PANE_MIN_WIDTH)
@@ -123,6 +124,11 @@ class _SplitPreviewPane(QWidget):
         layout.addWidget(self._status_bar)
 
         self._source_overview_features = self._snapshot_source_features(source)
+        self._pending_overview_view_state = (
+            dict(initial_overview_view_state)
+            if initial_overview_view_state
+            else None
+        )
         fasta_tab = (
             int(initial_fasta_tab)
             if initial_fasta_tab >= 0
@@ -148,6 +154,8 @@ class _SplitPreviewPane(QWidget):
         if not resolved.is_file():
             return
         self._source_overview_features = None
+        # New file: do not keep the pre-split scroll from another alignment.
+        self._pending_overview_view_state = None
         if fasta_tab >= 0:
             self._desired_fasta_tab = int(fasta_tab)
         self._tabs.open_file(resolved, replace=True)
@@ -233,6 +241,7 @@ class _SplitPreviewPane(QWidget):
                 progress_detail="Loading annotations…"
             )
             self._apply_source_features_if_needed(page)
+            self._apply_pending_overview_view_state(page)
         elif (
             page.is_single_record_fasta_preview()
             and page.is_annotation_preview_active()
@@ -249,6 +258,17 @@ class _SplitPreviewPane(QWidget):
             if hasattr(self._header, "_update_header_height"):
                 self._header._update_header_height()
         self._sync_title_zoom_host()
+
+    def _apply_pending_overview_view_state(self, page: FilePreviewPage) -> None:
+        state = self._pending_overview_view_state
+        if not state:
+            return
+        overview = getattr(page, "_annotation_overview", None)
+        if overview is None or not hasattr(overview, "set_pending_view_restore"):
+            return
+        overview.set_pending_view_restore(state)
+        if overview.restore_view_state(state):
+            self._pending_overview_view_state = None
 
     def _apply_source_features_if_needed(self, page: FilePreviewPage) -> None:
         snapshot = self._source_overview_features
@@ -374,8 +394,9 @@ class PreviewSplitWindow(QWidget):
 
     Default: embedded in the Preview dock (replaces the single-pane tab view).
     Optional ``floating=True`` keeps the legacy Tool window.
-    ``Sync left and right view`` links vertical position, Displayed annotations,
-    and selection. Overview↔Dotplot always mirrors the active sequence
+    ``Sync left and right view`` links vertical position and selection.
+    Displayed annotations stay per-pane so one side can show tracks and the
+    other hide them. Overview↔Dotplot always mirrors the active sequence
     selection both ways while the split is open.
     """
 
@@ -399,6 +420,7 @@ class PreviewSplitWindow(QWidget):
         floating: bool = False,
         left_tab: int = -1,
         right_tab: int = -1,
+        initial_overview_view_state: dict | None = None,
     ) -> None:
         if floating:
             super().__init__(parent, self._WINDOW_FLAGS)
@@ -421,6 +443,11 @@ class PreviewSplitWindow(QWidget):
         default_tab = source.current_fasta_tab_index()
         left_idx = int(left_tab) if left_tab >= 0 else default_tab
         right_idx = int(right_tab) if right_tab >= 0 else default_tab
+        view_state = (
+            dict(initial_overview_view_state)
+            if initial_overview_view_state
+            else None
+        )
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -455,12 +482,14 @@ class PreviewSplitWindow(QWidget):
             source_tabs=source_tabs,
             parent=self._splitter,
             initial_fasta_tab=left_idx,
+            initial_overview_view_state=view_state,
         )
         self._right = _SplitPreviewPane(
             source,
             source_tabs=source_tabs,
             parent=self._splitter,
             initial_fasta_tab=right_idx,
+            initial_overview_view_state=view_state,
         )
 
         self._splitter.addWidget(self._left)
@@ -592,9 +621,6 @@ class PreviewSplitWindow(QWidget):
         for overview in (left, right):
             rail = overview._rail
             rail.syncSplitViewsChanged.connect(self._on_sync_toggled)
-            rail.annotationTrackKindsChanged.connect(
-                lambda keys, src=overview: self._on_linked_annotation_kinds(src, keys)
-            )
             overview._bars.selectionChanged.connect(
                 lambda src=overview: self._on_linked_selection(src)
             )
@@ -722,9 +748,6 @@ class PreviewSplitWindow(QWidget):
             anchor = source.linked_viewport_row_anchor()
             if anchor is not None:
                 target.apply_linked_viewport_row_anchor(*anchor)
-            target.apply_linked_annotation_kinds(
-                source._rail.visible_annotation_kinds()
-            )
             rows = source._bars.selected_rows()
             target.apply_linked_selected_rows(rows)
             self._align_peer_to_selected_row(source, target, rows)
@@ -774,24 +797,6 @@ class PreviewSplitWindow(QWidget):
         try:
             target.apply_linked_selected_rows(rows)
             self._align_peer_to_selected_row(source, target, rows)
-        finally:
-            self._link_applying = False
-
-    def _on_linked_annotation_kinds(
-        self, source: MultiSequenceOverviewPanel, keys: object
-    ) -> None:
-        if not self._link_enabled or self._link_applying:
-            return
-        target = self._peer_overview(source)
-        if target is None:
-            return
-        if keys is None:
-            visible = source._rail.visible_annotation_kinds()
-        else:
-            visible = frozenset(str(k) for k in keys)
-        self._link_applying = True
-        try:
-            target.apply_linked_annotation_kinds(visible)
         finally:
             self._link_applying = False
 

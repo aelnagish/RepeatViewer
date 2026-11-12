@@ -700,7 +700,8 @@ class AlignWorker(QObject):
 
     @Slot()
     def run(self) -> None:
-        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import concurrent.futures as _cf
+        import concurrent.futures.thread as _cf_thread
 
         from repeatviewer.external_process import process_log_sink
 
@@ -825,12 +826,12 @@ class AlignWorker(QObject):
                     completed += ALIGN_PHASES
             else:
                 # Parallel: advance by ALIGN_PHASES when each file completes.
-                with ThreadPoolExecutor(max_workers=workers) as pool:
+                with _cf_thread.ThreadPoolExecutor(max_workers=workers) as pool:
                     futures = {
                         pool.submit(_align_one, path): path
                         for path in self._seq_files
                     }
-                    for future in as_completed(futures):
+                    for future in _cf.as_completed(futures):
                         if cancel is not None:
                             cancel.check()
                         seq_path, output, error = future.result()
@@ -10781,6 +10782,8 @@ class MainWindow(
 
     def _present_te_viz_dialog(self, dialog: QDialog, on_accept) -> None:
         """Show a non-modal TE settings dialog so the Files panel stays clickable."""
+        from repeatviewer.views.dialog_polish import prepare_params_dialog_for_show
+
         self._dismiss_open_tool_dialogs()
         if self._te_viz_input_dialog is not None and self._te_viz_input_dialog is not dialog:
             self._te_viz_input_dialog.close()
@@ -10800,6 +10803,8 @@ class MainWindow(
             dialog.deleteLater()
 
         dialog.finished.connect(_finished)
+        # Polish + size before the first paint (avoids the post-open layout jump).
+        prepare_params_dialog_for_show(dialog)
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
@@ -11727,6 +11732,8 @@ class MainWindow(
             self._blast_params_dialog.activateWindow()
             return
 
+        from repeatviewer.views.dialog_polish import prepare_params_dialog_for_show
+
         self._dismiss_open_tool_dialogs()
         reload_blast_databases_into_project(self._project)
         dialog = BlastParamsDialog(
@@ -11735,6 +11742,7 @@ class MainWindow(
         self._configure_app_floating_dialog(dialog)
         self._blast_params_dialog = dialog
         dialog.finished.connect(self._on_blast_params_dialog_finished)
+        prepare_params_dialog_for_show(dialog)
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
@@ -11807,11 +11815,14 @@ class MainWindow(
             self._hmmer_params_dialog.raise_()
             self._hmmer_params_dialog.activateWindow()
             return
+        from repeatviewer.views.dialog_polish import prepare_params_dialog_for_show
+
         self._dismiss_open_tool_dialogs()
         dialog = HmmerParamsDialog(initial=self._hmmer_options, parent=self)
         self._configure_app_floating_dialog(dialog)
         self._hmmer_params_dialog = dialog
         dialog.finished.connect(self._on_hmmer_params_dialog_finished)
+        prepare_params_dialog_for_show(dialog)
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
@@ -11894,11 +11905,14 @@ class MainWindow(
             self._samtools_params_dialog.raise_()
             self._samtools_params_dialog.activateWindow()
             return
+        from repeatviewer.views.dialog_polish import prepare_params_dialog_for_show
+
         self._dismiss_open_tool_dialogs()
         dialog = SamtoolsParamsDialog(initial=self._samtools_options, parent=self)
         self._configure_app_floating_dialog(dialog)
         self._samtools_params_dialog = dialog
         dialog.finished.connect(self._on_samtools_params_dialog_finished)
+        prepare_params_dialog_for_show(dialog)
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
@@ -13744,6 +13758,7 @@ class MainWindow(
             reference_sequence=ref_seq,
             on_dialog_ready=_wire,
             prediction=getattr(overview, "_boundary_result", None),
+            features_by_id=getattr(overview, "_features", None),
         )
 
     def _overview_panel_for_path(self, path: Path):

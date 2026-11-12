@@ -875,15 +875,19 @@ class MapReferenceDialog(QDialog):
         self._sync_inputs(resize=False)
         self._on_tab_changed(self._tab_bar.currentIndex())
         self.resize(self._DIALOG_WIDTH, 360)
-        QTimer.singleShot(0, lambda: self._resize_for_advanced(False))
 
-    def showEvent(self, event) -> None:  # noqa: N802
-        super().showEvent(event)
+    def prepare_for_show(self) -> None:
         self._engine_compact_size = None
         self._sync_field_column()
         if self._tab_bar.currentIndex() == self._TAB_OPTIONS:
             self._update_executable_status()
-        QTimer.singleShot(0, lambda: self._resize_for_advanced(False))
+        self._resize_for_advanced(False)
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        self._sync_field_column()
+        if self._tab_bar.currentIndex() == self._TAB_OPTIONS:
+            self._update_executable_status()
         # Don't leave the caret in Reference (or other path fields) on open —
         # typing would silently rewrite the saved genome path.
         QTimer.singleShot(0, self._clear_startup_path_focus)

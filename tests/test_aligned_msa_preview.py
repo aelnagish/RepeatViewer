@@ -9,6 +9,7 @@ import pytest
 from PySide6.QtWidgets import QApplication
 
 from repeatviewer.backends.sequence_features import (
+    aligned_fasta_width,
     is_aligned_fasta,
     load_aligned_fasta_rows,
 )
@@ -20,18 +21,21 @@ def test_is_aligned_fasta_equal_length_gapped(tmp_path: Path) -> None:
     path = tmp_path / "aln.fa"
     path.write_text(">s1\nACGT--GT\n>s2\nACGTACGT\n")
     assert is_aligned_fasta(path) is True
+    assert aligned_fasta_width(path) == 8
 
 
 def test_is_aligned_fasta_false_for_unequal_lengths(tmp_path: Path) -> None:
     path = tmp_path / "multi.fa"
     path.write_text(">s1\nACGT\n>s2\nACGTACGT\n")
     assert is_aligned_fasta(path) is False
+    assert aligned_fasta_width(path) is None
 
 
 def test_is_aligned_fasta_false_for_single_record(tmp_path: Path) -> None:
     path = tmp_path / "one.fa"
     path.write_text(">only\nACGTACGT\n")
     assert is_aligned_fasta(path) is False
+    assert aligned_fasta_width(path) is None
 
 
 def test_load_aligned_fasta_rows_uppercases(tmp_path: Path) -> None:
@@ -125,6 +129,81 @@ def test_overview_switching_msa_resets_scroll_to_origin(
     # Fit zoom for the new file (not the previous zoomed-in ppb).
     fit_ppb, _ = panel._bars.zoom_bounds(panel._bars_viewport_width())
     assert panel._bars.pixels_per_base() == pytest.approx(fit_ppb, rel=0.05)
+    panel.deleteLater()
+
+
+def test_overview_fit_bars_keeps_vertical_scroll(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    """Fit / viewport refit must not jump back to the first sequence row."""
+    long_cols = "ACGT" * 200
+    rows = "\n".join(f">s{i}\n{long_cols}" for i in range(40))
+    path = tmp_path / "tall.fa"
+    path.write_text(rows + "\n", encoding="utf-8")
+
+    panel = MultiSequenceOverviewPanel(path)
+    panel.resize(900, 360)
+    panel.show()
+    panel.load_path(path, msa_mode=True)
+    qapp.processEvents()
+    panel._fit_bars()
+    qapp.processEvents()
+
+    vbar = panel._bars_scroll.verticalScrollBar()
+    assert vbar.maximum() > 0
+    vbar.setValue(min(180, vbar.maximum()))
+    panel._names_scroll.verticalScrollBar().setValue(vbar.value())
+    before = int(vbar.value())
+    assert before > 0
+
+    # Same path as window / split-pane resize while at Fit zoom.
+    panel._refit_after_viewport_change()
+    qapp.processEvents()
+    assert int(vbar.value()) == before
+    assert int(panel._names_scroll.verticalScrollBar().value()) == before
+
+    panel._fit_bars()
+    qapp.processEvents()
+    assert int(vbar.value()) == before
+    panel.deleteLater()
+
+
+def test_overview_capture_restore_view_state_keeps_row(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    """Split panes clone the source Overview scroll via capture/restore."""
+    long_cols = "ACGT" * 200
+    rows = "\n".join(f">s{i}\n{long_cols}" for i in range(40))
+    path = tmp_path / "split_src.fa"
+    path.write_text(rows + "\n", encoding="utf-8")
+
+    panel = MultiSequenceOverviewPanel(path)
+    panel.resize(900, 360)
+    panel.show()
+    panel.load_path(path, msa_mode=True)
+    qapp.processEvents()
+    panel._fit_bars()
+    qapp.processEvents()
+
+    vbar = panel._bars_scroll.verticalScrollBar()
+    assert vbar.maximum() > 0
+    vbar.setValue(min(220, vbar.maximum()))
+    panel._names_scroll.verticalScrollBar().setValue(vbar.value())
+    state = panel.capture_view_state()
+    before_anchor = state.get("row_anchor")
+    assert before_anchor is not None
+
+    # Simulate a fresh split pane load that would otherwise pin to row 0.
+    panel._reset_scrollbars_to_origin()
+    qapp.processEvents()
+    assert int(vbar.value()) == 0
+
+    panel.set_pending_view_restore(state)
+    assert panel.restore_view_state(state) is True
+    qapp.processEvents()
+    restored = panel.linked_viewport_row_anchor()
+    assert restored is not None
+    assert int(restored[0]) == int(before_anchor[0])
     panel.deleteLater()
 
 

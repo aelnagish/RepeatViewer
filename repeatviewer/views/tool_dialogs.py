@@ -65,9 +65,11 @@ from repeatviewer.widgets.help_button import (  # noqa: E402
 
 def exec_modal_dialog(dialog: QDialog) -> bool:
     """Show a modal dialog above the main window (avoids WebEngine / dock click stealing)."""
+    from repeatviewer.views.dialog_polish import prepare_params_dialog_for_show
+
     dialog.setModal(True)
     dialog.setWindowModality(Qt.WindowModality.ApplicationModal)
-    dialog.adjustSize()
+    prepare_params_dialog_for_show(dialog)
     dialog.raise_()
     dialog.activateWindow()
     return dialog.exec() == QDialog.DialogCode.Accepted
@@ -366,7 +368,11 @@ def pin_tool_tabs_height(tabs: QTabWidget, page_h: int | None) -> None:
     Pass ``None`` to clear pins **before** measuring. After ``resize``, call again
     with the measured active-page height. Required for Sequence Annotation,
     Flexidot, TE-Aid, HMMER, Genome density, MSA Clean, Consensus, etc.
+
+    Non-current pages use ``Ignored`` vertical policy so their sizeHint (e.g. an
+    Options page with stretch) cannot inflate the tab widget / dialog.
     """
+    current = tabs.currentWidget()
     if page_h is None:
         tabs.setMinimumHeight(0)
         tabs.setMaximumHeight(16777215)
@@ -375,15 +381,35 @@ def pin_tool_tabs_height(tabs: QTabWidget, page_h: int | None) -> None:
             if page is not None:
                 page.setMinimumHeight(0)
                 page.setMaximumHeight(16777215)
+                page.setSizePolicy(
+                    QSizePolicy.Policy.Preferred,
+                    QSizePolicy.Policy.Maximum
+                    if page is current
+                    else QSizePolicy.Policy.Ignored,
+                )
         return
     tab_bar_h = max(24, tabs.tabBar().sizeHint().height())
     tabs_h = tab_bar_h + max(1, int(page_h)) + 8
-    tabs.setMinimumHeight(0)
-    tabs.setMaximumHeight(tabs_h)
-    current = tabs.currentWidget()
-    if current is not None:
-        current.setMinimumHeight(0)
-        current.setMaximumHeight(max(1, int(page_h)))
+    # Fixed height — maximumHeight alone loses to QTabWidget sizeHint (max of
+    # all pages, including Options with stretch).
+    tabs.setFixedHeight(tabs_h)
+    for i in range(tabs.count()):
+        page = tabs.widget(i)
+        if page is None:
+            continue
+        if page is current:
+            page.setMinimumHeight(0)
+            page.setMaximumHeight(max(1, int(page_h)))
+            page.setSizePolicy(
+                QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
+            )
+        else:
+            # Collapse inactive pages so their sizeHint (Options stretch, etc.)
+            # cannot keep the dialog taller than the active tab's content.
+            page.setFixedHeight(0)
+            page.setSizePolicy(
+                QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Ignored
+            )
 
 
 def settings_form_label_column_width(
@@ -2191,24 +2217,26 @@ class AlignParamsDialog(QDialog):
         self._update_advanced_settings_button()
         self._sync_align_field_columns()
         self._update_executable_status()
-        QTimer.singleShot(0, self._fit_current_align_tab)
+
+    def prepare_for_show(self) -> None:
+        """Align columns and size before the first paint (no post-show jump)."""
+        self._sync_align_field_columns()
+        self._fit_current_align_tab()
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
         self._sync_align_field_columns()
         if self._aligner_tabs.currentWidget() is self._options_tab:
             self._update_executable_status()
-        QTimer.singleShot(0, self._fit_current_align_tab)
 
     def _fit_current_align_tab(self) -> None:
         """Shrink / grow the dialog to the active tab’s real content height."""
-        if not self.isVisible():
-            return
         current = self._aligner_tabs.currentWidget()
         if current is self._options_tab:
             self._fit_options_content()
         elif current is self._fastga_tab:
-            self._refit_fastga_after_content_change()
+            # Works before show() (prepare_for_show) — do not require isVisible.
+            self._refit_fastga_after_content_change(force=True)
         elif current is self._muscle_tab:
             if not self._muscle_advanced_visible():
                 self._resize_for_muscle_advanced(False)
@@ -2387,21 +2415,7 @@ class AlignParamsDialog(QDialog):
 
     def _pin_aligner_tab_height(self, page_h: int | None) -> None:
         """Constrain the tab widget to the active page so other tabs cannot gap."""
-        page = self._aligner_tabs.currentWidget()
-        if page_h is None:
-            self._aligner_tabs.setMinimumHeight(0)
-            self._aligner_tabs.setMaximumHeight(16777215)
-            if page is not None:
-                page.setMinimumHeight(0)
-                page.setMaximumHeight(16777215)
-            return
-        tab_bar_h = self._aligner_tabs.tabBar().sizeHint().height() + 10
-        tabs_h = max(1, int(page_h) + tab_bar_h)
-        self._aligner_tabs.setMinimumHeight(0)
-        self._aligner_tabs.setMaximumHeight(tabs_h)
-        if page is not None:
-            page.setMinimumHeight(0)
-            page.setMaximumHeight(max(1, int(page_h)))
+        pin_tool_tabs_height(self._aligner_tabs, page_h)
 
     def _fastga_dialog_chrome_height(self) -> int:
         return self._dialog_chrome_height()
@@ -2415,14 +2429,16 @@ class AlignParamsDialog(QDialog):
         self._fastga_compact_size = None
         QTimer.singleShot(0, self._refit_fastga_after_content_change)
 
-    def _refit_fastga_after_content_change(self) -> None:
+    def _refit_fastga_after_content_change(self, *, force: bool = False) -> None:
         """Refit height after Mode/Inputs rows change.
 
         Measure the compact (no-Advanced) size first so a leftover Advanced
         height cannot leave a blank band under Settings. Restore Advanced only
         when the footer toggle is still checked.
+
+        ``force=True`` allows sizing before the first paint (prepare_for_show).
         """
-        if not self.isVisible():
+        if not force and not self.isVisible():
             return
         if self._aligner_tabs.currentWidget() is not self._fastga_tab:
             return
@@ -4815,9 +4831,10 @@ class FastGaPanel(QWidget):
         self._advanced_panel.setVisible(visible)
         # Force the layout to drop or reclaim height (setVisible alone can leave a gap).
         if visible:
+            self._advanced_panel.setMinimumHeight(0)
             self._advanced_panel.setMaximumHeight(16777215)
         else:
-            self._advanced_panel.setMaximumHeight(0)
+            self._advanced_panel.setFixedHeight(0)
         self._advanced_panel.updateGeometry()
         root = self.layout()
         if root is not None:
@@ -5971,10 +5988,8 @@ class HmmerParamsDialog(QDialog):
         self._set_hmmer_advanced_visible(False)
         self._sync_field_column()
         self.resize(self._DIALOG_WIDTH, 420)
-        QTimer.singleShot(0, lambda: self._resize_for_hmmer_advanced(False))
 
-    def showEvent(self, event) -> None:  # noqa: N802
-        super().showEvent(event)
+    def prepare_for_show(self) -> None:
         self._hmmer_compact_size = None
         self._populate_database_combo(
             selected_name=self._database.currentData()
@@ -5982,7 +5997,10 @@ class HmmerParamsDialog(QDialog):
             else None
         )
         self._sync_field_column()
-        QTimer.singleShot(0, lambda: self._resize_for_hmmer_advanced(False))
+        self._resize_for_hmmer_advanced(False)
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
 
     def should_run(self) -> bool:
         return dialog_should_run(self)
@@ -6484,10 +6502,11 @@ class ExtendParamsDialog(QDialog):
         self._tabs.currentChanged.connect(self._on_tab_changed)
         self._on_tab_changed(self._tabs.currentIndex())
 
+    def prepare_for_show(self) -> None:
+        self._fit_to_current_tab()
+
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
-        # Dialog polish may call adjustSize(); re-fit to the active tab after that.
-        QTimer.singleShot(0, self._fit_to_current_tab)
 
     def _on_tab_changed(self, _tab_index: int) -> None:
         self._fit_to_current_tab()
@@ -6857,14 +6876,12 @@ def _auto_resolve_tsd_boundaries(
     reference_extent_1based: tuple[int, int] | None = None,
     reference_sequence: str | None = None,
     prediction=None,
+    features_by_id: dict | None = None,
 ) -> TsdSearchOptions:
     """Fill left/right from Auto detect / reference without a dialog."""
     from dataclasses import replace
 
-    from repeatviewer.backends.tsd_search import (
-        boundaries_from_sidecar_1based,
-        preferred_tsd_boundaries_1based,
-    )
+    from repeatviewer.backends.tsd_search import preferred_tsd_boundaries_1based
 
     aln_len = max(1, int(aln_len))
     left, right = preferred_tsd_boundaries_1based(
@@ -6876,11 +6893,8 @@ def _auto_resolve_tsd_boundaries(
         reference_extent_1based=reference_extent_1based,
         reference_sequence=reference_sequence,
         prediction=prediction,
+        features_by_id=features_by_id,
     )
-    if left <= 0 and right <= 0:
-        rv = boundaries_from_sidecar_1based(file_path, aln_len)
-        if rv is not None:
-            left, right = rv
     return replace(opts, left_boundary=left, right_boundary=right)
 
 
@@ -6894,17 +6908,22 @@ def prompt_tsd_boundaries(
     reference_sequence: str | None = None,
     on_dialog_ready=None,
     prediction=None,
+    features_by_id: dict | None = None,
 ) -> TsdSearchOptions | None:
     """Resolve TE edges for a TSD run.
 
-    Auto detect / Reference: resolve silently (``prediction`` is the open
-    MSA's Boundary prediction, used before ``*.boundaries_RV.json``).
+    Auto detect: reuse open Boundary prediction / ``*.boundaries_RV.json``
+    (LTR/TIR → Genome Cov → MSA identity), then Feature detection LTR/TIR.
     User define: show a non-modal dialog (MSA drag fills Start/End). Cancel →
-    ``None``. Prefills from ``*.boundaries_RV.json`` when available.
+    ``None``.
     """
     from PySide6.QtCore import QEventLoop
 
-    from repeatviewer.backends.tsd_search import boundaries_from_sidecar_1based
+    from repeatviewer.backends.tsd_search import (
+        boundaries_from_prediction_1based,
+        boundaries_from_sidecar_1based,
+        load_boundary_prediction_for_tsd,
+    )
 
     if opts.boundary_source != TSD_BOUNDARY_USER:
         return _auto_resolve_tsd_boundaries(
@@ -6914,13 +6933,15 @@ def prompt_tsd_boundaries(
             reference_extent_1based=reference_extent_1based,
             reference_sequence=reference_sequence,
             prediction=prediction,
+            features_by_id=features_by_id,
         )
 
     aln_len = max(1, int(aln_len))
     left, right = 0, 0
-    from repeatviewer.backends.tsd_search import boundaries_from_prediction_1based
-
-    rv = boundaries_from_prediction_1based(prediction) or boundaries_from_sidecar_1based(
+    pred = load_boundary_prediction_for_tsd(
+        file_path, aln_len, prediction=prediction
+    )
+    rv = boundaries_from_prediction_1based(pred) or boundaries_from_sidecar_1based(
         file_path, aln_len
     )
     if rv is not None:
@@ -7724,17 +7745,20 @@ class BlastParamsDialog(QDialog):
         self._on_blast_tab_changed(self._tabs.currentIndex())
         self.resize(self._DIALOG_WIDTH, 420)
 
-    def showEvent(self, event) -> None:  # noqa: N802
-        super().showEvent(event)
-        # Refresh in case Manage / Add ran while this dialog was constructed,
-        # and pick up a newly defined genome for the reference-genome row.
-        self._refresh_database_combos()
-        # Force a tight compact height after polish (no blank gap under Inputs).
+    def prepare_for_show(self) -> None:
+        """Align Inputs/Settings columns and size before the first paint."""
         self._blast_compact_size = None
+        # Refresh before sizing so combo widths/labels match the first paint.
+        self._refresh_database_combos()
         self._sync_blast_inputs_field_column()
         if self._tabs.currentIndex() == self._options_tab_index:
             self._update_executable_status()
-        QTimer.singleShot(0, lambda: self._resize_for_blast_advanced(False))
+            self._fit_to_content()
+        else:
+            self._resize_for_blast_advanced(False)
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
 
     def _refresh_database_combos(
         self,
@@ -8777,10 +8801,11 @@ class ConsensusParamsDialog(QDialog):
         self._tabs.currentChanged.connect(self._on_tab_changed)
         self._on_tab_changed(self._tabs.currentIndex())
 
+    def prepare_for_show(self) -> None:
+        self._fit_to_current_tab()
+
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
-        # Dialog polish calls adjustSize() after Show; re-shrink once that runs.
-        QTimer.singleShot(0, self._fit_to_current_tab)
 
     def _on_tab_changed(self, tab_index: int) -> None:
         self._fit_to_current_tab()
@@ -9499,14 +9524,17 @@ class FlexidotParamsDialog(QDialog):
         self._on_sequence_type_changed()
         self._on_flexidot_tab_changed(self._tabs.currentIndex())
         self.resize(self._DIALOG_WIDTH, 420)
-        QTimer.singleShot(0, self._fit_active_dotplot_tab)
 
-    def showEvent(self, event) -> None:  # noqa: N802
-        super().showEvent(event)
+    def prepare_for_show(self) -> None:
         self._flexidot_compact_size = None
         self._sync_field_column()
         self._sync_builtin_field_column()
-        QTimer.singleShot(0, self._fit_active_dotplot_tab)
+        self._fit_active_dotplot_tab()
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        self._sync_field_column()
+        self._sync_builtin_field_column()
 
     def should_run(self) -> bool:
         return dialog_should_run(self)
@@ -10540,10 +10568,12 @@ class TeAnnotationDialog(QDialog):
         self._tabs.currentChanged.connect(self._on_tab_changed)
         self._on_tab_changed(self._tabs.currentIndex())
 
+    def prepare_for_show(self) -> None:
+        self._te_ann_compact_size = None
+        self._resize_for_advanced(False)
+
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
-        self._te_ann_compact_size = None
-        QTimer.singleShot(0, lambda: self._resize_for_advanced(False))
 
     def _on_tab_changed(self, tab_index: int) -> None:
         on_params = tab_index == 0
@@ -10555,7 +10585,8 @@ class TeAnnotationDialog(QDialog):
             self._advanced_settings_btn.setText("Advanced Settings ▸")
             self._advanced_panel.setVisible(False)
             self._advanced_panel.setMaximumHeight(0)
-        QTimer.singleShot(0, lambda: self._resize_for_advanced(False))
+        if self.isVisible():
+            QTimer.singleShot(0, lambda: self._resize_for_advanced(False))
 
     def _on_advanced_settings_toggled(self, checked: bool) -> None:
         self._advanced_settings_btn.setText(
@@ -11683,13 +11714,15 @@ class TeaAidParamsDialog(QDialog):
         self._sync_teaid_mode(resize=False)
         self._set_teaid_advanced_visible(False)
         self.resize(self._DIALOG_WIDTH, 420)
-        QTimer.singleShot(0, lambda: self._resize_for_teaid_advanced(False))
+
+    def prepare_for_show(self) -> None:
+        self._teaid_compact_size = None
+        self._sync_field_column()
+        self._resize_for_teaid_advanced(False)
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
-        self._teaid_compact_size = None
         self._sync_field_column()
-        QTimer.singleShot(0, lambda: self._resize_for_teaid_advanced(False))
 
     def should_run(self) -> bool:
         return dialog_should_run(self)
@@ -12560,11 +12593,14 @@ class MsaCleanParamsDialog(QDialog):
         self._sync_field_column()
         self._on_tab_changed(self._tabs.currentIndex())
 
-    def showEvent(self, event) -> None:  # noqa: N802
-        super().showEvent(event)
+    def prepare_for_show(self) -> None:
         self._fit_method_list_height()
         self._sync_field_column()
-        QTimer.singleShot(0, self._fit_to_current_tab)
+        self._fit_to_current_tab()
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        self._sync_field_column()
 
     def _on_file_input_field_activated(self) -> None:
         sender = self.sender()
@@ -14441,7 +14477,14 @@ class TeDensityPlotDialog(QDialog):
         self._sync_te_option_checkboxes()
         self._sync_field_column()
         self.resize(self._DIALOG_WIDTH, 480)
-        QTimer.singleShot(0, lambda: self._resize_for_advanced(False))
+
+    def prepare_for_show(self) -> None:
+        self._te_density_compact_size = None
+        self.setMinimumWidth(self._DIALOG_WIDTH)
+        self._sync_field_column()
+        self._resize_for_advanced(False)
+        # Warm chromosome list off the critical path (after first paint).
+        QTimer.singleShot(50, self._chrom_picker.ensure_populated)
 
     def _sync_te_option_checkboxes(self) -> None:
         """Grey TE / methylation options that do not apply to current inputs."""
@@ -14460,13 +14503,7 @@ class TeDensityPlotDialog(QDialog):
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
-        self._te_density_compact_size = None
-        self.setMinimumWidth(self._DIALOG_WIDTH)
         self._sync_field_column()
-        QTimer.singleShot(0, lambda: self._resize_for_advanced(False))
-        # Warm chromosome checkboxes after the dialog is visible so the first
-        # Advanced Settings click does not stall on a large genome.
-        QTimer.singleShot(50, self._chrom_picker.ensure_populated)
 
     def should_run(self) -> bool:
         return dialog_should_run(self)
@@ -15407,13 +15444,15 @@ class MsaPlotDialog(QDialog):
         self._sync_msa_inputs(resize=False)
         self._set_msa_advanced_visible(False)
         self.resize(self._DIALOG_WIDTH, 420)
-        QTimer.singleShot(0, lambda: self._resize_for_msa_advanced(False))
+
+    def prepare_for_show(self) -> None:
+        self._msa_compact_size = None
+        self._sync_field_column()
+        self._resize_for_msa_advanced(False)
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
-        self._msa_compact_size = None
         self._sync_field_column()
-        QTimer.singleShot(0, lambda: self._resize_for_msa_advanced(False))
 
     def should_run(self) -> bool:
         return dialog_should_run(self)
@@ -16261,10 +16300,13 @@ class RepeatQuantifyDialog(QDialog):
             [self._basic_form, self._advanced_form],
         )
 
+    def prepare_for_show(self) -> None:
+        self._sync_field_column()
+        self._refit()
+
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
         self._sync_field_column()
-        QTimer.singleShot(0, self._refit)
 
     def _refit_soon(self, *_args) -> None:
         if self.isVisible():

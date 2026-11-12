@@ -80,7 +80,7 @@ def test_resolve_tsd_search_scope_whole_msa_when_unset(tmp_path: Path) -> None:
     left, right, radius, mode = resolve_tsd_search_scope(fasta, 100, 0, 0, 50)
     assert mode == "whole_msa"
     assert left == right == 49
-    assert radius == 100
+    assert radius == 50
 
 
 def test_msa_midpoint_halves_split() -> None:
@@ -94,6 +94,59 @@ def test_msa_midpoint_halves_split() -> None:
     left, right = _msa_midpoint_halves("AC-TACGTAA")
     assert left == [0, 1, 3]
     assert right == [4, 5, 6, 7, 8, 9]
+
+
+def test_msa_whole_search_windows_use_terminal_radius() -> None:
+    from repeatviewer.backends.tsd_search import _msa_whole_search_windows
+
+    left, right = _msa_whole_search_windows("ACGTACGTAA", nt_radius=2)
+    assert left == [0, 1]
+    assert right == [8, 9]
+
+
+def test_whole_msa_scan_stays_fast_on_long_alignment() -> None:
+    import time
+
+    from repeatviewer.backends.tsd_search import _scan_record_tsd_hits
+
+    ltr = ("TGTTGG" + "AT" * 40 + "CGTA" * 20) * 12
+    body = ("ACGT" * 800 + "AAAA" * 80 + "TATA" * 80) * 3
+    seq = ltr + body + ltr
+    assert len(seq) > 15_000
+    t0 = time.perf_counter()
+    hits = _scan_record_tsd_hits(
+        seq, seq_id="x", nt_radius=100, k_min=4, k_max=20, whole_msa=True
+    )
+    assert time.perf_counter() - t0 < 2.0
+    assert isinstance(hits, list)
+
+
+def test_preferred_boundaries_uses_existing_ltr_prediction(tmp_path: Path) -> None:
+    """Auto detect must reuse Boundary prediction LTR without re-running."""
+    from repeatviewer.backends.boundary_predict import BoundaryPrediction
+    from repeatviewer.backends.tsd_search import (
+        auto_tsd_span_source,
+        preferred_tsd_boundaries_1based,
+    )
+    from repeatviewer.job_options import TSD_BOUNDARY_REPEATVIEWER
+
+    fasta = tmp_path / "msa.fa"
+    fasta.write_text(">a\nACGT\n>b\nACGT\n", encoding="utf-8")
+    # 0-based half-open [4740, 12150) → 1-based inclusive 4741..12150
+    pred = BoundaryPrediction(
+        terminal_repeat=(4740, 12150),
+        terminal_repeat_type="LTR",
+        blast_coverage=(4719, 12150),
+        msa_identity=(4742, 12150),
+    )
+    assert auto_tsd_span_source(pred) == "LTR"
+    left, right = preferred_tsd_boundaries_1based(
+        fasta,
+        18000,
+        boundary_source=TSD_BOUNDARY_REPEATVIEWER,
+        prediction=pred,
+    )
+    assert (left, right) == (4741, 12150)
 
 
 def test_scan_tsds_per_sequence_finds_flanks(tmp_path: Path) -> None:
@@ -204,6 +257,7 @@ def test_run_te_annotation_tsd_only_writes_sidecar(tmp_path: Path, monkeypatch) 
             right_boundary=_TE_RIGHT_1BASED,
             nt_radius=10,
             min_distance=0,
+            write_text_report=True,
         ),
     )
 
@@ -244,6 +298,7 @@ def test_run_te_annotation_persist_false_skips_sidecar(tmp_path: Path, monkeypat
             right_boundary=_TE_RIGHT_1BASED,
             nt_radius=10,
             min_distance=0,
+            write_text_report=True,
         ),
     )
 
