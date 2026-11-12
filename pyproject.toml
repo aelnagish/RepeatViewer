@@ -10,6 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 authors = [
   { name = "Jiangzhao Qian" },
+  { name = "Abdullah Yusuf" },
 ]
 dependencies = [
   "PySide6>=6.6",
