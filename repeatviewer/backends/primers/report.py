@@ -1,4 +1,7 @@
-"""HTML report for a primer result (same look as the Mapping report)."""
+"""HTML report for a primer result (same look as the Mapping report).
+
+Developer: Abdullah Yusuf
+"""
 
 from __future__ import annotations
 

@@ -5,6 +5,8 @@ Suffix and Keep File Extension. The preview lists every file with its new name
 and marks names that cannot be used (taken, duplicated, invalid); Rename stays
 off until every new name is fine. The main window performs the rename
 (``MainWindow._batch_rename_files``), all at once and as one Undo step.
+
+Developers: Abdullah Yusuf, Jiangzhao Qian
 """
 
 from __future__ import annotations

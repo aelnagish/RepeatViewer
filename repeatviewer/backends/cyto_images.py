@@ -12,6 +12,8 @@ Qt-free storage layer. Each data folder keeps its images in a hidden
 ``index.json`` holds one record per image. A record can be linked to several
 targets (multicolour FISH: one picture, several probes), each target being a
 FASTA file in the same folder and, optionally, one annotation on it.
+
+Developer: Abdullah Yusuf
 """
 
 from __future__ import annotations

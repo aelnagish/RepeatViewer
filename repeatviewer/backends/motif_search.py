@@ -12,6 +12,8 @@ Options follow Geneious' Find in Document:
     when an alignment gap splits it
   * mismatches: up to this many positions may differ
   * protein: the query is a peptide, searched in all six reading frames
+
+Developer: Abdullah Yusuf
 """
 
 from __future__ import annotations

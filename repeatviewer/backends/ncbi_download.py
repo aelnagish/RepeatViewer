@@ -12,6 +12,8 @@ Three NCBI databases are offered:
 Pure Python (``urllib``), no Biopython. Everything here runs off the UI
 thread; ``progress(done, total, detail)`` and ``cancel()`` let the caller
 drive the progress bar and the Stop button.
+
+Developer: Abdullah Yusuf
 """
 
 from __future__ import annotations

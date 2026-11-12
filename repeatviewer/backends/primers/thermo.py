@@ -8,6 +8,8 @@ primer3 directly and can be tested without Qt.
 A primer may carry a lower-case 5' tail (adapter, restriction site, M13…).
 The tail does not bind the template, so Tm and binding use only the upper-case
 3' part (see :func:`split_tail`); dimers and hairpins use the whole oligo.
+
+Developer: Abdullah Yusuf
 """
 
 from __future__ import annotations

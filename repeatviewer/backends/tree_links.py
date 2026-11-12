@@ -14,6 +14,8 @@ Where the sequences of a tree are found, first hit wins:
 
 Tip names are matched to FASTA headers as the tree builder names them (first
 word, made Newick-safe); IQ-TREE-style trees of other origins usually match too.
+
+Developer: Abdullah Yusuf
 """
 
 from __future__ import annotations

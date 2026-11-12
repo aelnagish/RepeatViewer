@@ -1,4 +1,7 @@
-"""Compare with Gel Photo: your real gel next to the in-silico one, band by band."""
+"""Compare with Gel Photo: your real gel next to the in-silico one, band by band.
+
+Developer: Abdullah Yusuf
+"""
 
 from __future__ import annotations
 

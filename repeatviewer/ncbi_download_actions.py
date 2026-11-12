@@ -8,6 +8,8 @@ a genome can take an hour, and that slot greys out every tool. Instead each
 download runs on its own daemon thread with its own progress bar and Stop
 button in the status bar, so browsing, previews and other tools keep working.
 Further downloads wait in a queue and start one after another.
+
+Developer: Abdullah Yusuf
 """
 
 from __future__ import annotations

@@ -15,6 +15,8 @@ Two search strategies give the same answer where both apply:
   finds exactly the sites the exhaustive search finds.
 
 Coordinates in results are 1-based, inclusive, on the template's top strand.
+
+Developer: Abdullah Yusuf
 """
 
 from __future__ import annotations

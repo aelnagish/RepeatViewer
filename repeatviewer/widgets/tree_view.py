@@ -19,6 +19,8 @@ Opens ``.treefile`` (IQ-TREE), ``.nwk``, ``.newick``, ``.tre`` and ``.tree``.
 The geometry and the edits come from the pure, unit-tested modules
 :mod:`repeatviewer.backends.tree_layout` and :mod:`repeatviewer.backends.tree_edit`;
 this module only turns them into a ``QGraphicsScene``.
+
+Developers: Abdullah Yusuf, Jiangzhao Qian
 """
 
 from __future__ import annotations

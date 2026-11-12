@@ -3,6 +3,8 @@
 Left: what to run (templates, primers, kind of PCR, conditions) with the
 Cancel / Save / Run buttons. Middle: the products on the template and the
 products table. Right: a quick gel and the selected product.
+
+Developer: Abdullah Yusuf
 """
 
 from __future__ import annotations

@@ -2,6 +2,8 @@
 
 The card is a page (white, A4 proportions) that can be printed or saved as PDF;
 the options on the right change it live.
+
+Developer: Abdullah Yusuf
 """
 
 from __future__ import annotations

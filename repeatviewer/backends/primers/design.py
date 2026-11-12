@@ -10,6 +10,8 @@ Modes (``DesignSettings.mode``):
 * ``fish``       – FISH oligo probes conserved across monomers / copies.
 
 Everything here is Qt-free; the dialogs only fill :class:`DesignSettings`.
+
+Developer: Abdullah Yusuf
 """
 
 from __future__ import annotations

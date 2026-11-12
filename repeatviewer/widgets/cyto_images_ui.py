@@ -3,6 +3,8 @@
 Storage lives in :mod:`repeatviewer.backends.cyto_images`; this module is the
 Qt side. Every change is announced through :func:`cyto_notifier` so the file
 list tick column, annotation markers and open panels refresh together.
+
+Developer: Abdullah Yusuf
 """
 
 from __future__ import annotations

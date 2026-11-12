@@ -15,6 +15,8 @@ with the most votes win. Monomers with too few shared k-mers are left
 unchanged and reported.
 
 Pure Python, no Qt; unit-tested in ``tests/test_monomer_phase.py``.
+
+Developer: Abdullah Yusuf
 """
 
 from __future__ import annotations

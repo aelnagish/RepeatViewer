@@ -4,6 +4,8 @@
 left and lane numbers and names below; hover tells what a band is, a click
 selects it and a double-click asks to open the product it came from. The same
 widget is the quick gel in the PCR window.
+
+Developer: Abdullah Yusuf
 """
 
 from __future__ import annotations

@@ -8,6 +8,8 @@ squeezed towards the wells or the front, so a 0.7 % gel separates 10 kb bands
 and a 3 % gel separates 50 bp steps. Brightness follows the mass of DNA
 (amount × length) unless switched off: short products look fainter, as with
 SYBR / GelRed staining.
+
+Developer: Abdullah Yusuf
 """
 
 from __future__ import annotations

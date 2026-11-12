@@ -6,6 +6,8 @@ Products of the chosen pair are an orange band. The view zooms (scroll wheel, pi
 moves (drag, trackpad swipe); double-click shows everything again.
 The side panel counts sites per sequence for the primer(s) shown and the
 products of the chosen pair (the expected value for a qPCR copy-number assay).
+
+Developer: Abdullah Yusuf
 """
 
 from __future__ import annotations

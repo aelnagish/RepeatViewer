@@ -9,6 +9,8 @@ and writes an order file and a report.
 Coordinates: Chorus2 BED rows are ``chrom start end sequence [score strand]``
 with a 1-based ``start`` and an inclusive ``end``. Inside this module probes
 keep that convention; the BED we write is standard (0-based start).
+
+Developer: Abdullah Yusuf
 """
 
 from __future__ import annotations

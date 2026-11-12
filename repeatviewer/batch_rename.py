@@ -5,6 +5,8 @@ The dialog builds a :class:`RenameOptions` from its fields and shows the
 plan's moves with :func:`apply_moves`, which renames in two steps (old name to
 a temporary name, then to the new name) so swaps and chains such as
 a -> b, b -> c work and a failure puts every file back.
+
+Developer: Abdullah Yusuf
 """
 
 from __future__ import annotations

@@ -10,6 +10,8 @@ tab), so it stays readable, editable and easy to share::
     caggaaacagctatgacGTTGCATCCACTTAGCTTAG
 
 Lower-case 5' letters are a tail that does not bind the template.
+
+Developer: Abdullah Yusuf
 """
 
 from __future__ import annotations
