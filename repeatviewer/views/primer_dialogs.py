@@ -7,6 +7,8 @@
 
 All follow the tool-window rules: Cancel / Save / Run, an Options tab, file
 fields filled by a click in the Files panel, "?" help next to the item.
+
+Developer: Abdullah Yusuf
 """
 
 from __future__ import annotations

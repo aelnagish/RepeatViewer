@@ -14,6 +14,8 @@ length units on both axes. The Qt widget scales them to pixels.
 
 ``.treefile`` is IQ-TREE's extension for a Newick file; ``.nwk``, ``.newick``,
 ``.tre`` and ``.tree`` are the same format under other names.
+
+Developer: Abdullah Yusuf
 """
 
 from __future__ import annotations

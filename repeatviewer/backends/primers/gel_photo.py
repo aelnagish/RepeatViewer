@@ -5,6 +5,8 @@ bright (a light-background scan is inverted), lanes are found from the column
 profile, bands from each lane's row profile. The ladder lane gives a fit of
 log10(size) against distance (quadratic), which turns every other band into a
 size; those sizes are then compared with the bands the in-silico gel expects.
+
+Developer: Abdullah Yusuf
 """
 
 from __future__ import annotations

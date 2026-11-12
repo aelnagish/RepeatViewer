@@ -12,6 +12,8 @@ falls in) and Not used (with the reason). Clicking a row moves the view there.
 
 Pure helpers (lane packing, difference marks, feature cells) have no Qt
 drawing and are tested in ``tests/test_contig_view.py``.
+
+Developer: Abdullah Yusuf
 """
 
 from __future__ import annotations

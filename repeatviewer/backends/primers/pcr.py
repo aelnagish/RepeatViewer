@@ -15,6 +15,8 @@ Kinds of PCR:
 Each product carries the primers' 5' tails (copied in from cycle 3 on) and a
 relative yield used by the gel: fewer mismatches, an exact 3' end and a
 shorter product make more DNA; identical products from repeated sites add up.
+
+Developer: Abdullah Yusuf
 """
 
 from __future__ import annotations

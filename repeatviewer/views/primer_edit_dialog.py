@@ -3,6 +3,8 @@
 Edit Primer shows, as you type, where the primer binds on the open sequence,
 its Tm (annealed part and full oligo), the 5′ tail, dimers and hairpins, and
 the other places it binds.
+
+Developer: Abdullah Yusuf
 """
 
 from __future__ import annotations

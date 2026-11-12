@@ -16,6 +16,8 @@ time and replays them, so the inventory is the same on every computer once
 Sciebo has synced. Two people editing different fields of one primer both
 keep their change; on the same field the later edit wins. Every change keeps
 who and when, which is the history shown in the Database window.
+
+Developer: Abdullah Yusuf
 """
 
 from __future__ import annotations

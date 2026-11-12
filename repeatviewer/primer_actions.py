@@ -4,6 +4,8 @@ Kept out of ``main_window.py``: :class:`PrimerActionsMixin` is mixed into
 ``MainWindow`` and only uses the window's shared job / dialog helpers
 (``_present_te_viz_dialog``, ``_start_background_job``,
 ``_attach_process_monitor``, ``_populate_file_list`` ...).
+
+Developer: Abdullah Yusuf
 """
 
 from __future__ import annotations

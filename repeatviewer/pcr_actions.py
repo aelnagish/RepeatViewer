@@ -1,4 +1,7 @@
-"""Tools > Primers and Probes > PCR (with gel, binding sites, bench card) for ``MainWindow``."""
+"""Tools > Primers and Probes > PCR (with gel, binding sites, bench card) for ``MainWindow``.
+
+Developer: Abdullah Yusuf
+"""
 
 from __future__ import annotations
 

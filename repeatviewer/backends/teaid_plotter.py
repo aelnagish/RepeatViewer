@@ -36,6 +36,7 @@ warnings.filterwarnings('ignore', category=BiopythonDeprecationWarning)
 The BLAST, coverate, and self-dot plot codes are derived from TE-Aid. https://github.com/clemgoub/TE-Aid.git
 
 Developer: Jiangzhao Qian
+Contributor: Abdullah Yusuf
 """
 
 os_type = platform.system()

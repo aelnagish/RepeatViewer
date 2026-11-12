@@ -19,6 +19,8 @@ change turns ``CG`` into ``TG``, so the sequences that still carry ``CG`` are
 what flags the column.
 
 Pure Python, no Qt; unit-tested in ``tests/test_methylation_mask.py``.
+
+Developer: Abdullah Yusuf
 """
 
 from __future__ import annotations

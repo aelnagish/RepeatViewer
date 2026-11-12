@@ -11,6 +11,8 @@ covers. Two engines:
   (added in a later step; see ``quantify_library_repeatmasker``).
 
 This is *quantification against a known library* — not de-novo discovery.
+
+Developer: Abdullah Yusuf
 """
 
 from __future__ import annotations

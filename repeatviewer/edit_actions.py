@@ -1,4 +1,7 @@
-"""Pure helpers for the Edit menu (no Qt, so they can be unit tested anywhere)."""
+"""Pure helpers for the Edit menu (no Qt, so they can be unit tested anywhere).
+
+Developer: Abdullah Yusuf
+"""
 
 from __future__ import annotations
 

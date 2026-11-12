@@ -16,6 +16,8 @@ on its own branch (a common mistake when rerooting Newick trees).
 
 Clades are identified by their tip names (:func:`clade_key`), which survive
 reordering and reloading, so view settings can refer to them.
+
+Developer: Abdullah Yusuf
 """
 
 from __future__ import annotations

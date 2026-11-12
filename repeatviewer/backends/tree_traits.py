@@ -20,6 +20,8 @@ can go into a supplement. Users can edit it or add columns in any spreadsheet.
 
 Columns are numeric (colour scale) or categorical (distinct colours).
 Pure Python + numpy, no Qt; unit-tested in ``tests/test_tree_traits.py``.
+
+Developer: Abdullah Yusuf
 """
 
 from __future__ import annotations

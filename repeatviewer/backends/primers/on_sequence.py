@@ -5,6 +5,8 @@ Qt-free. A FASTA keeps its primers in a hidden sidecar next to it,
 Where a primer binds is not stored there: it is worked out from the sequence
 (:func:`place_primer`) and drawn as a ``primer_bind`` annotation, the same
 feature type Design and Map Primers already write.
+
+Developer: Abdullah Yusuf
 """
 
 from __future__ import annotations

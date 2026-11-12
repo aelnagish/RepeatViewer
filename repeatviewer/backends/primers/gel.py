@@ -4,6 +4,8 @@ Migration is linear in log(size) between the ladder's smallest and largest
 band, which is close to what a real gel shows over a 2–3 log range. The same
 geometry is used by the Qt gel view and by the SVG in the HTML report, so
 both always agree.
+
+Developer: Abdullah Yusuf
 """
 
 from __future__ import annotations

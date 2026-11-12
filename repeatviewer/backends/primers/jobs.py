@@ -8,6 +8,8 @@ the first input: the report the preview opens. Its ``<base>_details/``
 folder holds the primers as FASTA, the tables, the gel picture and the full
 result as JSON. The main window asks before an existing report is
 overwritten (Overwrite / Cancel / Rename), so the name can also be given.
+
+Developer: Abdullah Yusuf
 """
 
 from __future__ import annotations

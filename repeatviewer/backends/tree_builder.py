@@ -22,6 +22,8 @@ input becomes ``<input>_tree_2…`` — nothing is overwritten.
 
 Pure functions (checks, statistics, split handling, rooting, reports) have no
 Qt dependency and are unit-tested in ``tests/test_tree_builder.py``.
+
+Developers: Abdullah Yusuf, Jiangzhao Qian
 """
 
 from __future__ import annotations

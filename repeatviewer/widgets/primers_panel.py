@@ -4,6 +4,8 @@ The page lists the primers kept for the open FASTA, shows where each binds on
 the shown sequence (arrows in the annotation track, mismatches in red on the
 bases) and the numbers of the selected primer. It talks to its host, the
 :class:`SequenceMapPanel`, through a few ``primers_host_*`` methods.
+
+Developer: Abdullah Yusuf
 """
 
 from __future__ import annotations

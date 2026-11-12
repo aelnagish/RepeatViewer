@@ -3,6 +3,8 @@
 No Qt here (unit tested). Big files are searched in a worker thread: the file is
 streamed record by record, ``progress`` is called after each sequence (rule 13:
 "N done, M left") and ``cancelled`` is checked so Stop works.
+
+Developer: Abdullah Yusuf
 """
 
 from __future__ import annotations

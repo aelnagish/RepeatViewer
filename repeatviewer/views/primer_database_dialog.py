@@ -7,6 +7,8 @@ history of every change (History…).
 
 The database can be a folder on this computer or a shared folder (Sciebo):
 see :mod:`repeatviewer.backends.primers.inventory`.
+
+Developer: Abdullah Yusuf
 """
 
 from __future__ import annotations

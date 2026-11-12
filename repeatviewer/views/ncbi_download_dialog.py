@@ -7,6 +7,8 @@ tick what you want and press Run to download into the folder shown in
 
 Searching runs on a Python thread; results come back through a Qt signal, so
 the window never freezes while NCBI answers.
+
+Developer: Abdullah Yusuf
 """
 
 from __future__ import annotations

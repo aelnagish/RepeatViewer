@@ -3,6 +3,8 @@
 A small window for one job. Everything Map Primers asks that does not matter here
 (which inputs, which primer mode, where primers come from) is left out; "All
 Settings…" opens the full Map Primers window filled in the same way.
+
+Developer: Abdullah Yusuf
 """
 
 from __future__ import annotations
