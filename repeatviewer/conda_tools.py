@@ -31,7 +31,8 @@ _CONDA_PREF_KEY = "conda_tools_env"
 _PATH_MARKER = "REPEATVIEWER_CONDA_BIN"
 _WSL_BIN_ENV = "REPEATVIEWER_WSL_CONDA_BIN"
 _original_path: str | None = None
-_wsl_bin_cache: str | None | object = object()  # sentinel = unset
+_UNSET = object()  # sentinel: WSL bin not looked up yet
+_wsl_bin_cache: str | None | object = _UNSET
 _wsl_resolve_cache: dict[str, str | None] = {}
 _wsl_which_cache: dict[tuple[str, str], str | None] = {}
 _conda_roots_cache: list[Path] | None = None
@@ -115,7 +116,7 @@ def _wsl_first_line(result: subprocess.CompletedProcess[str]) -> str | None:
 
 def _clear_wsl_caches() -> None:
     global _wsl_bin_cache, _conda_roots_cache
-    _wsl_bin_cache = object()
+    _wsl_bin_cache = _UNSET
     _wsl_resolve_cache.clear()
     _wsl_which_cache.clear()
     _conda_roots_cache = None
@@ -337,7 +338,7 @@ def uses_wsl_conda(spec: str | None = None) -> bool:
 
 def _active_wsl_bin() -> str | None:
     global _wsl_bin_cache
-    if _wsl_bin_cache is not object():
+    if _wsl_bin_cache is not _UNSET:
         return _wsl_bin_cache  # type: ignore[return-value]
     cached = os.environ.get(_WSL_BIN_ENV, "").strip()
     if cached:

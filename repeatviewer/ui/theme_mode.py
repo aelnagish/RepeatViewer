@@ -14,6 +14,7 @@ Corners are always rounded (no sharp option).
 from __future__ import annotations
 
 import os
+import sys
 
 from PySide6.QtCore import QEvent, QObject, Qt, QSettings
 from PySide6.QtGui import QColor, QGuiApplication, QPalette
@@ -162,6 +163,28 @@ def _popup_painter() -> _PopupPainter:
     return _POPUP_PAINTER
 
 
+_IS_WINDOWS = sys.platform == "win32"
+_WINDOWS_POPUP_FLAGS = (
+    Qt.WindowType.FramelessWindowHint | Qt.WindowType.NoDropShadowWindowHint
+)
+
+
+def _windows_transparent_popup(widget: QWidget) -> None:
+    """Windows only: a translucent popup must also be frameless and without the
+    system drop shadow. Otherwise Windows fills the area outside the rounded
+    panel (and the class drop shadow) black: the dark corners on menus, combo
+    lists and tooltips. Set before the native window exists."""
+    if (widget.windowFlags() & _WINDOWS_POPUP_FLAGS) == _WINDOWS_POPUP_FLAGS:
+        return
+    if widget.property("_rv_win_popup_flags"):
+        return  # re-entered from setWindowFlags (re-polish)
+    widget.setProperty("_rv_win_popup_flags", True)
+    try:
+        widget.setWindowFlags(widget.windowFlags() | _WINDOWS_POPUP_FLAGS)
+    finally:
+        widget.setProperty("_rv_win_popup_flags", False)
+
+
 class _MenuStyle(QProxyStyle):
     """Fusion, with every popup (menus, combo-box lists, tooltips, completer lists, the
     preview zoom slider) on a transparent window, so the stylesheet's rounded corners
@@ -191,6 +214,8 @@ class _MenuStyle(QProxyStyle):
                     target.setItemDelegate(QStyledItemDelegate(target))
             if target.metaObject().className() == "QComboBoxPrivateContainer":
                 target.installEventFilter(_popup_painter())
+            if rounded and _IS_WINDOWS and target.isWindow():
+                _windows_transparent_popup(target)
             if rounded and not target.testAttribute(
                     Qt.WidgetAttribute.WA_TranslucentBackground):
                 target.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
