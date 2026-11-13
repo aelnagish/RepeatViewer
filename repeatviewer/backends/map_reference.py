@@ -17,12 +17,12 @@ like Geneious Prime's "Map to Reference", with additions for repeat work:
 
 Results follow the RepeatViewer naming rule (full input name, then a suffix):
 the selected aligner output beside the input
-(``…_minimap.paf`` / ``…_minimap.sam`` / ``…_hisat.sam``), a full run record
-``<alignment>.rv.json`` used by the genome browser (it replaces ``.rvmap``),
-and a matching ``_details/`` folder with the report, consensus, mapped and
-unused sequences, and variant / feature / read tables. A second run becomes
-``…_minimap_2…`` / ``…_hisat_2…``; nothing is overwritten. Older ``.rvmap``
-files still open in the contig view.
+(``…_minimap.paf`` / ``…_minimap.sam`` / ``…_hisat.sam``), a contig-view
+document ``…_minimap.rvmap`` / ``…_hisat.rvmap``, and a matching ``_details/``
+folder with the report, consensus, mapped and unused sequences, and variant /
+feature / read tables. A second run becomes ``…_minimap_2…`` / ``…_hisat_2…``;
+nothing is overwritten. Older ``<alignment>.rv.json`` sidecars are still
+recognised if present, but new runs do not write them.
 
 Pure functions (parsers, projection, consensus, variants, lift-over) have no Qt
 dependency and are tested in ``tests/test_map_reference.py``.
@@ -1389,12 +1389,19 @@ def alignment_run_stem(path: Path) -> str:
     return Path(path).stem
 
 
+def find_rvmap_for_alignment(path: Path) -> Path | None:
+    """Contig document ``{stem}.rvmap`` beside an alignment (SAM / BAM / PAF)."""
+    path = Path(path)
+    cand = path.parent / f"{alignment_run_stem(path)}{RVMAP_SUFFIX}"
+    return cand if cand.is_file() else None
+
+
 def find_run_json(path: Path) -> Path | None:
-    """Run JSON for an alignment, including after SAM is saved as BAM or CRAM.
+    """Legacy ``*.rv.json`` beside an alignment (older Mapping runs).
 
     Looks in the same directory for ``{path}.rv.json``, then
     ``{stem}.sam.rv.json``, ``.bam.rv.json``, ``.cram.rv.json``, ``.paf.rv.json``,
-    and ``.sam.gz.rv.json``.
+    and ``.sam.gz.rv.json``. Prefer :func:`find_mapping_document` for new code.
     """
     path = Path(path)
     parent = path.parent
@@ -1410,6 +1417,11 @@ def find_run_json(path: Path) -> Path | None:
         if cand.is_file():
             return cand
     return None
+
+
+def find_mapping_document(path: Path) -> Path | None:
+    """Mapping snapshot for an alignment: ``.rvmap`` first, else legacy ``.rv.json``."""
+    return find_rvmap_for_alignment(path) or find_run_json(path)
 
 
 def is_alignment_path(path: Path) -> bool:
@@ -1933,8 +1945,7 @@ def run_mapping(
 ) -> tuple[Path, list[Path], Path]:
     """Map ``queries`` to ``opts.reference_fasta``.
 
-    Returns (run record ``<alignment>.rv.json``, created files, report HTML).
-    ``.rvmap`` is not written."""
+    Returns (``.rvmap`` contig document, created files, report HTML)."""
     say = progress or (lambda _m: None)
     queries = [Path(q).expanduser() for q in queries]
     ref_text = str(opts.reference_fasta or "").strip()
@@ -2008,6 +2019,7 @@ def run_mapping(
     from repeatviewer.backends.job_cancel import JobCancelledError
 
     def _cleanup() -> None:
+        layout.rvmap.unlink(missing_ok=True)
         for ext in (".paf", ".sam"):
             layout.alignment(ext).unlink(missing_ok=True)
             run_json_path(layout.alignment(ext)).unlink(missing_ok=True)
@@ -2608,11 +2620,13 @@ def _write_outputs(run: MapRun, layout: OutputLayout, info: InputInfo, created: 
 
     report = layout.path("_report.html")
     details["report"] = report.name
-    # Full run record next to the aligner file. The genome browser reads it.
-    # ``.rvmap`` is no longer written; older files still open in the contig view.
-    result = run_json_path(raw) if raw is not None else layout.parent / f"{layout.base}.rv.json"
+    # Contig-view document next to the input / aligner file.
+    rvmap = layout.rvmap
     title = f"{output_base_name(run.queries)} mapped to {run.reference.name}"
-    report.write_text(report_html(run, [result, *created, report], title), encoding="utf-8")
+    report.write_text(
+        report_html(run, [rvmap, *created, report], title),
+        encoding="utf-8",
+    )
     created.append(report)
 
     payload = {
@@ -2661,8 +2675,8 @@ def _write_outputs(run: MapRun, layout: OutputLayout, info: InputInfo, created: 
             "reads": [_read_json(r, lf, pl, with_marks=not c.detailed) for r, lf, pl in shown],
         }
         payload["contigs"].append(entry)
-    result.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
-    return result, [result, *created], report
+    rvmap.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
+    return rvmap, [rvmap, *created], report
 
 
 # --------------------------------------------------------------------------

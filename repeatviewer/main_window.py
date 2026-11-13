@@ -5354,9 +5354,8 @@ class MainWindow(
         rvmap = Path(result["rvmap"])
         created = [Path(p) for p in result["files"] if Path(p).is_file()]
         if self._current_folder:
-            # The aligner file (.paf / .sam / .bam) sits next to the input. Its run
-            # record (<alignment>.rv.json) stays hidden beside it. Report /
-            # tables / FASTA live in <stem>_details.
+            # Aligner file (.paf / .sam / .bam) and contig document (.rvmap) sit
+            # next to the input. Report / tables / FASTA live in <stem>_details.
             self._refresh_subfolders_under(self._current_folder)
             self._populate_file_list(
                 self._current_folder,

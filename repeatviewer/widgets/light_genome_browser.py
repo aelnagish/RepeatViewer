@@ -30,6 +30,7 @@ from PySide6.QtGui import (
     QKeySequence,
     QContextMenuEvent,
     QPainter,
+    QPainterPath,
     QPen,
     QPolygonF,
 )
@@ -70,13 +71,12 @@ ANNOTATION_SUFFIXES = (".gff", ".gff3", ".gtf", ".bed", ".gff.gz", ".gff3.gz", "
                        ".bed.gz")
 LIGHT_BROWSER_SUFFIXES = ALIGNMENT_SUFFIXES + ANNOTATION_SUFFIXES
 
-# Colour-by menu for alignments (full labels — no combo elision).
-# Separators match GenomeFlow's grouping; Tag / RG options stay out of this light UI.
+# Colour-by / Group-by menus for alignments (full labels — no combo elision).
+# Tag… stays out of this light UI; insert-size colour is omitted.
 _COLOR_MENU_ENTRIES: tuple[tuple[str, str] | None, ...] = (
     (style.COLOR_STRAND, "Strand"),
     None,
     (style.COLOR_FIRST_STRAND, "First-of-pair strand"),
-    (style.COLOR_INSERT, "Insert size and pair orientation"),
     None,
     (style.COLOR_MAPQ, "Mapping quality"),
     (style.COLOR_IDENTITY, "Identity"),
@@ -86,6 +86,15 @@ _COLOR_MENU_ENTRIES: tuple[tuple[str, str] | None, ...] = (
 _COLOR_MODE_LABELS = {
     mode: label for entry in _COLOR_MENU_ENTRIES if entry for mode, label in (entry,)
 }
+_GROUP_MENU_ENTRIES: tuple[tuple[str, str], ...] = (
+    (style.GROUP_NONE, "None"),
+    (style.COLOR_STRAND, "Strand"),
+    (style.COLOR_FIRST_STRAND, "First-of-pair strand"),
+    ("pair_orientation", "Pair orientation"),
+    (style.COLOR_MAPQ, "Mapping quality"),
+    (style.COLOR_READ_GROUP, "Read group"),
+    (style.COLOR_SAMPLE, "Sample"),
+)
 
 
 def is_light_browser_file(path: Path) -> bool:
@@ -313,10 +322,22 @@ class _RefJob(QThread):
 RULER_H = 28
 SEQ_H = 16
 COV_H = 22
+JUNC_H = 36
 READ_H = 9
+READ_H_SQUISHED = 4
+READ_H_COLLAPSED = 2
 READ_GAP = 2
 ANN_ROW_H = 26
 ANN_ROW_H_SMALL = 12
+
+LAYOUT_EXPANDED = "expanded"
+LAYOUT_SQUISHED = "squished"
+LAYOUT_COLLAPSED = "collapsed"
+LAYOUT_READ_H = {
+    LAYOUT_EXPANDED: READ_H,
+    LAYOUT_SQUISHED: READ_H_SQUISHED,
+    LAYOUT_COLLAPSED: READ_H_COLLAPSED,
+}
 MARGIN_TOP = 2
 MAX_READS_DRAWN = 30_000
 MAX_FEATURES_DRAWN = 25_000
@@ -452,12 +473,15 @@ class LightBrowserCanvas(QWidget):
         self.run_features: list = []
         self.one_per_row = False
         self.sort_key = "start"
+        self.layout_mode = LAYOUT_EXPANDED
+        self.group_by = style.GROUP_NONE
         self.min_identity = 0.0
         self.min_mapq = 0
         self.hide_secondary = False
         self.show_features = True
         self.hidden_feature_types: set[str] = set()
         self.show_coverage = True
+        self.show_junctions = False
         self.cov_log = False
         self.cov_low: int | None = None
         self.cov_high: int | None = None
@@ -632,6 +656,57 @@ class LightBrowserCanvas(QWidget):
                 p.fillRect(QRectF(x0, top + height - 3, width, 3), QColor("#c0392b"))
             elif self.cov_high is not None and depth > self.cov_high:
                 p.fillRect(QRectF(x0, top + height - 3, width, 3), QColor("#e67e22"))
+
+    def _paint_junctions(self, p: QPainter, top: float, a: int, b: int, w: int,
+                         fg: QColor, mid: QColor) -> None:
+        """Splice-junction arcs from CIGAR N / long gaps in the loaded reads."""
+        t = self.track
+        if t is None or not hasattr(t, "junctions"):
+            return
+        try:
+            rows = t.junctions(self.chrom, a, b)
+        except Exception:  # noqa: BLE001 - missing tiles / no junctions
+            rows = None
+        if rows is None or len(rows) == 0:
+            p.setPen(QPen(mid, 1))
+            p.drawLine(self._name_w(), top + JUNC_H - 2, w, top + JUNC_H - 2)
+            return
+        base = top + JUNC_H - 4
+        peak = max(1, int(np.max(rows[:, 2:5]))) if len(rows) else 1
+        for js, je, plus, minus, unk in rows:
+            total = int(plus) + int(minus) + int(unk)
+            if total <= 0:
+                continue
+            x0, x1 = self.x_of(int(js)), self.x_of(int(je))
+            if x1 < self._name_w() or x0 > w:
+                continue
+            span = max(4.0, x1 - x0)
+            lift = 6.0 + (JUNC_H - 12) * min(1.0, total / peak)
+            if plus >= minus and plus >= unk:
+                col = QColor("#2a62c9")
+            elif minus > plus and minus >= unk:
+                col = QColor("#c0392b")
+            else:
+                col = QColor("#7f8c8d")
+            col.setAlpha(160)
+            pen = QPen(col, 1.0 + min(2.5, total / max(1.0, peak) * 2.5))
+            p.setPen(pen)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            path = QPainterPath(QPointF(x0, base))
+            path.cubicTo(
+                QPointF(x0 + span * 0.15, base - lift),
+                QPointF(x1 - span * 0.15, base - lift),
+                QPointF(x1, base),
+            )
+            p.drawPath(path)
+        p.setPen(QPen(mid, 1))
+        p.drawLine(self._name_w(), top + JUNC_H - 2, w, top + JUNC_H - 2)
+        p.setPen(fg)
+        p.drawText(
+            QRectF(self._name_w() + 4, top, 120, 14),
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+            "Junctions",
+        )
 
     def _zoom_focus_bp(self) -> float | None:
         """Where toolbar zoom should stay: the selected region, else the picked sequence."""
@@ -838,6 +913,9 @@ class LightBrowserCanvas(QWidget):
         kind = str(feat.get("feature_type") or feat.get("type") or "other")
         return kind not in self.hidden_feature_types
 
+    def _read_body_h(self) -> int:
+        return LAYOUT_READ_H.get(self.layout_mode, READ_H)
+
     def _rows_top(self) -> int:
         top = MARGIN_TOP + RULER_H + self._feature_lane_h() + self._seq_lane_h()
         if (
@@ -846,6 +924,12 @@ class LightBrowserCanvas(QWidget):
             and self.track.kind == gt.KIND_ALIGNMENT
         ):
             top += COV_H + 4
+        if (
+            self.show_junctions
+            and self.track is not None
+            and self.track.kind == gt.KIND_ALIGNMENT
+        ):
+            top += JUNC_H + 4
         return top
 
     def _rows_area_h(self) -> int:
@@ -1119,9 +1203,10 @@ class LightBrowserCanvas(QWidget):
         visible = t.reads_visible(a, b)
         n_items = t.count_in(self.chrom, a, b) if visible else 0
         # coverage — same start/bpp X mapping as reads
+        band = top
         if self.show_coverage:
             cov, left, right, _cov_w = self._view_coverage(t, self.chrom)
-            cov_top = top + 2
+            cov_top = band + 2
             if cov is not None and len(cov):
                 raw = np.asarray(cov, dtype=float)
                 raw_peak = float(np.max(raw)) if len(raw) else 0.0
@@ -1149,7 +1234,11 @@ class LightBrowserCanvas(QWidget):
                         label,
                     )
             p.setPen(QPen(mid, 1))
-            p.drawLine(self._name_w(), top + COV_H + 2, w, top + COV_H + 2)
+            p.drawLine(self._name_w(), band + COV_H + 2, w, band + COV_H + 2)
+            band += COV_H + 4
+        if self.show_junctions:
+            self._paint_junctions(p, band + 2, a, b, w, fg, mid)
+            band += JUNC_H + 4
         rows_top = self._rows_top()
         area_h = self._rows_area_h()
         if not visible:
@@ -1167,12 +1256,17 @@ class LightBrowserCanvas(QWidget):
         if named is not None and not named:
             named = None
         ppb = 1.0 / self.bpp
-        show_mism = self.show_mismatches and ref is not None and ppb >= 0.5
+        show_mism = (
+            self.show_mismatches
+            and ref is not None
+            and ppb >= 0.5
+            and self.layout_mode == LAYOUT_EXPANDED
+        )
         show_letters = show_mism and ppb >= 8
         # Tall enough that a differing base sits inside the read, not under it.
-        body_h = READ_H
+        body_h = self._read_body_h()
         if show_letters:
-            body_h = max(READ_H, QFontMetrics(self._mono).height())
+            body_h = max(body_h, QFontMetrics(self._mono).height())
         row_px = (NAME_ROW_H if named is not None else body_h) + READ_GAP
         first_row = self.vscroll // row_px
         shown_rows = area_h // row_px + 2
@@ -1849,7 +1943,6 @@ class _RunSidePanel(QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         from repeatviewer.widgets.combo_boxes import NoWheelComboBox
-        from repeatviewer.widgets.spin_boxes import NoWheelDoubleSpinBox, NoWheelSpinBox
 
         self._data: dict = {}
         self._chrom = ""
@@ -1914,51 +2007,46 @@ class _RunSidePanel(QWidget):
             return laid
 
         self._layout_mode = NoWheelComboBox(body)
-        self._layout_mode.addItem("Packed", False)
-        self._layout_mode.addItem("One per row", True)
-        row_item = self._layout_mode.model().item(1)
-        if row_item is not None:
-            row_item.setEnabled(False)
-        self._sort = NoWheelComboBox(body)
-        for text, key in (("Start", "start"), ("Strand", "strand"),
-                          ("Identity", "identity"), ("Name", "name")):
-            self._sort.addItem(text, key)
-        self._sort.setEnabled(False)
-        self._sort.setToolTip("Order when Layout is One per row, and in the Sequences list")
+        for label, key in (
+            ("Expanded", LAYOUT_EXPANDED),
+            ("Squished", LAYOUT_SQUISHED),
+            ("Collapsed", LAYOUT_COLLAPSED),
+        ):
+            self._layout_mode.addItem(label, key)
+        self._layout_mode.setToolTip(
+            "Expanded: normal read height. Squished: thinner rows. "
+            "Collapsed: compact lines."
+        )
         self._color_by = NoWheelComboBox(body)
         for entry in _COLOR_MENU_ENTRIES:
             if entry is None:
                 continue
             mode, label = entry
             self._color_by.addItem(label, mode)
+        self._group_by = NoWheelComboBox(body)
+        for mode, label in _GROUP_MENU_ENTRIES:
+            self._group_by.addItem(label, mode)
+        self._cov_show = QCheckBox("Show coverage", body)
+        self._cov_show.setChecked(True)
+        self._cov_scale = NoWheelComboBox(body)
+        self._cov_scale.addItem("Linear", False)
+        self._cov_scale.addItem("Log", True)
+        self._cov_scale.setToolTip("Coverage depth scale when Show coverage is on.")
+        self._cov_show.toggled.connect(self._cov_scale.setEnabled)
+        self._junc_show = QCheckBox("Show splice junctions", body)
+        self._junc_show.setChecked(False)
+        self._junc_show.setToolTip(
+            "Draw splice junctions (CIGAR N / long gaps) as arcs above the reads."
+        )
         display, _display_rule = section("Display")
         display.add_layout(form(
             ("Layout", self._layout_mode),
-            ("Sort by", self._sort),
             ("Colour by", self._color_by),
+            ("Group by", self._group_by),
+            ("Coverage scale", self._cov_scale),
         ))
-        self._min_identity = NoWheelDoubleSpinBox(body)
-        self._min_identity.setRange(0.0, 100.0)
-        self._min_identity.setDecimals(0)
-        self._min_identity.setSingleStep(5.0)
-        self._min_identity.setSuffix(" %")
-        self._min_identity.setToolTip("Hide sequences placed with a lower identity")
-        self._min_mapq = NoWheelSpinBox(body)
-        self._min_mapq.setRange(0, 60)
-        self._min_mapq.setPrefix("≥ ")
-        self._min_mapq.setToolTip("Hide placements with a lower mapping quality. "
-                                  "Placements without a MAPQ stay visible.")
-        self._hide_secondary = QCheckBox("Hide secondary placements", body)
-        self._hidden_label = QLabel(body)
-        self._hidden_label.setEnabled(False)
-        self._hidden_label.hide()
-        filters, _filters_rule = section("Filters")
-        filters.add_layout(form(
-            ("Min identity", self._min_identity),
-            ("Mapping quality", self._min_mapq),
-        ))
-        filters.add_widget(self._hide_secondary)
-        filters.add_widget(self._hidden_label)
+        display.add_widget(self._cov_show)
+        display.add_widget(self._junc_show)
 
         self._show_ann = QCheckBox("Show on browser", body)
         self._show_ann.setChecked(True)
@@ -1970,46 +2058,11 @@ class _RunSidePanel(QWidget):
         annotations.add_widget(self._show_ann)
         annotations.add_widget(self._types_host)
         self._annotations = annotations
-
-        self._cov_show = QCheckBox("Show coverage", body)
-        self._cov_show.setChecked(True)
-        self._cov_log = QCheckBox("Log scale", body)
-        self._cov_low_on = QCheckBox("Below", body)
-        self._cov_low = NoWheelSpinBox(body)
-        self._cov_low.setRange(0, 1_000_000)
-        self._cov_low.setValue(5)
-        self._cov_low.setEnabled(False)
-        self._cov_low.setFixedWidth(72)
-        self._cov_low_on.toggled.connect(self._sync_cov_fields)
-        self._cov_high_on = QCheckBox("Above", body)
-        self._cov_high = NoWheelSpinBox(body)
-        self._cov_high.setRange(0, 1_000_000)
-        self._cov_high.setValue(100)
-        self._cov_high.setEnabled(False)
-        self._cov_high.setFixedWidth(72)
-        self._cov_high_on.toggled.connect(self._sync_cov_fields)
-        self._cov_show.toggled.connect(self._sync_cov_fields)
-        low_row = QWidget(body)
-        low_line = QHBoxLayout(low_row)
-        low_line.setContentsMargins(0, 0, 0, 0)
-        low_line.addWidget(self._cov_low_on, 1)
-        low_line.addWidget(self._cov_low)
-        high_row = QWidget(body)
-        high_line = QHBoxLayout(high_row)
-        high_line.setContentsMargins(0, 0, 0, 0)
-        high_line.addWidget(self._cov_high_on, 1)
-        high_line.addWidget(self._cov_high)
-        coverage, _coverage_rule = section("Coverage", expanded=False)
-        coverage.add_widget(self._cov_show)
-        coverage.add_widget(self._cov_log)
-        coverage.add_widget(low_row)
-        coverage.add_widget(high_row)
         body_col.addStretch(1)
 
         for widget in (
-            self._layout_mode, self._sort, self._color_by, self._min_identity, self._min_mapq,
-            self._hide_secondary, self._show_ann, self._cov_show, self._cov_log,
-            self._cov_low_on, self._cov_low, self._cov_high_on, self._cov_high,
+            self._layout_mode, self._color_by, self._group_by, self._cov_scale,
+            self._show_ann, self._cov_show, self._junc_show,
         ):
             if hasattr(widget, "currentIndexChanged"):
                 widget.currentIndexChanged.connect(self._emit_options)
@@ -2017,7 +2070,7 @@ class _RunSidePanel(QWidget):
                 widget.valueChanged.connect(self._emit_options)
             elif hasattr(widget, "toggled"):
                 widget.toggled.connect(self._emit_options)
-        for combo in (self._layout_mode, self._sort, self._color_by):
+        for combo in (self._layout_mode, self._color_by, self._group_by, self._cov_scale):
             combo.setSizeAdjustPolicy(
                 NoWheelComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
             combo.setMinimumContentsLength(8)
@@ -2092,30 +2145,22 @@ class _RunSidePanel(QWidget):
     def options(self) -> dict:
         hidden = {name for name, box in self._type_boxes.items() if not box.isChecked()}
         return {
-            "one_per_row": bool(self._layout_mode.currentData()),
-            "sort": str(self._sort.currentData() or "start"),
+            "layout_mode": str(self._layout_mode.currentData() or LAYOUT_EXPANDED),
             "color_by": str(self._color_by.currentData() or style.COLOR_STRAND),
-            "min_identity": float(self._min_identity.value()) / 100.0,
-            "min_mapq": int(self._min_mapq.value()),
-            "hide_secondary": self._hide_secondary.isChecked(),
+            "group_by": str(self._group_by.currentData() or style.GROUP_NONE),
+            "min_identity": 0.0,
+            "min_mapq": 0,
+            "hide_secondary": False,
             "show_features": self._show_ann.isChecked(),
             "hidden_types": hidden,
             "show_coverage": self._cov_show.isChecked(),
-            "cov_log": self._cov_log.isChecked(),
-            "cov_low": int(self._cov_low.value()) if self._cov_low_on.isChecked() else None,
-            "cov_high": int(self._cov_high.value()) if self._cov_high_on.isChecked() else None,
+            "show_junctions": self._junc_show.isChecked(),
+            "cov_log": bool(self._cov_scale.currentData()),
+            "cov_low": None,
+            "cov_high": None,
         }
 
-    def _sync_cov_fields(self, *_args) -> None:
-        on = self._cov_show.isChecked()
-        self._cov_log.setEnabled(on)
-        self._cov_low_on.setEnabled(on)
-        self._cov_high_on.setEnabled(on)
-        self._cov_low.setEnabled(on and self._cov_low_on.isChecked())
-        self._cov_high.setEnabled(on and self._cov_high_on.isChecked())
-
     def _emit_options(self, *_args) -> None:
-        self._sort.setEnabled(bool(self._layout_mode.currentData()))
         entry = self._entry()
         self._fill_sequences(entry)
         self._fill_features(entry)
@@ -2123,15 +2168,7 @@ class _RunSidePanel(QWidget):
         self.optionsChanged.emit()
 
     def _read_visible(self, read: dict) -> bool:
-        if self._hide_secondary.isChecked() and str(read.get("kind", "")) == "secondary":
-            return False
-        mq = read.get("mapq", -1)
-        if self._min_mapq.value() and mq not in (None, -1, "") and int(mq) < self._min_mapq.value():
-            return False
-        ident = read.get("identity")
-        if self._min_identity.value() > 0 and ident is not None:
-            if float(ident) < float(self._min_identity.value()) / 100.0:
-                return False
+        del read
         return True
 
     def set_chrom(self, chrom: str) -> None:
@@ -2146,21 +2183,8 @@ class _RunSidePanel(QWidget):
         self._emit_options()
 
     def set_one_per_row_allowed(self, allowed: bool, reason: str) -> None:
-        """Grey One per row when this scaffold cannot list every sequence."""
-        self._layout_mode.blockSignals(True)
-        row_item = self._layout_mode.model().item(1)
-        if row_item is not None:
-            row_item.setEnabled(allowed)
-            row_item.setToolTip(reason)
-        switched = False
-        if not allowed and self._layout_mode.currentData():
-            self._layout_mode.setCurrentIndex(0)
-            switched = True
-        self._layout_mode.blockSignals(False)
-        self._layout_mode.setToolTip(reason)
-        self._sort.setEnabled(allowed and bool(self._layout_mode.currentData()))
-        if switched:
-            self._emit_options()
+        """Kept for callers; Layout is Expanded / Squished / Collapsed now."""
+        del allowed, reason
 
     def _sync_page_titles(self, entry: dict | None) -> None:
         counts = {
@@ -2241,22 +2265,7 @@ class _RunSidePanel(QWidget):
 
     def _fill_sequences(self, entry: dict | None) -> None:
         reads = [r for r in ((entry or {}).get("reads") or []) if self._read_visible(r)]
-        key = str(self._sort.currentData() or "start")
-
-        def order(read: dict):
-            start = int(read.get("start", 0))
-            if key == "strand":
-                return (0 if read.get("strand") == "+" else 1, start)
-            if key == "identity":
-                return (-float(read.get("identity") or 0), start)
-            if key == "name":
-                return (str(read.get("name", "")), start)
-            return (start, int(read.get("end", start)))
-
-        reads.sort(key=order)
-        hidden = len((entry or {}).get("reads") or []) - len(reads)
-        self._hidden_label.setText(f"{hidden:,} hidden by filters" if hidden else "")
-        self._hidden_label.setVisible(hidden > 0)
+        reads.sort(key=lambda read: (int(read.get("start", 0)), int(read.get("end", 0))))
         self._sequences.setRowCount(len(reads))
         for row, read in enumerate(reads):
             ident = read.get("identity")
@@ -2474,13 +2483,28 @@ class LightGenomeBrowserPanel(QWidget):
             ANNOTATION_FIT_BUTTON_RENDERED_WIDTH,
             ANNOTATION_SELECT_BUTTON_RENDERED_WIDTH,
             ANNOTATION_ZOOM_SLIDER_WIDTH,
-            OVERVIEW_SELECT_FIT_HEIGHT,
             ZOOM_SLIDER_HEIGHT,
             apply_annotation_zoom_slider_style,
             make_overview_zoom_button,
-            style_compact_button,
         )
         from repeatviewer.widgets.spin_boxes import NoWheelSlider
+
+        # Nav buttons a bit taller than the shared 18 px overview controls, still
+        # under the locus QLineEdit / chips (~24–26 px).
+        _NAV_BTN_H = 22
+        _NAV_BTN_INNER = 20
+
+        def _style_nav_button(btn: QPushButton) -> None:
+            btn.setFixedHeight(_NAV_BTN_H)
+            btn.setStyleSheet(
+                "QPushButton { border: 1px solid palette(mid); border-radius: 4px;"
+                f" background: palette(base); padding: 0px 8px; margin: 0px;"
+                f" min-height: {_NAV_BTN_INNER}px; max-height: {_NAV_BTN_INNER}px; }}"
+                "QPushButton:hover { background: palette(midlight); }"
+                "QPushButton:pressed { background: palette(mid); }"
+                "QPushButton:checked { background: palette(midlight); }"
+                "QPushButton:disabled { color: palette(mid); }"
+            )
 
         self._history: list[tuple[str, int, int]] = []
         self._history_at = -1
@@ -2511,6 +2535,7 @@ class LightGenomeBrowserPanel(QWidget):
             btn.setAutoRepeat(True)
             btn.setAutoRepeatDelay(300)
             btn.setAutoRepeatInterval(60)
+            btn.setFixedSize(_NAV_BTN_H, _NAV_BTN_H)
         self._zoom_slider = NoWheelSlider(Qt.Orientation.Horizontal, nav)
         self._zoom_slider.setObjectName("annotationZoomSlider")
         self._zoom_slider.setRange(0, ZOOM_STEPS)
@@ -2533,8 +2558,7 @@ class LightGenomeBrowserPanel(QWidget):
             saved = style.COLOR_STRAND
         self.canvas.color_by = saved
         for b in (select, fit):
-            b.setFixedHeight(OVERVIEW_SELECT_FIT_HEIGHT)
-            style_compact_button(b)
+            _style_nav_button(b)
             b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         for w in (zoom_out, zoom_in, self._zoom_slider, select, fit):
             w.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
@@ -2545,10 +2569,9 @@ class LightGenomeBrowserPanel(QWidget):
 
         self._view_key = "Browser"
         self._view_btn = QPushButton("Browser ▾", self)
-        self._view_btn.setFixedHeight(OVERVIEW_SELECT_FIT_HEIGHT)
+        _style_nav_button(self._view_btn)
         self._view_btn.setToolTip("Browser, text, or a mapping list")
         self._view_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        style_compact_button(self._view_btn)
         self._view_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self._view_menu = QMenu(self._view_btn)
         self._view_btn.clicked.connect(self._popup_view_menu)
@@ -2571,7 +2594,7 @@ class LightGenomeBrowserPanel(QWidget):
         self._side_btn.setAutoRaise(True)
         self._side_btn.setIcon(_sidebar_icon(self))
         self._side_btn.setToolTip("Show or hide the mapping panel")
-        self._side_btn.setFixedHeight(OVERVIEW_SELECT_FIT_HEIGHT)
+        self._side_btn.setFixedHeight(_NAV_BTN_H)
         self._side_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self._side_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._side_btn.toggled.connect(self._set_side_visible)
@@ -2775,12 +2798,13 @@ class LightGenomeBrowserPanel(QWidget):
     def _go(self, chrom: str, a: int, b: int) -> None:
         length = (self._result.lengths.get(chrom, 1) if self._result else 1)
         self.canvas.set_chrom(chrom, length, a, b)
+        self._apply_track_grouping()
         self._apply_run_chrom(chrom)
         self._sync_one_per_row_choice()
         self._sync_vbar()
 
     def _read_run(self, path: Path) -> None:
-        from repeatviewer.backends.map_reference import find_run_json, load_rvmap
+        from repeatviewer.backends.map_reference import find_mapping_document, load_rvmap
 
         self._run = None
         self._run_ref = None
@@ -2788,7 +2812,7 @@ class LightGenomeBrowserPanel(QWidget):
         self._query_seq_cache = {}
         self.canvas.run_features = []
         self.canvas.one_per_row = False
-        found = find_run_json(path)
+        found = find_mapping_document(path)
         if found is not None:
             try:
                 data = load_rvmap(found)
@@ -2843,16 +2867,14 @@ class LightGenomeBrowserPanel(QWidget):
     def _apply_run_options(self) -> None:
         opts = self._run_panel.options()
         canvas = self.canvas
-        was_rows = canvas.one_per_row
-        canvas.one_per_row = bool(opts["one_per_row"])
-        if canvas.one_per_row and not was_rows:
-            canvas.set_vscroll(0)
-        canvas.sort_key = str(opts["sort"])
+        canvas.layout_mode = str(opts.get("layout_mode") or LAYOUT_EXPANDED)
+        canvas.group_by = str(opts.get("group_by") or style.GROUP_NONE)
         canvas.min_identity = float(opts["min_identity"])
         canvas.min_mapq = int(opts["min_mapq"])
         canvas.hide_secondary = bool(opts["hide_secondary"])
         canvas.show_features = bool(opts["show_features"])
         canvas.show_coverage = bool(opts["show_coverage"])
+        canvas.show_junctions = bool(opts["show_junctions"])
         canvas.hidden_feature_types = set(opts["hidden_types"])
         canvas.show_mismatches = True
         canvas.cov_log = bool(opts["cov_log"])
@@ -2862,7 +2884,23 @@ class LightGenomeBrowserPanel(QWidget):
         if mode in _COLOR_MODE_LABELS and canvas.color_by != mode:
             canvas.color_by = mode
             _settings().setValue(_SETTINGS_COLOR, mode)
+        self._apply_track_grouping()
         self._sync_name_column()
+        canvas.update()
+
+    def _apply_track_grouping(self) -> None:
+        """Push Display → Group by onto the open alignment track."""
+        track = self.canvas.track
+        if track is None or not hasattr(track, "set_grouping"):
+            return
+        mode = str(self.canvas.group_by or style.GROUP_NONE)
+        fn = style.group_function(
+            mode,
+            read_groups=getattr(track, "read_groups", None) or {},
+            chrom=self.canvas.chrom or "",
+        )
+        key = None if fn is None else mode
+        track.set_grouping(key, fn)
 
     def _sync_name_column(self) -> None:
         """Turn the name column on with One per row, and keep a fitted view fitted."""
@@ -3402,7 +3440,9 @@ class LightGenomeBrowserPanel(QWidget):
         self._vbar.blockSignals(True)
         self._vbar.setRange(0, max(0, total - page))
         self._vbar.setPageStep(max(1, page))
-        step = (NAME_ROW_H if self.canvas._names_on else READ_H) + READ_GAP
+        step = (
+            NAME_ROW_H if self.canvas._names_on else self.canvas._read_body_h()
+        ) + READ_GAP
         self._vbar.setSingleStep(step)
         self._vbar.setValue(self.canvas.vscroll)
         self._vbar.blockSignals(False)

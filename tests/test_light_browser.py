@@ -287,16 +287,19 @@ def test_one_per_row_names_and_menu(qapp, tmp_path, monkeypatch):
     assert panel._view_btn.text().startswith("Text")
     panel._set_view("Browser")
     assert panel._stack.currentIndex() == 0
-    # more mapped reads than the cap: the names stay off and One per row is grey
+    # more mapped reads than the cap: one-per-row names stay off
     monkeypatch.setattr(lgb, "ONE_PER_ROW_LIMIT", 10)
-    panel._sync_one_per_row_choice()
-    row_item = panel._run_panel._layout_mode.model().item(1)
-    assert row_item is not None and not row_item.isEnabled()
-    assert "10" in panel._run_panel._layout_mode.toolTip()
+    panel.canvas.one_per_row = True
+    panel._sync_name_column()
     panel.canvas.repaint()
     assert not panel.canvas._names_on
     assert panel.canvas._name_hits == []
     assert panel.canvas.name_at(QPointF(8, panel.canvas._rows_top() + 4)) is None
+    # Display layout modes are Expanded / Squished / Collapsed
+    assert panel._run_panel._layout_mode.findData(lgb.LAYOUT_EXPANDED) >= 0
+    assert panel._run_panel._layout_mode.findData(lgb.LAYOUT_SQUISHED) >= 0
+    assert panel._run_panel._layout_mode.findData(lgb.LAYOUT_COLLAPSED) >= 0
+    assert panel._run_panel._junc_show is not None
     panel.shutdown()
 
 

@@ -77,12 +77,13 @@ the reference has repeated names.
 
 ## What is written
 
-Only the mapper's own file is placed next to the input; everything else goes
-into `<input>_minimap_details/` (or `_hisat2_details/`):
+The mapper's alignment and the contig document sit next to the input; tables
+and FASTA go into `<input>_minimap_details/` (or `_hisat_details/`):
 
 | File | Contents |
 |------|----------|
 | `<input>_minimap.paf` or `.sam` | The mapper's alignment (opens in Preview) |
+| `<input>_minimap.rvmap` | Contig-view snapshot of the run |
 | `…_report.html` | Run report: numbers, coverage plot, features, most frequent differences, methods text, citations |
 | `…_consensus.fa` | Consensus of the mapped reads, with the reference annotations moved onto it |
 | `…_mapped.fa` | The placed reads, turned to the reference strand, with lifted annotations |
@@ -90,9 +91,9 @@ into `<input>_minimap_details/` (or `_hisat2_details/`):
 | `…_variants.tsv`, `…_features.tsv`, `…_reads.tsv` | Every difference; every reference feature in every read; every placement |
 | `…_methods.txt`, `…_commands.txt` | A methods paragraph and the exact command lines |
 
-A hidden `<alignment>.rv.json` next to the alignment keeps the run record; it
-follows the alignment when you rename it. A second run writes `_2`; nothing is
-overwritten. No samtools or pysam is needed.
+A `<input>_minimap.rvmap` (or `_hisat`) contig document next to the alignment
+opens in Contig view. A second run writes `_2`; nothing is overwritten. No
+samtools or pysam is needed for Mapping itself.
 
 ## The genome browser (SAM, BAM, CRAM)
 

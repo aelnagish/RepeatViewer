@@ -456,10 +456,11 @@ def test_minimap2_satellite_end_to_end(tmp_path):
     if opts is None:
         pytest.skip("minimap2 not available")
     rvmap, files, report = mr.run_mapping([variants], opts)
-    assert rvmap.name == "variants.fa_minimap.paf.rv.json" and rvmap.parent == tmp_path
-    assert not (tmp_path / "variants.fa_minimap.rvmap").exists()
+    assert rvmap.name == "variants.fa_minimap.rvmap" and rvmap.parent == tmp_path
     paf = tmp_path / "variants.fa_minimap.paf"
     assert paf.is_file() and paf in files
+    assert not mr.run_json_path(paf).exists()
+    assert mr.find_mapping_document(paf) == rvmap
     data = mr.load_rvmap(rvmap)
     assert data["engine"] == MAP_ENGINE_MINIMAP2
     assert data["summary"]["n_placed"] == 3 and data["summary"]["n_reversed"] == 1
@@ -535,8 +536,11 @@ def test_read_mappers_end_to_end(tmp_path, engine):
     tag = "minimap" if engine == MAP_ENGINE_MINIMAP2 else "hisat"
     raw = tmp_path / f"reads.fq_{tag}.{'paf' if engine == MAP_ENGINE_MINIMAP2 else 'sam'}"
     assert raw.is_file() and raw in files
-    assert rvmap == mr.run_json_path(raw)
-    assert mr.find_run_json(raw.with_suffix(".bam") if raw.suffix == ".sam" else raw) == rvmap
+    assert rvmap.name.endswith(".rvmap") and rvmap in files
+    assert not mr.run_json_path(raw).exists()
+    assert mr.find_mapping_document(raw) == rvmap
+    bam_or_raw = raw.with_suffix(".bam") if raw.suffix == ".sam" else raw
+    assert mr.find_mapping_document(bam_or_raw) == rvmap
 
 
 def test_reference_lengths_line_by_line_and_fai(tmp_path):
