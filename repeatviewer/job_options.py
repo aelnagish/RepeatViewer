@@ -3033,6 +3033,8 @@ class MapOptions:
     # After SAM output: sort+index with samtools/pysam (disabled for minimap2 PAF).
     sort_and_index_sam: bool = False
     delete_sam_after_sort_index: bool = False
+    # Contig-view snapshot (``.rvmap``) beside the alignment; default on.
+    generate_rvmap: bool = True
     # Options tab
     right_click_action: str = MAP_RIGHT_CLICK_RUN
     show_process_window: bool = DEFAULT_SHOW_PROCESS_WINDOW
@@ -3114,6 +3116,7 @@ def load_map_options() -> MapOptions:
         delete_sam_after_sort_index=_to_bool(
             v.get("delete_sam_after_sort_index"), d.delete_sam_after_sort_index
         ),
+        generate_rvmap=_to_bool(v.get("generate_rvmap"), d.generate_rvmap),
         right_click_action=_pick("right_click_action", MAP_RIGHT_CLICK_ACTIONS,
                                  d.right_click_action),
         show_process_window=_to_bool(v.get("show_process_window"), d.show_process_window),
@@ -3167,6 +3170,7 @@ def save_map_options(opts: MapOptions) -> None:
             "max_display_reads": opts.max_display_reads,
             "sort_and_index_sam": opts.sort_and_index_sam,
             "delete_sam_after_sort_index": opts.delete_sam_after_sort_index,
+            "generate_rvmap": opts.generate_rvmap,
             "right_click_action": opts.right_click_action,
             "show_process_window": opts.show_process_window,
             "close_process_window_when_finished": (

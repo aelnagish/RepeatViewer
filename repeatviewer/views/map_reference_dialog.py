@@ -137,6 +137,11 @@ DELETE_SAM_INFO = (
     "The sorted BAM and index are kept. Only applies when "
     "<b>Sort and index SAM outputs</b> is on."
 )
+GENERATE_RVMAP_INFO = (
+    "Write a <code>.rvmap</code> contig-view document beside the alignment "
+    "(consensus, coverage, placements, lift-over). Turn off for huge runs when "
+    "you only need the SAM/PAF and <code>_details/</code> tables."
+)
 CIGAR_INFO = (
     "PAF only: add a CIGAR string with <code>-c</code> (base-level alignment). "
     "SAM always includes CIGAR. Leave on unless you want approximate mapping only."
@@ -528,6 +533,9 @@ class MapReferenceDialog(QDialog):
             bool(getattr(opts, "delete_sam_after_sort_index", False))
         )
         self._delete_sam.setToolTip(DELETE_SAM_INFO)
+        self._generate_rvmap = QCheckBox("Generate rvmap output", self)
+        self._generate_rvmap.setChecked(bool(getattr(opts, "generate_rvmap", True)))
+        self._generate_rvmap.setToolTip(GENERATE_RVMAP_INFO)
         self._sort_index_sam.toggled.connect(self._sync_sam_postprocess)
 
         for field in (
@@ -660,6 +668,12 @@ class MapReferenceDialog(QDialog):
         )
         self._delete_sam_label = QLabel("")
         form.addRow(self._delete_sam_label, self._delete_sam_field)
+        form.addRow(
+            "",
+            field_with_help(
+                self._generate_rvmap, "Generate rvmap", GENERATE_RVMAP_INFO
+            ),
+        )
 
         # Minimap2 Output (FastGA-style Format + optional tags).
         self._mm_output_sep = _form_section_separator()
@@ -1323,6 +1337,7 @@ class MapReferenceDialog(QDialog):
         self._threads.setValue(max(1, d.threads))
         self._sort_index_sam.setChecked(d.sort_and_index_sam)
         self._delete_sam.setChecked(d.delete_sam_after_sort_index)
+        self._generate_rvmap.setChecked(d.generate_rvmap)
         self._sync_sam_postprocess()
         self._set_combo(self._threshold, d.consensus_threshold)
         self._set_combo(self._no_cov, d.no_coverage)
@@ -1438,6 +1453,7 @@ class MapReferenceDialog(QDialog):
             delete_sam_after_sort_index=(
                 self._delete_sam.isEnabled() and self._delete_sam.isChecked()
             ),
+            generate_rvmap=self._generate_rvmap.isChecked(),
             right_click_action=MAP_RIGHT_CLICK_RUN,
             show_process_window=self._show_process_window.isChecked(),
             close_process_window_when_finished=(

@@ -275,7 +275,6 @@ class SamtoolsParamsDialog(QDialog):
         options_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         options_layout.addWidget(process_box)
         options_layout.addWidget(make_citation_box(self, CITATION_SAMTOOLS))
-        options_layout.addStretch(1)
         self._options_tab = options_tab
 
         self._tabs = QTabBar(self)
@@ -342,6 +341,18 @@ class SamtoolsParamsDialog(QDialog):
     def prepare_for_show(self) -> None:
         self._sync_field_column()
         self._fit_to_content()
+
+    def sizeHint(self) -> QSize:  # noqa: N802
+        # Prefer the last fitted size so polish/adjustSize cannot re-expand
+        # to the tallest stack page after Options → Index.
+        if self._compact_size is not None:
+            return self._compact_size
+        return super().sizeHint()
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802
+        if self._compact_size is not None:
+            return QSize(self._compact_size.width(), 0)
+        return super().minimumSizeHint()
 
     def _make_threads_spin(self, value: int) -> QSpinBox:
         spin = QSpinBox(self)
@@ -497,7 +508,11 @@ class SamtoolsParamsDialog(QDialog):
         on_options = index == self._options_tab_index
         self._inputs_panel.setVisible(not on_options)
         self._compact_size = None
-        self._fit_to_content()
+        # Refit after visibility/layout settles so Options → Index shrinks.
+        if self.isVisible():
+            QTimer.singleShot(0, self._fit_to_content)
+        else:
+            self._fit_to_content()
 
     def _sync_inputs(self, *, resize: bool = True) -> None:
         define = self.input_source() == ALIGN_INPUT_DEFINE
@@ -537,36 +552,91 @@ class SamtoolsParamsDialog(QDialog):
         margins = self.layout().contentsMargins() if self.layout() else None
         top = margins.top() if margins is not None else 18
         bottom = margins.bottom() if margins is not None else 16
-        tabs_h = self._tabs.sizeHint().height()
+        tabs_h = max(24, self._tabs.sizeHint().height())
         buttons_h = self._button_box.sizeHint().height()
         return top + bottom + tabs_h + buttons_h + 8
 
     def _inputs_height(self) -> int:
         if not self._inputs_panel.isVisible():
             return 0
+        self._inputs_panel.ensurePolished()
         self._inputs_panel.updateGeometry()
-        return max(0, self._inputs_panel.sizeHint().height())
+        return max(
+            0,
+            self._inputs_panel.minimumSizeHint().height(),
+            self._inputs_panel.sizeHint().height(),
+        )
+
+    def _prepare_stack_pages_for_measure(self) -> QWidget | None:
+        """Collapse inactive stack pages so their sizeHint cannot leave a blank band."""
+        page = self._stack.currentWidget()
+        for i in range(self._stack.count()):
+            widget = self._stack.widget(i)
+            if widget is None:
+                continue
+            if widget is page:
+                widget.setMinimumHeight(0)
+                widget.setMaximumHeight(16777215)
+                widget.setSizePolicy(
+                    QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
+                )
+            else:
+                widget.setFixedHeight(0)
+                widget.setSizePolicy(
+                    QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Ignored
+                )
+        return page
 
     def _stack_page_height(self) -> int:
-        page = self._stack.currentWidget()
+        page = self._prepare_stack_pages_for_measure()
         if page is None:
             return 0
+        page.ensurePolished()
         root = page.layout()
         if root is not None:
             root.invalidate()
             root.activate()
+        page.adjustSize()
         page.updateGeometry()
-        return max(0, page.sizeHint().height())
+
+        if page is self._options_tab:
+            content_h = max(page.minimumSizeHint().height(), page.sizeHint().height())
+            if root is not None:
+                content_h = max(
+                    content_h,
+                    root.totalMinimumSize().height(),
+                    root.totalSizeHint().height(),
+                )
+            return max(0, content_h)
+
+        # Measure Settings form only — page sizeHint can keep leftover height
+        # after visiting Options.
+        margins = root.contentsMargins() if root is not None else None
+        margin_h = (margins.top() + margins.bottom()) if margins is not None else 10
+        basic = root.itemAt(0).widget() if root is not None and root.count() else None
+        if basic is None:
+            return max(0, page.sizeHint().height())
+        basic.ensurePolished()
+        basic_h = max(basic.minimumSizeHint().height(), basic.sizeHint().height())
+        return max(0, margin_h + basic_h)
 
     def _pin_stack_height(self, height: int | None) -> None:
+        page = self._stack.currentWidget()
         if height is None:
             self._stack.setMinimumHeight(0)
             self._stack.setMaximumHeight(16777215)
+            if page is not None:
+                page.setMinimumHeight(0)
+                page.setMaximumHeight(16777215)
             return
-        self._stack.setFixedHeight(max(0, int(height)))
+        pinned = max(0, int(height))
+        self._stack.setFixedHeight(pinned)
+        if page is not None:
+            page.setMinimumHeight(0)
+            page.setMaximumHeight(pinned)
 
     def _fit_to_content(self) -> None:
-        """Widen for Define inputs; shrink height to the visible content."""
+        """Widen for Define inputs; shrink height to the visible tab content."""
         self._sync_field_column()
         width = tool_params_dialog_width(
             define_inputs=(
@@ -579,23 +649,12 @@ class SamtoolsParamsDialog(QDialog):
         screen = self.screen().availableGeometry() if self.screen() else None
         max_h = screen.height() - 40 if screen is not None else 10_000
 
-        if self._tabs.currentIndex() == self._options_tab_index:
-            self._pin_stack_height(None)
-            self._options_tab.updateGeometry()
-            height = self._dialog_chrome_height() + max(
-                0, self._options_tab.sizeHint().height()
-            )
-            height = min(max(height, 220), max_h)
-            self.setMaximumHeight(height)
-            self.resize(width, height)
-            self.setMaximumHeight(16777215)
-            return
-
         page_h = self._stack_page_height()
         inputs_h = self._inputs_height()
         height = self._dialog_chrome_height() + inputs_h + page_h
-        height = min(max(height, 220), max_h)
+        height = min(max(height, 200), max_h)
         self._pin_stack_height(page_h)
+        self.setMinimumHeight(0)
         self.setMaximumHeight(height)
         self.resize(width, height)
         self.setMaximumHeight(16777215)

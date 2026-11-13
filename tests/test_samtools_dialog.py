@@ -58,6 +58,22 @@ def test_samtools_dialog_define_inputs_widens(qapp: QApplication) -> None:
     assert dlg.input_source() == ALIGN_INPUT_DEFINE
 
 
+def test_samtools_dialog_height_follows_tab(qapp: QApplication) -> None:
+    """Options → Index must shrink; blank band under Index Settings is a bug."""
+    dlg = _dialog(qapp)
+    dlg._tabs.setCurrentIndex(3)  # Options
+    dlg._fit_to_content()
+    qapp.processEvents()
+    options_h = dlg.height()
+    dlg._tabs.setCurrentIndex(1)  # Index
+    dlg._fit_to_content()
+    qapp.processEvents()
+    index_h = dlg.height()
+    assert index_h < options_h
+    # Index is Inputs + short Settings — should stay compact.
+    assert index_h < 420
+
+
 def test_samtools_dialog_options_roundtrip(qapp: QApplication) -> None:
     dlg = _dialog(
         qapp,

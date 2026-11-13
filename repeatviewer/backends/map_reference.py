@@ -1945,7 +1945,8 @@ def run_mapping(
 ) -> tuple[Path, list[Path], Path]:
     """Map ``queries`` to ``opts.reference_fasta``.
 
-    Returns (``.rvmap`` contig document, created files, report HTML)."""
+    Returns (``.rvmap`` when ``opts.generate_rvmap``, else the alignment path,
+    created files, report HTML)."""
     say = progress or (lambda _m: None)
     queries = [Path(q).expanduser() for q in queries]
     ref_text = str(opts.reference_fasta or "").strip()
@@ -2620,14 +2621,16 @@ def _write_outputs(run: MapRun, layout: OutputLayout, info: InputInfo, created: 
 
     report = layout.path("_report.html")
     details["report"] = report.name
-    # Contig-view document next to the input / aligner file.
+    write_rvmap = bool(getattr(o, "generate_rvmap", True))
     rvmap = layout.rvmap
     title = f"{output_base_name(run.queries)} mapped to {run.reference.name}"
-    report.write_text(
-        report_html(run, [rvmap, *created, report], title),
-        encoding="utf-8",
-    )
+    listed = ([rvmap] if write_rvmap else []) + [*created, report]
+    report.write_text(report_html(run, listed, title), encoding="utf-8")
     created.append(report)
+
+    if not write_rvmap:
+        primary = raw if raw is not None else report
+        return primary, list(created), report
 
     payload = {
         "format": RVMAP_FORMAT, "version": RVMAP_VERSION, "created": run.stamp,
