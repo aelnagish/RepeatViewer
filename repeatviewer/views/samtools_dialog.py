@@ -338,7 +338,10 @@ class SamtoolsParamsDialog(QDialog):
             define_inputs=self.input_source() == ALIGN_INPUT_DEFINE
         )
         self.resize(width, 360)
-        QTimer.singleShot(0, self._fit_to_content)
+
+    def prepare_for_show(self) -> None:
+        self._sync_field_column()
+        self._fit_to_content()
 
     def _make_threads_spin(self, value: int) -> QSpinBox:
         spin = QSpinBox(self)
@@ -407,7 +410,6 @@ class SamtoolsParamsDialog(QDialog):
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
         self._sync_field_column()
-        QTimer.singleShot(0, self._fit_to_content)
 
     def should_run(self) -> bool:
         return dialog_should_run(self)

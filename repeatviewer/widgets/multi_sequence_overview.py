@@ -197,7 +197,7 @@ _MSA_ZOOM_LETTER_SLIDER = 75  # 3/4 of 0–100 slider
 _MSA_LETTER_BG_SCALE = 1.0
 _MSA_LETTER_BG_MAX_WIDTH_SCALE = 3.0  # bg width at slider max / width at ¾
 _DEFAULT_MSA_FONT_PT = _MSA_LETTER_SIZE_PT
-_DEFAULT_TRACK_DISTANCE = 1  # Size → Track distance (1–40 px)
+_DEFAULT_TRACK_DISTANCE = 1  # Size → Track distance (0–40 px; 0 = no gap)
 _DEFAULT_TRACK_HEIGHT = 5  # Others → Track height (1–10); 10 == size-10 band
 _DEFAULT_MSA_SEQUENCE_DISTANCE = 1
 _DEFAULT_MULTI_SEQUENCE_DISTANCE = 2
@@ -1996,8 +1996,8 @@ class _BarsCanvas(QWidget):
         return int(self._feat_gap)
 
     def set_track_gap(self, gap: int) -> None:
-        """Gap between a sequence track and its first annotation row."""
-        new = max(1, min(40, int(gap)))
+        """Gap below a sequence track (0 = tracks touch)."""
+        new = max(0, min(40, int(gap)))
         if new == self._track_gap:
             return
         self._track_gap = new
@@ -3283,10 +3283,15 @@ class _BarsCanvas(QWidget):
         self.rowsChanged.emit()
 
     def _msa_track_block_height(self, rid: str) -> int:
-        # Track distance always sits below the sequence band, so it spaces
-        # sequences apart even when no annotation is shown.
+        """Pixels under the sequence band for annotation tracks.
+
+        When annotations are hidden, returns 0 — inter-sequence spacing then
+        comes only from Track distance (see ``_recompute_layout``), so 0 means
+        tracks touch. When annotations are shown, Track distance is the gap
+        above the first annotation row.
+        """
         if not self._show_annotation_track:
-            return max(0, int(self._track_gap))
+            return 0
         n_tracks = len(self._tracks.get(rid) or [])
         if n_tracks <= 0:
             return max(0, int(self._track_gap))
@@ -3298,6 +3303,16 @@ class _BarsCanvas(QWidget):
             + (n_tracks - 1) * gap
         )
 
+    def _inter_sequence_gap(self) -> int:
+        """White space between sequence rows (not part of either hit-target).
+
+        Annotations off: Track distance alone (0 = tracks flush).
+        Annotations on: Sequence distance (Track distance is seq→annotation).
+        """
+        if not self._show_annotation_track:
+            return max(0, int(self._track_gap))
+        return max(0, int(self._sequence_row_gap))
+
     def _recompute_layout(self) -> None:
         # Layout/zoom/size change → residue snapshot must be rebuilt.
         self._invalidate_msa_layer_cache()
@@ -3305,7 +3320,8 @@ class _BarsCanvas(QWidget):
         self._row_heights = []
         y = 0
         n_rows = len(self._record_ids)
-        gap = max(0, int(self._sequence_row_gap))
+        gap = self._inter_sequence_gap()
+        ann_on = bool(self._show_annotation_track)
         for i, rid in enumerate(self._record_ids):
             if self._msa_mode or self._msa_seqs:
                 # MSA / multi-seq: Track height when squeezed; square band up to
@@ -3316,14 +3332,15 @@ class _BarsCanvas(QWidget):
             else:
                 n_tracks = (
                     len(self._tracks.get(rid) or [])
-                    if self._show_annotation_track
+                    if ann_on
                     else 0
                 )
                 h = _row_height(
                     n_tracks,
                     feat_height=self._feat_height,
                     feat_gap=self._feat_gap,
-                    track_gap=self._track_gap,
+                    # Annotations off: Track distance is the between-row gap only.
+                    track_gap=self._track_gap if ann_on else 0,
                 )
             self._row_tops.append(y)
             self._row_heights.append(h)
@@ -5779,6 +5796,11 @@ class MultiSequenceOverviewPanel(QWidget):
         self._annotations_dirty = False
         self._did_initial_fit = False
         self._refit_pending_on_show = False
+        # When set (e.g. split panes cloning the source view), honor this instead
+        # of pinning scrollbars to the top-left after load / initial fit.
+        self._pending_view_restore: dict[str, object] | None = None
+        # After a successful restore, ignore deferred origin-reset timers from load.
+        self._keep_restored_scroll = False
         self._name_width = _NAME_COLUMN_DEFAULT
         self._syncing_scroll = False
         self._search_needle = ""
@@ -6119,6 +6141,10 @@ class MultiSequenceOverviewPanel(QWidget):
             self._refit_pending_on_show = True
             return
         self._refit_pending_on_show = False
+        if self._pending_view_restore is not None:
+            if self.restore_view_state(self._pending_view_restore):
+                self._bars.update()
+                return
         if not self._did_initial_fit:
             self._try_initial_fit()
             return
@@ -6670,7 +6696,7 @@ class MultiSequenceOverviewPanel(QWidget):
         distance = max(0, min(40, distance))
         ann_thickness = max(2, min(40, ann_thickness))
         ann_distance = max(0, min(40, ann_distance))
-        track_distance = max(1, min(40, track_distance))
+        track_distance = max(0, min(40, track_distance))
         ann_labels = max(0, min(24, ann_labels))
         scale_labels = max(4, min(24, scale_labels))
         col_distance = max(0, min(40, col_distance))
@@ -7456,9 +7482,19 @@ class MultiSequenceOverviewPanel(QWidget):
 
     def _prompt_tsd_boundaries_for_run(self):
         """Prefill TE edges (RV / reference / user) and confirm via dialog + MSA drag."""
-        from repeatviewer.job_options import load_tsd_search_options, save_tsd_search_options
+        from repeatviewer.backends.tsd_search import (
+            auto_tsd_span_source,
+            load_boundary_prediction_for_tsd,
+        )
+        from repeatviewer.job_options import (
+            TSD_BOUNDARY_REPEATVIEWER,
+            load_tsd_search_options,
+            save_tsd_search_options,
+        )
         from repeatviewer.views.tool_dialogs import prompt_tsd_boundaries
 
+        # Prefer already-shown Boundary prediction (or sidecar) before resolving.
+        self._ensure_boundary_prediction_loaded_for_tsd()
         opts = load_tsd_search_options()
         aln_len = max(1, int(self._bars.max_length()))
         ref_extent = None
@@ -7512,22 +7548,71 @@ class MultiSequenceOverviewPanel(QWidget):
             reference_extent_1based=ref_extent,
             on_dialog_ready=_wire,
             prediction=self._boundary_result,
+            features_by_id=self._features,
         )
         if updated is None:
             return None
         save_tsd_search_options(updated)
+        if (
+            updated.boundary_source == TSD_BOUNDARY_REPEATVIEWER
+            and updated.left_boundary > 0
+            and updated.right_boundary > 0
+        ):
+            pred = load_boundary_prediction_for_tsd(
+                self._path, aln_len, prediction=self._boundary_result
+            )
+            source = auto_tsd_span_source(pred)
+            if source:
+                self.statusMessage.emit(
+                    f"TSD Auto detect: using {source} "
+                    f"{updated.left_boundary:,}–{updated.right_boundary:,}"
+                )
         return updated
 
+    def _ensure_boundary_prediction_loaded_for_tsd(self) -> bool:
+        """Load existing Boundary prediction into memory if it has usable edges.
+
+        Returns True when LTR/TIR, Genome Cov, or MSA identity is already
+        available (in-memory or ``*.boundaries_RV.json``).
+        """
+        from repeatviewer.backends.tsd_search import (
+            auto_tsd_span,
+            load_boundary_prediction_for_tsd,
+        )
+
+        if auto_tsd_span(self._boundary_result) is not None:
+            return True
+        aln_len = max(1, int(self._bars.max_length()))
+        loaded = load_boundary_prediction_for_tsd(
+            self._path, aln_len, prediction=self._boundary_result
+        )
+        if auto_tsd_span(loaded) is None:
+            return False
+        if loaded is not self._boundary_result:
+            self._apply_boundary_prediction(loaded)
+        return True
+
     def _tsd_needs_boundary_prediction(self) -> bool:
-        """TSD Auto detect with no Boundary prediction for this MSA yet."""
+        """True when Auto detect must run Boundary prediction from scratch."""
+        from repeatviewer.backends.tsd_search import (
+            boundaries_from_terminal_features_1based,
+        )
         from repeatviewer.job_options import (
             TSD_BOUNDARY_REPEATVIEWER,
             load_tsd_search_options,
         )
 
-        if not self.is_msa_mode() or self._boundary_result is not None:
+        if not self.is_msa_mode():
             return False
-        return load_tsd_search_options().boundary_source == TSD_BOUNDARY_REPEATVIEWER
+        if load_tsd_search_options().boundary_source != TSD_BOUNDARY_REPEATVIEWER:
+            return False
+        # Already have Boundary prediction edges on screen / disk — use them.
+        if self._ensure_boundary_prediction_loaded_for_tsd():
+            return False
+        # Feature detection LTR/TIR arrows can supply edges without a new run.
+        if boundaries_from_terminal_features_1based(self._features) is not None:
+            return False
+        return True
 
     def _on_auto_run_clicked(self) -> None:
         if self._annotation_running():
@@ -7552,10 +7637,10 @@ class MultiSequenceOverviewPanel(QWidget):
             return
         tsd_opts = None
         if AutoAnnotationMode.TSD in modes and self._tsd_needs_boundary_prediction():
-            # TSD Auto detect: run Boundary prediction first, then come back.
+            # No Boundary prediction yet: run it, then resume with LTR→Cov→identity.
             self._auto_run_after_boundary = True
             self.statusMessage.emit(
-                "TSD Auto detect: running Boundary prediction first…"
+                "TSD Auto detect: no Boundary prediction yet — running it first…"
             )
             self._run_boundary_prediction()
             if not self._boundary_running():
@@ -8778,6 +8863,7 @@ class MultiSequenceOverviewPanel(QWidget):
         self._features = features
         self._annotations_dirty = False
         self._did_initial_fit = False
+        self._keep_restored_scroll = False
         self._search_needle = ""
         self._search_hits = []
         self._search_hit_index = -1
@@ -8862,6 +8948,7 @@ class MultiSequenceOverviewPanel(QWidget):
             self._features = {rid: [] for rid in record_ids}
         self._annotations_dirty = False
         self._did_initial_fit = False
+        self._keep_restored_scroll = False
         self._search_needle = ""
         self._search_hits = []
         self._search_hit_index = -1
@@ -8913,6 +9000,11 @@ class MultiSequenceOverviewPanel(QWidget):
     def _try_initial_fit(self) -> None:
         if not self._overview_panel_alive():
             return
+        if self._pending_view_restore is not None:
+            if self.restore_view_state(self._pending_view_restore):
+                return
+            # Not ready yet — keep pending; do not Fit-to-origin over it.
+            return
         if self._did_initial_fit or not self._record_ids:
             return
         if not self.isVisible():
@@ -8932,6 +9024,10 @@ class MultiSequenceOverviewPanel(QWidget):
             return
         self._bars._invalidate_msa_layer_cache()
         self._refit_pending_on_show = False
+        if self._pending_view_restore is not None:
+            if self.restore_view_state(self._pending_view_restore):
+                self._bars.update()
+                return
         if not self._did_initial_fit:
             self._try_initial_fit()
             return
@@ -9016,9 +9112,77 @@ class MultiSequenceOverviewPanel(QWidget):
 
     def _reset_scrollbars_to_origin(self) -> None:
         """Pin Overview to bp 1 and the first sequence row."""
+        if self._pending_view_restore is not None:
+            if self.restore_view_state(self._pending_view_restore):
+                return
+            # Defer origin pin until restore can run (split clone path).
+            return
+        if self._keep_restored_scroll:
+            return
         self._bars_scroll.horizontalScrollBar().setValue(0)
         self._bars_scroll.verticalScrollBar().setValue(0)
         self._names_scroll.verticalScrollBar().setValue(0)
+
+    def capture_view_state(self) -> dict[str, object]:
+        """Snapshot zoom + scroll so split panes can reopen at the same place."""
+        hbar = self._bars_scroll.horizontalScrollBar()
+        ppb = max(float(self._bars.pixels_per_base()), 1e-12)
+        scroll_x = int(hbar.value())
+        left_bp = max(0.0, float(self._bars.x_to_bp(float(scroll_x))))
+        return {
+            "ppb": ppb,
+            "left_bp": left_bp,
+            "row_anchor": self.linked_viewport_row_anchor(),
+            "near_fit": bool(self._is_near_fit_zoom()),
+        }
+
+    def set_pending_view_restore(self, state: dict[str, object] | None) -> None:
+        """Request restore after the next load / initial-fit timers."""
+        self._pending_view_restore = dict(state) if state else None
+
+    def restore_view_state(self, state: dict[str, object] | None) -> bool:
+        """Re-apply ``capture_view_state`` output. Returns True when applied."""
+        if not state or not self._overview_panel_alive() or not self._record_ids:
+            return False
+        if not self.isVisible():
+            self._refit_pending_on_show = True
+            return False
+        if self._bars_scroll.viewport().width() < 120:
+            return False
+        anchor = state.get("row_anchor")
+        needs_rows = isinstance(anchor, (tuple, list)) and len(anchor) == 2
+        if needs_rows and not self._bars.row_tops():
+            return False
+        self._name_width = self._current_name_width()
+        self._sync_viewport_fill()
+        near_fit = bool(state.get("near_fit", True))
+        if near_fit:
+            self._bars.fit_to_bars_width(self._bars_viewport_width())
+            self._bars_scroll.horizontalScrollBar().setValue(0)
+        else:
+            try:
+                ppb = float(state.get("ppb") or self._bars.pixels_per_base())
+            except (TypeError, ValueError):
+                ppb = float(self._bars.pixels_per_base())
+            self._bars.set_pixels_per_base(ppb)
+            try:
+                left_bp = float(state.get("left_bp") or 0.0)
+            except (TypeError, ValueError):
+                left_bp = 0.0
+            self._scroll_to_keep_bp_at_viewport_x(left_bp, 0.0)
+        if needs_rows:
+            try:
+                self.apply_linked_viewport_row_anchor(int(anchor[0]), float(anchor[1]))
+            except (TypeError, ValueError):
+                pass
+        self._did_initial_fit = True
+        self._pending_view_restore = None
+        self._keep_restored_scroll = True
+        self._sync_names_column()
+        self._update_scale()
+        self._sync_zoom_slider_from_ppb()
+        self._sync_header_position_spins()
+        return True
 
     def _reset_overview_to_start(self) -> None:
         """After loading a different FASTA/MSA, fit and show the top-left.
@@ -9027,6 +9191,18 @@ class MultiSequenceOverviewPanel(QWidget):
         over when switching alignments in the same Overview panel.
         """
         if not self._overview_panel_alive():
+            return
+        if self._pending_view_restore is not None:
+            if self.restore_view_state(self._pending_view_restore):
+                return
+            # Layout seed only; scroll/zoom restored when the viewport is ready.
+            self._name_width = self._current_name_width()
+            self._sync_viewport_fill()
+            self._bars.fit_to_bars_width(self._bars_viewport_width())
+            self._sync_names_column()
+            self._update_scale()
+            self._sync_zoom_slider_from_ppb()
+            self._sync_header_position_spins()
             return
         self._name_width = self._current_name_width()
         self._sync_viewport_fill()
@@ -9039,10 +9215,27 @@ class MultiSequenceOverviewPanel(QWidget):
         self._sync_header_position_spins()
 
     def _fit_bars(self) -> None:
+        """Zoom tracks to the viewport width; keep the current vertical row."""
         # Keep the user's splitter ratio; only zoom tracks to the track viewport.
+        # Do not jump to the first sequence when Fit runs after a resize/split.
         if not self._overview_panel_alive():
             return
-        self._reset_overview_to_start()
+        if self._pending_view_restore is not None:
+            if self.restore_view_state(self._pending_view_restore):
+                return
+        vbar = self._bars_scroll.verticalScrollBar()
+        keep_v = int(vbar.value())
+        self._name_width = self._current_name_width()
+        self._sync_viewport_fill()
+        self._bars.fit_to_bars_width(self._bars_viewport_width())
+        self._bars_scroll.horizontalScrollBar().setValue(0)
+        keep_v = max(0, min(keep_v, int(vbar.maximum())))
+        vbar.setValue(keep_v)
+        self._names_scroll.verticalScrollBar().setValue(keep_v)
+        self._sync_names_column()
+        self._update_scale()
+        self._sync_zoom_slider_from_ppb()
+        self._sync_header_position_spins()
 
     def _open_msa_clean_dialog(self) -> None:
         """Open MSA clean parameters for the alignment shown in this overview."""
@@ -10682,7 +10875,8 @@ class MultiSequenceOverviewPanel(QWidget):
                 return
 
         def _job(*, progress=None):
-            from concurrent.futures import ThreadPoolExecutor, as_completed
+            import concurrent.futures as _cf
+            import concurrent.futures.thread as _cf_thread
             import threading
 
             from Bio import SeqIO
@@ -10794,9 +10988,9 @@ class MultiSequenceOverviewPanel(QWidget):
                     projected.extend(project_features_to_gapped([feat], tgt_keep))
                 return tgt_id, label, projected, None
 
-            with ThreadPoolExecutor(max_workers=max(1, parallel)) as pool:
+            with _cf_thread.ThreadPoolExecutor(max_workers=max(1, parallel)) as pool:
                 futures = [pool.submit(_run_one, item) for item in work]
-                for future in as_completed(futures):
+                for future in _cf.as_completed(futures):
                     if cancel.requested:
                         for pending in futures:
                             pending.cancel()

@@ -116,10 +116,29 @@ def _configure_matplotlib_backend() -> None:
     Setting MPLBACKEND here covers every ``import matplotlib.pyplot`` in the
     codebase, so individual call sites cannot reintroduce the crash.
     Set REPEATVIEWER_MPL_BACKEND to override when debugging plots interactively.
+
+    Also pin ``MPLCONFIGDIR`` to an app-writable cache when unset. If the
+    default ``~/.matplotlib`` is missing the versioned fontlist (or is not
+    writable), matplotlib rebuilds the font cache on import — often 10–15s
+    under Intel/Rosetta conda on Apple Silicon.
     """
     os.environ.setdefault(
         "MPLBACKEND", os.environ.get("REPEATVIEWER_MPL_BACKEND", "Agg")
     )
+    if not os.environ.get("MPLCONFIGDIR"):
+        if sys.platform == "darwin":
+            root = Path.home() / "Library" / "Caches" / "RepeatViewer"
+        elif sys.platform == "win32":
+            local = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+            root = Path(local) / "RepeatViewer"
+        else:
+            root = Path.home() / ".cache" / "RepeatViewer"
+        cache = root / "matplotlib"
+        try:
+            cache.mkdir(parents=True, exist_ok=True)
+            os.environ["MPLCONFIGDIR"] = str(cache)
+        except OSError:
+            pass
 
 
 def install_macos_stderr_fd_filter() -> None:

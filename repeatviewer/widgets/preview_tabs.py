@@ -3917,6 +3917,18 @@ class PreviewTabWidget(QTabWidget):
             self._remember_current_split(enabled=True)
             return True
 
+        overview_view_state = None
+        overview = getattr(widget, "_annotation_overview", None)
+        if (
+            overview is not None
+            and widget.is_annotation_preview_active()
+            and hasattr(overview, "capture_view_state")
+        ):
+            try:
+                overview_view_state = overview.capture_view_state()
+            except Exception:
+                overview_view_state = None
+
         host = self.parentWidget()
         if host is None or host.layout() is None:
             win = PreviewSplitWindow(
@@ -3926,6 +3938,7 @@ class PreviewTabWidget(QTabWidget):
                 floating=True,
                 left_tab=left_idx,
                 right_tab=right_idx,
+                initial_overview_view_state=overview_view_state,
             )
             ok = self._show_floating_preview_window(win)
             self._set_split_action_checked(ok)
@@ -3942,6 +3955,7 @@ class PreviewTabWidget(QTabWidget):
             floating=False,
             left_tab=left_idx,
             right_tab=right_idx,
+            initial_overview_view_state=overview_view_state,
         )
         self._inline_split = split
         split.closeSplitRequested.connect(self._close_inline_split)
@@ -4001,6 +4015,28 @@ class PreviewTabWidget(QTabWidget):
         if page is None or not page.is_single_fasta_preview():
             return None
         return "multi" if page.is_multi_fasta_preview() else "single"
+
+    def _preview_split_kind_for_path(self, path: Path) -> str | None:
+        """``multi`` / ``single`` for FASTA that can split; ``None`` for PDF etc."""
+        try:
+            resolved = Path(path).expanduser().resolve()
+        except OSError:
+            return None
+        if not _is_sequence_map_fasta(resolved):
+            return None
+        return "multi" if _is_multi_fasta_file(resolved) else "single"
+
+    def _should_keep_inline_split_for_path(self, path: Path) -> bool:
+        """Keep an open split only when the new file matches the same FASTA shape."""
+        if not self.is_split_active():
+            return False
+        new_kind = self._preview_split_kind_for_path(path)
+        if new_kind is None:
+            return False
+        current = self.currentWidget()
+        if not isinstance(current, FilePreviewPage):
+            return False
+        return self._preview_split_kind_for_page(current) == new_kind
 
     def _remember_current_split(
         self,
@@ -4125,14 +4161,19 @@ class PreviewTabWidget(QTabWidget):
         Either way, a file that is already open somewhere just gets focused
         instead of being loaded a second time.
 
-        When the Preview is split, a normal open keeps the split and loads the
-        file into both panes. Additional Tab briefly leaves split so the new
-        file tab is created, then re-opens the same left/right layout on that
-        new tab (so the added tab is also split).
+        When the Preview is split, a normal open of the *same* FASTA shape
+        (multi vs single) keeps the split and loads the file into both panes.
+        Opening a different kind (e.g. PDF, or single-seq after MSA) leaves
+        split without clearing the previous shape's preference, then applies
+        that kind's remembered split if any.
+
+        Additional Tab briefly leaves split so the new file tab is created,
+        then re-opens the same left/right layout on that tab when the new file
+        is the same FASTA shape.
 
         After you use Overview|Dotplot split on an MSA (or a single-seq FASTA),
         the next open of the same shape auto-restores that split until you
-        turn Split window off.
+        turn Split window off. Non-FASTA files (PDF, …) never auto-split.
         """
         resolved = path.expanduser().resolve()
         key = str(resolved)
@@ -4142,10 +4183,16 @@ class PreviewTabWidget(QTabWidget):
             fasta_tab = current.current_fasta_tab_index()
 
         # Additional Tab while split: remember Overview|Dotplot, close split so
-        # the new tab is a real Preview tab, then restore split on that tab.
+        # the new tab is a real Preview tab, then restore split on that tab
+        # only when the new file is the same FASTA shape.
         restore_split: tuple[int, int] | None = None
         if not replace and self.is_split_active():
             restore_split = self._split_layout_snapshot()
+            self._close_inline_split(clear_preference=False)
+        elif replace and self.is_split_active() and not self._should_keep_inline_split_for_path(
+            resolved
+        ):
+            # PDF / other kind / other FASTA shape: leave split, keep prefs.
             self._close_inline_split(clear_preference=False)
 
         # While split (replace path), keep each pane's Text/Overview/Dotplot.
@@ -4153,8 +4200,16 @@ class PreviewTabWidget(QTabWidget):
 
         def _finish_open_split() -> None:
             if restore_split is not None:
-                self._restore_split_layout(restore_split)
-                return
+                # Additional Tab left a layout snapshot. Restore it only when
+                # the new file is the same FASTA shape (not PDF / other kind).
+                new_kind = self._preview_split_kind_for_path(resolved)
+                page = self.currentWidget()
+                page_kind = self._preview_split_kind_for_page(
+                    page if isinstance(page, FilePreviewPage) else None
+                )
+                if new_kind is not None and new_kind == page_kind:
+                    self._restore_split_layout(restore_split)
+                    return
             if not self.is_split_active():
                 self._maybe_apply_remembered_split()
 
@@ -4234,8 +4289,18 @@ class PreviewTabWidget(QTabWidget):
             self._suppress_remembered_split = False
         self._sync_tab_bar_visible()
         if restore_split is not None:
-            self._restore_split_layout(restore_split)
-        elif not self.is_split_active():
+            page = self.currentWidget()
+            page_kind = self._preview_split_kind_for_page(
+                page if isinstance(page, FilePreviewPage) else None
+            )
+            # Only put the prior layout back when the focused new tab is the
+            # same FASTA shape (PDF / text stay single-pane).
+            if page_kind is not None:
+                path_kind = self._preview_split_kind_for_path(page.path)
+                if path_kind == page_kind:
+                    self._restore_split_layout(restore_split)
+                    return
+        if not self.is_split_active():
             self._maybe_apply_remembered_split()
 
     def open_self_dotplot_tab(self, path: object, sequence_id: str) -> FilePreviewPage | None:

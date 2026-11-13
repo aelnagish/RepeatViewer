@@ -10,7 +10,10 @@ from datetime import datetime
 from pathlib import Path
 
 from repeatviewer.app_preferences import config_dir
-from repeatviewer.backends.sequence_features import summarize_single_sequence_fasta
+from repeatviewer.backends.sequence_features import (
+    aligned_fasta_width,
+    summarize_single_sequence_fasta,
+)
 
 _FASTA_SUFFIXES = {".fa", ".fasta", ".fas", ".fna", ".faa"}
 # Summarising a single-record FASTA loads the whole sequence into memory
@@ -28,7 +31,8 @@ _METADATA_CACHE_SAVE_TIMER: threading.Timer | None = None
 
 
 def _metadata_cache_path() -> Path:
-    return config_dir() / "browser_file_metadata_cache.json"
+    # v2: Length column stores MSA column count for equal-length multi-FASTA.
+    return config_dir() / "browser_file_metadata_cache_v2.json"
 
 
 def _load_metadata_cache_from_disk() -> None:
@@ -380,6 +384,15 @@ def enrich_fasta_metadata(path: Path) -> BrowserFileMetadata:
                 gc_key = float(summary.gc_percent)
         except (OSError, ValueError):
             pass
+    elif seq_count >= 2 and size <= _MAX_FASTA_SUMMARY_BYTES:
+        # MSA / equal-length multi-FASTA: Length = alignment columns.
+        try:
+            width = aligned_fasta_width(path)
+        except (OSError, ValueError):
+            width = None
+        if width is not None:
+            length_text = f"{width:,}"
+            length_key = float(width)
 
     meta = BrowserFileMetadata(
         modified_text=_format_modified(mtime),

@@ -114,7 +114,8 @@ class RepeatViewerPlugin(ABC):
 
         ``cancel`` is a ``JobCancellation`` from the main window Stop button.
         """
-        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import concurrent.futures as _cf
+        import concurrent.futures.thread as _cf_thread
         import threading
 
         from repeatviewer.backends.job_cancel import JobCancelledError, check_cancelled
@@ -152,9 +153,9 @@ class RepeatViewerPlugin(ABC):
                 check_cancelled(cancel)
                 _run_one(path)
         else:
-            with ThreadPoolExecutor(max_workers=workers) as pool:
+            with _cf_thread.ThreadPoolExecutor(max_workers=workers) as pool:
                 futures = [pool.submit(_run_one, p) for p in file_list]
-                for fut in as_completed(futures):
+                for fut in _cf.as_completed(futures):
                     check_cancelled(cancel)
                     # Surface cancel from worker threads.
                     exc = fut.exception()

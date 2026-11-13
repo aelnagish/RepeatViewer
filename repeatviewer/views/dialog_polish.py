@@ -1,6 +1,6 @@
 """Automatic, app-wide polish for the tool parameter dialogs.
 
-When a dialog from ``repeatviewer.views.tool_dialogs`` is first shown, give every
+When a dialog from ``repeatviewer.views`` is first shown, give every
 combo/spin box one uniform width and every QFormLayout label a uniform
 right-aligned column, so the parameter dialogs stay symmetric without
 per-dialog code.
@@ -8,8 +8,12 @@ per-dialog code.
 IMPORTANT: never install a Python event filter on QApplication. On macOS,
 PySide6 can segfault when an application-level filter runs during
 ``QObject::setProperty`` (nested ``getWrapperForQObject``). Polish uses a
-per-dialog object filter instead, and only *schedules* work with a
-zero-delay timer (never mutate widgets during event delivery).
+per-dialog object filter instead.
+
+Layout jumps after open: polish and ``prepare_for_show`` must run *before*
+``show()`` (see ``prepare_params_dialog_for_show``). The Show filter only
+covers dialogs that skipped that helper; it still defers with a zero-delay
+timer (never mutate widgets during event delivery).
 """
 
 from __future__ import annotations
@@ -33,7 +37,9 @@ _seen: WeakSet = WeakSet()
 _installed = False
 
 
-def polish_form_dialog(dialog: QDialog) -> None:
+def polish_form_dialog(dialog: QDialog, *, adjust_size: bool = True) -> None:
+    """Align combo/spin widths and form labels; optionally ``adjustSize``."""
+
     def _explicitly_fixed(widget) -> bool:
         # Honor widths already pinned by the dialog (e.g. Blast spin boxes at 150).
         return widget.minimumWidth() > 0 and widget.minimumWidth() == widget.maximumWidth()
@@ -65,7 +71,34 @@ def polish_form_dialog(dialog: QDialog) -> None:
             lbl.setFixedWidth(label_width)
             lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
-    dialog.adjustSize()
+    if adjust_size:
+        dialog.adjustSize()
+    setattr(dialog, "_repeatviewer_form_polished", True)
+
+
+def prepare_params_dialog_for_show(dialog: QDialog) -> None:
+    """Polish + dialog-specific layout *before* the first paint.
+
+    Call this immediately before ``dialog.show()`` so the first frame already
+    has aligned columns and the final size (no post-show jump).
+    """
+    if not isinstance(dialog, QDialog):
+        return
+    try:
+        prepare = getattr(dialog, "prepare_for_show", None)
+        has_prepare = callable(prepare)
+        # tool_dialogs + any dialog that implements prepare_for_show (Tree,
+        # Map, Samtools, Primers, …).
+        if _should_polish_dialog(dialog) or has_prepare:
+            if not getattr(dialog, "_repeatviewer_form_polished", False):
+                # Skip adjustSize when prepare_for_show will set the real height —
+                # adjustSize uses the tallest tab and leaves a blank band.
+                polish_form_dialog(dialog, adjust_size=not has_prepare)
+        if has_prepare:
+            prepare()
+        _seen.add(dialog)
+    except Exception:
+        pass
 
 
 class _DialogShowWatcher(QObject):
@@ -76,25 +109,45 @@ class _DialogShowWatcher(QObject):
             dialog = obj
             if isinstance(dialog, QDialog) and dialog not in _seen:
                 _seen.add(dialog)
+                # Fallback when open paths forget prepare_params_dialog_for_show.
                 QTimer.singleShot(0, lambda d=dialog: _deferred_polish(d))
         return False
 
 
 def _deferred_polish(dialog: QDialog) -> None:
     try:
-        polish_form_dialog(dialog)
+        if getattr(dialog, "_repeatviewer_form_polished", False):
+            # Already laid out before show — do not polish or prepare again
+            # (a second adjustSize / fit is the post-open jump).
+            return
+        prepare = getattr(dialog, "prepare_for_show", None)
+        has_prepare = callable(prepare)
+        polish_form_dialog(dialog, adjust_size=not has_prepare)
+        if has_prepare:
+            prepare()
     except Exception:
         pass
 
 
+_POLISH_MODULE_PREFIXES = (
+    "repeatviewer.views.tool_dialogs",
+    "repeatviewer.views.tree_dialog",
+    "repeatviewer.views.map_reference_dialog",
+    "repeatviewer.views.samtools_dialog",
+    "repeatviewer.views.primer_dialogs",
+    "repeatviewer.views.ncbi_download_dialog",
+)
+
+
 def _should_polish_dialog(dialog: QDialog) -> bool:
     module = type(dialog).__module__ or ""
-    return module.startswith("repeatviewer.views.tool_dialogs")
+    return module.startswith(_POLISH_MODULE_PREFIXES)
 
 
 def _patched_qdialog_init(self, *args, **kwargs) -> None:
     _original_qdialog_init(self, *args, **kwargs)
-    if not _should_polish_dialog(self):
+    # Watch tool params dialogs and any dialog that implements prepare_for_show.
+    if not (_should_polish_dialog(self) or hasattr(self, "prepare_for_show")):
         return
     if getattr(self, "_repeatviewer_dialog_show_watcher", None) is not None:
         return

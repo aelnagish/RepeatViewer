@@ -21,8 +21,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from repeatviewer.backends.blast_genome_plot import is_genome_map_html_file
-from repeatviewer.backends.curation import is_flexidot_html_file
+from repeatviewer.backends.html_kinds import (
+    is_flexidot_html_file,
+    is_genome_map_html_file,
+)
 from repeatviewer.backends.flexidot_go_to import (
     FLEXIDOT_GO_TO_BRIDGE_JS,
     payload_from_console_message,

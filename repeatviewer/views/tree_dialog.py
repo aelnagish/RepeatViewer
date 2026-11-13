@@ -390,14 +390,20 @@ class TreeParamsDialog(QDialog):
         self._sync_field_columns()
         self._tab_changed(self._tabs.currentIndex())
         self._sync()
+        # Background load — never block opening the window for this.
         QTimer.singleShot(0, self._start_summary_load)
-        QTimer.singleShot(0, self._fit_to_content)
+        # Final size is applied in prepare_for_show (before the first paint).
         self.resize(self._DIALOG_WIDTH, 420)
+
+    def prepare_for_show(self) -> None:
+        """Align columns and size before the first paint (no post-show jump)."""
+        self._sync_field_columns()
+        self._fit_to_content()
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
+        # Columns only — sizing was done in prepare_for_show before show().
         self._sync_field_columns()
-        QTimer.singleShot(0, self._fit_to_content)
 
     def _sync_field_columns(self) -> None:
         sync_form_field_column_spacers(
@@ -451,6 +457,8 @@ class TreeParamsDialog(QDialog):
         self._cov_ref.setFixedWidth(TOOL_PARAMS_FIELD_WIDTH - 96)
         self._frag_hint = _note("Counting sequences…", self)
         self._frag_hint.setWordWrap(False)
+        # One-line row: keep height stable when the count text arrives.
+        self._frag_hint.setMinimumHeight(self._frag_hint.fontMetrics().height() + 2)
         self._frag_hint_label = QLabel("")
 
         # Inputs: Files-panel selection, or files chosen for this run only.
@@ -567,10 +575,10 @@ class TreeParamsDialog(QDialog):
             "Alignment:",
             field_with_help(self._align_mode, "Alignment", ALIGN_INFO),
         )
-        f.addRow(
-            "Monomers:",
-            field_with_help(self._rotate, "Rotate monomers", ROTATE_INFO),
+        self._rotate_field = field_with_help(
+            self._rotate, "Rotate monomers", ROTATE_INFO
         )
+        f.addRow("Monomers:", self._rotate_field)
         f.addRow(
             "Skip fragments:",
             field_with_help(
@@ -805,15 +813,14 @@ class TreeParamsDialog(QDialog):
     def _apply_engine_rows(self) -> None:
         """Show only the open engine's Settings rows."""
         engine = self._last_engine
-        f = self._form
         on_iq = engine == TREE_ENGINE_IQTREE
-        f.setRowVisible(self._support_iq_field, on_iq)
-        f.setRowVisible(self._support_fme_field, engine == TREE_ENGINE_FASTME)
-        f.setRowVisible(self._support_ft_field, engine == TREE_ENGINE_FASTTREE)
-        f.setRowVisible(self._ft_note, engine == TREE_ENGINE_FASTTREE)
-        f.setRowVisible(self._model_field, on_iq)
-        f.setRowVisible(self._mask_field, on_iq and not self._protein())
-        f.setRowVisible(self._fast_field, on_iq)
+        self._set_row(self._form, self._support_iq_field, on_iq)
+        self._set_row(self._form, self._support_fme_field, engine == TREE_ENGINE_FASTME)
+        self._set_row(self._form, self._support_ft_field, engine == TREE_ENGINE_FASTTREE)
+        self._set_row(self._form, self._ft_note, engine == TREE_ENGINE_FASTTREE)
+        self._set_row(self._form, self._model_field, on_iq)
+        self._set_row(self._form, self._mask_field, on_iq and not self._protein())
+        self._set_row(self._form, self._fast_field, on_iq)
         self._sync_iqtree_fast_enabled()
 
     def _iq_ufboot_replicates(self) -> int:
@@ -855,7 +862,12 @@ class TreeParamsDialog(QDialog):
     def _set_advanced_visible(self, visible: bool) -> None:
         panel = self._iq_advanced_panel
         panel.setVisible(visible)
-        panel.setMaximumHeight(16777215 if visible else 0)
+        if visible:
+            panel.setMinimumHeight(0)
+            panel.setMaximumHeight(16777215)
+        else:
+            # Fixed 0 so sizeHint cannot leave a blank band under Settings.
+            panel.setFixedHeight(0)
         panel.updateGeometry()
 
     def _on_advanced_toggled(self, checked: bool) -> None:
@@ -882,7 +894,7 @@ class TreeParamsDialog(QDialog):
 
     def _sync_inputs(self) -> None:
         define = self._input_define.isChecked()
-        self._form.setRowVisible(self._define_inputs, define)
+        self._set_row(self._form, self._define_inputs, define)
         self.setMinimumWidth(tool_params_dialog_width(define_inputs=define))
 
     def _on_inputs_changed(self, *_args) -> None:
@@ -913,7 +925,15 @@ class TreeParamsDialog(QDialog):
 
     @staticmethod
     def _set_row(form: QFormLayout, field: QWidget, visible: bool) -> None:
+        """Show/hide a form row and collapse its height (no blank before show)."""
         form.setRowVisible(field, visible)
+        field.setVisible(visible)
+        if visible:
+            field.setMinimumHeight(0)
+            field.setMaximumHeight(16777215)
+        else:
+            field.setFixedHeight(0)
+        field.updateGeometry()
 
     def _choose_outgroup(self) -> None:
         names = (
@@ -943,9 +963,9 @@ class TreeParamsDialog(QDialog):
     def _on_summary_ready(self, summary) -> None:
         self._summary_loader = None
         self._summary = summary
+        # Hint row is already visible ("Counting sequences…"); only refresh
+        # text/visibility — do not re-fit (that caused a ~1s layout jump).
         self._sync()
-        if self.isVisible():
-            QTimer.singleShot(0, self._fit_to_content)
 
     def _update_check(self, *_args) -> None:
         s = self._summary
@@ -972,9 +992,7 @@ class TreeParamsDialog(QDialog):
     def _sync(self, *_args) -> None:
         protein = self._protein()
         aligning = self._align_mode.currentData() != TREE_ALIGN_NEVER
-        self._set_row(
-            self._top_form, self._rotate.parentWidget(), aligning and not protein
-        )
+        self._set_row(self._top_form, self._rotate_field, aligning and not protein)
         self._apply_engine_rows()
         outgroup = self._root_mode.currentData() == TREE_ROOT_OUTGROUP
         self._outgroup_btn.setEnabled(outgroup)
@@ -1056,26 +1074,61 @@ class TreeParamsDialog(QDialog):
             + tab_h + self._button_box.sizeHint().height()
         )
 
+    def _engine_compact_content_height(self) -> int:
+        """Height of Inputs/Alignment/Settings (+ Advanced if open), no blank band."""
+        root = self._engine_page.layout()
+        margins = root.contentsMargins() if root is not None else None
+        margin_h = (margins.top() + margins.bottom()) if margins is not None else 20
+        spacing = root.spacing() if root is not None else 4
+        form = self._form
+        form.activate()
+        basic_h = max(form.totalMinimumSize().height(), form.totalSizeHint().height())
+        content_h = margin_h + basic_h + spacing
+        adv = self._iq_advanced_panel
+        if adv.isVisible() and adv.maximumHeight() > 0:
+            content_h += max(adv.minimumSizeHint().height(), adv.sizeHint().height())
+        return content_h
+
     def _fit_to_content(self) -> None:
         """Size the window to the open tab's real height (no blank band)."""
+        on_options = self._stack.currentIndex() == 1
         page = self._stack.currentWidget()
         if page is None:
             return
         self._stack.setMaximumHeight(16777215)
-        page.setMaximumHeight(16777215)
+        for i in range(self._stack.count()):
+            w = self._stack.widget(i)
+            if w is None:
+                continue
+            if w is page:
+                w.setMinimumHeight(0)
+                w.setMaximumHeight(16777215)
+                w.setSizePolicy(
+                    QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
+                )
+            else:
+                w.setFixedHeight(0)
+                w.setSizePolicy(
+                    QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Ignored
+                )
         page.ensurePolished()
         root = page.layout()
         if root is not None:
             root.invalidate()
             root.activate()
-        content_h = max(page.minimumSizeHint().height(), page.sizeHint().height())
-        if root is not None:
-            content_h = max(
-                content_h,
-                root.totalMinimumSize().height(),
-                root.totalSizeHint().height(),
-            )
-        self._stack.setMaximumHeight(content_h)
+        if on_options:
+            content_h = max(page.minimumSizeHint().height(), page.sizeHint().height())
+            if root is not None:
+                content_h = max(
+                    content_h,
+                    root.totalMinimumSize().height(),
+                    root.totalSizeHint().height(),
+                )
+        else:
+            # Measure the engine form only — page sizeHint can keep leftover
+            # height from the Options stack page / collapsed Advanced panel.
+            content_h = self._engine_compact_content_height()
+        self._stack.setFixedHeight(content_h)
         page.setMaximumHeight(content_h)
         height = self._dialog_chrome_height() + content_h
         screen = self.screen().availableGeometry() if self.screen() else None

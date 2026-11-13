@@ -1039,15 +1039,15 @@ def fasta_record_lengths(path: Path) -> dict[str, int]:
     return lengths
 
 
-def is_aligned_fasta(path: Path) -> bool:
-    """True when the FASTA has ≥2 records that all share one positive length.
+def aligned_fasta_width(path: Path) -> int | None:
+    """Return MSA column count when FASTA has ≥2 equal-length records.
 
-    Used to choose residue-row MSA view in Preview Annotation. Streams once;
-    does not load sequences into memory.
+    Streams once without keeping sequences in memory. Returns ``None`` when the
+    file is missing, has fewer than two records, or lengths differ.
     """
     resolved = Path(path).expanduser().resolve()
     if not resolved.is_file():
-        return False
+        return None
     count = 0
     length: int | None = None
     try:
@@ -1057,15 +1057,26 @@ def is_aligned_fasta(path: Path) -> bool:
                 continue
             seq_len = len(record.seq)
             if seq_len <= 0:
-                return False
+                return None
             if length is None:
                 length = seq_len
             elif seq_len != length:
-                return False
+                return None
             count += 1
     except (OSError, ValueError):
-        return False
-    return count >= 2 and length is not None and length > 0
+        return None
+    if count >= 2 and length is not None and length > 0:
+        return int(length)
+    return None
+
+
+def is_aligned_fasta(path: Path) -> bool:
+    """True when the FASTA has ≥2 records that all share one positive length.
+
+    Used to choose residue-row MSA view in Preview Annotation. Streams once;
+    does not load sequences into memory.
+    """
+    return aligned_fasta_width(path) is not None
 
 
 def load_aligned_fasta_rows(path: Path) -> tuple[list[str], list[str]]:

@@ -10006,7 +10006,8 @@ class SequenceMapPanel(QWidget):
         job_opts = opts
 
         def _job(*, progress=None):
-            from concurrent.futures import ThreadPoolExecutor, as_completed
+            import concurrent.futures as _cf
+            import concurrent.futures.thread as _cf_thread
             import threading
 
             from repeatviewer.backends.annotation_transfer import (
@@ -10088,9 +10089,9 @@ class SequenceMapPanel(QWidget):
                 except Exception as exc:  # noqa: BLE001 — skip this source only
                     return label, None, str(exc) or exc.__class__.__name__
 
-            with ThreadPoolExecutor(max_workers=max(1, parallel)) as pool:
+            with _cf_thread.ThreadPoolExecutor(max_workers=max(1, parallel)) as pool:
                 futures = [pool.submit(_run_one, item) for item in work]
-                for future in as_completed(futures):
+                for future in _cf.as_completed(futures):
                     if self._transfer_cancel.requested:
                         for pending in futures:
                             pending.cancel()

@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from repeatviewer.backends.curation import is_flexidot_html_file
+from repeatviewer.backends.html_kinds import is_flexidot_html_file
 
 
 def may_attempt_embedded_html_preview(*, force: bool = False) -> bool:

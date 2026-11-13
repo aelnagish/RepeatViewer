@@ -10,6 +10,8 @@ requests>=2.28
 orfipy>=0.0.4
 pyhmmer>=0.12.0
 primer3-py>=2.0
+# Large BAM / CRAM browser + Tools → Samtools (macOS / Linux; no Windows wheels).
+pysam>=0.22; sys_platform != "win32"
 # Forked Flexidot (Jiangzhao branch) with html output + --teviewer-integration
 # (interactive Go-to dotplots). Stock PyPI flexidot only supports png/pdf/svg.
 flexidot @ git+https://github.com/qjiangzhao/flexidot.git@Jiangzhao

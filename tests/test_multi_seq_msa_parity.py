@@ -831,20 +831,21 @@ def test_multi_seq_bar_respects_track_height_and_gap(qapp: QApplication) -> None
         sequences=["A" * 100, "C" * 80, "G" * 120],
     )
     assert not canvas.is_msa_mode()
+    canvas.set_show_annotation_track(False)
     canvas.set_track_height(1)
-    canvas.set_sequence_row_gap(1)
-    canvas.set_track_gap(1)  # Track distance (min 1) also spaces rows
+    canvas.set_sequence_row_gap(9)  # ignored while annotations are hidden
+    canvas.set_track_gap(1)
     canvas._ppb = 0.2
     canvas._recompute_layout()
     band = canvas._row_letter_band_height()
     assert band >= 1
     assert canvas._multi_seq_bar_height(0) == band
-    # Pitch = band + gap; painted bar must not spill into the gap/next row.
-    assert canvas.row_tops()[1] == canvas.row_tops()[0] + band + 1 + 1
+    # Annotations off: pitch = band + Track distance only.
+    assert canvas.row_tops()[1] == canvas.row_tops()[0] + band + 1
     assert canvas._sequence_bar_y(0) + canvas._multi_seq_bar_height(0) <= canvas.row_tops()[1]
-    canvas.set_sequence_row_gap(6)
+    canvas.set_track_gap(6)
     canvas._recompute_layout()
-    assert canvas.row_tops()[1] == canvas.row_tops()[0] + band + 6 + 1
+    assert canvas.row_tops()[1] == canvas.row_tops()[0] + band + 6
     canvas.close()
 
 
@@ -1059,14 +1060,15 @@ def test_msa_letter_background_square_connects_rows(qapp: QApplication) -> None:
     canvas.show()
     qapp.processEvents()
     canvas.set_msa_data(["s1", "s2"], ["ACGTACGTAC", "ACGTACGTAC"])
-    canvas.set_sequence_row_gap(0)
-    canvas.set_track_gap(1)  # Track distance (min 1) also spaces rows
+    canvas.set_show_annotation_track(False)
+    canvas.set_sequence_row_gap(5)  # ignored while annotations are hidden
+    canvas.set_track_gap(0)  # 0 = bands touch
     canvas._ppb = letter_ppb
     canvas._recompute_layout()
     assert canvas._msa_shows_letters()
     assert canvas._msa_letter_band_height() == letter_h
-    # Sequence distance 0: only the 1 px minimum Track distance separates bands.
-    assert canvas.row_tops()[1] == canvas.row_tops()[0] + canvas._msa_letter_band_height() + 1
+    # Track distance 0 with annotations hidden: row edges touch.
+    assert canvas.row_tops()[1] == canvas.row_tops()[0] + canvas._msa_letter_band_height()
     r0 = _msa_letter_bg_rect(
         0.0,
         float(canvas.row_tops()[0]),
@@ -1081,7 +1083,7 @@ def test_msa_letter_background_square_connects_rows(qapp: QApplication) -> None:
         float(letter_h),
         letter_side=float(letter_h),
     )
-    assert r0.bottom() + 1 == pytest.approx(r1.top())
+    assert r0.bottom() == pytest.approx(r1.top())
     # Max zoom reaches 3× size-10 so fills can widen; band height stays fixed.
     _fit, max_ppb = canvas.zoom_bounds()
     assert max_ppb >= letter_ppb * _MSA_LETTER_BG_MAX_WIDTH_SCALE - 1e-6
@@ -1211,18 +1213,21 @@ def test_name_click_selects_sequence_msa_click_clears(qapp: QApplication) -> Non
 
 
 def test_track_distance_spaces_rows_without_annotations(qapp: QApplication) -> None:
-    """Track distance adds space below a sequence with no annotation rows."""
+    """With annotations hidden, Track distance alone spaces sequences (0 = flush)."""
     from repeatviewer.widgets.multi_sequence_overview import _BarsCanvas
 
     canvas = _BarsCanvas()
     canvas.set_msa_data(["a", "b"], ["ACGTACGTAC", "ACGTACGTAC"])
-    canvas.set_sequence_row_gap(0)
-    canvas.set_track_gap(0)  # clamps to the 1 px minimum
-    assert canvas.track_gap() == 1
+    canvas.set_show_annotation_track(False)
+    # Sequence distance must not add a second gap when annotations are off.
+    canvas.set_sequence_row_gap(9)
+    canvas.set_track_gap(0)
+    assert canvas.track_gap() == 0
     canvas._recompute_layout()
     tight = canvas.row_tops()[1]
+    assert tight == canvas.row_tops()[0] + canvas._msa_letter_band_height()
     canvas.set_track_gap(7)
-    assert canvas.row_tops()[1] == tight + 6
+    assert canvas.row_tops()[1] == tight + 7
     canvas.close()
 
 

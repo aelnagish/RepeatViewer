@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import collections
 import os
+import re
 from collections import defaultdict
 from collections.abc import Callable
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -301,24 +302,26 @@ def resolve_tsd_boundaries(
 TSD_BOUNDARY_DEFINITION_HELP = (
     "Sets the TE left and right edges; TSDs are searched within the search "
     "range (± columns) outside each edge.<br><br>"
-    "<b>Auto detect</b><br>Uses Boundary prediction (Annotation tab). The "
-    "first available boundary is used, in this order:<br>"
+    "<b>Auto detect</b><br>Reuses Boundary prediction results already shown "
+    "in the Annotation tab (or ``*.boundaries_RV.json``). The first available "
+    "edge is used, in this order:<br>"
     "1. LTR or TIR<br>"
     "2. Genome Cov<br>"
-    "3. MSA identity<br>"
-    "Results already shown in Boundary prediction (or saved by TEtrimmer as "
-    "*.boundaries_RV.json) are reused. In an open MSA without them, Boundary "
-    "prediction runs first, then the TSD search starts. If no boundary is "
-    "found, the TSD search splits the MSA at its middle column.<br><br>"
+    "3. MSA identity (density)<br>"
+    "If none of those exist yet, Boundary prediction is run first, then the "
+    "same order is applied. Feature detection LTR/TIR arrows on the map are "
+    "used only when Boundary prediction still has no edges. If no boundary is "
+    "found, the TSD search looks within the search range at the MSA ends."
+    "<br><br>"
     "<b>User define</b><br>A window opens at run time; type the left and right "
     "columns or drag across the MSA to fill them."
 )
 
 
 def auto_tsd_span(prediction) -> tuple[int, int] | None:
-    """Auto detect edge span (0-based, exclusive end): LTR/TIR, Genome Cov, MSA identity.
+    """Auto detect edge span (0-based, exclusive end).
 
-    A TEtrimmer sidecar that only stores ``final`` falls back to it.
+    Priority: LTR/TIR → Genome Cov → MSA identity → ``final`` sidecar span.
     """
     if prediction is None:
         return None
@@ -333,6 +336,25 @@ def auto_tsd_span(prediction) -> tuple[int, int] | None:
     return None
 
 
+def auto_tsd_span_source(prediction) -> str | None:
+    """Which Boundary prediction field ``auto_tsd_span`` would pick."""
+    if prediction is None:
+        return None
+    mapping = (
+        ("LTR/TIR", prediction.terminal_repeat),
+        ("Genome Cov", prediction.blast_coverage),
+        ("MSA identity", prediction.msa_identity),
+        ("final", prediction.final),
+    )
+    for label, span in mapping:
+        if span is not None and int(span[1]) > int(span[0]):
+            if label == "LTR/TIR":
+                kind = str(getattr(prediction, "terminal_repeat_type", "") or "").upper()
+                return kind if kind in {"LTR", "TIR"} else "LTR/TIR"
+            return label
+    return None
+
+
 def boundaries_from_prediction_1based(prediction) -> tuple[int, int] | None:
     """Auto detect edges as 1-based inclusive columns."""
     span = auto_tsd_span(prediction)
@@ -341,27 +363,34 @@ def boundaries_from_prediction_1based(prediction) -> tuple[int, int] | None:
     return span[0] + 1, span[1]  # exclusive end → 1-based last inclusive
 
 
+def load_boundary_prediction_for_tsd(
+    file_path: str | Path,
+    aln_len: int,
+    *,
+    prediction=None,
+):
+    """Return an in-memory or on-disk Boundary prediction with usable edges.
+
+    Prefers ``prediction`` when it already has LTR/TIR, Genome Cov, or MSA
+    identity. Otherwise loads ``*.boundaries_RV.json`` beside the MSA.
+    """
+    if auto_tsd_span(prediction) is not None:
+        return prediction
+    from repeatviewer.backends.boundary_predict import load_boundary_prediction_json
+
+    loaded = load_boundary_prediction_json(file_path, msa_width=max(1, int(aln_len)))
+    if auto_tsd_span(loaded) is not None:
+        return loaded
+    return prediction if prediction is not None else loaded
+
+
 def boundaries_from_sidecar_1based(
     file_path: str | Path,
     aln_len: int,
 ) -> tuple[int, int] | None:
     """Auto detect edges from ``*.boundaries_RV.json`` (1-based inclusive)."""
-    from repeatviewer.backends.boundary_predict import load_boundary_prediction_json
-
-    prediction = load_boundary_prediction_json(file_path, msa_width=aln_len)
-    if prediction is None:
-        return None
-    span = auto_tsd_span(prediction)
-    if span is None:
-        return None
-    start_0, end_excl = int(span[0]), int(span[1])
-    if end_excl <= start_0:
-        return None
-    left_1 = start_0 + 1
-    right_1 = end_excl  # exclusive end → 1-based last inclusive
-    if right_1 < left_1:
-        return None
-    return left_1, right_1
+    prediction = load_boundary_prediction_for_tsd(file_path, aln_len)
+    return boundaries_from_prediction_1based(prediction)
 
 
 def boundaries_from_sequence_extent_1based(seq: str) -> tuple[int, int] | None:
@@ -379,6 +408,74 @@ def boundaries_from_sequence_extent_1based(seq: str) -> tuple[int, int] | None:
     return first + 1, last + 1
 
 
+_TERMINAL_PAIR_NAME_RE = re.compile(
+    r"^(?P<kind>LTR|TIR)(?P<end>[53])(?:_\d+)?(?:\s*\([^)]*\))?\s*$",
+    re.IGNORECASE,
+)
+
+
+def boundaries_from_terminal_features_1based(
+    features_by_id: dict[str, list] | None,
+) -> tuple[int, int] | None:
+    """TE edges from Feature detection LTR/TIR arrows (1-based inclusive)."""
+    if not features_by_id:
+        return None
+    lefts: list[int] = []
+    rights: list[int] = []
+    for feats in features_by_id.values():
+        if not feats:
+            continue
+        left_5: list[int] = []
+        right_3: list[int] = []
+        any_term: list[tuple[int, int]] = []
+        for feat in feats:
+            ftype = str(getattr(feat, "feature_type", "") or "").upper()
+            if ftype not in {"LTR", "TIR"}:
+                continue
+            try:
+                start = int(feat.start)
+                end = int(feat.end)
+            except (TypeError, ValueError, AttributeError):
+                continue
+            if end < start:
+                start, end = end, start
+            any_term.append((start, end))
+            match = _TERMINAL_PAIR_NAME_RE.match(str(getattr(feat, "name", "") or ""))
+            if match is None:
+                continue
+            if match.group("end") == "5":
+                left_5.append(start)
+            elif match.group("end") == "3":
+                right_3.append(end)
+        if left_5 and right_3:
+            left_edge = min(left_5)
+            right_edge = max(right_3)
+        elif len(any_term) >= 2:
+            ordered = sorted(any_term, key=lambda span: (span[0], span[1]))
+            left_edge = ordered[0][0]
+            right_edge = ordered[-1][1]
+        else:
+            continue
+        if right_edge > left_edge:
+            lefts.append(left_edge)
+            rights.append(right_edge)
+    if not lefts or not rights:
+        return None
+
+    def _median(values: list[int]) -> int:
+        ordered = sorted(values)
+        mid = len(ordered) // 2
+        if len(ordered) % 2:
+            return int(ordered[mid])
+        return int(round(0.5 * (ordered[mid - 1] + ordered[mid])))
+
+    left = _median(lefts)
+    right = _median(rights)
+    if right <= left:
+        return None
+    return left, right
+
+
 def preferred_tsd_boundaries_1based(
     file_path: str | Path,
     aln_len: int,
@@ -389,14 +486,13 @@ def preferred_tsd_boundaries_1based(
     reference_extent_1based: tuple[int, int] | None = None,
     reference_sequence: str | None = None,
     prediction=None,
+    features_by_id: dict[str, list] | None = None,
 ) -> tuple[int, int]:
-    """Prefill left/right (1-based) for the run-time TSD boundary dialog.
+    """Resolve Auto detect / reference TE edges (1-based inclusive).
 
-    Auto detect uses ``prediction`` (Boundary prediction in the open MSA)
-    first, then ``*.boundaries_RV.json``.
-
-    ``boundary_source`` is one of ``repeatviewer`` / ``reference`` / ``user``.
-    Falls back to saved values, then ``0, 0`` (whole-MSA midpoint search).
+    Auto detect: in-memory Boundary prediction → ``*.boundaries_RV.json`` →
+    Feature detection LTR/TIR arrows. Span priority inside a prediction is
+    LTR/TIR → Genome Cov → MSA identity.
     """
     from repeatviewer.job_options import (
         TSD_BOUNDARY_REFERENCE,
@@ -420,16 +516,18 @@ def preferred_tsd_boundaries_1based(
                 return extent
         return saved
 
-    # Default / Auto detect: Boundary prediction, then *.boundaries_RV.json
     if source != TSD_BOUNDARY_REPEATVIEWER:
         source = TSD_BOUNDARY_REPEATVIEWER
     del source
-    auto = boundaries_from_prediction_1based(prediction)
+    pred = load_boundary_prediction_for_tsd(
+        file_path, aln_len, prediction=prediction
+    )
+    auto = boundaries_from_prediction_1based(pred)
     if auto is not None:
         return auto
-    rv = boundaries_from_sidecar_1based(file_path, aln_len)
-    if rv is not None:
-        return rv
+    from_feats = boundaries_from_terminal_features_1based(features_by_id)
+    if from_feats is not None:
+        return from_feats
     return saved
 
 
@@ -453,7 +551,8 @@ def resolve_tsd_search_scope(
         edges = resolve_tsd_boundaries(aln_len, left_1, right_1, radius)
         return edges[0], edges[1], radius, "explicit"
     edges = resolve_tsd_boundaries(aln_len, 0, 0, radius)
-    return edges[0], edges[1], max(radius, aln_len), "whole_msa"
+    # Keep the configured search radius (do not inflate to aln_len).
+    return edges[0], edges[1], radius, "whole_msa"
 
 
 def _msa_midpoint_halves(seq_str: str) -> tuple[list[int], list[int]]:
@@ -465,6 +564,15 @@ def _msa_midpoint_halves(seq_str: str) -> tuple[list[int], list[int]]:
     left = [c for c in range(0, mid) if seq_str[c] != "-"]
     right = [c for c in range(mid, aln_len) if seq_str[c] != "-"]
     return left, right
+
+
+def _msa_whole_search_windows(
+    seq_str: str, nt_radius: int
+) -> tuple[list[int], list[int]]:
+    """Terminal search windows when TE edges are unset (whole-MSA mode)."""
+    left_half, right_half = _msa_midpoint_halves(seq_str)
+    radius = max(1, int(nt_radius))
+    return left_half[:radius], right_half[-radius:] if right_half else []
 
 
 def _tsd_nucleotide_span(
@@ -530,7 +638,8 @@ def _scan_record_tsd_hits(
     msa_to_nt = {col: i for i, col in enumerate(all_nt_pos)}
 
     if whole_msa:
-        l_nt_pos_map, r_nt_pos_map = _msa_midpoint_halves(seq_str)
+        # Unset edges: only scan near MSA termini (not entire midpoint halves).
+        l_nt_pos_map, r_nt_pos_map = _msa_whole_search_windows(seq_str, nt_radius)
     else:
         # Search range around each edge: both sides of the left boundary and
         # both sides of the right boundary (MSA columns; gaps count).
@@ -704,6 +813,8 @@ def scan_tsds_per_sequence(
         if progress is None or total <= 0:
             return
         progress(int(done), total, label)
+
+    _emit(0, "scan")
 
     def _run_sequential() -> list[TsdFlankHit]:
         out: list[TsdFlankHit] = []

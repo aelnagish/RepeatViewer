@@ -102,21 +102,25 @@ _BOUNDARY_PREDICTION_HELP = (
     "rules (rare nucleotides below 1% become gaps, then gappy or poorly "
     "conserved columns are removed). Boundaries are found on the cleaned MSA "
     "and shown as MSA columns.<br><br>"
-    "<b>LTR / TIR</b><br>Self-BLAST of the 0.7 consensus (after end cropping). "
-    "Direct repeats of 100 bp or more at both ends give an LTR; inverted "
-    "repeats of 20 bp or more give a TIR. The span runs from the start of the "
-    "left copy to the end of the right copy.<br><br>"
-    "<b>MSA identity</b><br>Sequence ends are cropped where conservation is "
-    "low, then the boundary is the first and last 4-column window whose 0.8 "
-    "consensus has no N.<br><br>"
-    "<b>Genome Cov</b><br>The 0.7 consensus is BLASTed against the project "
-    "genome. The boundary is where hit coverage rises above background at each "
-    "end (a 20-column window summing over 100, trimmed at a 5× coverage jump). "
-    "If MSA identity extends 30 or more columns past it, Genome Cov is re-run "
-    "with a 0.55 consensus. Needs a project genome.<br><br>"
-    "<b>PolyA</b><br>Only when the file name contains LINE or SINE. A run of 10 "
-    "or more A near the 3′ end of the 0.8 consensus, with an unconserved "
-    "region after it. LINE also crops divergent ends by gaps first.<br><br>"
+    "<b>LTR / TIR</b> based boundary definition<br><br>"
+    "Self-BLAST of the 0.7 consensus (after end cropping). Direct repeats of "
+    "100 bp or more at both ends give an LTR; inverted repeats of 20 bp or "
+    "more give a TIR. The span runs from the start of the left copy to the "
+    "end of the right copy.<br><br>"
+    "<b>MSA identity</b> based boundary definition<br><br>"
+    "Sequence ends are cropped where conservation is low, then the boundary "
+    "is the first and last 4-column window whose 0.8 consensus has no N."
+    "<br><br>"
+    "<b>Genome Cov</b> based boundary definition<br><br>"
+    "The 0.7 consensus is BLASTed against the project genome. The boundary is "
+    "where hit coverage rises above background at each end (a 20-column "
+    "window summing over 100, trimmed at a 5× coverage jump). If MSA "
+    "identity extends 30 or more columns past it, Genome Cov is re-run with "
+    "a 0.55 consensus. Needs a project genome.<br><br>"
+    "<b>PolyA</b> based boundary definition<br><br>"
+    "Only when the file name contains LINE or SINE. A run of 10 or more A "
+    "near the 3′ end of the 0.8 consensus, with an unconserved region after "
+    "it. LINE also crops divergent ends by gaps first.<br><br>"
     "Tick a row to draw its boundary lines on the MSA."
 )
 _FIND_IUPAC_HELP = (
@@ -1108,9 +1112,10 @@ class SequenceAnnotationRail(QWidget):
         self.sync_split_views.setChecked(False)
         self.sync_split_views.setToolTip(
             "In Split Preview, keep both panes aligned by sequence row "
-            "(same sequence at the same vertical level even at different zoom), "
-            "Displayed annotations, and selection. Horizontal position / columns "
-            "stay independent so each pane can show a different region."
+            "(same sequence at the same vertical level even at different zoom) "
+            "and selection. Displayed annotations stay independent per pane. "
+            "Horizontal position / columns stay independent so each pane can "
+            "show a different region."
         )
         self.sync_split_views.toggled.connect(self.syncSplitViewsChanged.emit)
         self.sync_split_views.setVisible(False)
@@ -1484,13 +1489,13 @@ class SequenceAnnotationRail(QWidget):
 
         self.track_distance_label = QLabel("Track distance:", size_section)
         self.track_distance = NoWheelSpinBox(size_section)
-        self.track_distance.setRange(1, 40)
+        self.track_distance.setRange(0, 40)
         self.track_distance.setValue(1)
         self.track_distance.setSizePolicy(spin_expand, QSizePolicy.Policy.Fixed)
         self.track_distance.setToolTip(
-            "Space below each sequence track (pixels): above its first "
-            "annotation row, or before the next sequence when no "
-            "annotation is shown."
+            "When annotations are hidden: space between sequence tracks "
+            "(0 = tracks touch). When annotations are shown: space below "
+            "each sequence band above its first annotation row."
         )
         self.track_distance.valueChanged.connect(self.trackDistanceChanged.emit)
         self.track_distance_label.setVisible(False)
@@ -1551,7 +1556,9 @@ class SequenceAnnotationRail(QWidget):
         self.sequence_distance.setValue(1)
         self.sequence_distance.setSizePolicy(spin_expand, QSizePolicy.Policy.Fixed)
         self.sequence_distance.setToolTip(
-            "Vertical gap between sequences (pixels)."
+            "Vertical gap between sequences (pixels) when annotation tracks "
+            "are shown. When annotations are hidden, use Track distance "
+            "instead (0 = tracks touch)."
         )
         self.sequence_distance.valueChanged.connect(self.sequenceDistanceChanged.emit)
         self._sequence_distance_label = QLabel("Sequence distance:", size_section)

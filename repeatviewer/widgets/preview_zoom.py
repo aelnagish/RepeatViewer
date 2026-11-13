@@ -225,6 +225,7 @@ def save_default_fasta_preview_tab(tab: DefaultFastaPreviewTab) -> None:
 
 
 # Remembered inline Split layout per FASTA shape (multi-seq MSA vs single-seq).
+# Non-FASTA previews (PDF, HTML, …) never use these keys — they stay single-pane.
 PreviewSplitKind = str  # "multi" | "single"
 
 
