@@ -752,6 +752,19 @@ def run_on_sequence(
             cancel=cancel,
             progress=sequence_progress,
         )
+        # gui_functions.blast returns a marker string instead of a path when
+        # nothing was written. Zero hits is a valid result, not a failure.
+        if blast_bed in {"blast_n_zero", "blastp_zero_hits"}:
+            if warnings_out is not None:
+                db_label = f" ({genome_label})" if genome_label else ""
+                warnings_out.append(
+                    f"{seq_path.name}{db_label}: no BLAST hits (0 hits with the current settings)."
+                )
+            return created
+        if blast_bed in {"blastn_not_found", "blastp_not_found"}:
+            raise RuntimeError(f"{program} was not found. Check the BLAST+ installation in Settings.")
+        if blast_bed in {"blastn_got_error", "blastp_got_error"}:
+            raise RuntimeError(f"{program} stopped with an error. See the process log for details.")
         if is_protein:
             if not blast_txt:
                 raise RuntimeError(f"{program.upper()} failed: {blast_bed}")
@@ -1489,6 +1502,7 @@ def run_batch(
         return {
             "func_name": func_name,
             "total": total_units,
+            "total_files": len(work_items),
             "failures": failures,
             "warnings": warnings,
             "created_outputs": created_outputs,
@@ -1549,6 +1563,7 @@ def run_batch(
     return {
         "func_name": func_name,
         "total": total_units,
+        "total_files": len(work_items),
         "failures": failures,
         "warnings": warnings,
         "created_outputs": created_outputs,
