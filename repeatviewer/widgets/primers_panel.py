@@ -165,7 +165,8 @@ class PrimersPanel(QWidget):
         self._report_timer.timeout.connect(self._refresh_inspector)
 
         # Workbench tabs: Design (around a region of this sequence) | Primer (the list
-        # and the selected primer). The Design window stays for many files and modes.
+        # and the selected primer) | PCR (live products) | Enzymes (restriction map,
+        # methylation from data). The Design window stays for many files and modes.
         from repeatviewer.widgets.primer_design_pane import DesignPane
 
         outer = QVBoxLayout(self)
@@ -177,6 +178,7 @@ class PrimersPanel(QWidget):
         self.tabs.addTab("Design")
         self.tabs.addTab("Primer")
         self.tabs.addTab("PCR")
+        self.tabs.addTab("Enzymes")
         outer.addWidget(self.tabs)
         self.pages = QStackedWidget(self)
         outer.addWidget(self.pages, 1)
@@ -188,6 +190,10 @@ class PrimersPanel(QWidget):
 
         self.pcr_pane = PcrPane(self, self.pages)
         self.pages.addWidget(self.pcr_pane)
+        from repeatviewer.widgets.primer_enzyme_pane import EnzymePane
+
+        self.enzyme_pane = EnzymePane(self, self.pages)
+        self.pages.addWidget(self.enzyme_pane)
         self.tabs.currentChanged.connect(self._on_workbench_tab)
         self.design_pane.keepRequested.connect(self._on_keep_designed)
         self.design_pane.designWindowRequested.connect(self._on_design_window)
@@ -377,12 +383,13 @@ class PrimersPanel(QWidget):
         self.design_pane.set_host(host)
         tab = QSettings().value("primers/workbench_tab", 1)
         try:
-            self.tabs.setCurrentIndex(max(0, min(2, int(tab))))
+            self.tabs.setCurrentIndex(max(0, min(3, int(tab))))
         except (TypeError, ValueError):
             self.tabs.setCurrentIndex(1)
         self.pages.setCurrentIndex(self.tabs.currentIndex())
         self.design_pane.overlay_enabled = self.tabs.currentIndex() == 0
         self.pcr_pane.active = self.tabs.currentIndex() == 2
+        self.enzyme_pane.active = self.tabs.currentIndex() == 3
 
     def _on_workbench_tab(self, index: int) -> None:
         self.pages.setCurrentIndex(index)
@@ -390,11 +397,15 @@ class PrimersPanel(QWidget):
         # The region band and candidates belong to Design, the products to PCR.
         self.design_pane.overlay_enabled = index == 0
         self.pcr_pane.active = index == 2
+        self.enzyme_pane.active = index == 3
         self.design_pane.push_overlay()
         self._push_edit_primer()
+        self.enzyme_pane.push_overlay()
         if index == 2:
             self.pcr_pane.refresh_primers()
             self.pcr_pane.push_overlay()
+        if index == 3:
+            self.enzyme_pane.schedule()
 
     def show_design_tab(self) -> None:
         self.tabs.setCurrentIndex(0)
@@ -405,6 +416,7 @@ class PrimersPanel(QWidget):
         self._push_edit_primer()
         if self.tabs.currentIndex() == 2:
             self.pcr_pane.push_overlay()
+        self.enzyme_pane.push_overlay()
 
     def on_sequence_selection(self, start: int, end: int) -> None:
         """The map selection becomes the Design region (single clicks are ignored)."""
@@ -589,9 +601,12 @@ class PrimersPanel(QWidget):
         same_file = self._path is not None and path == self._path
         if not same_file or seq_id != self._seq_id or len(template or "") != len(self._template):
             self.design_pane.reset_for_sequence()
+        new_sequence = not same_file or seq_id != self._seq_id or template != self._template
         self._path = path
         self._seq_id = seq_id
         self._template = template or ""
+        if new_sequence:
+            self.enzyme_pane.reset_for_sequence()
         stored = osq.load_sequence_primers(path)
         legacy = osq.primers_from_features(features, self._template, stored)
         self._primers = stored + legacy

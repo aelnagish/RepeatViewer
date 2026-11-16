@@ -4,7 +4,7 @@ import random
 import time
 
 import pytest
-from PySide6.QtCore import QCoreApplication, QSettings
+from PySide6.QtCore import QCoreApplication, QSettings, Qt
 
 
 @pytest.fixture()
@@ -223,3 +223,56 @@ def test_live_pcr_tab(qapp, isolated_settings, tmp_path):
     pane.fit_button.click()
     assert "Ready for PCR" in pane.status_label.text()
     assert panel.design_pane.prod_max.value() >= 1401
+
+
+def test_enzymes_tab_draws_sites_and_methylation(qapp, isolated_settings, tmp_path):
+    from repeatviewer.widgets.primers_panel import PrimersPanel
+
+    r = random.Random(5)
+    seq = "".join(r.choice("AT") for _ in range(600))
+    seq = seq[:100] + "GAATTC" + seq[106:300] + "AACCGGTT" + seq[308:]
+    fa = tmp_path / "t.fa"
+    fa.write_text(">t\n" + seq + "\n")
+    (tmp_path / "t.bismark.cov").write_text("t\t304\t304\t95\t19\t1\n")   # C of CG in CCGG
+    drawn = []
+
+    class Host(_Host):
+        def primers_host_set_enzymes(self, sites):
+            drawn.append(list(sites))
+
+        def primers_host_show_range(self, start, end):
+            self.shown = (start, end)
+
+    QSettings().setValue("primers/workbench_enzymes",
+                         '{"enzyme_set": "methyl", "show": "many"}')
+    panel = PrimersPanel(width=330)
+    panel.set_host(Host(fa, seq))
+    panel.reload()
+    pane = panel.enzyme_pane
+    assert pane.data_combo.findText("t.bismark.cov") > 0
+    pane.data_combo.setCurrentIndex(pane.data_combo.findText("t.bismark.cov"))
+    panel.tabs.setCurrentIndex(3)
+
+    def settle():
+        end = time.time() + 20
+        while (pane._timer.isActive() or not pane._rows) and time.time() < end:
+            qapp.processEvents()
+            time.sleep(0.02)
+        for _ in range(5):
+            qapp.processEvents()
+            time.sleep(0.02)
+
+    settle()
+    names = {s[3]: s for s in drawn[-1]}
+    assert names["HpaII"][4] is True and names["MspI"][4] is False
+    assert "probably not cut" in names["HpaII"][5].lower()
+    assert names["EcoRI"][2] == 102
+    assert not pane.pair_note.isHidden()
+    # untick EcoRI: gone from the map
+    row = [pane.table.item(i, 0).text() for i in range(pane.table.rowCount())].index("EcoRI")
+    pane.table.item(row, 0).setCheckState(Qt.CheckState.Unchecked)
+    assert "EcoRI" not in {s[3] for s in drawn[-1]}
+    panel.tabs.setCurrentIndex(1)
+    assert drawn[-1] == []
+    pane.digest_button.click()
+    assert list(tmp_path.glob("t_t_digest*.rvgel"))

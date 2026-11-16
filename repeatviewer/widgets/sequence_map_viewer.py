@@ -3246,6 +3246,78 @@ class SequenceMapCanvas(QWidget):
         self._workbench_state = state
         self.update()
 
+    def set_enzyme_sites(self, sites) -> None:
+        """Primer workbench Enzymes tab: restriction sites on the bases.
+
+        ``sites``: (start, end, cut, label, blocked, tooltip), 1-based; ``cut`` is
+        the base right of the top-strand cut. Blocked sites are drawn red and dashed.
+        """
+        state = [tuple(x) for x in (sites or [])]
+        if state == getattr(self, "_enzyme_sites", []):
+            return
+        self._enzyme_sites = state
+        self.update()
+
+    def _enzyme_site_at(self, x: float, y: float):
+        sites = getattr(self, "_enzyme_sites", None)
+        if not sites:
+            return None
+        _, cell_h_f, _ = self._cell_size()
+        span_h = float(cell_h_f + self._extra_display_height())
+        best, best_d = None, 6.0
+        for site in sites:
+            start, end, cut = int(site[0]), int(site[1]), int(site[2])
+            for x1, _x2, top in self._base_spans(cut, cut):
+                if not (top - 2 <= y <= top + span_h + 2):
+                    continue
+                d = abs(x - x1)
+                if d < best_d:
+                    best, best_d = site, d
+            if best is site:
+                continue
+            for x1, x2, top in self._base_spans(start, end):
+                if top - 2 <= y <= top + span_h + 2 and x1 <= x <= x2 and best is None:
+                    best = site
+        return best
+
+    def _paint_enzyme_sites(self, painter: QPainter, clip: QRectF) -> None:
+        sites = getattr(self, "_enzyme_sites", None)
+        if not sites:
+            return
+        _, cell_h_f, _ = self._cell_size()
+        span_h = float(cell_h_f + self._extra_display_height())
+        cut_c, block_c = QColor(31, 41, 55), QColor(194, 65, 12)
+        painter.save()
+        font = painter.font()
+        font.setPointSizeF(max(6.5, font.pointSizeF() * 0.78))
+        painter.setFont(font)
+        fm = painter.fontMetrics()
+        last_right: dict[float, float] = {}
+        for start, end, cut, label, blocked, _tip in sites:
+            colour = block_c if blocked else cut_c
+            tint = QColor(colour)
+            tint.setAlpha(46 if blocked else 22)
+            for x1, x2, top in self._base_spans(int(start), int(end)):
+                rect = QRectF(x1, top, max(1.0, x2 - x1), span_h)
+                if clip.intersects(rect):
+                    painter.fillRect(rect, tint)
+            for x, _x2, top in self._base_spans(int(cut), int(cut)):
+                if x < clip.left() - 60 or x > clip.right() + 4:
+                    continue
+                pen = QPen(colour, 2.0 if not blocked else 1.6,
+                           Qt.PenStyle.DashLine if blocked else Qt.PenStyle.SolidLine)
+                painter.setPen(pen)
+                painter.drawLine(QPointF(x, top - 1), QPointF(x, top + span_h + 1))
+                text = f"{label} ×" if blocked else str(label)
+                w = fm.horizontalAdvance(text)
+                if x + 3 >= last_right.get(top, -1e9) and fm.height() <= span_h + 2:
+                    back = QRectF(x + 2, top, w + 4, fm.height())
+                    painter.fillRect(back, QColor(255, 255, 255, 210))
+                    painter.setPen(colour)
+                    painter.drawText(back, Qt.AlignmentFlag.AlignCenter, text)
+                    last_right[top] = x + w + 10
+        painter.restore()
+
     def _base_spans(self, a: int, b: int) -> list[tuple[float, float, float]]:
         """(x1, x2, top) pieces of the 1-based range a..b on the nucleotide strip."""
         origin_x, origin_y, cell_w, _ = self._nucleotide_cell_geometry()
@@ -3446,12 +3518,16 @@ class SequenceMapCanvas(QWidget):
         return None
 
     def _update_sequence_track_tooltip(self, pos: QPointF, global_pos) -> None:
-        kind = self._display_row_kind_at_y(float(pos.y()))
-        tip = (
-            self._track_kind_label(kind, is_protein=self._is_protein)
-            if kind
-            else ""
-        )
+        site = self._enzyme_site_at(float(pos.x()), float(pos.y()))
+        if site is not None:
+            tip = str(site[5])
+        else:
+            kind = self._display_row_kind_at_y(float(pos.y()))
+            tip = (
+                self._track_kind_label(kind, is_protein=self._is_protein)
+                if kind
+                else ""
+            )
         if tip == self._hover_track_tip:
             return
         self._hover_track_tip = tip
@@ -4150,6 +4226,7 @@ class SequenceMapCanvas(QWidget):
             self._paint_find_hits(painter, clip)
         if getattr(self, "_primer_marks", None):
             self._paint_primer_marks(painter, clip)
+        self._paint_enzyme_sites(painter, clip)
         self._paint_workbench(painter, clip)
         self._paint_edit_primer(painter, clip)
         self._paint_selection_overlay(painter, clip)
@@ -5649,6 +5726,9 @@ class SequenceMapWidget(QWidget):
 
     def set_edit_primer(self, span, strand: str = "+", flagged: bool = False) -> None:
         self._canvas.set_edit_primer(span, strand, flagged)
+
+    def set_enzyme_sites(self, sites) -> None:
+        self._canvas.set_enzyme_sites(sites)
 
     def select_by_position(self, start: int, end: int, *, _attempt: int = 0) -> None:
         if self._data is None or self.is_too_long_for_display():
@@ -9314,6 +9394,7 @@ class SequenceMapPanel(QWidget):
             self._map.set_primer_marks([])
             self._map.set_workbench_overlay(None, [], -1)
             self._map.set_edit_primer(None)
+            self._map.set_enzyme_sites([])
 
     def show_primers_tab(self) -> None:
         self._rail.show_primers_tab()
@@ -9353,6 +9434,9 @@ class SequenceMapPanel(QWidget):
 
     def primers_host_set_workbench(self, region, candidates, selected: int = -1) -> None:
         self._map.set_workbench_overlay(region, candidates, selected)
+
+    def primers_host_set_enzymes(self, sites) -> None:
+        self._map.set_enzyme_sites(sites)
 
     @Slot(str)
     def _on_sequence_search_activated(self, text: str) -> None:
