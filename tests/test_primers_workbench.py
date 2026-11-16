@@ -63,3 +63,25 @@ def test_primer_for_span_move_and_resize():
     rplace = osq.place_primer(rev, seq, name="R")
     assert rplace.strand == "-"
     assert wb.primer_for_span(rev, rplace, seq, 405, 425) == th.reverse_complement(seq[404:425])
+
+
+def test_binding_sites_and_flags():
+    from repeatviewer.backends.primers import on_sequence as osq
+
+    mono = _seq(170, 11)
+    seq = _seq(100, 12) + mono * 4 + _seq(100, 13)
+    primer = mono[20:42]
+    sites = wb.binding_sites(primer, seq)
+    assert [x.start for x in sites] == [121 + 170 * k for k in range(4)]
+    assert all(x.mismatches == 0 and x.annealed == 22 and x.tm > 40 for x in sites)
+    s = dz.DesignSettings()                              # Tm 57-63, size 18-25
+    place = osq.place_primer(primer[:12], seq, name="short")
+    flags = wb.primer_flags(primer[:12], place, s)
+    assert any(f.startswith("Tm") and "below" in f for f in flags)
+    assert any("shorter than 18" in f for f in flags)
+    full = osq.place_primer(primer, seq, name="p")
+    avoid = wb.Region(full.start, full.end + 5, "avoid")
+    assert any(f.startswith("In the avoided region") for f in wb.primer_flags(primer, full, s, avoid))
+    bad = primer[:-2] + ("A" if primer[-2] != "A" else "C") + primer[-1]
+    bplace = osq.place_primer(bad, seq, name="b")
+    assert any("Mismatch 2 nt from the 3′ end" in f for f in wb.primer_flags(bad, bplace, s))

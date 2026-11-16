@@ -199,3 +199,77 @@ def primer_for_span(primer_seq: str, placement, template: str, start: int, end: 
     else:
         three, five = placement.start - start, end - placement.end
     return osq.resize_on_template(primer_seq, placement, template, five, three)
+
+
+@dataclass
+class SiteInfo:
+    """One place a primer binds on the open sequence (for the site navigator)."""
+
+    start: int
+    end: int
+    strand: str
+    mismatches: int
+    annealed: int
+    tm: float
+    three_exact: int
+
+
+def binding_sites(primer_seq: str, template: str, *, max_mismatches: int = 2,
+                  three_prime_exact: int = 3, settings=None) -> list[SiteInfo]:
+    """Every site of the primer on the sequence, in sequence order, with its own Tm."""
+    from repeatviewer.backends.primers import on_sequence as osq
+    from repeatviewer.backends.primers import thermo as th
+
+    bind = th.binding_part(primer_seq)
+    n = len(bind)
+    out = []
+    for s in osq.find_all_sites(bind, template, max_mismatches=max_mismatches,
+                                three_prime_exact=three_prime_exact):
+        exact = n - max(s.mismatch_positions) if s.mismatch_positions else n
+        try:
+            tm = th.duplex_tm(bind, s.site, settings) if s.site else 0.0
+        except Exception:  # noqa: BLE001 - Tm is informative
+            tm = 0.0
+        out.append(SiteInfo(s.start, s.end, s.strand, s.mismatches, s.end - s.start + 1,
+                            float(tm), int(exact)))
+    out.sort(key=lambda x: (x.start, x.strand))
+    return out
+
+
+#: A mismatch this close to the 3' end (1 = the last base) is flagged.
+NEAR_THREE_PRIME = 5
+
+
+def primer_flags(primer_seq: str, placement, s: dz.DesignSettings,
+                 region: Region | None = None) -> list[str]:
+    """Where a primer is outside the Design settings (shown in amber, never blocked)."""
+    from repeatviewer.backends.primers import thermo as th
+
+    flags = []
+    bind = th.binding_part(primer_seq)
+    if not bind:
+        return flags
+    tm = th.calc_tm(bind, s.thermo)
+    if tm == tm:  # not NaN
+        if tm < s.tm_min:
+            flags.append(f"Tm {tm:.1f} °C, below {s.tm_min:g} to {s.tm_max:g}")
+        elif tm > s.tm_max:
+            flags.append(f"Tm {tm:.1f} °C, above {s.tm_min:g} to {s.tm_max:g}")
+    n = len(bind)
+    if n < s.size_min:
+        flags.append(f"{n} nt, shorter than {s.size_min} to {s.size_max}")
+    elif n > s.size_max:
+        flags.append(f"{n} nt, longer than {s.size_min} to {s.size_max}")
+    if placement is not None and placement.mismatch_positions:
+        three = placement.end if placement.strand == "+" else placement.start
+        nearest = min(abs(three - p) + 1 for p in placement.mismatch_positions)
+        if nearest <= NEAR_THREE_PRIME:
+            flags.append(f"Mismatch {nearest} nt from the 3′ end")
+    if placement is not None and region is not None:
+        overlaps = placement.start <= region.end and region.start <= placement.end
+        if region.use == USE_AVOID and overlaps:
+            flags.append(f"In the avoided region ({region.start:,} to {region.end:,})")
+        if region.use == USE_INSIDE and not (region.start <= placement.start
+                                             and placement.end <= region.end):
+            flags.append(f"Outside the Inside region ({region.start:,} to {region.end:,})")
+    return flags

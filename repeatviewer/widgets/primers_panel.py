@@ -289,6 +289,38 @@ class PrimersPanel(QWidget):
         snap_row.addWidget(self.snap_button, 1)
         snap_row.addWidget(self.snap_tm)
         il.addLayout(snap_row)
+        # Outside the Design settings: amber chips (never blocked).
+        self.flags_label = QLabel(self.inspector)
+        self.flags_label.setWordWrap(True)
+        self.flags_label.setTextFormat(Qt.TextFormat.RichText)
+        self.flags_label.hide()
+        il.addWidget(self.flags_label)
+        # Every binding site on this sequence: ◀ n of N ▶ with its own numbers.
+        nav = QHBoxLayout()
+        nav.setContentsMargins(0, 0, 0, 0)
+        nav.setSpacing(6)
+        nav_label = QLabel("Binding site", self.inspector)
+        self.site_prev = QPushButton("◀", self.inspector)
+        self.site_next = QPushButton("▶", self.inspector)
+        for b, tip in ((self.site_prev, "Previous binding site"), (self.site_next, "Next binding site")):
+            b.setFixedWidth(34)
+            b.setToolTip(tip)
+            b.setAccessibleName(tip)
+        self.site_count = QLabel(self.inspector)
+        self.site_count.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.site_count.setMinimumWidth(64)
+        nav.addWidget(nav_label)
+        nav.addStretch(1)
+        nav.addWidget(self.site_prev)
+        nav.addWidget(self.site_count)
+        nav.addWidget(self.site_next)
+        il.addLayout(nav)
+        self.site_label = QLabel(self.inspector)
+        self.site_label.setWordWrap(True)
+        self.site_label.setTextFormat(Qt.TextFormat.RichText)
+        il.addWidget(self.site_label)
+        self._sites: list = []
+        self._site_index = 0
         # Dragging the primer on the bases previews the change here; Apply keeps it.
         self.drag_note = QLabel(self.inspector)
         self.drag_note.setWordWrap(True)
@@ -321,6 +353,8 @@ class PrimersPanel(QWidget):
         self.pcr_button.clicked.connect(self._on_pcr)
         self.edit_button.clicked.connect(lambda: self.edit_primer(self._selected))
         self.apply_button.clicked.connect(self._apply_drag)
+        self.site_prev.clicked.connect(lambda: self._step_site(-1))
+        self.site_next.clicked.connect(lambda: self._step_site(1))
         self.revert_button.clicked.connect(self._revert_drag)
         self.fix_button.clicked.connect(self._on_fix)
         self.snap_button.clicked.connect(self._on_snap)
@@ -361,6 +395,61 @@ class PrimersPanel(QWidget):
 
     # ------------------------------------------------------------- drag on bases
 
+    def _flags(self, p: Primer, place) -> list[str]:
+        """The primer against the Design tab's settings and region."""
+        from repeatviewer.backends.primers import workbench as wb
+
+        try:
+            return wb.primer_flags(p.sequence, place, self.design_pane.settings(),
+                                   self.design_pane.region())
+        except Exception:  # noqa: BLE001 - flags are advice
+            return []
+
+    def _refresh_sites(self, p: Primer, place) -> None:
+        from repeatviewer.backends.primers import workbench as wb
+
+        try:
+            self._sites = wb.binding_sites(p.sequence, self._template)
+        except Exception:  # noqa: BLE001
+            self._sites = []
+        self._site_index = 0
+        if place is not None:
+            for i, site in enumerate(self._sites):
+                if (site.start, site.end) == (place.start, place.end):
+                    self._site_index = i
+                    break
+        self._show_site(move=False)
+
+    def _step_site(self, step: int) -> None:
+        if not self._sites:
+            return
+        self._site_index = (self._site_index + step) % len(self._sites)
+        self._show_site(move=True)
+
+    def _show_site(self, *, move: bool) -> None:
+        n = len(self._sites)
+        self.site_prev.setEnabled(n > 1)
+        self.site_next.setEnabled(n > 1)
+        if not n:
+            self.site_count.setText("none")
+            self.site_label.setText(
+                '<span style="color:gray">No site with up to 2 mismatches on this sequence.</span>')
+            return
+        site = self._sites[self._site_index]
+        self.site_count.setText(f"<b>{self._site_index + 1}</b> of {n}")
+        mm = ("no mismatch" if not site.mismatches else
+              f"{site.mismatches} mismatch{'es' if site.mismatches > 1 else ''}")
+        tm = f"Tm {site.tm:.1f} °C" if site.tm else "Tm –"
+        self.site_label.setText(
+            f"{site.start:,} – {site.end:,} ({'→' if site.strand == '+' else '←'}), "
+            f"{site.annealed} annealed, {mm}, {tm}, 3′ end exact {site.three_exact}")
+        if move and self._host is not None:
+            show = getattr(self._host, "primers_host_show_range", None)
+            try:
+                (show or self._host.primers_host_show)(site.start, site.end)
+            except Exception:  # noqa: BLE001
+                pass
+
     def _push_edit_primer(self) -> None:
         """Make the selected primer draggable on the bases (Primer page only)."""
         host = self._host
@@ -371,7 +460,8 @@ class PrimersPanel(QWidget):
             if place is None:
                 host.primers_host_edit_primer(None)
             else:
-                host.primers_host_edit_primer((place.start, place.end), place.strand)
+                flagged = bool(self._flags(self._primer(self._selected), place))
+                host.primers_host_edit_primer((place.start, place.end), place.strand, flagged)
         except Exception:  # noqa: BLE001 - drawing is a convenience
             pass
 
@@ -397,6 +487,7 @@ class PrimersPanel(QWidget):
         self._set_primer_sequence(name, new_seq)
         if finished:
             self._refresh_inspector()
+            self._push_edit_primer()
         else:
             self._report_timer.start()
 
@@ -692,6 +783,15 @@ class PrimersPanel(QWidget):
                 where += (f'<br><span style="color:{CHECK_COLOR}">{place.other_sites} more '
                           "site(s) here with ≤ 2 mismatches</span>")
         self.where_label.setText(where)
+        self._refresh_sites(p, place)
+        flags = self._flags(p, place)
+        if flags:
+            chips = " ".join(
+                '<span style="background:#FFF4E5; color:#7A4A00; border:1px solid #E8A33D;">'
+                f"&nbsp;{html.escape(f)}&nbsp;</span>" for f in flags)
+            self.flags_label.setText(chips)
+        self.flags_label.setVisible(bool(flags))
+        self.snap_button.setDefault(any(f.startswith("Tm") for f in flags))
         pending = self._pending is not None and self._pending[0] == p.name
         self.apply_button.setVisible(pending)
         self.revert_button.setVisible(pending)

@@ -151,3 +151,37 @@ def test_drag_primer_preview_apply_and_revert(qapp, isolated_settings, tmp_path)
     p = panel._primer("P_F")
     assert p.sequence == seq[199:226] and p.extra.get("edited") is True
     assert [x.sequence for x in osq.load_sequence_primers(fa)] == [seq[199:226]]
+
+
+def test_site_navigator_and_amber_flags(qapp, isolated_settings, tmp_path):
+    from repeatviewer.backends.primers.oligos import Primer
+    from repeatviewer.widgets.primers_panel import PrimersPanel
+
+    r = random.Random(8)
+    mono = "".join(r.choice("ACGT") for _ in range(170))
+    seq = "".join(r.choice("ACGT") for _ in range(100)) + mono * 4
+    fa = tmp_path / "t.fa"
+    fa.write_text(">t\n" + seq + "\n")
+    edits = []
+
+    class Host(_Host):
+        def primers_host_edit_primer(self, span, strand="+", flagged=False):
+            edits.append((span, flagged))
+
+        def primers_host_show_range(self, start, end):
+            self.shown = (start, end)
+
+    host = Host(fa, seq)
+    panel = PrimersPanel(width=330)
+    panel.set_host(host)
+    panel.reload()
+    panel.tabs.setCurrentIndex(1)
+    panel.add_primers([Primer("S_F", mono[30:44])])      # 14 nt: short, low Tm
+    panel._select_row_of("S_F")
+    panel._refresh_inspector()
+    assert panel.site_count.text() == "<b>1</b> of 4"
+    panel.site_next.click()
+    assert panel.site_count.text() == "<b>2</b> of 4" and host.shown[0] == 100 + 170 + 31
+    assert not panel.flags_label.isHidden() and "shorter than 18" in panel.flags_label.text()
+    panel._push_edit_primer()
+    assert edits[-1][1] is True
