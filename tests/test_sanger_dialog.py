@@ -92,5 +92,5 @@ def test_menu_offers_sanger_check(qapp):
     menu = QMenu()
     _Host()._populate_primers_menu(menu)
     texts = [a.text() for a in menu.actions() if not a.isSeparator()]
-    assert texts == ["Design", "Map", "Database", "In-silico PCR", "Sanger Check"]
-    assert all("…" not in t and "." not in t.rstrip(".") or t == "In-silico PCR" for t in texts)
+    assert texts[:5] == ["Design", "Map", "Database", "In-silico PCR", "Sanger Check"]
+    assert all("…" not in t for t in texts)

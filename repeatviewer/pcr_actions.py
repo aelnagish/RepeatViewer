@@ -104,6 +104,31 @@ class PcrActionsMixin:
         a.setToolTip("In-silico PCR: products of the primers on the selected sequences")
         a = menu.addAction("Sanger Check", lambda: self._open_sanger_dialog())
         a.setToolTip("Sanger reads (.ab1) of a clone against the sequence it should carry")
+        a = menu.addAction("Cloning", lambda: self._open_cloning_dialog())
+        a.setToolTip("Put a PCR product into a vector: orientation, colony PCR, warnings")
+
+    # ------------------------------------------------------------- cloning
+
+    def _open_cloning_dialog(self, *, insert: str = "", insert_name: str = "",
+                             path=None, features=()) -> None:
+        from repeatviewer.views.cloning_dialog import CloningDialog
+        from repeatviewer.views.sanger_dialog import _read_fasta
+
+        if not insert:
+            source = Path(path) if path else next(
+                (p for p in (self._selected_files() if hasattr(self, "_selected_files") else [])
+                 if Path(p).is_file()), None)
+            if source is not None:
+                records = _read_fasta(Path(source))
+                if records:
+                    insert_name, insert = records[0][0], records[0][1]
+                    path = source
+        folder = Path(path).parent if path else None
+        dlg = CloningDialog(insert, insert_name=insert_name, folder=folder, features=features,
+                            parent=self)
+        dlg.setWindowFlag(Qt.WindowType.Tool, True)
+        dlg.show()
+        self._cloning_dialog = dlg
 
     # ------------------------------------------------------------- Sanger
 
