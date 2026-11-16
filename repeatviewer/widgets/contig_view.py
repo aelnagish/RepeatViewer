@@ -1,6 +1,6 @@
-"""Contig view: the result of Tools → Map to Reference (``*.rvmap``).
+"""Contig view: the result of Tools → Mapping (``*.rvmap``).
 
-Like Geneious' contig view: the reference with its annotations on top, then the
+contig view: the reference with its annotations on top, then the
 consensus, the coverage and the reference bases, then every placed sequence,
 with the bases that differ from the reference highlighted. Zoom in far enough
 and the bases are written out.
