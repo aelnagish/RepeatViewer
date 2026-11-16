@@ -24,6 +24,7 @@ from PySide6.QtCore import (
     Slot,
 )
 from PySide6.QtGui import (
+    QBrush,
     QColor,
     QContextMenuEvent,
     QCursor,
@@ -3172,6 +3173,108 @@ class SequenceMapCanvas(QWidget):
         self._find_max_len = max((b - a + 1 for a, b in self._find_hits), default=0)
         self.update()
 
+    def set_workbench_overlay(self, region, candidates, selected: int = -1) -> None:
+        """Primer workbench: the Design region as a band and candidate pairs as arrows.
+
+        ``region``: (start, end, use) 1-based or None; ``candidates``: list of
+        (f_start, f_end, r_start, r_end) 1-based; ``selected``: index drawn solid.
+        """
+        region = tuple(region) if region else None
+        cands = [tuple(int(v) for v in c) for c in (candidates or [])]
+        state = (region, cands, int(selected))
+        if state == getattr(self, "_workbench_state", (None, [], -1)):
+            return
+        self._workbench_state = state
+        self.update()
+
+    def _base_spans(self, a: int, b: int) -> list[tuple[float, float, float]]:
+        """(x1, x2, top) pieces of the 1-based range a..b on the nucleotide strip."""
+        origin_x, origin_y, cell_w, _ = self._nucleotide_cell_geometry()
+        if cell_w <= 0 or b < a:
+            return []
+        if not self.uses_wrap():
+            x1 = origin_x + (a - 1) * cell_w - self._scroll_px
+            x2 = origin_x + b * cell_w - self._scroll_px
+            return [(x1, x2, float(origin_y))]
+        bpl = max(1, self._bases_per_line())
+        out = []
+        start = a - 1
+        while start <= b - 1:
+            line_end = min(b - 1, (start // bpl + 1) * bpl - 1)
+            x1, y = self._index_to_xy(start)
+            x2, _ = self._index_to_xy(line_end)
+            out.append((x1, x2 + cell_w, y))
+            start = line_end + 1
+        return out
+
+    def _paint_workbench(self, painter: QPainter, clip: QRectF) -> None:
+        region, cands, selected = getattr(self, "_workbench_state", (None, [], -1))
+        if not region and not cands:
+            return
+        _, cell_h_f, _ = self._cell_size()
+        span_h = float(cell_h_f + self._extra_display_height())
+        painter.save()
+        if region:
+            a, b, use = region
+            colour = {"amplify": QColor(31, 87, 195), "inside": QColor(30, 130, 76),
+                      "avoid": QColor(120, 120, 128)}.get(str(use), QColor(31, 87, 195))
+            fill = QColor(colour)
+            fill.setAlpha(38)
+            fill.setAlpha(46)
+            pen = QPen(colour, 1.5, Qt.PenStyle.DashLine)
+            for x1, x2, top in self._base_spans(int(a), int(b)):
+                rect = QRectF(x1, top - 2, max(2.0, x2 - x1), span_h + 4)
+                if clip.intersects(rect):
+                    painter.fillRect(rect, fill)
+                    if use == "avoid":
+                        painter.fillRect(rect, QBrush(QColor(120, 120, 128, 70),
+                                                      Qt.BrushStyle.BDiagPattern))
+                    painter.setPen(pen)
+                    painter.drawRect(rect)
+        fwd_c, rev_c = QColor(31, 87, 195), QColor(194, 65, 12)
+        arrow_h = max(4.0, span_h * 0.42)
+        outline = QPen(QColor(255, 255, 255, 200), 1)
+        order = [i for i in range(len(cands)) if i != selected] + (
+            [selected] if 0 <= selected < len(cands) else [])
+        for i in order:
+            fs, fe, rs, re_ = cands[i]
+            solid = i == selected
+            alpha = 220 if solid else 130
+            for (a, b, colour, right) in ((fs, fe, fwd_c, True), (rs, re_, rev_c, False)):
+                c = QColor(colour)
+                c.setAlpha(alpha)
+                for x1, x2, top in self._base_spans(int(a), int(b)):
+                    # forward arrows on the top half of the bases, reverse on the bottom half
+                    y = top + 1.0 if right else top + span_h - arrow_h - 1.0
+                    w = max(4.0, x2 - x1)
+                    head = min(arrow_h * 0.9, w / 2)
+                    mid = y + arrow_h / 2
+                    path = QPainterPath()
+                    if right:
+                        path.moveTo(x1, y)
+                        path.lineTo(x1 + w - head, y)
+                        path.lineTo(x1 + w, mid)
+                        path.lineTo(x1 + w - head, y + arrow_h)
+                        path.lineTo(x1, y + arrow_h)
+                    else:
+                        path.moveTo(x1 + w, y)
+                        path.lineTo(x1 + head, y)
+                        path.lineTo(x1, mid)
+                        path.lineTo(x1 + head, y + arrow_h)
+                        path.lineTo(x1 + w, y + arrow_h)
+                    path.closeSubpath()
+                    if clip.intersects(path.boundingRect()):
+                        painter.fillPath(path, c)
+                        painter.setPen(outline if solid else QPen(QColor(255, 255, 255, 110), 1))
+                        painter.drawPath(path)
+            if solid:
+                spans = self._base_spans(int(fe) + 1, int(rs) - 1)
+                painter.setPen(QPen(QColor(60, 60, 67, 160), 1, Qt.PenStyle.DotLine))
+                for x1, x2, top in spans:
+                    yy = top + span_h / 2
+                    painter.drawLine(QPointF(x1, yy), QPointF(x2, yy))
+        painter.restore()
+
     def set_primer_marks(self, positions: list[int]) -> None:
         """Template bases where a primer has a mismatch (1-based), drawn red."""
         marks = sorted({int(p) for p in positions if int(p) > 0})
@@ -3988,6 +4091,7 @@ class SequenceMapCanvas(QWidget):
             self._paint_find_hits(painter, clip)
         if getattr(self, "_primer_marks", None):
             self._paint_primer_marks(painter, clip)
+        self._paint_workbench(painter, clip)
         self._paint_selection_overlay(painter, clip)
         painter.end()
 
@@ -5433,6 +5537,9 @@ class SequenceMapWidget(QWidget):
     def set_primer_marks(self, positions: list[int]) -> None:
         self._canvas.set_primer_marks(positions)
 
+    def set_workbench_overlay(self, region, candidates, selected: int = -1) -> None:
+        self._canvas.set_workbench_overlay(region, candidates, selected)
+
     def select_by_position(self, start: int, end: int, *, _attempt: int = 0) -> None:
         if self._data is None or self.is_too_long_for_display():
             return
@@ -5460,6 +5567,27 @@ class SequenceMapWidget(QWidget):
             target_ppb = max(_FIT_MIN_PPB, min(self._canvas.zoom_ppb_max(), usable_w / span))
             self._apply_zoom_ppb(target_ppb, sync_slider=True)
 
+        self._scroll_to_bp_range(a, b)
+        QTimer.singleShot(0, lambda lo=a, hi=b: self._scroll_to_bp_range(lo, hi))
+        self.refresh_layout()
+
+    def show_range(self, start: int, end: int, *, _attempt: int = 0) -> None:
+        """Zoom and scroll so start..end fills the view (with a margin), without selecting."""
+        if self._data is None or self.is_too_long_for_display():
+            return
+        self._layout_intent_generation += 1
+        viewport_w = self._scroll_viewport_width()
+        if (not self.isVisible() or viewport_w <= 20) and _attempt < 40:
+            QTimer.singleShot(50, lambda s=int(start), e=int(end), a=_attempt + 1:
+                              self.show_range(s, e, _attempt=a))
+            return
+        a, b = sorted((int(start), int(end)))
+        pad = max(5, (b - a + 1) // 10)
+        a, b = max(1, a - pad), min(len(self._data.sequence or "") or b + pad, b + pad)
+        span = max(1, b - a + 1)
+        usable_w = max(1.0, float(viewport_w - _LEFT_MARGIN - _RIGHT_MARGIN))
+        target_ppb = max(_FIT_MIN_PPB, min(self._canvas.zoom_ppb_max(), usable_w / span))
+        self._apply_zoom_ppb(target_ppb, sync_slider=True)
         self._scroll_to_bp_range(a, b)
         QTimer.singleShot(0, lambda lo=a, hi=b: self._scroll_to_bp_range(lo, hi))
         self.refresh_layout()
@@ -9070,8 +9198,10 @@ class SequenceMapPanel(QWidget):
 
         if index == PRIMERS_TAB_INDEX:
             self._reload_primers_panel()
+            self._rail.primers_panel.design_pane.push_overlay()
         else:
             self._map.set_primer_marks([])
+            self._map.set_workbench_overlay(None, [], -1)
 
     def show_primers_tab(self) -> None:
         self._rail.show_primers_tab()
@@ -9102,6 +9232,12 @@ class SequenceMapPanel(QWidget):
 
     def primers_host_set_marks(self, positions: list[int]) -> None:
         self._map.set_primer_marks(list(positions))
+
+    def primers_host_show_range(self, start: int, end: int) -> None:
+        self._map.show_range(int(start), int(end))
+
+    def primers_host_set_workbench(self, region, candidates, selected: int = -1) -> None:
+        self._map.set_workbench_overlay(region, candidates, selected)
 
     @Slot(str)
     def _on_sequence_search_activated(self, text: str) -> None:

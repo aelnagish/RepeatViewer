@@ -130,6 +130,7 @@ class DesignPane(QWidget):
         self._run_settings: dz.DesignSettings | None = None
         self._busy = False
         self._shown: tuple[int, int] | None = None   # range shown for a candidate
+        self.overlay_enabled = True   # the panel turns it off on the Primer page
         self._relay = _Relay(self)
         self._relay.done.connect(self._on_done)
 
@@ -348,6 +349,7 @@ class DesignPane(QWidget):
     # ------------------------------------------------------------------ advice
 
     def _update_advice(self) -> None:
+        self.push_overlay()
         _sid, seq = self._sequence()
         region = self.region()
         if region is None:
@@ -414,6 +416,7 @@ class DesignPane(QWidget):
     def _clear_candidates(self) -> None:
         self._run = None
         self.table.setRowCount(0)
+        self.push_overlay()
         self.cand_title.setText("<b>Candidates</b>")
         self.cand_note.setText("None yet. Press Design.")
         self._sync_buttons()
@@ -436,6 +439,7 @@ class DesignPane(QWidget):
         n = len(pairs)
         self.cand_title.setText(f"<b>Candidates</b> &nbsp;<span style='color:gray'>"
                                 f"{n} pair{'s' if n != 1 else ''}</span>")
+        self.push_overlay()
         if pairs:
             self.cand_note.setText("Click a pair to see it on the sequence. Tick the ones to keep.")
             self.table.selectRow(0)
@@ -448,17 +452,42 @@ class DesignPane(QWidget):
         if not rows or self._run is None or self._host is None:
             return
         p = self._run.pairs[rows[0].row()]
+        self.push_overlay()
         if p.forward is None or p.reverse is None:
             return
         self._shown = (int(p.forward.start), int(p.reverse.end))
         try:
-            self._host.primers_host_show(p.forward.start, p.reverse.end)
+            show = getattr(self._host, "primers_host_show_range", None) or self._host.primers_host_show
+            show(p.forward.start, p.reverse.end)
         except Exception:  # noqa: BLE001 - showing is a convenience
             pass
         notes = "; ".join(p.notes[:2])
         self.cand_note.setText(
             f"Pair {rows[0].row() + 1}: {p.forward.start:,} – {p.reverse.end:,}, "
             f"{p.product_size:,} bp." + (f" {notes}." if notes else ""))
+
+    def push_overlay(self) -> None:
+        """Draw the region band and the candidate arrows on the sequence."""
+        host = self._host
+        if host is None or not hasattr(host, "primers_host_set_workbench"):
+            return
+        if not self.overlay_enabled:
+            host.primers_host_set_workbench(None, [], -1)
+            return
+        region = self.region()
+        reg = (region.start, region.end, region.use) if region is not None else None
+        cands, selected = [], -1
+        if self._run is not None:
+            for p in self._run.pairs:
+                if p.forward is not None and p.reverse is not None:
+                    cands.append((p.forward.start, p.forward.end, p.reverse.start, p.reverse.end))
+            rows = self.table.selectionModel().selectedRows() if self.table.selectionModel() else []
+            if rows:
+                selected = rows[0].row()
+        try:
+            host.primers_host_set_workbench(reg, cands, selected)
+        except Exception:  # noqa: BLE001 - drawing is a convenience
+            pass
 
     def ticked_pairs(self) -> list[dz.DesignedPair]:
         if self._run is None:

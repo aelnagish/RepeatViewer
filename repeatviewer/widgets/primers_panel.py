@@ -324,10 +324,14 @@ class PrimersPanel(QWidget):
         except (TypeError, ValueError):
             self.tabs.setCurrentIndex(1)
         self.pages.setCurrentIndex(self.tabs.currentIndex())
+        self.design_pane.overlay_enabled = self.tabs.currentIndex() == 0
 
     def _on_workbench_tab(self, index: int) -> None:
         self.pages.setCurrentIndex(index)
         QSettings().setValue("primers/workbench_tab", int(index))
+        # The region band and candidate arrows belong to the Design page.
+        self.design_pane.overlay_enabled = index == 0
+        self.design_pane.push_overlay()
 
     def show_design_tab(self) -> None:
         self.tabs.setCurrentIndex(0)

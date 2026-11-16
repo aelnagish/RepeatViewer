@@ -80,3 +80,39 @@ def test_design_tab_region_advice_and_keep(qapp, isolated_settings, tmp_path):
     assert len(panel.primers()) == 2 and panel.pages.currentIndex() == 1
     panel.on_sequence_selection(10, 10)              # a click is not a region
     assert pane.region().start == 1400
+
+
+def test_overlay_follows_region_candidates_and_tab(qapp, isolated_settings, tmp_path):
+    from repeatviewer.widgets.primers_panel import PrimersPanel
+
+    r = random.Random(4)
+    seq = "".join(r.choice("ACGT") for _ in range(2000))
+    fa = tmp_path / "t.fa"
+    fa.write_text(">t\n" + seq + "\n")
+    calls = []
+
+    class Host(_Host):
+        def primers_host_set_workbench(self, region, cands, selected=-1):
+            calls.append((region, list(cands), selected))
+
+        def primers_host_show_range(self, start, end):
+            self.shown = (start, end)
+
+    host = Host(fa, seq)
+    panel = PrimersPanel(width=330)
+    panel.set_host(host)
+    panel.reload()
+    panel.show_design_tab()
+    pane = panel.design_pane
+    panel.on_sequence_selection(900, 1000)
+    assert calls[-1][0] == (900, 1000, "amplify") and calls[-1][1] == []
+    pane.prod_min.setValue(150)
+    pane.prod_max.setValue(500)
+    pane.run_design()
+    _wait(qapp, pane)
+    region, cands, selected = calls[-1]
+    assert cands and selected == 0
+    assert all(f_s < 900 and r_e > 1000 for f_s, _fe, _rs, r_e in cands)
+    assert pane.region().start == 900          # showing a candidate keeps the region
+    panel.tabs.setCurrentIndex(1)
+    assert calls[-1] == (None, [], -1)
