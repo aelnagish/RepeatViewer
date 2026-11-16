@@ -2823,6 +2823,8 @@ class SequenceMapCanvas(QWidget):
     copySequenceRequested = Signal(int, int)  # 1-based inclusive range
     extractSequenceRequested = Signal(int, int)  # 1-based inclusive range
     featureActionRequested = Signal(str)  # delete | copy | extract | modify
+    # Primer workbench: a primer dragged on the bases (start, end 1-based, finished)
+    primerEdited = Signal(int, int, bool)
     # Parent must re-size canvas_row from content height (not a clipped layout height).
     contentHeightChanged = Signal()
 
@@ -3172,6 +3174,63 @@ class SequenceMapCanvas(QWidget):
         self._find_starts = [a for a, _b in self._find_hits]
         self._find_max_len = max((b - a + 1 for a, b in self._find_hits), default=0)
         self.update()
+
+    def set_edit_primer(self, span, strand: str = "+", flagged: bool = False) -> None:
+        """The primer that can be dragged: ``span`` (start, end) 1-based or None.
+
+        ``flagged`` draws it amber (outside the Design settings; allowed).
+        """
+        state = (tuple(int(v) for v in span), str(strand), bool(flagged)) if span else None
+        if getattr(self, "_edit_drag", None) is not None and state is not None:
+            return   # the drag owns the span until the button is released
+        if state == getattr(self, "_edit_primer", None):
+            return
+        self._edit_primer = state
+        self.update()
+
+    def _edit_primer_hit(self, x: float, y: float):
+        """'left' / 'right' / 'move' when (x, y) is on the editable primer, else None."""
+        state = getattr(self, "_edit_primer", None)
+        if not state:
+            return None
+        (a, b), _strand, _flag = state
+        _, cell_h_f, _ = self._cell_size()
+        span_h = float(cell_h_f + self._extra_display_height())
+        _, _, cell_w, _ = self._nucleotide_cell_geometry()
+        for x1, x2, top in self._base_spans(a, b):
+            if not (top - 3 <= y <= top + span_h + 3):
+                continue
+            edge = min(max(5.0, cell_w * 0.8), max(2.0, (x2 - x1) / 3))
+            if x1 - 4 <= x <= x1 + edge:
+                return "left"
+            if x2 - edge <= x <= x2 + 4:
+                return "right"
+            if x1 < x < x2:
+                return "move"
+        return None
+
+    def _paint_edit_primer(self, painter: QPainter, clip: QRectF) -> None:
+        state = getattr(self, "_edit_primer", None)
+        if not state:
+            return
+        (a, b), strand, flagged = state
+        _, cell_h_f, _ = self._cell_size()
+        span_h = float(cell_h_f + self._extra_display_height())
+        colour = QColor(224, 138, 0) if flagged else (
+            QColor(31, 87, 195) if strand == "+" else QColor(194, 65, 12))
+        fill = QColor(colour)
+        fill.setAlpha(70)
+        painter.save()
+        for x1, x2, top in self._base_spans(a, b):
+            rect = QRectF(x1, top - 2, max(3.0, x2 - x1), span_h + 4)
+            if not clip.intersects(rect.adjusted(-6, 0, 6, 0)):
+                continue
+            painter.fillRect(rect, fill)
+            painter.setPen(QPen(colour, 2))
+            painter.drawRect(rect)
+            for hx in (rect.left() - 3, rect.right() - 3):
+                painter.fillRect(QRectF(hx, rect.top(), 6, rect.height()), colour)
+        painter.restore()
 
     def set_workbench_overlay(self, region, candidates, selected: int = -1) -> None:
         """Primer workbench: the Design region as a band and candidate pairs as arrows.
@@ -4092,6 +4151,7 @@ class SequenceMapCanvas(QWidget):
         if getattr(self, "_primer_marks", None):
             self._paint_primer_marks(painter, clip)
         self._paint_workbench(painter, clip)
+        self._paint_edit_primer(painter, clip)
         self._paint_selection_overlay(painter, clip)
         painter.end()
 
@@ -4241,6 +4301,16 @@ class SequenceMapCanvas(QWidget):
             super().mousePressEvent(event)
             return
         pos = event.position()
+        hit = self._edit_primer_hit(pos.x(), pos.y())
+        if hit is not None:
+            (a, b), _strand, _flag = self._edit_primer
+            self._edit_drag = (hit, self._bp_at_pos(pos.x(), pos.y()), a, b)
+            self.grabMouse()
+            self._mouse_grabbed = True
+            self.setCursor(Qt.CursorShape.ClosedHandCursor if hit == "move"
+                           else Qt.CursorShape.SizeHorCursor)
+            event.accept()
+            return
         if self.uses_wrap():
             feat_idx = self._feature_at(pos)
             if feat_idx is not None:
@@ -4266,6 +4336,35 @@ class SequenceMapCanvas(QWidget):
         event.accept()
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        drag = getattr(self, "_edit_drag", None)
+        if drag is not None:
+            mode, anchor, a0, b0 = drag
+            n = len(self._sequence)
+            bp = self._bp_at_pos(event.position().x(), event.position().y())
+            min_len = 10
+            if mode == "move":
+                length = b0 - a0
+                a = min(max(1, a0 + bp - anchor), max(1, n - length))
+                b = a + length
+            elif mode == "left":
+                a, b = max(1, min(bp, b0 - min_len + 1)), b0
+            else:
+                a, b = a0, min(n, max(bp, a0 + min_len - 1))
+            (old, strand, flag) = self._edit_primer
+            if (a, b) != tuple(old):
+                self._edit_primer = ((a, b), strand, flag)
+                self.update()
+                self.primerEdited.emit(a, b, False)
+            event.accept()
+            return
+        if getattr(self, "_edit_primer", None) and not self._drag_select:
+            hit = self._edit_primer_hit(event.position().x(), event.position().y())
+            if hit == "move":
+                self.setCursor(Qt.CursorShape.OpenHandCursor)
+            elif hit in ("left", "right"):
+                self.setCursor(Qt.CursorShape.SizeHorCursor)
+            else:
+                self.unsetCursor()
         if self._drag_select and self._select_start_bp is not None:
             if self._hover_track_tip:
                 self._hover_track_tip = ""
@@ -4294,6 +4393,14 @@ class SequenceMapCanvas(QWidget):
         super().leaveEvent(event)
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton and getattr(self, "_edit_drag", None):
+            self._edit_drag = None
+            self._release_drag_mouse()
+            self.unsetCursor()
+            (a, b), _strand, _flag = self._edit_primer
+            self.primerEdited.emit(a, b, True)
+            event.accept()
+            return
         if event.button() == Qt.MouseButton.LeftButton:
             self._drag_select = False
             self._release_drag_mouse()
@@ -5539,6 +5646,9 @@ class SequenceMapWidget(QWidget):
 
     def set_workbench_overlay(self, region, candidates, selected: int = -1) -> None:
         self._canvas.set_workbench_overlay(region, candidates, selected)
+
+    def set_edit_primer(self, span, strand: str = "+", flagged: bool = False) -> None:
+        self._canvas.set_edit_primer(span, strand, flagged)
 
     def select_by_position(self, start: int, end: int, *, _attempt: int = 0) -> None:
         if self._data is None or self.is_too_long_for_display():
@@ -8218,6 +8328,7 @@ class SequenceMapPanel(QWidget):
         self._primers_stale = True
         self._rail.primers_panel.set_host(self)
         self._map._canvas.selectionChanged.connect(self._rail.primers_panel.on_sequence_selection)
+        self._map._canvas.primerEdited.connect(self._rail.primers_panel.on_primer_dragged)
         self._rail.tabChanged.connect(self._on_rail_tab_for_primers)
         self._sequence_search.returnPressed.connect(self._on_sequence_search_submitted)
         self._rail.addFeatureClicked.connect(self._on_add_feature_clicked)
@@ -9202,6 +9313,7 @@ class SequenceMapPanel(QWidget):
         else:
             self._map.set_primer_marks([])
             self._map.set_workbench_overlay(None, [], -1)
+            self._map.set_edit_primer(None)
 
     def show_primers_tab(self) -> None:
         self._rail.show_primers_tab()
@@ -9232,6 +9344,9 @@ class SequenceMapPanel(QWidget):
 
     def primers_host_set_marks(self, positions: list[int]) -> None:
         self._map.set_primer_marks(list(positions))
+
+    def primers_host_edit_primer(self, span, strand: str = "+", flagged: bool = False) -> None:
+        self._map.set_edit_primer(span, strand, flagged)
 
     def primers_host_show_range(self, start: int, end: int) -> None:
         self._map.show_range(int(start), int(end))

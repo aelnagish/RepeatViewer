@@ -116,3 +116,38 @@ def test_overlay_follows_region_candidates_and_tab(qapp, isolated_settings, tmp_
     assert pane.region().start == 900          # showing a candidate keeps the region
     panel.tabs.setCurrentIndex(1)
     assert calls[-1] == (None, [], -1)
+
+
+def test_drag_primer_preview_apply_and_revert(qapp, isolated_settings, tmp_path):
+    from repeatviewer.backends.primers import on_sequence as osq
+    from repeatviewer.backends.primers.oligos import Primer
+    from repeatviewer.widgets.primers_panel import PrimersPanel
+
+    r = random.Random(6)
+    seq = "".join(r.choice("ACGT") for _ in range(800))
+    fa = tmp_path / "t.fa"
+    fa.write_text(">t\n" + seq + "\n")
+    edits = []
+
+    class Host(_Host):
+        def primers_host_edit_primer(self, span, strand="+", flagged=False):
+            edits.append((span, strand))
+
+    panel = PrimersPanel(width=330)
+    panel.set_host(Host(fa, seq))
+    panel.reload()
+    panel.tabs.setCurrentIndex(1)
+    panel.add_primers([Primer("P_F", seq[199:221])])
+    panel._select_row_of("P_F")
+    assert edits[-1] == ((200, 221), "+")
+    panel.on_primer_dragged(210, 231, False)         # move by 10
+    panel.on_primer_dragged(210, 231, True)
+    assert panel._primer("P_F").sequence == seq[209:231]
+    assert not panel.apply_button.isHidden()
+    panel._revert_drag()
+    assert panel._primer("P_F").sequence == seq[199:221]
+    panel.on_primer_dragged(200, 226, True)          # 3' end longer
+    panel.apply_button.click()
+    p = panel._primer("P_F")
+    assert p.sequence == seq[199:226] and p.extra.get("edited") is True
+    assert [x.sequence for x in osq.load_sequence_primers(fa)] == [seq[199:226]]

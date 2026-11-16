@@ -168,3 +168,34 @@ def write_candidates_report(fasta, seq_id: str, seq: str, s: dz.DesignSettings,
     layout = pj.plan_outputs(fasta, pj.DESIGN_TAG)
     pj.write_result(layout, payload, pairs=run.pairs)
     return layout.main
+
+
+#: Shortest binding part a primer can be dragged to (hard limit: no meaningful Tm below).
+MIN_DRAG_NT = 10
+
+
+def primer_for_span(primer_seq: str, placement, template: str, start: int, end: int) -> str:
+    """The primer after dragging its binding part to ``start``..``end`` (1-based).
+
+    Moving (same length, new place) takes the template bases there; resizing keeps
+    the user's own bases (mismatches) where the old site overlaps. The 5' tail stays.
+    """
+    from repeatviewer.backends.primers import on_sequence as osq
+    from repeatviewer.backends.primers import thermo as th
+
+    tpl = template.upper()
+    start, end = max(1, int(start)), min(len(tpl), int(end))
+    if end - start + 1 < MIN_DRAG_NT:
+        return primer_seq
+    same_len = (end - start) == (placement.end - placement.start)
+    if same_len and start == placement.start:
+        return primer_seq
+    if same_len:
+        tail, _bind = th.split_tail(primer_seq)
+        stretch = tpl[start - 1:end]
+        return tail + (stretch if placement.strand == "+" else th.reverse_complement(stretch))
+    if placement.strand == "+":
+        five, three = placement.start - start, end - placement.end
+    else:
+        three, five = placement.start - start, end - placement.end
+    return osq.resize_on_template(primer_seq, placement, template, five, three)

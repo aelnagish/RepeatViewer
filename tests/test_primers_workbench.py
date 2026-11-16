@@ -44,3 +44,22 @@ def test_candidates_cover_the_region(tmp_path):
     fa.write_text(">t\n" + seq + "\n")
     report = wb.write_candidates_report(fa, "t", seq, s, region, run)
     assert report.is_file() and "Region 1,400" in report.read_text(encoding="utf-8")
+
+
+def test_primer_for_span_move_and_resize():
+    from repeatviewer.backends.primers import on_sequence as osq
+    from repeatviewer.backends.primers import thermo as th
+
+    seq = _seq(600, 9)
+    fwd = "gaattc" + seq[99:121]                       # tail + 22 nt at 100..121
+    place = osq.place_primer(fwd, seq, name="F")
+    assert (place.start, place.end, place.strand) == (100, 121, "+")
+    moved = wb.primer_for_span(fwd, place, seq, 110, 131)
+    assert moved == "gaattc" + seq[109:131]
+    longer = wb.primer_for_span(fwd, place, seq, 100, 125)   # 3' end + 4
+    assert longer == "gaattc" + seq[99:125]
+    assert wb.primer_for_span(fwd, place, seq, 100, 105) == fwd   # below 10 nt: unchanged
+    rev = th.reverse_complement(seq[399:420])
+    rplace = osq.place_primer(rev, seq, name="R")
+    assert rplace.strand == "-"
+    assert wb.primer_for_span(rev, rplace, seq, 405, 425) == th.reverse_complement(seq[404:425])
