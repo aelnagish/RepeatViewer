@@ -9309,7 +9309,7 @@ class SequenceMapPanel(QWidget):
 
         if index == PRIMERS_TAB_INDEX:
             self._reload_primers_panel()
-            self._rail.primers_panel.design_pane.push_overlay()
+            self._rail.primers_panel.push_workbench_overlay()
         else:
             self._map.set_primer_marks([])
             self._map.set_workbench_overlay(None, [], -1)

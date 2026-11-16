@@ -82,12 +82,12 @@ def _section(title: str, parent: QWidget, help_title: str, help_text: str):
     return box, lay, lab
 
 
-def _row(label: str, *widgets, parent: QWidget, joins=()) -> QHBoxLayout:
+def _row(label: str, *widgets, parent: QWidget, joins=(), label_w: int = LABEL_W) -> QHBoxLayout:
     row = QHBoxLayout()
     row.setContentsMargins(0, 0, 0, 0)
     row.setSpacing(GAP)
     lab = QLabel(label, parent)
-    lab.setFixedWidth(LABEL_W)
+    lab.setFixedWidth(label_w)
     lab.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
     row.addWidget(lab)
     for i, w in enumerate(widgets):

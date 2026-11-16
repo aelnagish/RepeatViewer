@@ -185,3 +185,41 @@ def test_site_navigator_and_amber_flags(qapp, isolated_settings, tmp_path):
     assert not panel.flags_label.isHidden() and "shorter than 18" in panel.flags_label.text()
     panel._push_edit_primer()
     assert edits[-1][1] is True
+
+
+def test_live_pcr_tab(qapp, isolated_settings, tmp_path):
+    from repeatviewer.backends.primers import thermo as th
+    from repeatviewer.backends.primers.oligos import Primer
+    from repeatviewer.widgets.primers_panel import PrimersPanel
+
+    r = random.Random(12)
+    seq = "".join(r.choice("ACGT") for _ in range(2500))
+    fa = tmp_path / "t.fa"
+    fa.write_text(">t\n" + seq + "\n")
+    calls = []
+
+    class Host(_Host):
+        def primers_host_set_workbench(self, region, cands, selected=-1):
+            calls.append((region, list(cands), selected))
+
+        def primers_host_show_range(self, start, end):
+            self.shown = (start, end)
+
+    panel = PrimersPanel(width=330)
+    panel.set_host(Host(fa, seq))
+    panel.reload()
+    panel.add_primers([Primer("A_F", seq[299:321]), Primer("A_R", th.reverse_complement(seq[1678:1700]))])
+    panel.tabs.setCurrentIndex(2)
+    pane = panel.pcr_pane
+    assert pane.forward.currentData() == "A_F" and pane.reverse.currentData() == "A_R"
+    end = time.time() + 20
+    while (pane._result is None or pane._timer.isActive()) and time.time() < end:
+        qapp.processEvents()
+        time.sleep(0.02)
+    prods = pane.products()
+    assert prods and prods[0].size == 1401 and (prods[0].start, prods[0].end) == (300, 1700)
+    assert calls[-1][1] and calls[-1][2] == 0
+    assert "longer" in pane.status_label.text()          # Design range 100 to 1,000
+    pane.fit_button.click()
+    assert "Ready for PCR" in pane.status_label.text()
+    assert panel.design_pane.prod_max.value() >= 1401

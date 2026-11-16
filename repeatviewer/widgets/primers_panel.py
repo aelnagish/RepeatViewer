@@ -176,6 +176,7 @@ class PrimersPanel(QWidget):
         self.tabs.setDrawBase(False)
         self.tabs.addTab("Design")
         self.tabs.addTab("Primer")
+        self.tabs.addTab("PCR")
         outer.addWidget(self.tabs)
         self.pages = QStackedWidget(self)
         outer.addWidget(self.pages, 1)
@@ -183,6 +184,10 @@ class PrimersPanel(QWidget):
         self.pages.addWidget(self.design_pane)
         primer_page = QWidget(self.pages)
         self.pages.addWidget(primer_page)
+        from repeatviewer.widgets.primer_pcr_pane import PcrPane
+
+        self.pcr_pane = PcrPane(self, self.pages)
+        self.pages.addWidget(self.pcr_pane)
         self.tabs.currentChanged.connect(self._on_workbench_tab)
         self.design_pane.keepRequested.connect(self._on_keep_designed)
         self.design_pane.designWindowRequested.connect(self._on_design_window)
@@ -372,22 +377,34 @@ class PrimersPanel(QWidget):
         self.design_pane.set_host(host)
         tab = QSettings().value("primers/workbench_tab", 1)
         try:
-            self.tabs.setCurrentIndex(max(0, min(1, int(tab))))
+            self.tabs.setCurrentIndex(max(0, min(2, int(tab))))
         except (TypeError, ValueError):
             self.tabs.setCurrentIndex(1)
         self.pages.setCurrentIndex(self.tabs.currentIndex())
         self.design_pane.overlay_enabled = self.tabs.currentIndex() == 0
+        self.pcr_pane.active = self.tabs.currentIndex() == 2
 
     def _on_workbench_tab(self, index: int) -> None:
         self.pages.setCurrentIndex(index)
         QSettings().setValue("primers/workbench_tab", int(index))
-        # The region band and candidate arrows belong to the Design page.
+        # The region band and candidates belong to Design, the products to PCR.
         self.design_pane.overlay_enabled = index == 0
+        self.pcr_pane.active = index == 2
         self.design_pane.push_overlay()
         self._push_edit_primer()
+        if index == 2:
+            self.pcr_pane.refresh_primers()
+            self.pcr_pane.push_overlay()
 
     def show_design_tab(self) -> None:
         self.tabs.setCurrentIndex(0)
+
+    def push_workbench_overlay(self) -> None:
+        """Redraw what the current page shows on the sequence (rail tab shown again)."""
+        self.design_pane.push_overlay()
+        self._push_edit_primer()
+        if self.tabs.currentIndex() == 2:
+            self.pcr_pane.push_overlay()
 
     def on_sequence_selection(self, start: int, end: int) -> None:
         """The map selection becomes the Design region (single clicks are ignored)."""
@@ -584,6 +601,7 @@ class PrimersPanel(QWidget):
         self._place_all()
         self._fill_table()
         self._push_marks()
+        self.pcr_pane.refresh_primers()
 
     def _place_all(self) -> None:
         self._placements = {}
@@ -835,6 +853,7 @@ class PrimersPanel(QWidget):
         self._save()
         self._fill_table()
         self._push_marks()
+        self.pcr_pane.refresh_primers()
         self.primersChanged.emit()
 
     def add_primers(self, primers: list[Primer], *, tick: bool = False) -> list[Primer]:
