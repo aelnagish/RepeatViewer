@@ -284,3 +284,28 @@ def test_enzymes_tab_draws_sites_and_methylation(qapp, isolated_settings, tmp_pa
     assert "methylated in your data" in page.why.text()
     page.open_button.click()
     assert list(tmp_path.glob("t_t_digest*.rvgel"))
+
+
+def test_primer_chips_warn_about_a_restriction_tail(qapp, isolated_settings, tmp_path):
+    from repeatviewer.backends.primers import tails as tl
+    from repeatviewer.backends.primers import thermo as th
+    from repeatviewer.backends.primers.oligos import Primer
+    from repeatviewer.widgets.primers_panel import PrimersPanel
+
+    r = random.Random(21)
+    seq = "".join(r.choice("ACGT") for _ in range(1200))
+    seq = seq[:600] + "GAATTC" + seq[606:]          # EcoRI inside the open sequence
+    fa = tmp_path / "t.fa"
+    fa.write_text(">t\n" + seq + "\n")
+    panel = PrimersPanel(width=330)
+    panel.set_host(_Host(fa, seq))
+    panel.reload()
+    fwd = "atgaattc" + seq[99:121]                  # 2 bases of padding only
+    rev = tl.tail_for("EcoRI", binding="x") + th.reverse_complement(seq[1000:1022])
+    panel.add_primers([Primer("A_F", fwd), Primer("A_R", rev)], tick=True)
+    panel._select_row_of("A_F")
+    panel._refresh_inspector()
+    chips = panel.flags_label.text()
+    assert "Only 2 bases" in chips
+    assert "also cuts the open sequence" in chips
+    assert "carries EcoRI too" in chips and "A_R" in chips

@@ -428,11 +428,33 @@ class PrimersPanel(QWidget):
         """The primer against the Design tab's settings and region."""
         from repeatviewer.backends.primers import workbench as wb
 
+        from repeatviewer.backends.primers import tails as tl
+
         try:
-            return wb.primer_flags(p.sequence, place, self.design_pane.settings(),
-                                   self.design_pane.region())
+            flags = wb.primer_flags(p.sequence, place, self.design_pane.settings(),
+                                    self.design_pane.region())
         except Exception:  # noqa: BLE001 - flags are advice
-            return []
+            flags = []
+        try:
+            partner, partner_name = self._partner(p, place)
+            flags += tl.tail_warnings(p.sequence, insert=self._template,
+                                      insert_name="open sequence",
+                                      partner_seq=partner, partner_name=partner_name)
+        except Exception:  # noqa: BLE001
+            pass
+        return flags
+
+    def _partner(self, p: Primer, place) -> tuple[str, str]:
+        """The primer most likely used with this one: ticked, on the other strand."""
+        if place is None:
+            return "", ""
+        for other in self.ticked_primers() + self._primers:
+            if other.name == p.name:
+                continue
+            op = self._placements.get(other.name)
+            if op is not None and op.strand != place.strand:
+                return other.sequence, other.name
+        return "", ""
 
     def _refresh_sites(self, p: Primer, place) -> None:
         from repeatviewer.backends.primers import workbench as wb

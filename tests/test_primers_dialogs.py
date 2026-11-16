@@ -399,3 +399,31 @@ def test_design_window_opens_without_empty_space(qapp, isolated_settings):
         d._fit()
         assert d._stack.height() == before
         d.close()
+
+
+def test_tail_box_pads_six_bases_and_warns(qapp, isolated_settings):
+    from repeatviewer.backends.primers import tails as tl
+    from repeatviewer.backends.primers.oligos import Primer
+    from repeatviewer.views.primer_edit_dialog import PAD_AUTO, EditPrimerDialog
+
+    bind = "ATGCTAGCTAGGTTCAGATCC"
+    template = "TTTT" + bind + "AAAA" + "GAATTC" + "CCCC"
+    dlg = EditPrimerDialog(Primer("A_F", bind), template=template)
+    assert dlg.pad_combo.currentData() == PAD_AUTO      # 6 bases by default
+    dlg.enzyme_combo.setCurrentIndex(
+        [dlg.enzyme_combo.itemData(i) for i in range(dlg.enzyme_combo.count())].index("BamHI"))
+    tail = dlg._chosen_tail()
+    assert len(tail) == tl.PAD_BASES + 6 and tail.endswith("ggatcc")
+    assert "does not cut the open sequence" in dlg.tail_note.text()
+
+    i = [dlg.enzyme_combo.itemData(x) for x in range(dlg.enzyme_combo.count())].index("EcoRI")
+    dlg.enzyme_combo.setCurrentIndex(i)
+    assert "also cuts the open sequence" in dlg.tail_note.text()
+    assert "Not cutting here" in dlg.tail_note.text()
+
+    j = [dlg.pad_combo.itemData(x) for x in range(dlg.pad_combo.count())].index("AT")
+    dlg.pad_combo.setCurrentIndex(j)
+    assert "Only 2 bases" in dlg.tail_note.text()
+    dlg.apply_tail.click()
+    assert dlg._clean().startswith("atgaattc")
+    dlg.deleteLater()
