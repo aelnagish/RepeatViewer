@@ -6,8 +6,6 @@ Kinds of PCR:
   primer combinations, as in a real tube), with the mismatches per primer.
 * **Satellite ladder**: the same products grouped by size; when the primers
   sit in a tandem repeat, sizes step by the monomer and are labelled 1×, 2×, …
-* **TE present / absent**: one lane per template (accession); the expected
-  bands per accession tell whether the insertion is there.
 
 Each product carries the primers' 5' tails (copied in from cycle 3 on) and a
 relative yield used by the gel: fewer mismatches, an exact 3' end and a
@@ -34,12 +32,10 @@ CancelFn = Callable[[], bool] | None
 
 MODE_STANDARD = "standard"
 MODE_LADDER = "ladder"
-MODE_PRESENCE = "presence"
-MODES = (MODE_STANDARD, MODE_LADDER, MODE_PRESENCE)
+MODES = (MODE_STANDARD, MODE_LADDER)
 MODE_LABELS = {
     MODE_STANDARD: "Standard",
     MODE_LADDER: "Satellite ladder",
-    MODE_PRESENCE: "TE present / absent",
 }
 
 POLYMERASES = {
@@ -68,7 +64,7 @@ class PcrSettings:
     dimers: bool = True
 
     def __post_init__(self) -> None:
-        if self.mode not in MODES:   # also the removed "bisulfite" mode of old settings
+        if self.mode not in MODES:   # also the removed "bisulfite" and "presence" modes
             self.mode = MODE_STANDARD
         if self.polymerase not in POLYMERASES:
             self.polymerase = "Taq"

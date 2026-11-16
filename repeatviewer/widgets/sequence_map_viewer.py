@@ -8089,6 +8089,7 @@ class SequenceMapPanel(QWidget):
         self._sequence_combo.currentIndexChanged.connect(self._on_sequence_combo_changed)
         self._primers_stale = True
         self._rail.primers_panel.set_host(self)
+        self._map._canvas.selectionChanged.connect(self._rail.primers_panel.on_sequence_selection)
         self._rail.tabChanged.connect(self._on_rail_tab_for_primers)
         self._sequence_search.returnPressed.connect(self._on_sequence_search_submitted)
         self._rail.addFeatureClicked.connect(self._on_add_feature_clicked)

@@ -14,7 +14,7 @@ import html
 import math
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import QSettings, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QFontDatabase
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -28,6 +28,8 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSizePolicy,
+    QStackedWidget,
+    QTabBar,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -162,7 +164,29 @@ class PrimersPanel(QWidget):
         self._report_timer.setInterval(120)
         self._report_timer.timeout.connect(self._refresh_inspector)
 
-        lay = QVBoxLayout(self)
+        # Workbench tabs: Design (around a region of this sequence) | Primer (the list
+        # and the selected primer). The Design window stays for many files and modes.
+        from repeatviewer.widgets.primer_design_pane import DesignPane
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(8)
+        self.tabs = QTabBar(self)
+        self.tabs.setExpanding(True)
+        self.tabs.setDrawBase(False)
+        self.tabs.addTab("Design")
+        self.tabs.addTab("Primer")
+        outer.addWidget(self.tabs)
+        self.pages = QStackedWidget(self)
+        outer.addWidget(self.pages, 1)
+        self.design_pane = DesignPane(self.pages)
+        self.pages.addWidget(self.design_pane)
+        primer_page = QWidget(self.pages)
+        self.pages.addWidget(primer_page)
+        self.tabs.currentChanged.connect(self._on_workbench_tab)
+        self.design_pane.keepRequested.connect(self._on_keep_designed)
+        self.design_pane.designWindowRequested.connect(self._on_design_window)
+        lay = QVBoxLayout(primer_page)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(8)
 
@@ -172,7 +196,8 @@ class PrimersPanel(QWidget):
         grid.setVerticalSpacing(6)
         self.add_button = QPushButton("Add Primer…", self)
         self.database_button = QPushButton("From Database…", self)
-        self.design_button = QPushButton("Design…", self)
+        self.design_button = QPushButton("Design", self)
+        self.design_button.setToolTip("Design new primers around a region of this sequence")
         self.pcr_button = QPushButton("Run PCR", self)
         for i, b in enumerate((self.add_button, self.database_button,
                                self.design_button, self.pcr_button)):
@@ -292,6 +317,38 @@ class PrimersPanel(QWidget):
 
     def set_host(self, host) -> None:
         self._host = host
+        self.design_pane.set_host(host)
+        tab = QSettings().value("primers/workbench_tab", 1)
+        try:
+            self.tabs.setCurrentIndex(max(0, min(1, int(tab))))
+        except (TypeError, ValueError):
+            self.tabs.setCurrentIndex(1)
+        self.pages.setCurrentIndex(self.tabs.currentIndex())
+
+    def _on_workbench_tab(self, index: int) -> None:
+        self.pages.setCurrentIndex(index)
+        QSettings().setValue("primers/workbench_tab", int(index))
+
+    def show_design_tab(self) -> None:
+        self.tabs.setCurrentIndex(0)
+
+    def on_sequence_selection(self, start: int, end: int) -> None:
+        """The map selection becomes the Design region (single clicks are ignored)."""
+        self.design_pane.set_region(start, end)
+
+    def _on_keep_designed(self, primers: list) -> None:
+        added = self.add_primers(list(primers), tick=True)
+        if added:
+            self.tabs.setCurrentIndex(1)
+
+    def _on_design_window(self) -> None:
+        mw = find_main_window()
+        if mw is None or self._path is None:
+            return
+        try:
+            mw._open_primer_design_dialog(files=[self._path])
+        except TypeError:
+            mw._open_primer_design_dialog()
 
     def primers(self) -> list[Primer]:
         return list(self._primers)
@@ -317,6 +374,8 @@ class PrimersPanel(QWidget):
         except Exception:  # noqa: BLE001 - no data loaded yet
             return
         same_file = self._path is not None and path == self._path
+        if not same_file or seq_id != self._seq_id or len(template or "") != len(self._template):
+            self.design_pane.reset_for_sequence()
         self._path = path
         self._seq_id = seq_id
         self._template = template or ""
@@ -647,13 +706,7 @@ class PrimersPanel(QWidget):
                 self.add_primers(picked, tick=len(picked) <= 2)
 
     def _on_design(self) -> None:
-        mw = find_main_window()
-        if mw is None or self._path is None:
-            return
-        try:
-            mw._open_primer_design_dialog(files=[self._path])
-        except TypeError:
-            mw._open_primer_design_dialog()
+        self.show_design_tab()
 
     def _on_pcr(self) -> None:
         mw = find_main_window()

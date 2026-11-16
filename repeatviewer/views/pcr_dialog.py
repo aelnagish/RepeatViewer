@@ -61,8 +61,8 @@ PCR_HELP = (
     "<b>Primers</b>: from the Primers tab of a sequence, the Primer Database, or pasted. "
     "All combinations are tested, as in a real tube (also one primer at both ends).<br>"
     "<b>Standard</b>: every product. <b>Satellite ladder</b>: products that step by a common "
-    "size are labelled 1×, 2×, 3× (tandem repeat monomer). "
-    "<b>TE present / absent</b>: one lane per accession.<br>"
+    "size are labelled 1×, 2×, 3× (tandem repeat monomer). With several templates each one "
+    "is a lane, so primers can be compared across accessions.<br>"
     "<b>Mismatches per primer</b> and <b>3′ end exact</b> decide which sites count. "
     "<b>Expected yield</b> is relative: fewer mismatches, shorter products and repeated "
     "sites make more DNA.<br>"
@@ -80,8 +80,6 @@ MODE_NOTES = {
     pcr.MODE_STANDARD: "Every product the primers can make, with the mismatches per primer.",
     pcr.MODE_LADDER: "When the primers sit in a tandem repeat, copies give 1×, 2×, 3× … products. "
                      "Brightness falls with size.",
-    pcr.MODE_PRESENCE: "One lane per template (accession): a band at the expected size tells "
-                       "whether the insertion is there.",
 }
 
 

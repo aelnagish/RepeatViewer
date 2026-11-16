@@ -114,6 +114,30 @@ found it explains why (for example how many primers failed on Tm or GC). Common
 fixes: widen the Tm range or the product size; for satellite oligos lower *Min
 coverage* or allow more mismatches.
 
+## Design beside the sequence
+
+Open a FASTA in Preview and click the **Primers** tab on the right of the
+Annotation view. The tab has two pages, **Design** and **Primer**, and is wider
+than the other tabs so the settings fit.
+
+1. **Region**: drag on the map or the bases; the range appears in *From* and
+   *to* (or type it). Choose what the region is for:
+   - **Amplify**: primers sit outside the region and the product covers all of it.
+   - **Inside**: primers and product stay inside the region.
+   - **Avoid**: no primer may sit in the region (a SNP, a methylated site, a repeat).
+2. **Settings**: Standard PCR or qPCR, primer size, Tm and product size.
+   **Design Window…** opens the full Design window (GC, tails, salt, Ladder PCR,
+   FISH probes, several files).
+3. **Design**: the pairs appear under **Candidates**, best first. Click a pair to
+   see its product on the sequence; tick the ones you want and press **Keep
+   Ticked**. They are added to this sequence's primers (Primer page). Nothing is
+   written before that. **Open Report** writes the usual primer report.
+
+When the region and the settings cannot work together (for example a 1,500 bp
+region to amplify with products of at most 1,000 bp), an amber note says why
+before you run, and **Set Product Range to Fit** changes the product range.
+Nothing is blocked: the settings guide the automatic design, your choice wins.
+
 ## Primers on the sequence
 
 The **Primers** tab of the sequence side panel lists the primers kept with this
@@ -162,7 +186,6 @@ tab.
   - **Standard**: every product.
   - **Satellite ladder**: products that step by a common size are labelled 1×,
     2×, 3× (the monomer of a tandem repeat).
-  - **TE present / absent**: one lane per accession.
 - **Mismatches per primer** and **3′ end exact** decide which sites count;
   **Longest product**, **Polymerase** and **Annealing** set the reaction.
 

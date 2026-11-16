@@ -142,6 +142,8 @@ _GENETIC_CODE_HELP = (
 
 _RAIL_TAB_WIDTH = 24
 _MODULE_WIDTH = 260
+# The Primers tab holds the primer workbench (Design / Primer): it needs more room.
+_PRIMERS_MODULE_WIDTH = 330
 _TAB_BUTTON_HEIGHT_MIN = 36
 _TAB_PILL_RADIUS = 7
 _TAB_TEXT_PAD = 4  # vertical padding around rotated label
@@ -2946,6 +2948,7 @@ class SequenceAnnotationRail(QWidget):
             btn.setVisible(True)
         self._module_width = _MODULE_WIDTH
         self._apply_module_geometry()
+        self._sync_width_for_tab(self._active_tab)
 
     def set_boundary_prediction_text(self, html: str) -> None:
         """Show (or clear with "") the Boundary prediction summary."""
@@ -3075,6 +3078,7 @@ class SequenceAnnotationRail(QWidget):
             self._divider.setVisible(True)
             self.setFixedWidth(self._expanded_rail_width())
         self._stack.setCurrentIndex(index)
+        self._sync_width_for_tab(index)
         self._sync_tab_checked_state(index)
         if was_collapsed:
             self.panelCollapsedChanged.emit(False)
@@ -3100,6 +3104,14 @@ class SequenceAnnotationRail(QWidget):
             self._stack.setCurrentIndex(index)
             self._sync_tab_checked_state(index)
             self._save_rail_ui_state()
+        self._sync_width_for_tab(index)
+
+    def _sync_width_for_tab(self, index: int) -> None:
+        """Primers (the workbench) is 330 px wide, the other tabs 260 px."""
+        want = _PRIMERS_MODULE_WIDTH if index == PRIMERS_TAB_INDEX else _MODULE_WIDTH
+        if int(self._module_width) != want:
+            self._module_width = want
+            self._apply_module_geometry()
 
     def _settings(self) -> QSettings:
         settings = QSettings()
@@ -3118,6 +3130,7 @@ class SequenceAnnotationRail(QWidget):
             tab = max(0, min(tab, self._stack.count() - 1))
             self._active_tab = tab
             self._stack.setCurrentIndex(tab)
+            self._sync_width_for_tab(tab)
 
             collapsed_raw = settings.value(_SETTINGS_COLLAPSED_KEY, False)
             if isinstance(collapsed_raw, str):
