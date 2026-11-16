@@ -344,6 +344,7 @@ class MethCall:
     context: str
     percent: float
     reads: int
+    blocks: bool = False      # the context blocks this enzyme (any level)
 
 
 @dataclass
@@ -471,10 +472,10 @@ def judge_site(site: Site, sequence: str, meth: MethData | None, *, min_percent:
         pct, reads = call
         if not inside and context != "CG" and context != "CHG":
             continue
-        site.calls.append(MethCall(pos=i + 1, strand=strand, context=context, percent=pct,
-                                   reads=reads))
         rule = sens.get(context)
         counts = rule == OVERLAP or (rule == SENSITIVE and inside)
+        site.calls.append(MethCall(pos=i + 1, strand=strand, context=context, percent=pct,
+                                   reads=reads, blocks=counts))
         if counts and pct >= min_percent and reads >= min_reads:
             blocked_by.append(f"m{context} at {i + 1:,} ({pct:.0f} %, {reads} reads)")
     if blocked_by:
@@ -486,6 +487,12 @@ def judge_site(site: Site, sequence: str, meth: MethData | None, *, min_percent:
         site.reason = "Cut: " + sensitivity_text(site.enzyme)
     else:
         site.reason = "No reads at this site in your data. " + sensitivity_text(site.enzyme)
+
+
+def blocked_fraction(site: Site, min_reads: int) -> float | None:
+    """Share of molecules methylated in a blocking context (highest C), None without reads."""
+    vals = [c.percent / 100.0 for c in site.calls if c.blocks and c.reads >= min_reads]
+    return max(vals) if vals else None
 
 
 def restriction_map(sequence: str, settings: MapSettings, meth: MethData | None = None,
@@ -524,31 +531,6 @@ def fragments(length: int, cuts: list[int]) -> list[int]:
         prev = c
     out.append(length - prev + 1)
     return [f for f in out if f > 0]
-
-
-def digest_gel(sequence: str, rows: list[EnzymeRow], *, title: str = "",
-               with_data: bool = False):
-    """Gel document: ladder, uncut, then each enzyme (and, with data, the methylation-aware lane)."""
-    from repeatviewer.backends.primers import gel_doc as gd
-
-    n = len(sequence)
-    lanes = [gd.GelLane(label="Uncut", bands=[gd.GelBand(size=n, label="uncut")])]
-    sizes = [n]
-    for r in rows:
-        frags = fragments(n, [s.cut for s in r.sites])
-        sizes += frags
-        lanes.append(gd.GelLane(label=r.name, bands=[gd.GelBand(size=f, label=r.name)
-                                                     for f in frags],
-                                note=f"{r.cuts} sites, sequence only"))
-        if with_data and r.blocked:
-            frags = fragments(n, [s.cut for s in r.sites if not s.blocked])
-            lanes.append(gd.GelLane(label=f"{r.name} m", bands=[gd.GelBand(size=f, label=r.name)
-                                                                for f in frags],
-                                    note=f"{r.blocked} of {r.cuts} sites methylated in your data"))
-    ladder = gd.pick_ladder_name(sizes)
-    doc = gd.GelDoc(ladder=ladder, agarose=gd.pick_agarose(sizes), title=title)
-    doc.lanes = [gd.ladder_lane(ladder)] + lanes
-    return doc
 
 
 METH_SUFFIXES = (".cov", ".cov.gz", ".bed", ".bed.gz", ".bedmethyl", ".bedmethyl.gz")

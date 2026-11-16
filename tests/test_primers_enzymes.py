@@ -67,14 +67,10 @@ def test_load_bismark_and_bedmethyl(tmp_path):
     assert "No methylation rows" in ez.load_methylation(cov, "zz", len(SEQ)).note
 
 
-def test_map_and_digest_gel():
+def test_map_and_listing():
     s = ez.MapSettings(enzyme_set=ez.SET_METHYL, show=ez.SHOW_MANY)
     rows = ez.restriction_map(SEQ, s, ez.MethData(calls={8: (90.0, 12)}))
     by = {r.name: r for r in rows}
     assert by["HpaII"].blocked == 1 and by["MspI"].blocked == 0
     listed = ez.listed_rows(rows, s.show)
     assert listed[0].cuts >= 1 and listed[-1].cuts == 0
-    doc = ez.digest_gel(SEQ, [by["HpaII"]], with_data=True)
-    labels = [ln.label for ln in doc.lanes]
-    assert labels[1:] == ["Uncut", "HpaII", "HpaII m"]
-    assert [b.size for b in doc.lanes[-1].bands] == [len(SEQ)]

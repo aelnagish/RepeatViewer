@@ -4,7 +4,7 @@ Pick an enzyme set and how often an enzyme may cut; ticked enzymes are drawn on
 the bases (a line at each cut). With a Bismark .cov or modkit bedMethyl file,
 sites methylated in a context that blocks the enzyme are drawn "probably not
 cut" (red, dashed). Hover a site for the position, the reads and the reason.
-Digest Ticked makes a gel document of the ticked enzymes.
+Digest Ticked opens the Digest page (tandem-array ladders, methylation, partial cutting).
 
 Developer: Abdullah Yusuf
 """
@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QPushButton,
+    QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -59,8 +60,8 @@ METH_HELP = (
 LIST_HELP = (
     "<b>Cuts</b>: sites on this sequence. <b>In your data</b>: sites probably not cut "
     "because of methylation in your file.<br>Click an enzyme to go to its first site. "
-    "<b>Digest Ticked</b> makes a gel: uncut, each ticked enzyme, and with data an extra "
-    "lane without the methylated sites."
+    "<b>Digest Ticked</b> shows the ticked enzymes as a gel: monomer ladders, sites lost "
+    "in some copies, methylated sites from your data and partial cutting."
 )
 PAIR_NOTE = ("HpaII and MspI both cut CCGG; only HpaII is blocked by methylated CG, so the "
              "pair shows methylation on a gel.")
@@ -100,7 +101,18 @@ class EnzymePane(QWidget):
         self._timer.timeout.connect(self._run)
         s = self._load_settings()
 
-        lay = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        self.stack = QStackedWidget(self)
+        outer.addWidget(self.stack)
+        self.map_page = QWidget(self.stack)
+        self.stack.addWidget(self.map_page)
+        from repeatviewer.widgets.primer_digest_pane import DigestPage
+
+        self.digest_page = DigestPage(self, self.stack)
+        self.stack.addWidget(self.digest_page)
+        self.digest_page.backRequested.connect(self.show_map_page)
+        lay = QVBoxLayout(self.map_page)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(10)
 
@@ -223,6 +235,7 @@ class EnzymePane(QWidget):
 
     def reset_for_sequence(self) -> None:
         self._ticks = {}
+        self.show_map_page()
         self._fill_data_combo(self.settings().meth_path)
         self.schedule()
 
@@ -285,6 +298,8 @@ class EnzymePane(QWidget):
             return
         self._rows, self._meth = list(rows or []), meth
         self._fill()
+        if self.stack.currentWidget() is self.digest_page:
+            self.digest_page.schedule()
 
     # ------------------------------------------------------------------ table
 
@@ -371,6 +386,8 @@ class EnzymePane(QWidget):
             self._update_note()
             self.digest_button.setEnabled(bool(self.ticked_rows()))
             self.push_overlay()
+            if self.stack.currentWidget() is self.digest_page:
+                self.digest_page.schedule()
 
     def _on_row_selected(self) -> None:
         rows = self.table.selectionModel().selectedRows() if self.table.selectionModel() else []
@@ -412,25 +429,11 @@ class EnzymePane(QWidget):
 
     # ------------------------------------------------------------------ digest
 
-    def _on_digest(self) -> None:
-        from repeatviewer.backends.primers import gel_doc as gd
-        from repeatviewer.widgets.primers_panel import find_main_window
+    def show_map_page(self) -> None:
+        self.stack.setCurrentWidget(self.map_page)
 
-        rows = self.ticked_rows()
-        path = self._panel.fasta_path()
-        if not rows or path is None:
+    def _on_digest(self) -> None:
+        if not self.ticked_rows():
             return
-        seq_id = (self._panel._seq_id or "sequence").split()[0]
-        safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in seq_id)[:40]
-        base = f"{path.stem}_{safe}_digest"
-        has_data = self._meth is not None and bool(self._meth.calls)
-        doc = ez.digest_gel(self._panel._template, rows, title=base, with_data=has_data)
-        out = gd.unique_gel_path(path.parent, base)
-        try:
-            doc.save(out)
-        except OSError as exc:
-            self._set_note(f"Could not write the gel: {exc}", "amber")
-            return
-        mw = find_main_window()
-        if mw is not None and hasattr(mw, "_show_new_output"):
-            mw._show_new_output(out)
+        self.stack.setCurrentWidget(self.digest_page)
+        self.digest_page.recompute()

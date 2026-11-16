@@ -275,4 +275,12 @@ def test_enzymes_tab_draws_sites_and_methylation(qapp, isolated_settings, tmp_pa
     panel.tabs.setCurrentIndex(1)
     assert drawn[-1] == []
     pane.digest_button.click()
+    page = pane.digest_page
+    assert pane.stack.currentWidget() is page
+    labels = [ln.label for ln in page.lanes()]
+    assert labels == ["HpaII (your data)", "MspI", "HpaII (no data)"] or \
+        labels[0].startswith("HpaII (your data)")
+    assert page.gel._doc is not None and page.table.rowCount() > 0
+    assert "methylated in your data" in page.why.text()
+    page.open_button.click()
     assert list(tmp_path.glob("t_t_digest*.rvgel"))
