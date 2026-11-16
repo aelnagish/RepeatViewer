@@ -262,8 +262,9 @@ whether to use your own copy of the program). Buttons are always
 **Save** and **Run** on the right. **Save** keeps the settings without running.
 Settings are remembered between sessions.
 
-**Every tool is in the Tools menu.** Tools with many settings have two items:
-"… with default parameters" (run with the saved settings) and "Change …
-parameters" (open the window).
+**Every tool is in the Tools menu.** Click a tool name (BLAST, Mapping, …) to
+open its window — same as the toolbar. Choose the program or operation on the
+window tabs, then **Run**. Right-click the toolbar button to run with saved
+settings.
 
 ![The Tools menu, grouped by kind of work.](img/menu_tools.png)

@@ -5,9 +5,8 @@
 **Toolbar: Align · Tools → Align**
 
 Builds a multiple sequence alignment (MSA) with **MAFFT** or **MUSCLE** (both
-bundled), or a whole-genome style alignment with **FastGA**. The Tools menu has
-**MAFFT**, **MUSCLE** and **FastGA** (run with saved settings), **Align all
-selected files in one MSA**, and **Change alignment parameters** (the window).
+bundled), or a whole-genome style alignment with **FastGA**. **Tools → Align**
+opens the window; pick the program tab and **Run**.
 
 ![The Align window, MAFFT tab.](img/align.png)
 

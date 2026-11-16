@@ -19,9 +19,8 @@ falls back silently to a weaker method.
 
 ![The Tree window, IQ-TREE tab.](img/tree.png)
 
-**Tools → Tree → Tree with default parameters** builds with the saved
-settings; **Change Tree parameters** opens the window. The window has a tab per
-program (**IQ-TREE**, **FastME**, **FastTree**) and **Options**.
+**Tools → Tree** opens the window. It has a tab per program (**IQ-TREE**,
+**FastME**, **FastTree**) and **Options**.
 
 | Section | Setting | Default | Why |
 |---------|---------|---------|-----|

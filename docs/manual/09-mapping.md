@@ -134,8 +134,8 @@ The browser is read-only: it shows, it does not edit.
 
 Prepares alignment files (SAM, BAM, CRAM, also `.sam.gz`) from RepeatViewer's
 Mapping or from any other mapper, mostly so that large files open quickly in the
-genome browser. The menu has **Sort**, **Index** and **Convert** (run on the
-selected files with the saved settings) and **Change Samtools parameters**.
+genome browser. **Tools → Samtools** opens the window; use the **Sort**,
+**Index** or **Convert** tab and **Run**.
 
 ![The Samtools window, Sort tab.](img/samtools.png)
 

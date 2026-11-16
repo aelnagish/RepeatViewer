@@ -120,35 +120,14 @@ The suggested file name follows the type: `name.fa_RV.gff3` for annotations,
 
 ## Sequence Annotation (many files at once)
 
-**Tools → Annotate → Sequence Annotation** runs feature detection and
+**Tools → Annotate** runs feature detection and
 similarity annotation on all selected files in one go, writing the results into
 each file's annotations. Use it to annotate a whole library before you look at
 the elements one by one.
 
 ![The Sequence Annotation window.](img/seq_annotation.png)
 
-- **Feature detection**: the same types as in the side panel.
+- **Feature detection**: the same types as in the side panel (including TSD
+  search settings under Advanced).
 - **Similarity annotation**: the databases marked for annotation.
 - **Threads** and, under **Advanced Settings**, the detector parameters.
-
-## TSD Search
-
-**Tools → Annotate → TSD Search** looks for target site duplications in an
-alignment of genomic copies: short direct repeats just outside the element, one
-on each side. A TSD found in many copies is strong evidence that the boundaries
-are right.
-
-![TSD Search settings.](img/tsd_search.png)
-
-| Setting | Default | Meaning |
-|---------|---------|---------|
-| Boundary definition | Auto detect | Where the element starts and ends: found by boundary prediction, or set as alignment columns |
-| Search range around boundary | 100 bp | How far outside each boundary to look |
-| Min / Max TSD length | 4 / 20 bp | Lengths of TSD considered |
-| Min distance between TSDs | 200 bp | The two copies must be at least this far apart |
-| Write .tsd_search.txt report | off | Also write a text report |
-| Max TSD similarity | 0.30 | Similarity ceiling used when comparing candidates |
-| Poly-N threshold | 0.95 | Ignore candidates in runs of N |
-| Cluster distance (eps) | 1.0 | Tolerance when grouping candidates from many copies |
-
-The TSDs found are added as `TSD` features on the alignment.

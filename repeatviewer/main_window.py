@@ -395,7 +395,6 @@ from repeatviewer.job_options import (
     load_map_options,
     DEFAULT_CLOSE_PROCESS_WINDOW_WHEN_FINISHED,
     DEFAULT_SHOW_PROCESS_WINDOW,
-    msa_clean_method_description,
     save_align_options,
     save_blast_options,
     save_hmmer_options,
@@ -4099,18 +4098,6 @@ class MainWindow(
     def _genome_menu_hint() -> str:
         return "File → Manage Database"
 
-    def _populate_align_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
-        del skip_default
-        menu.addAction("MAFFT", self._run_mafft_default)
-        menu.addAction("MUSCLE", self._run_muscle_default)
-        menu.addAction("FastGA", self._run_fastga_default)
-        menu.addAction(
-            "Align all selected files in one MSA",
-            self._align_selected_combined,
-        )
-        menu.addSeparator()
-        menu.addAction("Change alignment parameters", self._modify_align_parameters)
-
     def _new_sequence(self) -> None:
         """Type or paste a sequence and save it into the current folder."""
         from repeatviewer.backends.sequence_compose import (
@@ -5055,15 +5042,6 @@ class MainWindow(
 
     # ------------------------------------------------------------------ Tree
 
-    def _populate_tree_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
-        if not skip_default:
-            menu.addAction("Tree with default parameters", self._run_tree_default)
-        menu.addSeparator()
-        # Settings can be changed without a selection (Run then asks for one).
-        menu.addAction(
-            "Change Tree parameters", lambda: self._open_tree_dialog(require_selection=False)
-        )
-
     def _tree_candidate_files(self) -> list[Path]:
         """Selected FASTA files (several files are combined into one tree). No UI."""
         return [
@@ -5210,15 +5188,6 @@ class MainWindow(
     # ------------------------------------------------------------------ Map to Reference
 
     _MAP_SUFFIXES = (".fa", ".fasta", ".fna", ".fas", ".fsa", ".fq", ".fastq")
-
-    def _populate_map_menu(self, menu: QMenu) -> None:
-        menu.addAction("Map with default parameters", self._run_map_default)
-        menu.addSeparator()
-        # Settings can be changed without a selection (Run then asks for one).
-        menu.addAction(
-            "Change Mapping parameters",
-            lambda: self._open_map_dialog(require_selection=False),
-        )
 
     def _map_candidate_files(self) -> list[Path]:
         """Selected FASTA / FASTQ files (gzipped too), without the reference. No UI."""
@@ -5996,40 +5965,6 @@ class MainWindow(
             self, "Repeat Quantify failed", error.strip() or "Unknown error."
         )
 
-    def _populate_blast_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
-        menu.addAction(
-            "BLASTn",
-            lambda checked=False: self._run_blast_program(BLAST_PROGRAM_BLASTN),
-        )
-        menu.addAction(
-            "BLASTp",
-            lambda checked=False: self._run_blast_program(BLAST_PROGRAM_BLASTP),
-        )
-        menu.addAction(
-            "BLASTx",
-            lambda checked=False: self._run_blast_program(BLAST_PROGRAM_BLASTX),
-        )
-        menu.addAction(
-            "Online BLAST",
-            lambda checked=False: self._run_blast_program(BLAST_PROGRAM_ONLINE),
-        )
-        menu.addSeparator()
-        menu.addAction("Change BLAST parameters", self._change_blast_parameters)
-
-    def _populate_hmmer_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
-        del skip_default
-        menu.addAction("HMMER with default parameters", self._run_hmmer)
-        menu.addSeparator()
-        menu.addAction("Change HMMER parameters", self._change_hmmer_parameters)
-
-    def _populate_samtools_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
-        del skip_default
-        menu.addAction("Sort", lambda: self._run_samtools_operation("sort"))
-        menu.addAction("Index", lambda: self._run_samtools_operation("index"))
-        menu.addAction("Convert", lambda: self._run_samtools_operation("convert"))
-        menu.addSeparator()
-        menu.addAction("Change Samtools parameters", self._change_samtools_parameters)
-
     def _populate_te_visualization_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
         if not skip_default:
             menu.addAction("Genome density plot", self._open_te_density_plot_dialog)
@@ -6041,85 +5976,6 @@ class MainWindow(
         if not skip_default:
             menu.addAction("Confusion matrix benchmarker", self._open_confusion_matrix_benchmark)
         menu.addAction("TE library benchmarker", self._open_te_library_benchmark)
-
-    def _populate_extend_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
-        if not skip_default:
-            menu.addAction("MSA Extend with default parameters", self._run_extend)
-        menu.addSeparator()
-        menu.addAction("Change MSA Extend parameters", self._modify_extend_parameters)
-
-    def _populate_tsd_search_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
-        if not skip_default:
-            menu.addAction("TSD search with default parameters", self._run_tsd_search)
-        menu.addSeparator()
-        menu.addAction("Change TSD search parameters", self._modify_tsd_search_parameters)
-
-    def _populate_teaid_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
-        if not skip_default:
-            menu.addAction("TE-Aid with default parameters", self._run_teaid)
-        menu.addSeparator()
-        menu.addAction("Change TE-Aid parameters", self._modify_teaid_parameters)
-
-    def _populate_msa_clean_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
-        del skip_default
-        menu.addAction("Combined MSA clean", self._run_default_msa_clean)
-        menu.addSeparator()
-        self._add_msa_clean_menu_action(
-            menu,
-            "Remove gappy columns",
-            "msa_clean_gappy",
-        )
-        self._add_msa_clean_menu_action(
-            menu,
-            "Clean row with divergence",
-            "msa_clean_div",
-        )
-        self._add_msa_clean_menu_action(
-            menu,
-            "Clean row with gap",
-            "msa_clean_gap",
-        )
-        menu.addSeparator()
-        menu.addAction("Change MSA clean parameters", self._modify_msa_clean_parameters)
-
-    def _populate_consensus_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
-        if not skip_default:
-            menu.addAction("Consensus with default parameters", self._run_consensus)
-        menu.addSeparator()
-        menu.addAction("Change consensus parameters", self._modify_consensus_parameters)
-
-    def _populate_flexidot_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
-        if not skip_default:
-            menu.addAction(
-                "Dotplot with default parameters",
-                self._run_dotplot_default,
-            )
-        menu.addSeparator()
-        menu.addAction("Change Dotplot parameters", self._modify_flexidot_parameters)
-
-    def _populate_orf_prediction_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
-        if not skip_default:
-            menu.addAction(
-                "ORF Prediction with default parameters",
-                self._run_orf_prediction,
-            )
-        menu.addSeparator()
-        menu.addAction(
-            "Change ORF Prediction parameters",
-            self._modify_orf_prediction_parameters,
-        )
-
-    def _populate_te_annotation_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
-        if not skip_default:
-            menu.addAction(
-                "Sequence annotation with default parameters",
-                self._run_te_annotation_saved,
-            )
-        menu.addSeparator()
-        menu.addAction(
-            "Change Sequence annotation parameters",
-            self._modify_te_annotation_parameters,
-        )
 
     def _build_menu(self) -> None:
         file_menu = self.menuBar().addMenu("&File")
@@ -6167,7 +6023,7 @@ class MainWindow(
             "Reverse Complement",
             lambda: self._apply_function("reverse_complement"),
         )
-        self._populate_orf_prediction_menu(seq_menu.addMenu("ORF &Prediction"))
+        seq_menu.addAction("ORF &Prediction", self._open_orf_prediction_dialog)
         seq_menu.addAction(
             "Translate",
             lambda: self._apply_function(
@@ -6182,31 +6038,34 @@ class MainWindow(
         tools_menu.addAction("Download from &NCBI", lambda: self._open_ncbi_download_dialog())
         tools_menu.addAction("Open in &AliView", self._open_selected_in_aliview)
         tools_menu.addSeparator()
-        # Grouped by task (10 Nov 2026): Search, Align, Curate, Annotate,
-        # Visualize, Mapping, Samtools, Tree, Primers and Probes, Quantify.
+        # Click a tool name to open its window (same as toolbar).
         search_menu = tools_menu.addMenu("&Search")
-        self._populate_blast_menu(search_menu.addMenu("&BLAST"))
-        self._populate_hmmer_menu(search_menu.addMenu("&HMMER"))
+        search_menu.addAction("&BLAST", self._open_blast_dialog)
+        search_menu.addAction("&HMMER", self._open_hmmer_dialog)
         search_menu.addSeparator()
         # Same window as File > Manage Database; the Ctrl+Shift+G shortcut
         # stays on the File item only (one key on two items makes Qt ignore it).
         search_menu.addAction("Define &Genome…", self._open_manage_references)
-        self._populate_align_menu(tools_menu.addMenu("&Align"))
+        tools_menu.addAction("&Align", self._open_align_dialog)
         curate_menu = tools_menu.addMenu("&Curate")
-        self._populate_extend_menu(curate_menu.addMenu("MSA &Extend"))
-        self._populate_msa_clean_menu(curate_menu.addMenu("MSA &Clean"))
-        self._populate_consensus_menu(curate_menu.addMenu("C&onsensus"))
-        self._populate_teaid_menu(curate_menu.addMenu("&TE-Aid"))
-        annotate_menu = tools_menu.addMenu("A&nnotate")
-        self._populate_te_annotation_menu(annotate_menu.addMenu("Sequence &Annotation"))
-        self._populate_tsd_search_menu(annotate_menu.addMenu("TSD &Search"))
+        curate_menu.addAction("MSA &Extend", self._open_extend_dialog)
+        curate_menu.addAction("MSA &Clean", self._open_msa_clean_dialog)
+        curate_menu.addAction("C&onsensus", self._open_consensus_dialog)
+        curate_menu.addAction("&TE-Aid", self._open_teaid_dialog)
+        tools_menu.addAction("A&nnotate", self._open_te_annotation_dialog)
         visualize_menu = tools_menu.addMenu("&Visualize")
-        self._populate_flexidot_menu(visualize_menu.addMenu("&Dotplot"))
+        visualize_menu.addAction("&Dotplot", self._open_flexidot_dialog)
         visualize_menu.addSeparator()
         self._populate_te_visualization_menu(visualize_menu)
-        self._populate_map_menu(tools_menu.addMenu("&Mapping"))
-        self._populate_samtools_menu(tools_menu.addMenu("&Samtools"))
-        self._populate_tree_menu(tools_menu.addMenu("T&ree"))
+        tools_menu.addAction(
+            "&Mapping",
+            lambda: self._open_map_dialog(require_selection=False),
+        )
+        tools_menu.addAction("&Samtools", self._open_samtools_dialog)
+        tools_menu.addAction(
+            "T&ree",
+            lambda: self._open_tree_dialog(require_selection=False),
+        )
         self._populate_primers_menu(tools_menu.addMenu("&Primers and Probes"))
         quantify_menu = tools_menu.addMenu("&Quantify")
         quantify_menu.addAction("Repeat &Quantify", self._open_repeat_quantify)
@@ -7872,17 +7731,6 @@ class MainWindow(
                     "Right-click: run with saved settings (set in the Options tab)."
                 ),
                 right_click_slot=self._quick_extend_right_click,
-            )
-        elif tool_id == "tsd_search":
-            self._add_toolbar_action_button(
-                bar,
-                "TSD Search",
-                self._modify_tsd_search_parameters,
-                tooltip=(
-                    "Click: set TSD boundaries / lengths and run.\n"
-                    "Right-click: run with saved settings."
-                ),
-                right_click_slot=self._run_tsd_search,
             )
         elif tool_id == "teaid":
             self._add_toolbar_action_button(
@@ -11560,10 +11408,6 @@ class MainWindow(
             return
         self._align_sequences(engine=aligner, mode=self._mode_for_aligner(aligner))
 
-    def _modify_align_parameters(self) -> None:
-        """Menu: same Cancel / Save / Run dialog as the Align toolbar button."""
-        self._open_align_dialog()
-
     def _align_sequences(
         self,
         paths: list[Path] | None = None,
@@ -11797,15 +11641,8 @@ class MainWindow(
             return
         dialog.apply_folder_from_panel(folder)
 
-    def _change_blast_parameters(self) -> None:
-        """Menu: same Cancel / Save / Run dialog as the BLAST toolbar button."""
-        self._open_blast_dialog()
-
     def _run_hmmer(self) -> None:
         self._apply_function("hmmer", hmmer_options=self._hmmer_options)
-
-    def _change_hmmer_parameters(self) -> None:
-        self._open_hmmer_dialog()
 
     def _open_hmmer_dialog(self) -> None:
         """Non-modal HMMER parameters (Define inputs can take Files/Folders clicks)."""
@@ -11890,9 +11727,6 @@ class MainWindow(
         if dialog is None or not dialog.isVisible() or clicked_path is None:
             return
         dialog.apply_path_from_panel(clicked_path)
-
-    def _change_samtools_parameters(self) -> None:
-        self._open_samtools_dialog()
 
     def _open_samtools_dialog(self) -> None:
         """Non-modal samtools parameters (Define inputs can take Files clicks)."""
@@ -13831,14 +13665,6 @@ class MainWindow(
         """Right-click HMMER: run with saved settings."""
         self._run_hmmer()
 
-    def _modify_teaid_parameters(self) -> None:
-        """Menu: same Cancel / Save / Run dialog as the TE-Aid toolbar button."""
-        self._open_teaid_dialog()
-
-    def _modify_extend_parameters(self) -> None:
-        """Menu: same Cancel / Save / Run dialog as the MSA Extend toolbar button."""
-        self._open_extend_dialog()
-
     def _modify_tsd_search_parameters(self) -> None:
         """Menu / change parameters: Cancel / Save / Run."""
         dialog = TsdSearchParamsDialog(
@@ -13986,10 +13812,6 @@ class MainWindow(
     def _quick_consensus_right_click(self) -> None:
         """Right-click Consensus: run with saved settings."""
         self._run_consensus()
-
-    def _modify_consensus_parameters(self) -> None:
-        """Menu: same Cancel / Save / Run dialog as the Consensus toolbar button."""
-        self._open_consensus_dialog()
 
     def _run_dotplot_default(self) -> None:
         """Tools → Dotplot with default parameters (last active engine tab)."""
@@ -14322,37 +14144,9 @@ class MainWindow(
         else:
             self._set_status_message("ORF Prediction settings saved", 4000)
 
-    def _modify_orf_prediction_parameters(self) -> None:
-        """Menu: same Cancel / Save / Run dialog as the ORF Prediction toolbar button."""
-        self._open_orf_prediction_dialog()
-
     def _run_te_annotation(self) -> None:
-        """Tools menu default entry: run with saved selection."""
+        """Run Sequence Annotation with saved selection."""
         self._run_te_annotation_saved()
-
-    def _modify_te_annotation_parameters(self) -> None:
-        """Menu: same Cancel / Save / Run dialog as the TE annotation toolbar button."""
-        self._open_te_annotation_dialog()
-
-    def _modify_flexidot_parameters(self) -> None:
-        """Menu: same Cancel / Save / Run dialog as the Dotplot toolbar button."""
-        self._open_flexidot_dialog()
-
-    def _add_msa_clean_menu_action(
-        self,
-        menu: QMenu,
-        label: str,
-        method_id: str,
-    ) -> None:
-        action = menu.addAction(label, lambda: self._apply_msa_clean(method_id))
-        desc = msa_clean_method_description(method_id)
-        if desc:
-            action.setToolTip(desc)
-            action.setStatusTip(desc)
-
-    def _modify_msa_clean_parameters(self) -> None:
-        """Menu: same Cancel / Save / Run dialog as the MSA Clean toolbar button."""
-        self._open_msa_clean_dialog()
 
     def _open_msa_clean_dialog(self) -> None:
         """Click MSA Clean: parameters dialog. Run runs; Save stores only.
@@ -16896,7 +16690,7 @@ class MainWindow(
                 QMessageBox.warning(
                     self,
                     "HMM database required",
-                    "Select an HMM database under Tools → Search → HMMER → Change HMMER parameters.\n\n"
+                    "Select an HMM database under Tools → Search → HMMER.\n\n"
                     "Add HMM profiles via File → Manage Database (HMM DNA / HMM Protein).",
                 )
                 return

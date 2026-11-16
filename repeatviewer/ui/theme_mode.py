@@ -24,10 +24,14 @@ from PySide6.QtWidgets import (
     QComboBox,
     QMenu,
     QProxyStyle,
+    QStyle,
     QStyledItemDelegate,
     QStyleFactory,
     QWidget,
 )
+
+# Hover → submenu open delay (ms). Fusion's default feels sluggish for Tools.
+_MENU_SUBMENU_POPUP_DELAY_MS = 50
 
 THEME_SETTINGS_GROUP = "appearance"
 DEFAULT_THEME_MODE = "auto"
@@ -189,6 +193,11 @@ class _MenuStyle(QProxyStyle):
     """Fusion, with every popup (menus, combo-box lists, tooltips, completer lists, the
     preview zoom slider) on a transparent window, so the stylesheet's rounded corners
     show. One look for all popups across the app."""
+
+    def styleHint(self, hint, option=None, widget=None, returnData=None):  # noqa: N802
+        if hint == QStyle.StyleHint.SH_Menu_SubMenuPopupDelay:
+            return _MENU_SUBMENU_POPUP_DELAY_MS
+        return super().styleHint(hint, option, widget, returnData)
 
     def polish(self, target):  # Qt override: QWidget, QPalette or QApplication
         if isinstance(target, QWidget):
