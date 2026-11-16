@@ -239,8 +239,9 @@ def _format_file_size(num_bytes: int) -> str:
 
 
 def is_fasta_path(path: Path) -> bool:
-    name = path.name.lower()
-    return path.suffix.lower() in _FASTA_SUFFIXES or name.endswith(".fa.gz")
+    from repeatviewer.backends.large_fasta import is_fasta_name
+
+    return is_fasta_name(path)
 
 
 def _molecule_type(path: Path) -> str:

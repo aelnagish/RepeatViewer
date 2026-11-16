@@ -10,6 +10,8 @@ from pathlib import Path
 
 from Bio import SeqIO
 
+from repeatviewer.backends.large_fasta import open_fasta_text, split_compression
+
 # Trailing #N (N>=2) added by uniquify_record_ids for duplicate FASTA headers.
 _UNIQUIFY_SUFFIX_RE = re.compile(r"^(.+)#([2-9]|[1-9]\d+)$")
 
@@ -959,7 +961,7 @@ def load_single_sequence_fasta(path: Path) -> tuple[str, str]:
     resolved = path.expanduser().resolve()
     if not resolved.is_file():
         raise FileNotFoundError(resolved)
-    records = list(SeqIO.parse(str(resolved), "fasta"))
+    records = list(SeqIO.parse(open_fasta_text(resolved), "fasta"))
     if not records:
         raise ValueError(f"No sequences in {resolved.name}")
     if len(records) != 1:
@@ -983,7 +985,7 @@ def list_fasta_record_ids(path: Path) -> list[str]:
     if not resolved.is_file():
         raise FileNotFoundError(resolved)
     ids: list[str] = []
-    for record in SeqIO.parse(str(resolved), "fasta"):
+    for record in SeqIO.parse(open_fasta_text(resolved), "fasta"):
         rid = str(record.id).strip()
         if rid:
             ids.append(rid)
@@ -1051,7 +1053,7 @@ def aligned_fasta_width(path: Path) -> int | None:
     count = 0
     length: int | None = None
     try:
-        for record in SeqIO.parse(str(resolved), "fasta"):
+        for record in SeqIO.parse(open_fasta_text(resolved), "fasta"):
             rid = str(record.id).strip()
             if not rid:
                 continue
@@ -1090,7 +1092,7 @@ def load_aligned_fasta_rows(path: Path) -> tuple[list[str], list[str]]:
         raise FileNotFoundError(resolved)
     raw_ids: list[str] = []
     seqs: list[str] = []
-    for record in SeqIO.parse(str(resolved), "fasta"):
+    for record in SeqIO.parse(open_fasta_text(resolved), "fasta"):
         rid = str(record.id).strip()
         if not rid:
             continue
@@ -1118,7 +1120,7 @@ def load_fasta_rows(path: Path) -> tuple[list[str], list[str]]:
         raise FileNotFoundError(resolved)
     raw_ids: list[str] = []
     seqs: list[str] = []
-    for record in SeqIO.parse(str(resolved), "fasta"):
+    for record in SeqIO.parse(open_fasta_text(resolved), "fasta"):
         rid = str(record.id).strip()
         if not rid:
             continue
@@ -1194,7 +1196,7 @@ def _fasta_lengths_and_single_sequence(
     raw_lens: list[int] = []
     first_seq: str | None = None
     multi = False
-    for record in SeqIO.parse(str(resolved), "fasta"):
+    for record in SeqIO.parse(open_fasta_text(resolved), "fasta"):
         rid = str(record.id).strip()
         if not rid:
             continue
@@ -1213,6 +1215,16 @@ def _fasta_lengths_and_single_sequence(
     return lengths, None if multi else first_seq
 
 
+class _ParsedIndex(dict):
+    """Stand-in for SeqIO.index on a gzipped FASTA (SeqIO.index cannot read gzip)."""
+
+    def __init__(self, path: Path) -> None:
+        super().__init__((str(r.id), r) for r in SeqIO.parse(open_fasta_text(path), "fasta"))
+
+    def close(self) -> None:
+        pass
+
+
 def load_fasta_record(path: Path, seq_id: str) -> tuple[str, str]:
     """Load one record by id (exact or soft match). Returns (id, uppercase sequence)."""
     from repeatviewer.backends.gff_features import _seqid_matches
@@ -1224,7 +1236,11 @@ def load_fasta_record(path: Path, seq_id: str) -> tuple[str, str]:
     if not wanted:
         raise ValueError("Sequence id is empty.")
 
-    index = SeqIO.index(str(resolved), "fasta")
+    index = (
+        _ParsedIndex(resolved)
+        if split_compression(resolved)[1]
+        else SeqIO.index(str(resolved), "fasta")
+    )
     try:
         if wanted in index:
             record = index[wanted]
@@ -1460,7 +1476,7 @@ def load_sequence_map_data(
 
 def _load_fasta_record_by_index(path: Path, index: int) -> tuple[str, str]:
     resolved = path.expanduser().resolve()
-    for i, record in enumerate(SeqIO.parse(str(resolved), "fasta")):
+    for i, record in enumerate(SeqIO.parse(open_fasta_text(resolved), "fasta")):
         if i != index:
             continue
         seq = str(record.seq).upper()

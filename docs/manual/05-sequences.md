@@ -86,6 +86,19 @@ below).
 An aligned FASTA (all rows the same length, with gaps) opens in the alignment
 viewer instead; see [Alignments](08-alignments.md#the-alignment-viewer).
 
+## Large genomes and compressed files
+
+A FASTA larger than 1 GB (256 MB when gzipped) does not load at once. Preview shows its **sequences** instead: the file is indexed once (a `.fai` next to it, the same index samtools writes; a progress bar shows how far it is) and every sequence is listed with its length and its number of saved annotations. Only the part you open is read from disk, so a 4 GB genome opens in seconds after the first index.
+
+- **Double-click** a sequence: up to 100 Mb opens whole, a longer one opens its first 5 Mb.
+- **Region**: type `scaffold_5:120,000,000-125,000,000`, a name alone (the whole sequence) or `1000-2000` (the selected sequence), then **Open Region**. At most 100 Mb.
+- **Open Region** and **Open Whole Sequence** write the part next to the genome as `<genome>_<name>_<start>-<end>.fa` (whole sequence: `<genome>_<name>.fa`) and open it. The header keeps the genome positions (`>scaffold_5:120000001-125000000 from Csat_v1.fa.gz`). Opening the same region again reuses the file.
+- **Extract to File** writes the region to a name you choose.
+
+Compressed files: every FASTA name ending in `.gz` or `.bgz` (`.fa.gz`, `.fasta.gz`, `.fna.gz` ...) opens like the plain file, and compressed text files (`.gff3.gz`, `.tsv.gz` ...) open as text. A **bgzip** file (made by `bgzip` or `samtools`) opens regions as fast as a plain file (index `.fai` + `.gzi` next to it). A plain **gzip** file has to be read from its start for every region; Preview then offers **Convert to bgzip**, which writes `<name>_bgzip.fa.gz` once.
+
+> **Tip.** `.fna`, `.ffn` and `.fsa` files are FASTA too.
+
 ## Sequence operations
 
 The **Sequence** menu holds operations that make new FASTA files.

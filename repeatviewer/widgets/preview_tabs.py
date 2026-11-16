@@ -68,8 +68,10 @@ from repeatviewer.widgets.preview_zoom import (
 
 logger = logging.getLogger(__name__)
 
-_FASTA_SUFFIXES = {".fa", ".fasta", ".fas", ".faa"}
+_FASTA_SUFFIXES = {".fa", ".fasta", ".fas", ".faa", ".fna", ".ffn", ".fsa"}
 _FASTA_PREVIEW_MAX_BYTES = 1024**3
+# A gzipped FASTA is about 3 to 4 times larger once read: list its sequences sooner.
+_FASTA_GZ_PREVIEW_MAX_BYTES = 256 * 1024**2
 # Show status-bar progress when opening files at least this large.
 _PREVIEW_OPEN_PROGRESS_MIN_BYTES = 10 * 1024 * 1024
 _FASTA_TOO_LARGE_MESSAGE = "The file size is too big to show"
@@ -86,15 +88,23 @@ def _count_fasta_sequences_fast(path: Path, *, stop_at: int | None = None) -> in
 
 
 def _is_fasta_file(path: Path) -> bool:
-    suffix = path.suffix.lower()
-    return suffix in _FASTA_SUFFIXES or path.name.lower().endswith(".fa.gz")
+    from repeatviewer.backends.large_fasta import is_fasta_name
+
+    return is_fasta_name(path)
 
 
 def _is_fasta_too_large_for_preview(path: Path) -> bool:
     if not _is_fasta_file(path):
         return False
     try:
-        return path.expanduser().resolve().stat().st_size > _FASTA_PREVIEW_MAX_BYTES
+        from repeatviewer.backends.large_fasta import split_compression
+
+        limit = (
+            _FASTA_GZ_PREVIEW_MAX_BYTES
+            if split_compression(path)[1]
+            else _FASTA_PREVIEW_MAX_BYTES
+        )
+        return path.expanduser().resolve().stat().st_size > limit
     except OSError:
         return False
 
@@ -193,7 +203,7 @@ def _preview_kind(path: Path) -> str:
         return "tree"
     if suffix in _HTML_PREVIEW_SUFFIXES:
         return "html"
-    if suffix in _FASTA_SUFFIXES or path.name.lower().endswith(".fa.gz"):
+    if _is_fasta_file(path):
         if _is_sequence_map_fasta(path):
             return "fasta_annotation"
         return "fasta"
@@ -214,7 +224,9 @@ def _switching_html_preview(old_path: Path, new_path: Path) -> bool:
 
 
 def _is_text_like_preview(path: Path) -> bool:
-    suffix = path.suffix.lower()
+    from repeatviewer.backends.large_fasta import inner_suffix
+
+    suffix = inner_suffix(path)
     name = path.name.lower()
     if is_bismark_cov_file(path):
         return True
@@ -301,6 +313,12 @@ def is_previewable_file(path: Path) -> bool:
     if is_bismark_cov_file(resolved):
         return True
     if _is_light_browser_path(resolved):
+        return True
+    from repeatviewer.backends.large_fasta import inner_suffix, split_compression
+
+    if split_compression(resolved)[1] and (
+        _is_fasta_file(resolved) or inner_suffix(resolved) in _TEXT_PREVIEW_SUFFIXES
+    ):
         return True
     if suffix in _UNSUPPORTED_PREVIEW_SUFFIXES:
         return False
@@ -1607,6 +1625,30 @@ class FilePreviewPage(QWidget):
         self._stack.setCurrentWidget(self._gel_panel)
         self._gel_panel.load(path)
 
+    def _show_sequence_list(self, path: Path) -> None:
+        """Large FASTA: list its sequences (indexed once) instead of loading it."""
+        from repeatviewer.widgets.sequence_list_page import SequenceListPage
+
+        if getattr(self, "_sequence_list", None) is None:
+            self._sequence_list = SequenceListPage(self)
+            self._sequence_list.setSizePolicy(
+                QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+            )
+            self._sequence_list.openRequested.connect(self.openFileRequested.emit)
+            self._sequence_list.fileWritten.connect(self.fileWritten.emit)
+            self._sequence_list.statusMessage.connect(self._sequence_list_status)
+            self._stack.addWidget(self._sequence_list)
+        self._stack.setCurrentWidget(self._sequence_list)
+        self._sequence_list.load(path)
+
+    def _sequence_list_status(self, text: str) -> None:
+        show = getattr(self.window(), "_set_status_message", None)
+        if callable(show):
+            show(text)
+
+    def sequence_list_page(self):
+        return getattr(self, "_sequence_list", None)
+
     def gel_panel(self):
         return getattr(self, "_gel_panel", None)
 
@@ -2429,7 +2471,7 @@ class FilePreviewPage(QWidget):
             self._set_single_fasta_mode(False)
             self._multi_fasta_mode = False
             self._fasta_text_deferred = False
-            self._show_text(_FASTA_TOO_LARGE_MESSAGE)
+            self._show_sequence_list(path)
             return
         # Stay on Annotation when the user is already flipping files there.
         stay_on_annotation = (
@@ -2538,7 +2580,7 @@ class FilePreviewPage(QWidget):
         self._sync_selection_preview_banner()
         if _is_fasta_too_large_for_preview(path):
             self._set_single_fasta_mode(False)
-            self._show_text(_FASTA_TOO_LARGE_MESSAGE)
+            self._show_sequence_list(path)
             return
         if _is_sequence_map_fasta(path):
             self._load_single_fasta_preview(path)
@@ -2694,7 +2736,7 @@ class FilePreviewPage(QWidget):
             "Preview is not available"
         ):
             return False
-        if current == _FASTA_TOO_LARGE_MESSAGE:
+        if current == _FASTA_TOO_LARGE_MESSAGE or _is_fasta_too_large_for_preview(self.path):
             return False
         return True
 
