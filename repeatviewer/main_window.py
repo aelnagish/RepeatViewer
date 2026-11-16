@@ -5332,7 +5332,15 @@ class MainWindow(
                 source_files=getattr(self, "_last_job_source_files", []),
                 open_preview=False,
             )
-        # Prefer sorted BAM (after Sort and index) over raw SAM/PAF.
+        # A written .rvmap opens in the contig view. Without one: sorted BAM
+        # (after Sort and index), else the raw SAM / PAF.
+        if rvmap.is_file() and rvmap.suffix.lower() == ".rvmap":
+            self._auto_open_outputs([rvmap])
+            self._set_status_message(
+                f"Mapping completed: {rvmap.name}",
+                12000, override_file_link=True,
+            )
+            return
         alignment = next(
             (
                 p

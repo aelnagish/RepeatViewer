@@ -20,7 +20,17 @@ import re
 from pathlib import Path
 
 import numpy as np
-from PySide6.QtCore import QEvent, QPointF, QRectF, Qt, QThread, QTimer, Signal
+from PySide6.QtCore import (
+    QAbstractTableModel,
+    QEvent,
+    QModelIndex,
+    QPointF,
+    QRectF,
+    Qt,
+    QThread,
+    QTimer,
+    Signal,
+)
 from PySide6.QtGui import (
     QAction,
     QColor,
@@ -36,6 +46,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QCheckBox,
     QFileDialog,
     QFormLayout,
@@ -51,6 +62,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSplitter,
     QStackedWidget,
+    QTableView,
     QTableWidget,
     QTableWidgetItem,
     QTextBrowser,
@@ -179,6 +191,21 @@ def _load_project():
 # Worker threads are not parented to the panel: a preview page may be deleted while
 # a large file is still being indexed, and a QThread must outlive its run().
 _LIVE_THREADS: set = set()
+
+
+def sam_too_large_message(path: Path | None) -> str:
+    """The refusal text when a SAM is over the open limit, else "" (only a stat)."""
+    if path is None or not Path(path).name.lower().endswith((".sam", ".sam.gz")):
+        return ""
+    try:
+        if Path(path).stat().st_size <= gt.sam_open_limit_bytes(Path(path)):
+            return ""
+        gt._refuse_large_sam(Path(path))
+    except gt.TrackError as exc:
+        return str(exc)
+    except OSError:
+        return ""
+    return ""
 
 
 def _start_thread(thread: QThread) -> None:
@@ -1927,6 +1954,63 @@ def _sidebar_icon(widget: QWidget):
     return icon
 
 
+class _ReadsModel(QAbstractTableModel):
+    """Rows of the Sequences page, drawn on demand: a run can hold 40,000 reads,
+    and one item object per cell froze the window while the page was filled."""
+
+    HEADERS = ("Name", "Start", "End", "Strand", "Identity", "MAPQ")
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._reads: list[dict] = []
+
+    def set_reads(self, reads: list[dict]) -> None:
+        self.beginResetModel()
+        self._reads = list(reads)
+        self.endResetModel()
+
+    def read(self, row: int) -> dict | None:
+        return self._reads[row] if 0 <= row < len(self._reads) else None
+
+    def find(self, name: str, start: int) -> int:
+        for row, read in enumerate(self._reads):
+            if str(read.get("name", "")) == name and int(read.get("start", -2)) == start:
+                return row
+        return -1
+
+    def rowCount(self, parent=QModelIndex()) -> int:  # noqa: N802 - Qt API
+        return 0 if parent.isValid() else len(self._reads)
+
+    def columnCount(self, parent=QModelIndex()) -> int:  # noqa: N802 - Qt API
+        return 0 if parent.isValid() else len(self.HEADERS)
+
+    def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):  # noqa: N802
+        if (role == Qt.ItemDataRole.DisplayRole
+                and orientation == Qt.Orientation.Horizontal
+                and 0 <= section < len(self.HEADERS)):
+            return self.HEADERS[section]
+        return None
+
+    def data(self, index, role=Qt.ItemDataRole.DisplayRole):
+        if not index.isValid() or role != Qt.ItemDataRole.DisplayRole:
+            return None
+        read = self._reads[index.row()]
+        col = index.column()
+        if col == 0:
+            return str(read.get("name", ""))
+        if col == 1:
+            return f"{int(read.get('start', 0)) + 1:,}"
+        if col == 2:
+            return f"{int(read.get('end', 0)):,}"
+        if col == 3:
+            return str(read.get("strand", ""))
+        if col == 4:
+            ident = read.get("identity")
+            return f"{float(ident):.1%}" if ident is not None else ""
+        mapq = read.get("mapq", -1)
+        return "" if mapq in (-1, None) else str(mapq)
+
+
 class _RunSidePanel(QWidget):
     """Sequences, variants, unused reads, statistics and the report for one mapping run.
 
@@ -2083,7 +2167,7 @@ class _RunSidePanel(QWidget):
 
         self._page_labels = {key: key for key in self.PAGE_KEYS}
         self._stack = QStackedWidget(self)
-        self._sequences = self._table(["Name", "Start", "End", "Strand", "Identity", "MAPQ"])
+        self._sequences = self._reads_table()
         self._features = self._table(["Name", "Type", "Start", "End", "Strand"])
         self._variants = self._table(["Position", "Ref", "Alt", "Count", "Depth"])
         self._unused = self._table(["Name", "Reason"])
@@ -2097,10 +2181,38 @@ class _RunSidePanel(QWidget):
             self._sequences, self._features, self._variants, self._unused, self._report,
         ):
             self._stack.addWidget(page)
-        self._sequences.cellClicked.connect(self._on_sequence)
+        self._sequences.clicked.connect(lambda index: self._on_sequence(index.row(), 0))
         self._features.cellClicked.connect(self._on_feature)
         self._variants.cellClicked.connect(self._on_variant)
         self.setMinimumWidth(280)
+
+    def _reads_table(self) -> QTableView:
+        """Sequences page: a model-based table (rows drawn only when visible)."""
+        self._reads_model = _ReadsModel(self)
+        table = QTableView(self)
+        table.setModel(self._reads_model)
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        table.setAlternatingRowColors(True)
+        table.setShowGrid(False)
+        table.setWordWrap(False)
+        table.verticalHeader().setVisible(False)
+        table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+        table.verticalHeader().setDefaultSectionSize(22)
+        table.horizontalHeader().setStretchLastSection(True)
+        table.horizontalHeader().setHighlightSections(False)
+        table.setFrameShape(QFrame.Shape.NoFrame)
+        return table
+
+    def select_read(self, name: str, start: int) -> bool:
+        """Select and scroll to a read in the Sequences page."""
+        row = self._reads_model.find(name, start)
+        if row < 0:
+            return False
+        self._sequences.selectRow(row)
+        self._sequences.scrollTo(self._reads_model.index(row, 0))
+        return True
 
     def _table(self, headers: list[str]) -> QTableWidget:
         table = QTableWidget(self)
@@ -2188,7 +2300,7 @@ class _RunSidePanel(QWidget):
 
     def _sync_page_titles(self, entry: dict | None) -> None:
         counts = {
-            "Sequences": self._sequences.rowCount(),
+            "Sequences": self._reads_model.rowCount(),
             "Features": self._features.rowCount(),
             "Variants": self._variants.rowCount(),
             "Not used": self._unused.rowCount(),
@@ -2266,20 +2378,7 @@ class _RunSidePanel(QWidget):
     def _fill_sequences(self, entry: dict | None) -> None:
         reads = [r for r in ((entry or {}).get("reads") or []) if self._read_visible(r)]
         reads.sort(key=lambda read: (int(read.get("start", 0)), int(read.get("end", 0))))
-        self._sequences.setRowCount(len(reads))
-        for row, read in enumerate(reads):
-            ident = read.get("identity")
-            values = [
-                str(read.get("name", "")),
-                f"{int(read.get('start', 0)) + 1:,}",
-                f"{int(read.get('end', 0)):,}",
-                str(read.get("strand", "")),
-                f"{float(ident):.1%}" if ident is not None else "",
-                "" if read.get("mapq", -1) in (-1, None) else str(read.get("mapq")),
-            ]
-            for col, text in enumerate(values):
-                self._sequences.setItem(row, col, QTableWidgetItem(text))
-            self._sequences.item(row, 0).setData(Qt.ItemDataRole.UserRole, read)
+        self._reads_model.set_reads(reads)
 
     def _fill_features(self, entry: dict | None) -> None:
         feats = []
@@ -2342,8 +2441,7 @@ class _RunSidePanel(QWidget):
             self._report.setHtml(path.read_text(encoding="utf-8", errors="replace"))
 
     def _on_sequence(self, row: int, _col: int) -> None:
-        item = self._sequences.item(row, 0)
-        read = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+        read = self._reads_model.read(row)
         if not read or not self._chrom:
             return
         start = int(read.get("start", 0))
@@ -2669,8 +2767,19 @@ class LightGenomeBrowserPanel(QWidget):
         self._message = QLabel(self)
         self._message.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._message.setWordWrap(True)
+        self._message_btn = QPushButton("Open Samtools…", self)
+        self._message_btn.setToolTip("Open the Samtools window to sort and index this SAM as a BAM")
+        self._message_btn.clicked.connect(self._open_samtools)
+        self._message_btn.hide()
+        message_page = QWidget(self)
+        message_lay = QVBoxLayout(message_page)
+        message_lay.addStretch(1)
+        message_lay.addWidget(self._message)
+        message_lay.addSpacing(8)
+        message_lay.addWidget(self._message_btn, 0, Qt.AlignmentFlag.AlignHCenter)
+        message_lay.addStretch(1)
         self._browser_stack = QStackedWidget(self)
-        self._browser_stack.addWidget(self._message)
+        self._browser_stack.addWidget(message_page)
         self._browser_stack.addWidget(self._view_split)
 
         self._text = QPlainTextEdit(self)
@@ -2712,6 +2821,12 @@ class LightGenomeBrowserPanel(QWidget):
             self._text_loaded_for = None
             self.canvas.set_track(None, None)
             self._result = None
+        too_large = sam_too_large_message(path)
+        if too_large:
+            # Before anything else: no run panel, no index, no beach ball.
+            self._show_sam_too_large(path, too_large)
+            return
+        self._message_btn.hide()
         kind = "alignment" if _is_alignment(path) else "annotation"
         text_first = kind in _text_mode_kinds()
         self._set_mode(text=text_first, remember=False)
@@ -2728,6 +2843,32 @@ class LightGenomeBrowserPanel(QWidget):
         loader = _Loader(self._token, path, project, reference, forced)
         loader.loaded.connect(self._on_loaded)
         _start_thread(loader)
+
+    def _show_sam_too_large(self, path: Path, text: str) -> None:
+        self._end_load_progress()
+        self._run = None
+        self._run_ref = None
+        self._mapped_hit_cache = {}
+        self._query_seq_cache = {}
+        self.canvas.run_features = []
+        self._sync_run_panel()
+        self._set_mode(text=False, remember=False)
+        self._banner_dismissed_text = ""
+        self._banner.hide()
+        self._set_browser_status("")
+        self._message.setText(f"Cannot show {path.name} as a genome browser:\n\n{text}\n\n"
+                              "Use Text to see the file.")
+        self._message_btn.show()
+        self._browser_stack.setCurrentIndex(0)
+
+    def _open_samtools(self) -> None:
+        """Open the Samtools window of the main window (the SAM is selected in Files)."""
+        host = self.window()
+        if not hasattr(host, "_open_samtools_dialog"):
+            host = next((w for w in QApplication.topLevelWidgets()
+                         if hasattr(w, "_open_samtools_dialog")), None)
+        if host is not None:
+            host._open_samtools_dialog()
 
     def _open_progress_host(self):
         widget = self.window()
@@ -2783,6 +2924,7 @@ class LightGenomeBrowserPanel(QWidget):
         if res.error:
             self._message.setText(f"Cannot show {self.path.name} as a genome browser:\n\n"
                                   f"{res.error}\n\nUse Text to see the file.")
+            self._message_btn.setVisible(bool(sam_too_large_message(self.path)))
             self._browser_stack.setCurrentIndex(0)
             return
         keep_view = None
@@ -3142,16 +3284,7 @@ class LightGenomeBrowserPanel(QWidget):
         self._set_view("Sequences")
         name = str(getattr(it, "name", "") or "")
         start = int(getattr(it, "start", -1))
-        table = self._run_panel._sequences
-        for row in range(table.rowCount()):
-            item = table.item(row, 0)
-            read = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
-            if not isinstance(read, dict):
-                continue
-            if str(read.get("name", "")) == name and int(read.get("start", -2)) == start:
-                table.selectRow(row)
-                table.scrollToItem(item)
-                return
+        self._run_panel.select_read(name, start)
 
     def _sync_one_per_row_choice(self) -> None:
         allowed, reason = self.canvas.one_per_row_availability()
@@ -3597,16 +3730,7 @@ class LightGenomeBrowserPanel(QWidget):
             return
         name = str(getattr(it, "name", "") or "")
         start = int(getattr(it, "start", -1))
-        table = self._run_panel._sequences
-        for row in range(table.rowCount()):
-            item = table.item(row, 0)
-            read = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
-            if not isinstance(read, dict):
-                continue
-            if str(read.get("name", "")) == name and int(read.get("start", -2)) == start:
-                table.selectRow(row)
-                table.scrollToItem(item)
-                return
+        self._run_panel.select_read(name, start)
 
     def _fill_text(self) -> None:
         if self.path is None or self._text_loaded_for == self.path:
