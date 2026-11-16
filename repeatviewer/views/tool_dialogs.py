@@ -14645,11 +14645,16 @@ class TeDensityPlotDialog(QDialog):
         for wrap in wraps:
             wrap.setMinimumHeight(target)
 
-    def _dialog_stack_height(self, *, expanded: bool) -> int:
-        """Exact height of tabs + optional Advanced + footer (no estimate padding)."""
-        self._tabs.updateGeometry()
+    def _dialog_stack_height(self, *, expanded: bool, page_h: int) -> int:
+        """Height of tabs + optional Advanced + footer for the active page only.
+
+        Do not use ``QTabWidget.sizeHint()`` — it stays at the tallest page
+        (TE) even after pinning, which leaves a blank band on Methylation/Gene.
+        """
         self._button_box.updateGeometry()
-        tabs_h = max(self._tabs.minimumSizeHint().height(), self._tabs.sizeHint().height())
+        tab_bar_h = max(24, self._tabs.tabBar().sizeHint().height())
+        # Match pin_tool_tabs_height: tab bar + page + inset.
+        tabs_h = tab_bar_h + max(1, int(page_h)) + 8
         buttons_h = max(
             self._button_box.minimumSizeHint().height(),
             self._button_box.sizeHint().height(),
@@ -14674,10 +14679,22 @@ class TeDensityPlotDialog(QDialog):
         height = min(max(height, 220), max_h)
         self.setMinimumWidth(width)
         self.setMinimumHeight(0)
-        # Cap height to the content stack so AlignTop does not leave a blank
-        # under the buttons; callers unlock max before measuring when growing.
+        # Cap briefly so AlignTop cannot leave a blank under the buttons, then
+        # unlock so later tab switches / file rows can grow again.
         self.setMaximumHeight(height)
         self.resize(width, height)
+        self.setMaximumHeight(16777215)
+        self._te_density_compact_size = QSize(width, height)
+
+    def sizeHint(self) -> QSize:  # noqa: N802
+        if self._te_density_compact_size is not None:
+            return self._te_density_compact_size
+        return super().sizeHint()
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802
+        if self._te_density_compact_size is not None:
+            return QSize(self._te_density_compact_size.width(), 0)
+        return super().minimumSizeHint()
 
     def _on_file_rows_changed(self) -> None:
         """Grow/shrink the dialog when masking/consensus/gene/meth rows change."""
@@ -14691,6 +14708,24 @@ class TeDensityPlotDialog(QDialog):
             return
         self._resize_for_advanced(self._advanced_settings_btn.isChecked())
 
+    def _measure_track_wrap_height(self, wrap: QWidget) -> int:
+        """Active track page height from its form — not leftover TE sizeHint."""
+        root = wrap.layout()
+        if root is not None:
+            root.invalidate()
+            root.activate()
+        wrap.ensurePolished()
+        wrap.adjustSize()
+        wrap.updateGeometry()
+        page = root.itemAt(0).widget() if root is not None and root.count() else None
+        form = page.layout() if page is not None else None
+        if isinstance(form, QFormLayout):
+            margins = root.contentsMargins() if root is not None else None
+            margin_h = (margins.top() + margins.bottom()) if margins is not None else 20
+            form_h = max(form.totalMinimumSize().height(), form.totalSizeHint().height())
+            return max(1, margin_h + form_h)
+        return max(1, wrap.minimumSizeHint().height(), wrap.sizeHint().height())
+
     def _resize_for_advanced(self, expanded: bool) -> None:
         if not self._on_track_page():
             self._fit_options_content()
@@ -14700,24 +14735,21 @@ class TeDensityPlotDialog(QDialog):
         self.setMaximumHeight(16777215)
         pin_tool_tabs_height(self._tabs, None)
         wrap = self._active_track_wrap()
-        root = wrap.layout()
-        if root is not None:
-            root.invalidate()
-            root.activate()
-        wrap.updateGeometry()
         self._sync_field_column()
+        self._set_track_wraps_equal_height(False)
 
         if expanded:
-            self._set_track_wraps_equal_height(True)
+            # Advanced open: keep all track pages the same height (tallest).
+            wrap_h = max(
+                self._measure_track_wrap_height(w) for w in self._track_wraps()
+            )
+            for track_wrap in self._track_wraps():
+                track_wrap.setMinimumHeight(wrap_h)
         else:
-            self._set_track_wraps_equal_height(False)
-
-        wrap_h = max(wrap.minimumSizeHint().height(), wrap.sizeHint().height())
+            wrap_h = self._measure_track_wrap_height(wrap)
         pin_tool_tabs_height(self._tabs, wrap_h)
-        height = self._dialog_stack_height(expanded=expanded)
+        height = self._dialog_stack_height(expanded=expanded, page_h=wrap_h)
         self._apply_dialog_height(height)
-        if not expanded:
-            self._te_density_compact_size = QSize(self._DIALOG_WIDTH, self.height())
 
     def _fit_options_content(self) -> None:
         page = self._options_tab
@@ -14737,13 +14769,7 @@ class TeDensityPlotDialog(QDialog):
                 root.totalSizeHint().height(),
             )
         pin_tool_tabs_height(self._tabs, content_h)
-        tab_bar_h = self._tabs.tabBar().sizeHint().height() + 8
-        buttons_h = self._button_box.sizeHint().height()
-        lay = self.layout()
-        margins = lay.contentsMargins() if lay is not None else None
-        margin_h = (margins.top() + margins.bottom()) if margins is not None else 34
-        spacing = lay.spacing() if lay is not None else 8
-        height = margin_h + tab_bar_h + content_h + buttons_h + spacing * 2
+        height = self._dialog_stack_height(expanded=False, page_h=content_h)
         self._apply_dialog_height(height)
 
     def _restore_defaults(self) -> None:
