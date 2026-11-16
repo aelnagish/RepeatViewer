@@ -13,6 +13,12 @@ from PySide6.QtWidgets import QMessageBox
 
 from repeatviewer.backends.job_cancel import CANCELLED_MESSAGE
 
+
+def sanger_read_suffixes() -> tuple[str, ...]:
+    from repeatviewer.backends.primers import sanger as sg
+
+    return sg.AB1_SUFFIXES
+
 PCR_SETTINGS_GROUP = "pcr"
 PCR_JOB_STEPS = 4
 
@@ -96,6 +102,35 @@ class PcrActionsMixin:
     def _populate_pcr_menu_items(self, menu) -> None:
         a = menu.addAction("In-silico PCR", lambda: self._open_pcr_window())
         a.setToolTip("In-silico PCR: products of the primers on the selected sequences")
+        a = menu.addAction("Sanger Check", lambda: self._open_sanger_dialog())
+        a.setToolTip("Sanger reads (.ab1) of a clone against the sequence it should carry")
+
+    # ------------------------------------------------------------- Sanger
+
+    def _open_sanger_dialog(self, *, expected: str = "", expected_name: str = "",
+                            path=None) -> None:
+        from repeatviewer.views.sanger_dialog import SangerDialog, _read_fasta
+
+        picked = [Path(p) for p in self._selected_files()] if hasattr(self, "_selected_files") \
+            else []
+        reads = [p for p in picked if p.suffix.lower() in sanger_read_suffixes()]
+        if not expected:
+            source = Path(path) if path else next(
+                (p for p in picked if p not in reads and p.is_file()), None)
+            if source is not None:
+                records = _read_fasta(source)
+                if records:
+                    expected_name, expected = records[0][0], records[0][1]
+                    path = source
+        folder = Path(path).parent if path else (reads[0].parent if reads else None)
+        dlg = SangerDialog(expected, expected_name=expected_name,
+                           expected_path=Path(path) if path else None, folder=folder,
+                           parent=self)
+        if reads:
+            dlg.add_reads(reads)
+        dlg.setWindowFlag(Qt.WindowType.Tool, True)
+        dlg.show()
+        self._sanger_dialog = dlg
 
     # ------------------------------------------------------------- PCR window
 
