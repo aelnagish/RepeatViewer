@@ -22,9 +22,12 @@ from dataclasses import asdict, dataclass, field
 import numpy as np
 
 from repeatviewer.backends.primers import binding as bd
+from repeatviewer.backends.primers import low_complexity as lc
 from repeatviewer.backends.primers.thermo import (
     PrimerError,
+    HybConditions,
     ThermoSettings,
+    hyb_tm,
     analyze_oligo,
     calc_tm,
     gc_percent,
@@ -107,10 +110,17 @@ class DesignSettings:
     # FISH
     fish_label: str = "Cy3"
     fish_avoid_fasta: str = ""
+    # the other selected FASTA files (e.g. the other satellite families) are avoided
+    fish_avoid_other_inputs: bool = True
+    # leave out low-complexity, simple-repeat and inverted-repeat regions
+    fish_skip_unsuitable: bool = True
+    hyb: HybConditions = field(default_factory=HybConditions)
 
     def __post_init__(self) -> None:
         if isinstance(self.thermo, dict):
             self.thermo = ThermoSettings.from_dict(self.thermo)
+        if isinstance(self.hyb, dict):
+            self.hyb = HybConditions.from_dict(self.hyb)
         if self.mode not in ALL_MODES:
             self.mode = MODE_PCR
         self.size_min = max(5, int(self.size_min))
@@ -123,6 +133,7 @@ class DesignSettings:
     def to_dict(self) -> dict:
         d = asdict(self)
         d["thermo"] = self.thermo.to_dict()
+        d["hyb"] = self.hyb.to_dict()
         return d
 
     @classmethod
@@ -143,8 +154,10 @@ def mode_preset(mode: str) -> dict:
                     tm_max=64.0, gc_min=30.0, gc_max=70.0, max_tm_diff=2.0,
                     product_min=40, product_max=2000)
     if mode == MODE_FISH:
-        return dict(size_min=30, size_opt=36, size_max=45, tm_min=60.0, tm_opt=72.0,
-                    tm_max=85.0, gc_min=35.0, gc_max=65.0, coverage_mismatches=3,
+        # Tm under the hybridisation conditions (50 % formamide, 2× SSC): about
+        # 52 °C for 50 to 60 nt, as in the TAREAN probe design protocol.
+        return dict(size_min=35, size_opt=50, size_max=60, tm_min=48.0, tm_opt=52.0,
+                    tm_max=58.0, gc_min=35.0, gc_max=65.0, coverage_mismatches=3,
                     min_coverage=0.9)
     return dict(size_min=18, size_opt=20, size_max=25, tm_min=57.0, tm_opt=60.0,
                 tm_max=63.0, gc_min=40.0, gc_max=60.0, max_tm_diff=2.0,
@@ -329,6 +342,7 @@ def run_primer3(template_id: str, template: str, s: DesignSettings, *,
                 misprime_lib: dict | None = None,
                 name_prefix: str = "",
                 coord_map: Callable[[int, int, str], tuple[int, int, str]] | None = None,
+                extra_args: dict | None = None,
                 ) -> Primer3Run:
     """One Primer3 call. Intervals are 0-based half-open on ``template``.
 
@@ -353,6 +367,8 @@ def run_primer3(template_id: str, template: str, s: DesignSettings, *,
     if left_primer:
         seq_args["SEQUENCE_PRIMER"] = left_primer
     gargs = primer3_global_args(s, num_return=num_return, product=product, pick_probe=pick_probe)
+    if extra_args:
+        gargs.update(extra_args)
     if left_primer:
         gargs["PRIMER_PICK_LEFT_PRIMER"] = 1
     try:
@@ -444,6 +460,30 @@ def pair_bands_on(pair: DesignedPair, records: list[tuple[str, str]],
 # --------------------------------------------------------------------------
 
 
+#: In a tandem repeat every primer binds the template many times: Primer3's
+#: template mispriming check must stay off (-1), or it rejects them all.
+LADDER_NO_TEMPLATE_MISPRIMING = {
+    "PRIMER_MAX_TEMPLATE_MISPRIMING": -1,
+    "PRIMER_PAIR_MAX_TEMPLATE_MISPRIMING": -1,
+    "PRIMER_MAX_TEMPLATE_MISPRIMING_TH": -1,
+    "PRIMER_PAIR_MAX_TEMPLATE_MISPRIMING_TH": -1,
+}
+
+
+def monomer_from_dimer(seq: str, min_identity: float = 0.95) -> tuple[str, bool]:
+    """A dimer consensus (TAREAN / TideCluster ``consensus_dimer.fasta``: the
+    monomer written twice) becomes its first monomer; anything else is kept."""
+    s = seq.upper()
+    n = len(s)
+    if n < 40 or n % 2:
+        return seq, False
+    h = n // 2
+    same = sum(a == b for a, b in zip(s[:h], s[h:]))
+    if same / h >= min_identity:
+        return seq[:h], True
+    return seq, False
+
+
 def design_ladder(rid: str, monomer: str, s: DesignSettings, misprime: dict | None = None
                   ) -> Primer3Run:
     """Outward-facing primers in one monomer: the forward primer in copy 1 and the
@@ -464,7 +504,7 @@ def design_ladder(rid: str, monomer: str, s: DesignSettings, misprime: dict | No
 
     run = run_primer3(rid, dimer, s, ok_regions=[[0, n, n, n]], product=(lo, hi),
                       misprime_lib=misprime, name_prefix="LAD", coord_map=mono_coords,
-                      num_return=s.num_return)
+                      num_return=s.num_return, extra_args=LADDER_NO_TEMPLATE_MISPRIMING)
     run.pairs = [p for p in run.pairs if p.dimer_dg >= -9.0] or run.pairs
     for p in run.pairs:
         p.extra["monomer_length"] = n
@@ -483,10 +523,18 @@ def ladder_bands(product: int, monomer: int, copies: int = 8) -> list[tuple[int,
 
 def design_fish(rid: str, template: str, members: list[tuple[str, str]], s: DesignSettings,
                 avoid: list[tuple[str, str]] | None = None,
-                progress: Callable[[str], None] | None = None) -> list[DesignedPair]:
-    """Oligo probes conserved across all monomers/copies, without hairpins."""
-    th = s.thermo
+                progress: Callable[[str], None] | None = None,
+                skip: list[lc.Region] | None = None) -> list[DesignedPair]:
+    """Oligo probes conserved across all monomers/copies, without hairpins.
+
+    Tm is the probe Tm under the hybridisation conditions (``s.hyb``); probes
+    that would melt off in the stringent wash are dropped. Candidates touching
+    a region in ``skip`` (low complexity, simple or inverted repeats) are left out.
+    """
+    hyb = s.hyb
+    th = hyb.thermo()
     t = template.upper()
+    skip = list(skip or [])
     lengths = sorted({s.size_min, s.size_opt, s.size_max})
     sep = "N" * (s.size_max + 2)
     pool = sep.join(seq.upper() for _n, seq in members)
@@ -494,6 +542,7 @@ def design_fish(rid: str, template: str, members: list[tuple[str, str]], s: Desi
     starts = np.cumsum([0] + [len(seq) + len(sep) for _n, seq in members])
     avoid_pool = sep.join(seq.upper() for _n, seq in (avoid or []))
     avoid_mask = bd.encode_template(avoid_pool) if avoid_pool else None
+    avoid_starts = np.cumsum([0] + [len(seq) + len(sep) for _n, seq in (avoid or [])])
     st = bd.SearchSettings(max_mismatches=s.coverage_mismatches, three_prime_exact=0)
     cands = []
     for L in lengths:
@@ -501,7 +550,7 @@ def design_fish(rid: str, template: str, members: list[tuple[str, str]], s: Desi
             progress(f"Scoring {L}-nt probes")
         for i in range(0, len(t) - L + 1):
             seq = t[i:i + L]
-            if "N" in seq:
+            if "N" in seq or (skip and lc.overlaps(i, i + L, skip)):
                 continue
             gc = gc_percent(seq)
             if not (s.gc_min <= gc <= s.gc_max):
@@ -519,34 +568,49 @@ def design_fish(rid: str, template: str, members: list[tuple[str, str]], s: Desi
         if cov < s.min_coverage:
             continue
         cross = 0
+        cross_rows: set[int] = set()
         if avoid_mask is not None:
             for strand_seq in (seq, reverse_complement(seq)):
                 idx, _m = bd._score_positions(avoid_mask, bd.encode_primer(strand_seq), st, True)
                 cross += len(idx)
-        scored.append((i, L, seq, gc, cov, cross))
+                if len(idx):
+                    cross_rows.update((np.searchsorted(avoid_starts, idx, side="right") - 1).tolist())
+        cross_names = sorted({avoid[r][0] for r in cross_rows if 0 <= r < len(avoid or [])})
+        scored.append((i, L, seq, gc, cov, cross, cross_names))
     scored.sort(key=lambda x: (x[5] > 0, -x[4], abs(x[3] - 48)))
     pairs: list[DesignedPair] = []
     taken: list[tuple[int, int]] = []
-    for i, L, seq, gc, cov, cross in scored:
+    for i, L, seq, gc, cov, cross, cross_names in scored:
         if any(not (i + L <= a or i >= b) for a, b in taken):
             continue
-        tm = calc_tm(seq, th)
+        tm = hyb_tm(seq, hyb)
         if not (s.tm_min <= tm <= s.tm_max):
             continue
+        wash_tm = hyb_tm(seq, hyb, wash=True)
+        if wash_tm < hyb.wash_temp_c:
+            continue   # melts off in the stringent wash
         oligo = make_oligo(f"{rid}_FISH{len(pairs) + 1}", seq, "probe", start=i + 1,
                            end=i + L, strand="+", thermo=th)
         if oligo.hairpin_dg < -6.0 or oligo.self_dimer_dg < -12.0:
             continue
+        oligo.tm = tm
+        oligo.extra.update(wash_tm=wash_tm, wash_margin=round(wash_tm - hyb.wash_temp_c, 2),
+                           tm_no_formamide=round(calc_tm(seq, th), 2))
         k = len(pairs) + 1
         label = "" if s.fish_label == "None" else s.fish_label
         pair = DesignedPair(rank=k, name=f"{rid}_FISH{k}", template=rid, probe=oligo,
                             penalty=round((1 - cov) * 20 + (5 if cross else 0), 2))
         pair.coverage = {"target_total": len(members), "target_amplified": int(round(cov * len(members))),
-                         "cross_hits": cross}
+                         "cross_hits": cross, "cross_names": cross_names[:10]}
         pair.extra["label"] = label
         pair.extra["order"] = (f"5'-{label}-" if label else "5'-") + seq + "-3'"
         pair.notes.append(f"in {pair.coverage['target_amplified']}/{len(members)} copies"
-                          + (f"; {cross} hits in the repeats to avoid" if cross else ""))
+                          + (f"; {cross} hits in the repeats to avoid ("
+                             + ", ".join(cross_names[:3])
+                             + (f" and {len(cross_names) - 3} more" if len(cross_names) > 3 else "")
+                             + ")" if cross else ""))
+        pair.notes.append(f"Tm {tm:.1f} °C at hybridisation, {wash_tm:.1f} °C in the stringent "
+                          f"wash ({wash_tm - hyb.wash_temp_c:+.1f} °C above the wash temperature)")
         pairs.append(pair)
         taken.append((i, i + L))
         if len(pairs) >= s.num_return:

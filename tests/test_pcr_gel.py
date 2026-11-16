@@ -54,17 +54,9 @@ def test_ladder_pcr_and_outputs(template):
     assert again["base"].endswith("_2")
 
 
-def test_bisulfite_lanes(template):
-    seq = _rnd(3000, 9)
-    meth = pcr.bisulfite_convert(seq, methylated=True)
-    assert pcr.bisulfite_convert("ACGTCAGTCTT", methylated=False) == "ATGTTAGTTTT"
-    assert pcr.bisulfite_convert("ACGTCAGTCTT", methylated=True) == "ACGTCAGTTTT"
-    template.write_text(">r\n" + seq + "\n")
-    res = pcr.run_pcr([template], [Primer("M_F", meth[500:524]),
-                                   Primer("M_R", th.reverse_complement(meth[700:722]))],
-                      pcr.PcrSettings(mode=pcr.MODE_BISULFITE, max_mismatches=1))
-    assert res.lanes == ["methylated", "unmethylated"]
-    assert [p for p in res.lane_products("methylated") if p.kind == "expected"]
+def test_removed_bisulfite_mode_opens_as_standard():
+    assert pcr.PcrSettings(mode="bisulfite").mode == pcr.MODE_STANDARD
+    assert "bisulfite" not in pcr.MODES
 
 
 def test_gel_document(tmp_path, template):

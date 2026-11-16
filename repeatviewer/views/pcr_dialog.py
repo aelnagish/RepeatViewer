@@ -61,8 +61,7 @@ PCR_HELP = (
     "<b>Primers</b>: from the Primers tab of a sequence, the Primer Database, or pasted. "
     "All combinations are tested, as in a real tube (also one primer at both ends).<br>"
     "<b>Standard</b>: every product. <b>Satellite ladder</b>: products that step by a common "
-    "size are labelled 1×, 2×, 3× (tandem repeat monomer). <b>Bisulfite / MSP</b>: templates "
-    "converted as methylated and unmethylated DNA (plant: CG and CHG stay C when methylated). "
+    "size are labelled 1×, 2×, 3× (tandem repeat monomer). "
     "<b>TE present / absent</b>: one lane per accession.<br>"
     "<b>Mismatches per primer</b> and <b>3′ end exact</b> decide which sites count. "
     "<b>Expected yield</b> is relative: fewer mismatches, shorter products and repeated "
@@ -81,8 +80,6 @@ MODE_NOTES = {
     pcr.MODE_STANDARD: "Every product the primers can make, with the mismatches per primer.",
     pcr.MODE_LADDER: "When the primers sit in a tandem repeat, copies give 1×, 2×, 3× … products. "
                      "Brightness falls with size.",
-    pcr.MODE_BISULFITE: "Templates converted in silico, once methylated and once unmethylated, "
-                        "on both strands. Use primers designed for the converted strand.",
     pcr.MODE_PRESENCE: "One lane per template (accession): a band at the expected size tells "
                        "whether the insertion is there.",
 }
@@ -485,16 +482,13 @@ class PcrWindow(QDialog):
         grid = QHBoxLayout()
         self.mode_group = QButtonGroup(page)
         self.mode_group.setExclusive(True)
-        col1, col2 = QVBoxLayout(), QVBoxLayout()
         for i, mode in enumerate(pcr.MODES):
             b = QPushButton(pcr.MODE_LABELS[mode], page)
             b.setCheckable(True)
             b.setProperty("mode", mode)
             b.setToolTip(MODE_NOTES.get(mode, ""))
             self.mode_group.addButton(b, i)
-            (col1 if i % 2 == 0 else col2).addWidget(b)
-        grid.addLayout(col1)
-        grid.addLayout(col2)
+            grid.addWidget(b, 1)
         pl.addLayout(grid)
         form = QFormLayout()
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
@@ -514,19 +508,13 @@ class PcrWindow(QDialog):
         self.anneal.setRange(40.0, 75.0)
         self.anneal.setDecimals(1)
         self.anneal.setSuffix(" °C")
-        self.meth_combo = QComboBox(page)
-        self.meth_combo.addItem("Plant (CG, CHG)", "plant")
-        self.meth_combo.addItem("Animal (CG)", "animal")
-        for w in (self.mm_combo, self.three_combo, self.max_combo, self.pol_combo, self.anneal,
-                  self.meth_combo):
+        for w in (self.mm_combo, self.three_combo, self.max_combo, self.pol_combo, self.anneal):
             w.setFixedWidth(150)
         form.addRow("Mismatches per primer", self.mm_combo)
         form.addRow("3′ end exact", self.three_combo)
         form.addRow("Longest product", self.max_combo)
         form.addRow("Polymerase", self.pol_combo)
         form.addRow("Annealing", self.anneal)
-        self.meth_label = QLabel("Methylation", page)
-        form.addRow(self.meth_label, self.meth_combo)
         pl.addLayout(form)
         self.mode_note = QLabel(page)
         self.mode_note.setWordWrap(True)
@@ -698,7 +686,6 @@ class PcrWindow(QDialog):
         self.max_combo.setCurrentIndex(i if i >= 0 else 2)
         self.pol_combo.setCurrentText(s.polymerase)
         self.anneal.setValue(s.annealing_c)
-        self.meth_combo.setCurrentIndex(max(0, self.meth_combo.findData(s.methylation)))
         self.dimer_check.setChecked(s.dimers)
         self._sync_mode()
 
@@ -710,7 +697,6 @@ class PcrWindow(QDialog):
                                max_product=int(self.max_combo.currentData()),
                                polymerase=self.pol_combo.currentText(),
                                annealing_c=float(self.anneal.value()),
-                               methylation=str(self.meth_combo.currentData()),
                                dimers=self.dimer_check.isChecked())
 
     def right_click_runs(self) -> bool:
@@ -719,9 +705,6 @@ class PcrWindow(QDialog):
     def _sync_mode(self) -> None:
         mode = self.settings().mode
         self.mode_note.setText(MODE_NOTES.get(mode, ""))
-        bis = mode == pcr.MODE_BISULFITE
-        self.meth_combo.setVisible(bis)
-        self.meth_label.setVisible(bis)
 
     # ---------------------------------------------------------------- inputs
 

@@ -47,11 +47,34 @@ sequence in the template file is used, up to 20.
 | Standard PCR | An ordinary pair | Any sequence | Ranked pairs and a virtual gel |
 | qPCR | Quantitative PCR | The target; optionally a single-copy reference gene FASTA | Short amplicons (70 to 180 bp), an optional TaqMan probe, and a matched pair on the reference gene for ΔCt |
 | Ladder PCR | Showing that a satellite sits in tandem arrays | Monomers (one or many) | Outward-facing primers inside one monomer. On genomic DNA they give a ladder: 1×, 2×, 3× … the monomer |
-| Satellite repeat oligos | FISH probes for a satellite or repeat family | Monomers or copies | 30 to 45 nt oligos present in at least *Min coverage* of the copies, without hairpins, ready to order with a 5′ label (FAM, Cy3, Cy5 …) |
+| Satellite repeat oligos | FISH probes for a satellite or repeat family | Monomers or copies, or a TAREAN dimer consensus | 35 to 60 nt oligos present in at least *Min coverage* of the copies, without hairpins, with a Tm for your hybridisation conditions, ready to order with a 5′ label (FAM, Cy3, Cy5 …) |
 | Chromosome painting (Chorus2) | Oligo pools that paint whole chromosomes or regions | The genome FASTA | Thousands of single-copy 45 nt oligos along the chromosomes, an order file and a density plot (see below) |
 
 For ladder PCR and FISH oligos, use many monomers (for example extracted from an
-array) rather than one: the tool then keeps the parts shared by most copies.
+array) rather than one: the tool then keeps the parts shared by most copies. A
+dimer consensus (TAREAN's `consensus_dimer.fasta`, the monomer written twice) is
+recognised and cut back to one monomer.
+
+**Satellite repeat oligos** have their own settings:
+
+| Field | Meaning |
+|---|---|
+| Avoid the other selected files | Select the target family first, then the other families (one FASTA each). Probes are designed on the first file and every probe that matches the others is ranked last; the report names the sequences it matches |
+| Leave out low-complexity and inverted repeats | Low-complexity stretches (DUST, as `dustmasker -level 30`), simple repeats and inverted repeats (arms of 12 nt or more, as EMBOSS `einverted`) are found first and no probe may touch them; the report lists them |
+| Hybridisation | Formamide, SSC and temperature of the hybridisation (default 50 % formamide, 2× SSC, 37 °C) |
+| Stringent wash | The same for the stringent wash (default 20 % formamide, 0.1× SSC, 42 °C); probes that would melt off in it are not offered |
+| Probe | Probe concentration in the mix (default 100 nM) |
+
+For these probes **Tm** is the Tm under the hybridisation conditions, not in a
+PCR buffer: SantaLucia (1998) nearest-neighbour values with the Owczarzy et al.
+(2004) Na⁺ correction (1× SSC = 195 mM Na⁺), minus 0.60 °C per % formamide
+(Hutton 1977). The default window (48 to 58 °C, about 52 °C for 50 to 60 nt)
+follows the TAREAN probe design protocol. The report gives each probe's Tm in
+the wash and how far it stays above the wash temperature.
+
+> **Tip.** Never use a PCR product amplified from genomic DNA as a hybridisation
+> probe, even with one band of the expected size: clone and sequence it first,
+> and keep short simple repeats in the clone out of the probe.
 
 **Primer Conditions**:
 
@@ -139,8 +162,6 @@ tab.
   - **Standard**: every product.
   - **Satellite ladder**: products that step by a common size are labelled 1×,
     2×, 3× (the monomer of a tandem repeat).
-  - **Bisulfite / MSP**: templates converted as methylated and as unmethylated
-    DNA (plants: CG and CHG stay C when methylated).
   - **TE present / absent**: one lane per accession.
 - **Mismatches per primer** and **3′ end exact** decide which sites count;
   **Longest product**, **Polymerase** and **Annealing** set the reaction.
@@ -373,8 +394,14 @@ binding-site search (Map, coverage on copies, genome counts) is RepeatViewer's
 own, on both strands: small inputs are scored at every position; on a genome,
 every version of each primer's 3′ end within the allowed mismatches is looked
 up, so the same sites are found. Ladder PCR and FISH oligos build on these.
+Ladder primers are picked on the dimer with Primer3's template mispriming check
+switched off, because every primer in a tandem repeat binds the template many
+times.
 Chromosome painting uses Chorus2 (MIT licence) in its own conda environment.
 
 References: Untergasser et al. (2012) *Nucleic Acids Research* 40:e115
-(Primer3). Zhang T, Liu G, Zhao H, Braz GT, Jiang J (2021) *Plant
+(Primer3). Owczarzy R et al. (2004) *Biochemistry* 43:3537–3554 (salt
+correction). Hutton JR (1977) *Nucleic Acids Research* 4:3537–3555 (formamide).
+Morgulis A et al. (2006) *Journal of Computational Biology* 13:1028–1040 (DUST).
+Zhang T, Liu G, Zhao H, Braz GT, Jiang J (2021) *Plant
 Biotechnology Journal* 19:1967–1978 (Chorus2).

@@ -348,3 +348,54 @@ def test_toolbar_ids_renamed_and_pages_scroll(qapp, isolated_settings, data):
     assert isinstance(m._stack.currentWidget(), QScrollArea)
     assert m._save_button.isVisible()
     m.close()
+
+
+def test_fish_mode_shows_hybridisation_rows_and_round_trips(qapp, isolated_settings, data):
+    from repeatviewer.views.primer_dialogs import PrimerDesignDialog
+
+    d = PrimerDesignDialog(initial=PrimerOptions(), files=[data.monomers])
+    d.show()
+    qapp.processEvents()
+    assert not d._hyb.isVisibleTo(d)
+    d._mode.setCurrentIndex(d._mode.findData(dz.MODE_FISH))
+    qapp.processEvents()
+    assert d._hyb.isVisibleTo(d) and d._wash.isVisibleTo(d) and d._fish_other.isVisibleTo(d)
+    assert d._hyb.width() == d._tm.width()          # same grid as the Tm row
+    d._hyb.set_values(30, 1.0, 40)
+    s = d.design_settings()
+    assert (s.hyb.formamide_pct, s.hyb.ssc, s.hyb.temp_c) == (30, 1.0, 40)
+    assert (s.hyb.wash_formamide_pct, s.hyb.wash_ssc, s.hyb.wash_temp_c) == (20, 0.1, 42)
+    assert s.fish_avoid_other_inputs and s.fish_skip_unsuitable
+    d.close()
+
+
+def test_designed_dialog_lists_fish_probes(qapp, tmp_path):
+    from repeatviewer.backends.primers.on_sequence import load_sequence_primers
+    from repeatviewer.views.primer_edit_dialog import DesignedPairsDialog
+
+    fasta = tmp_path / "mono.fa"
+    seq = "ACGTTGCAAGCTTAGCCTAGGATCCAAGTCGATCGGATCCTTAGCAAGTCCGATTACGATCGGCTA"
+    fasta.write_text(">m1\n" + seq + "\n")
+    probe = {"name": "consensus_FISH1", "sequence": seq[5:45], "start": 6, "end": 45,
+             "length": 40, "tm": 52.3}
+    d = DesignedPairsDialog([{"name": "consensus_FISH1", "template": "consensus",
+                              "probe": probe}], [fasta])
+    assert d.windowTitle() == "Designed Probes" and d.table.rowCount() == 1
+    assert d.table.horizontalHeaderItem(1).text() == "Probe"
+    assert d.add_ticked() == [fasta]
+    assert [p.name for p in load_sequence_primers(fasta)] == ["consensus_FISH1"]
+    d.close()
+
+
+def test_design_window_opens_without_empty_space(qapp, isolated_settings):
+    from repeatviewer.views.primer_dialogs import MapPrimersDialog, PrimerDesignDialog, _page_height
+
+    for cls in (PrimerDesignDialog, MapPrimersDialog):
+        d = cls(initial=PrimerOptions(), files=[])
+        d.prepare_for_show()
+        before = d._stack.height()
+        d.show()
+        qapp.processEvents()
+        d._fit()
+        assert d._stack.height() == before
+        d.close()

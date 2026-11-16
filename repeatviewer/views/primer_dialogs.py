@@ -58,6 +58,7 @@ from repeatviewer.backends.primers.thermo import (
     SALT_METHODS,
     TM_METHOD_LABELS,
     TM_METHODS,
+    HybConditions,
     PrimerError,
     ThermoSettings,
     primer3_available,
@@ -350,6 +351,65 @@ class RangeEdit(QWidget):
         return list(self._boxes)
 
 
+class HybEdit(RangeEdit):
+    """Formamide % [in] SSC × [at] °C: one hybridisation or wash step on the grid."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        QWidget.__init__(self, parent)
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(GRID_GAP)
+        self._boxes = []
+        spec = ((0, 100, 0, 5.0, " %", "Formamide", ""),
+                (0.01, 20, 2, 0.1, "× SSC", "SSC strength (2× SSC = 390 mM Na⁺)", "in"),
+                (10, 95, 0, 1.0, " °C", "Temperature", "at"))
+        for lo, hi, dec, step, suffix, tip, join in spec:
+            if dec:
+                box = QDoubleSpinBox(self)
+                box.setDecimals(dec)
+            else:
+                box = QSpinBox(self)
+            box.setRange(lo, hi)
+            box.setSingleStep(step)
+            box.setSuffix(suffix)
+            box.setFixedWidth(BOX_W)
+            box.setToolTip(tip)
+            box.valueChanged.connect(lambda _v: self.changed.emit())
+            if join:
+                word = QLabel(join, self)
+                word.setEnabled(False)
+                word.setFixedWidth(JOIN_W)
+                word.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                row.addWidget(word)
+            row.addWidget(box)
+            self._boxes.append(box)
+        self.setFixedWidth(3 * BOX_W + 2 * (JOIN_W + 2 * GRID_GAP))
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+
+
+HYB_HELP = (
+    "The probe Tm is calculated for these conditions, not for a PCR buffer.<br>"
+    "<b>Hybridisation</b>: formamide in the mix, SSC strength and temperature "
+    "(default: 50 % formamide, 2× SSC, 37 °C overnight, as in the lab FISH protocol; "
+    "dextran sulfate does not change Tm).<br>"
+    "<b>Stringent wash</b>: probes whose Tm in the wash is below the wash temperature "
+    "would melt off and are not offered (default: 20 % formamide, 0.1× SSC, 42 °C).<br>"
+    "<b>Probe</b>: probe concentration in the mix.<br>"
+    "Tm: SantaLucia 1998 nearest neighbour values with the Owczarzy 2004 Na⁺ correction "
+    "(Primer3), minus 0.60 °C per % formamide (Hutton 1977). 1× SSC = 195 mM Na⁺."
+)
+
+UNSUITABLE_HELP = (
+    "Before searching, the monomer is scanned for stretches that make poor probes, and "
+    "probes touching them are not offered:<br>"
+    "<b>Low complexity</b>: DUST score above level 30 (as dustmasker -level 30).<br>"
+    "<b>Simple repeats</b>: a 1 to 6 nt unit repeated three times or more, 12 nt or longer.<br>"
+    "<b>Inverted repeats</b>: two arms of 12 nt or more that pair with each other "
+    "(as EMBOSS einverted).<br>"
+    "The report lists every region left out."
+)
+
+
 class ThermoBox:
     """Formula / salt correction / concentrations (Geneious' Tm Calculation).
 
@@ -600,6 +660,32 @@ def _engine_box(parent: QWidget) -> QGroupBox:
     return box
 
 
+def _page_height(page: QWidget) -> int:
+    """Height the page needs for its visible rows.
+
+    Before the window is first shown, Qt still holds the page's size from before
+    the rows of other modes were hidden (every row counted, so the window opened
+    with a large empty area at the bottom). Adding up the children's own size
+    hints gives the real height at once.
+    """
+    lay = page.layout()
+    if lay is None:
+        return page.sizeHint().height()
+    m = lay.contentsMargins()
+    height, shown = m.top() + m.bottom(), 0
+    for i in range(lay.count()):
+        item = lay.itemAt(i)
+        w = item.widget()
+        if w is not None:
+            if w.isHidden():
+                continue
+            height += w.sizeHint().height()
+        else:
+            height += item.sizeHint().height()
+        shown += 1
+    return height + max(0, shown - 1) * max(0, lay.spacing())
+
+
 class _TabbedToolDialog(QDialog):
     """Tab bar + pages + Cancel / Save / Run, sized to the visible page."""
 
@@ -681,7 +767,7 @@ class _TabbedToolDialog(QDialog):
             return
         page = scroll.widget() if isinstance(scroll, QScrollArea) else scroll
         page.adjustSize()
-        wanted = page.sizeHint().height()
+        wanted = _page_height(page)
         # Room on this screen for the page: screen height minus the title bar,
         # tab bar, button bar and margins.
         screen = self.screen() or QApplication.primaryScreen()
@@ -716,7 +802,7 @@ class _TabbedToolDialog(QDialog):
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
-        # Tab/size already applied in prepare_for_show — only clear path focus.
+        # Tab/size already applied in prepare_for_show: only clear path focus.
         QTimer.singleShot(0, self._clear_path_focus)
 
     def _clear_path_focus(self) -> None:
@@ -836,6 +922,28 @@ class PrimerDesignDialog(_TabbedToolDialog):
         mrow((dz.MODE_FISH,), "Avoid:", self._fish_avoid, "Cross-hybridization",
              "Probes matching any of these sequences (with the mismatches tolerated) are "
              "ranked last (e.g. the other satellite families).")
+        self._fish_other = QCheckBox("Avoid the other selected files", self)
+        self._fish_other.setChecked(s.fish_avoid_other_inputs)
+        mcheck((dz.MODE_FISH,), self._fish_other, "Other satellite families",
+               "Select the target family first, then the other families (one FASTA each) "
+               "in the Files panel. Probes are designed on the first file; every probe "
+               "matching the other files is ranked last, and the report names the "
+               "sequences it matches.")
+        self._fish_skip = QCheckBox("Leave out low-complexity and inverted repeats", self)
+        self._fish_skip.setChecked(s.fish_skip_unsuitable)
+        mcheck((dz.MODE_FISH,), self._fish_skip, "Unsuitable regions", UNSUITABLE_HELP)
+        self._hyb = HybEdit(self)
+        self._hyb.set_values(s.hyb.formamide_pct, s.hyb.ssc, s.hyb.temp_c)
+        mrow((dz.MODE_FISH,), "Hybridisation:", self._hyb, "Hybridisation conditions", HYB_HELP)
+        self._wash = HybEdit(self)
+        self._wash.set_values(s.hyb.wash_formamide_pct, s.hyb.wash_ssc, s.hyb.wash_temp_c)
+        mrow((dz.MODE_FISH,), "Stringent wash:", self._wash, "Hybridisation conditions", HYB_HELP)
+        self._probe_nm = QDoubleSpinBox(self)
+        self._probe_nm.setRange(0.1, 10000)
+        self._probe_nm.setDecimals(0)
+        self._probe_nm.setSuffix(" nM")
+        self._probe_nm.setValue(s.hyb.probe_nM)
+        mrow((dz.MODE_FISH,), "Probe:", self._probe_nm, "Hybridisation conditions", HYB_HELP)
 
         self._conditions_title = f.section("Primer Conditions")[-1]
         self._size = RangeEdit(5, 60)
@@ -844,7 +952,8 @@ class PrimerDesignDialog(_TabbedToolDialog):
                                  "Length in bases (min, optimum, max).")
         self._tm = RangeEdit(20, 95, decimals=1, step=0.5)
         self._tm.set_values(s.tm_min, s.tm_opt, s.tm_max)
-        f.row("Tm (°C):", self._tm, "Tm", "Melting temperature of the binding part.")
+        f.row("Tm (°C):", self._tm, "Tm", "Melting temperature of the binding part. For "
+              "FISH probes: the Tm under the hybridisation conditions (formamide and SSC).")
         self._gc = RangeEdit(0, 100, decimals=0, opt=False, suffix=" %")
         self._gc.set_values(s.gc_min, s.gc_max)
         f.row("GC:", self._gc)
@@ -1456,7 +1565,16 @@ class PrimerDesignDialog(_TabbedToolDialog):
             coverage_mismatches=self._cov_mm.value(),
             fish_label=str(self._fish_label.currentData()),
             fish_avoid_fasta=path(self._fish_avoid),
+            fish_avoid_other_inputs=self._fish_other.isChecked(),
+            fish_skip_unsuitable=self._fish_skip.isChecked(),
+            hyb=self._hyb_conditions(),
         )
+
+    def _hyb_conditions(self) -> HybConditions:
+        fa, ssc, temp = self._hyb.values()
+        wfa, wssc, wtemp = self._wash.values()
+        return HybConditions(formamide_pct=fa, ssc=ssc, temp_c=temp, wash_formamide_pct=wfa,
+                             wash_ssc=wssc, wash_temp_c=wtemp, probe_nM=self._probe_nm.value())
 
     def options(self) -> PrimerOptions:
         return replace(

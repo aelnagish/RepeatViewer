@@ -803,21 +803,28 @@ class PickPrimersDialog(QDialog):
 
 
 class DesignedPairsDialog(QDialog):
-    """After Primer Design: tick the pairs to put on the sequence (Cancel / Add to Sequence)."""
+    """After Primer Design: tick the pairs (or FISH probes) to put on the sequence
+    (Cancel / Add to Sequence)."""
 
     def __init__(self, pairs: list[dict], inputs: list[Path], *,
                  parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Designed Primers")
         self.setMinimumSize(900, 460)
-        self._pairs = [p for p in pairs if p.get("forward") or p.get("reverse")]
+        self._pairs = [p for p in pairs if p.get("forward") or p.get("reverse") or p.get("probe")]
         self._inputs = [Path(p) for p in inputs]
+        # FISH oligo runs give single probes, not pairs
+        probes = bool(self._pairs) and all(
+            not (p.get("forward") or p.get("reverse")) for p in self._pairs)
+        what = "probe(s)" if probes else "pair(s)"
+        if probes:
+            self.setWindowTitle("Designed Probes")
         lay = QVBoxLayout(self)
         lay.setContentsMargins(16, 14, 16, 12)
         lay.setSpacing(10)
         head = QHBoxLayout()
-        title = QLabel(f"<b>{len(self._pairs)} pair(s) designed.</b> Tick the ones to add to the "
-                       "sequence as primers (arrows on the sequence, Primers tab).", self)
+        title = QLabel(f"<b>{len(self._pairs)} {what} designed.</b> Tick the ones to add to the "
+                       "sequence (arrows on the sequence, Primers tab).", self)
         title.setWordWrap(True)
         head.addWidget(title, 1)
         head.addWidget(make_help_button(
@@ -827,7 +834,8 @@ class DesignedPairsDialog(QDialog):
             "bind. The best pair of each sequence is ticked.<br>Nothing is written to the "
             "file until you press <b>Add to Sequence</b>."))
         lay.addLayout(head)
-        cols = ["", "Pair", "Sequence", "Product", "Forward", "Reverse", "Tm F / R"]
+        cols = (["", "Probe", "Sequence", "Position", "Probe 5′→3′", "Length", "Tm"] if probes
+                else ["", "Pair", "Sequence", "Product", "Forward", "Reverse", "Tm F / R"])
         self.table = QTableWidget(len(self._pairs), len(cols), self)
         self.table.setHorizontalHeaderLabels(cols)
         self.table.verticalHeader().hide()
@@ -839,7 +847,8 @@ class DesignedPairsDialog(QDialog):
         h.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         h.setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         h.setStretchLastSection(True)
-        for c, w in enumerate((28, 120, 120, 70, 220, 220)):
+        for c, w in enumerate((28, 160, 120, 100, 380, 60) if probes
+                              else (28, 120, 120, 70, 220, 220)):
             self.table.setColumnWidth(c, w)
         seen_templates: set[str] = set()
         for r, p in enumerate(self._pairs):
@@ -853,12 +862,20 @@ class DesignedPairsDialog(QDialog):
             self.table.setItem(r, 0, tick)
             f = p.get("forward") or {}
             rv = p.get("reverse") or {}
-            vals = [p.get("name", ""), tpl, f"{p.get('product_size', '')} bp",
-                    f.get("sequence", ""), rv.get("sequence", ""),
-                    f"{f.get('tm', 0):.1f} / {rv.get('tm', 0):.1f}" if f and rv else ""]
+            pr = p.get("probe") or {}
+            if probes:
+                vals = [p.get("name", ""), tpl, f"{pr.get('start', '')}–{pr.get('end', '')}",
+                        pr.get("sequence", ""), f"{pr.get('length', '')} nt",
+                        f"{pr.get('tm', 0):.1f} °C"]
+                mono_cols = (4,)
+            else:
+                vals = [p.get("name", ""), tpl, f"{p.get('product_size', '')} bp",
+                        f.get("sequence", ""), rv.get("sequence", ""),
+                        f"{f.get('tm', 0):.1f} / {rv.get('tm', 0):.1f}" if f and rv else ""]
+                mono_cols = (4, 5)
             for c, v in enumerate(vals, start=1):
                 item = QTableWidgetItem(str(v))
-                if c in (4, 5):
+                if c in mono_cols:
                     item.setFont(mono_font(-1))
                 self.table.setItem(r, c, item)
         lay.addWidget(self.table, 1)
@@ -895,8 +912,10 @@ class DesignedPairsDialog(QDialog):
         changed: list[Path] = []
         for p in self.ticked_pairs():
             tpl = str(p.get("template", ""))
+            # a consensus / representative template is not a record id: the design
+            # always runs on the first selected file
             path = ids.get(tpl) or ids.get(tpl.split()[0] if tpl else "") or (
-                self._inputs[0] if len(self._inputs) == 1 else None)
+                self._inputs[0] if self._inputs else None)
             if path is None:
                 continue
             osq.add_primers_to_fasta(path, osq.primers_of_pair(p),

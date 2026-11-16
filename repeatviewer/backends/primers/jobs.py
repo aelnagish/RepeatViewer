@@ -23,6 +23,7 @@ from pathlib import Path
 
 from repeatviewer.backends.primers import binding as bd
 from repeatviewer.backends.primers import design as dz
+from repeatviewer.backends.primers import low_complexity as lc
 from repeatviewer.backends.primers.gel import Lane, gel_svg, merge_bands, pick_ladder
 from repeatviewer.backends.primers.oligos import (
     KIND_FORWARD,
@@ -413,7 +414,7 @@ def run_design(inputs: list[Path], s: dz.DesignSettings, *, progress: ProgressFn
     payload["mode"] = s.mode
     payload["mode_label"] = dz.MODE_LABELS[s.mode]
     payload["settings"] = s.to_dict()
-    payload["thermo"] = s.thermo.describe()
+    payload["thermo"] = s.hyb.describe() if s.mode == dz.MODE_FISH else s.thermo.describe()
     payload["templates"] = []
     pairs: list[dz.DesignedPair] = []
     lane_sizes: dict[str, list[int]] = {}
@@ -429,6 +430,14 @@ def run_design(inputs: list[Path], s: dz.DesignSettings, *, progress: ProgressFn
                 # the copy most like the others stands in for a consensus
                 short = [r for r in records if len(r[1]) <= 20_000] or records
                 rid, tseq = dz.representative_record(short)
+            mono, was_dimer = dz.monomer_from_dimer(tseq)
+            if was_dimer:
+                explain.append(f"{rid} is a dimer consensus (the monomer written twice, as in "
+                               f"TAREAN's consensus_dimer.fasta): its first {len(mono)} bp "
+                               "monomer was used.")
+                tseq = mono
+                if len(records) == 1:
+                    records = [(rid, tseq)]
             payload["templates"].append(_template_entry(rid, tseq, file=str(ts.path)))
             _check(cancel)
             if s.mode == dz.MODE_LADDER:
@@ -437,8 +446,17 @@ def run_design(inputs: list[Path], s: dz.DesignSettings, *, progress: ProgressFn
                 avoid = []
                 if s.fish_avoid_fasta and Path(s.fish_avoid_fasta).expanduser().is_file():
                     avoid = list(bd.iter_fasta(Path(s.fish_avoid_fasta).expanduser()))
+                if s.fish_avoid_other_inputs:
+                    for other in sets[1:]:
+                        avoid.extend(other.ungapped())
+                    if len(sets) > 1:
+                        payload["avoided_files"] = [str(o.path) for o in sets[1:]]
+                skip: list = []
+                if s.fish_skip_unsuitable:
+                    skip = lc.unsuitable_regions(tseq)
+                    payload["unsuitable"] = [r.to_dict() for r in skip]
                 members = records if len(records) > 1 else [(rid, tseq)]
-                pairs.extend(dz.design_fish(rid, tseq, members, s, avoid, progress))
+                pairs.extend(dz.design_fish(rid, tseq, members, s, avoid, progress, skip=skip))
                 if not pairs:
                     explain.append("No probe passed the coverage / Tm / GC / hairpin "
                                    "filters. Lower \"Min coverage\" or widen the length, "
