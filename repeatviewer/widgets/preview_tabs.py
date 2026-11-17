@@ -3414,6 +3414,9 @@ class PreviewTabWidget(QTabWidget):
                 old_page.deleteLater()
                 break
         index = self.addTab(widget, name)
+        # Removing a tool tab shifts every tab after it: the file pages must be
+        # found again, or opening a file by path lands on the wrong tab.
+        self._rebuild_path_index()
         self.setCurrentIndex(index)
         return index
 
@@ -4376,14 +4379,9 @@ class PreviewTabWidget(QTabWidget):
         """Open ``path`` in preview (if needed) and switch to its Annotation tab."""
         resolved = path.expanduser().resolve()
         self.open_file(resolved, replace=False)
-        key = str(resolved)
-        index = self._path_to_index.get(key)
-        if index is None or not (0 <= index < self.count()):
+        widget = self.page_for_path(resolved)
+        if widget is None:
             return
-        widget = self.widget(index)
-        if not isinstance(widget, FilePreviewPage):
-            return
-        self.setCurrentIndex(index)
         self.setCurrentWidget(widget)
         widget.show()
         widget.show_annotation_tab()
@@ -4468,6 +4466,26 @@ class PreviewTabWidget(QTabWidget):
         self._rebuild_path_index()
         self._sync_tab_bar_visible()
         self._emit_current_path_changed()
+
+    def page_for_path(self, path: Path):
+        """The file preview showing ``path``, whatever tab it sits on (or None).
+
+        The stored index is only a hint: tool tabs come and go beside the file
+        pages, so the tabs themselves have the last word.
+        """
+        resolved = Path(path).expanduser().resolve()
+        key = str(resolved)
+        index = self._path_to_index.get(key)
+        if index is not None and 0 <= index < self.count():
+            widget = self.widget(index)
+            if isinstance(widget, FilePreviewPage) and str(widget.path) == key:
+                return widget
+        for index in range(self.count()):
+            widget = self.widget(index)
+            if isinstance(widget, FilePreviewPage) and str(widget.path) == key:
+                self._path_to_index[key] = index
+                return widget
+        return None
 
     def _rebuild_path_index(self) -> None:
         self._path_to_index.clear()

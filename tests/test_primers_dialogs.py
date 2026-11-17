@@ -273,3 +273,50 @@ def test_the_old_windows_are_gone():
     assert not hasattr(primer_dialogs, "MapPrimersDialog")
     with pytest.raises(ModuleNotFoundError):
         importlib.import_module("repeatviewer.views.pcr_dialog")
+
+
+def test_design_finds_the_file_page_behind_a_tool_tab(qapp, tmp_path):
+    """A tool tab that comes and goes must not send Design to the wrong tab."""
+    import random
+
+    pytest.importorskip("PySide6.QtPdf")   # the preview tabs need it
+
+    from PySide6.QtWidgets import QLabel, QWidget
+
+    from repeatviewer.pcr_actions import PcrActionsMixin
+    from repeatviewer.primer_actions import PrimerActionsMixin
+    from repeatviewer.widgets.preview_tabs import FilePreviewPage, PreviewTabWidget
+
+    r = random.Random(3)
+    fa = tmp_path / "CroSat4.fasta"
+    fa.write_text(">CroSat4\n" + "".join(r.choice("ACGT") for _ in range(209)) + "\n")
+    tabs = PreviewTabWidget()
+
+    class Host(PrimerActionsMixin, PcrActionsMixin, QWidget):
+        def __init__(self):
+            super().__init__()
+            self._preview_tabs = tabs
+            self._primer_options = load_primer_options()
+
+        def _selected_files(self):
+            return [fa]
+
+        def _ensure_preview_visible(self):
+            pass
+
+        def _set_status_message(self, *a, **k):
+            pass
+
+    host = Host()
+    tabs.open_tool_tab(QLabel("one"), "Sanger Check")
+    host._design_in_panel(dz.MODE_PCR)
+    assert isinstance(tabs.currentWidget(), FilePreviewPage)
+
+    # The same tool runs again: its old tab goes, every tab after it moves up.
+    tabs.open_tool_tab(QLabel("two"), "Sanger Check")
+    assert tabs.page_for_path(fa) is not None
+    host._design_in_panel(dz.MODE_PCR)
+    page = tabs.currentWidget()
+    assert isinstance(page, FilePreviewPage) and page.path == fa.resolve()
+    panel = page._ensure_annotation_panel()
+    assert panel.primers_panel().tabs.currentIndex() == 0

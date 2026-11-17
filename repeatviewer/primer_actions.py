@@ -245,12 +245,20 @@ class PrimerActionsMixin:
             return None
         tabs.show_annotation_for_path(path)
         self._ensure_preview_visible()
-        page = tabs.currentWidget()
+        # The page of this file, not whatever tab happens to be in front: a tool
+        # tab (Map, Sanger, a gel) can be the current one.
+        find = getattr(tabs, "page_for_path", None)
+        page = find(path) if find is not None else tabs.currentWidget()
         panel = None
         ensure = getattr(page, "_ensure_annotation_panel", None)
         if ensure is not None:
             panel = ensure()
         if panel is None:
+            QMessageBox.information(
+                self, "Primers and Probes",
+                f"{path.name} has no sequence view, so the Primers panel cannot "
+                "open on it. Click a FASTA in the Files panel and try again.",
+            )
             return None
         panel.show_primers_tab()
         primers = panel.primers_panel()
