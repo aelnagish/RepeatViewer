@@ -34,9 +34,15 @@ TOOLBAR_SETTINGS_GROUP = "toolbar"
 # load_toolbar_order() must run at most once, or it silently deletes the button
 # again every launch for anyone who deliberately adds it back.
 REPEAT_QUANTIFY_MIGRATION_KEY = "repeat_quantify_migrated_v1"
+# One-shot: users still on the previous curated default (MSA Clean / Extend /
+# Consensus) move to Mapping / Tree / Primers without wiping custom toolbars.
+DEFAULT_TOOLBAR_V2_MIGRATION_KEY = "default_toolbar_v2_migrated"
 DEFAULT_TOOLBAR_FONT_SIZE = 12
 MAX_TOOLBAR_FONT_SIZE = 20
 MIN_TOOLBAR_FONT_SIZE = 8
+# List height for the default set (~8 rows); scrolls when more buttons are added.
+_TOOLBAR_LIST_ROW_PAD = 8
+_TOOLBAR_LIST_ROW_FALLBACK = 26
 
 # Removed from toolbar customization (kept elsewhere in the app if needed).
 TOOLBAR_CUSTOMIZE_HIDDEN = frozenset({"te_divergence_plot", "_sep_plugins"})
@@ -89,11 +95,23 @@ DEFAULT_TOOLBAR_ORDER: list[str] = [
     "align",
     "flexidot",
     "teaid",
+    "map_reference",
+    "tree",
+    "primers",
+    "te_genome_map",
+]
+
+# Previous factory default; used only for the one-shot v2 migration.
+_PREVIOUS_DEFAULT_TOOLBAR_ORDER: tuple[str, ...] = (
+    "blast",
+    "align",
+    "flexidot",
+    "teaid",
     "msa_clean",
     "extend",
     "consensus",
     "te_genome_map",
-]
+)
 
 TOOLBAR_LABELS: dict[str, str] = {
     "define_genome": "Manage Database",
@@ -212,21 +230,31 @@ def build_toolbar_catalog(
     return catalog
 
 
-def _repeat_quantify_migration_done() -> bool:
-    """True once the one-shot Repeat Quantify migration has run (and mark it done)."""
+def _settings_flag_done(key: str) -> bool:
+    """True once a one-shot toolbar migration has run (and mark it done)."""
     from PySide6.QtCore import QSettings
 
     s = QSettings()
     s.beginGroup(TOOLBAR_SETTINGS_GROUP)
-    raw = s.value(REPEAT_QUANTIFY_MIGRATION_KEY)
+    raw = s.value(key)
     if isinstance(raw, str):
         done = raw.strip().lower() in {"1", "true", "yes", "on"}
     else:
         done = bool(raw)
     if not done:
-        s.setValue(REPEAT_QUANTIFY_MIGRATION_KEY, True)
+        s.setValue(key, True)
     s.endGroup()
     return done
+
+
+def _repeat_quantify_migration_done() -> bool:
+    """True once the one-shot Repeat Quantify migration has run (and mark it done)."""
+    return _settings_flag_done(REPEAT_QUANTIFY_MIGRATION_KEY)
+
+
+def _default_toolbar_v2_migration_done() -> bool:
+    """True once the curated-default v2 migration has run (and mark it done)."""
+    return _settings_flag_done(DEFAULT_TOOLBAR_V2_MIGRATION_KEY)
 
 
 # Old ids that became one button: Primers + Map Primers -> Primers and Probes.
@@ -250,6 +278,7 @@ def load_toolbar_order(registry: PluginRegistry | None = None) -> list[str]:
     labels = toolbar_labels_for(registry)
     default_order = default_toolbar_order_for(registry)
     migration_done = _repeat_quantify_migration_done()
+    v2_done = _default_toolbar_v2_migration_done()
     s = QSettings()
     s.beginGroup(TOOLBAR_SETTINGS_GROUP)
     raw = s.value("order")
@@ -277,6 +306,10 @@ def load_toolbar_order(registry: PluginRegistry | None = None) -> list[str]:
         if stripped == list(default_order):
             save_toolbar_order(stripped, registry)
             return stripped
+    # Users still on the previous curated default → new Mapping/Tree/Primers set.
+    if not v2_done and visible == list(_PREVIOUS_DEFAULT_TOOLBAR_ORDER):
+        save_toolbar_order(default_order, registry)
+        return list(default_order)
     return visible
 
 
@@ -642,7 +675,6 @@ class ToolbarCustomizeWidget(QWidget):
         font_row.addStretch()
 
         self._list = _ReorderOnlyListWidget()
-        self._list.setMinimumHeight(280)
         self._populate(self._catalog)
 
         button_row = QHBoxLayout()
@@ -672,9 +704,12 @@ class ToolbarCustomizeWidget(QWidget):
         layout.setSpacing(10)
         layout.addWidget(hint)
         layout.addLayout(font_row)
-        layout.addWidget(self._list, stretch=1)
+        # Fixed to the default set height so Preferences is not padded with
+        # empty list space; extra buttons scroll inside the list.
+        layout.addWidget(self._list, stretch=0)
         layout.addSpacing(6)
         layout.addLayout(button_row)
+        layout.addStretch(1)
 
     def _current_tool_ids(self) -> set[str]:
         return set(self._list_tool_ids())
@@ -814,6 +849,19 @@ class ToolbarCustomizeWidget(QWidget):
             if row >= 0:
                 self._list.takeItem(row)
 
+    def _fit_list_height(self) -> None:
+        """Size the list to the default toolbar set (scrolls when longer)."""
+        rows = max(len(DEFAULT_TOOLBAR_ORDER), 1)
+        hinted = self._list.sizeHintForRow(0) if self._list.count() else 0
+        row_h = max(
+            hinted,
+            self._list.fontMetrics().height() + 10,
+            _TOOLBAR_LIST_ROW_FALLBACK,
+        )
+        height = rows * row_h + _TOOLBAR_LIST_ROW_PAD
+        self._list.setMinimumHeight(height)
+        self._list.setMaximumHeight(height)
+
     def _populate(self, catalog: list[tuple[str, bool]]) -> None:
         self._list.clear()
         ordered_ids = normalize_toolbar_order(
@@ -824,6 +872,7 @@ class ToolbarCustomizeWidget(QWidget):
             if tool_id not in self._labels and not is_toolbar_separator(tool_id):
                 continue
             self._append_list_item(tool_id, visible=True)
+        self._fit_list_height()
 
     def _reset_default(self) -> None:
         self._font_size.setValue(DEFAULT_TOOLBAR_FONT_SIZE)

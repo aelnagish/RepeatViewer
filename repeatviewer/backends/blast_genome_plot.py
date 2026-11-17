@@ -166,7 +166,8 @@ HOVER_TRACK_POINTS_PER_CHROM = 36
 _GENOME_META_CACHE: dict[str, tuple[float, list[str], dict[str, int]]] = {}
 
 PLOTLY_HTML_CONFIG: dict[str, Any] = {
-    "scrollZoom": True,
+    # Plain wheel/trackpad scrolls the page. Shift+scroll zooms X (custom handler).
+    "scrollZoom": False,
     "displayModeBar": True,
     "displaylogo": False,
     # responsive reflow can undo restyle/redraw bar-height updates in Qt WebEngine.
@@ -3544,14 +3545,49 @@ def _plotly_interactive_controls_html(
       schedulePrefsSave();
     }});
     const xZoomEl = panel.querySelector('#te-sf-xzoom');
+    function applyXZoomRelayout(){{
+      if(!panel.querySelector('#te-sf-xzoom')){{ return Promise.resolve(); }}
+      const layoutUpdate = {{}};
+      applyXAxisZoomLayout(layoutUpdate);
+      if(!Object.keys(layoutUpdate).length){{ return Promise.resolve(); }}
+      return safeRelayout(layoutUpdate);
+    }}
+    function dataXFromClientX(clientX){{
+      const full = gd._fullLayout;
+      const xa = full && full.xaxis;
+      if(!xa || typeof xa.p2d !== 'function'){{ return null; }}
+      const rect = gd.getBoundingClientRect();
+      const px = clientX - rect.left;
+      const x = xa.p2d(px);
+      return Number.isFinite(x) ? x : null;
+    }}
+    function applyShiftWheelXZoom(e){{
+      const el = panel.querySelector('#te-sf-xzoom');
+      if(!el){{ return; }}
+      // macOS often remaps Shift+vertical scroll to deltaX (mouse and trackpad).
+      const dy = Number(e.deltaY) || 0;
+      const dx = Number(e.deltaX) || 0;
+      const delta = Math.abs(dy) >= Math.abs(dx) ? dy : dx;
+      if(!delta){{ return; }}
+      // Scroll up / fingers up → zoom in (same sense as maps).
+      const steps = -delta / 100;
+      const factor = Math.pow(1.12, steps);
+      const zoom = Math.min(
+        XZOOM_MAX,
+        Math.max({PLOT_XZOOM_MIN}, readXZoomScale() * factor)
+      );
+      const anchor = dataXFromClientX(e.clientX);
+      if(Number.isFinite(anchor)){{
+        gd._teXCenter = anchor;
+      }}
+      el.value = String(zoom);
+      const valEl = panel.querySelector('#te-sf-xzoom-val');
+      if(valEl){{ valEl.textContent = zoom.toFixed(1) + 'x'; }}
+      applyXZoomRelayout();
+      schedulePrefsSave();
+    }}
     if(xZoomEl){{
       xZoomEl.max = String(XZOOM_MAX);
-      function applyXZoomRelayout(){{
-        const layoutUpdate = {{}};
-        applyXAxisZoomLayout(layoutUpdate);
-        if(!Object.keys(layoutUpdate).length){{ return Promise.resolve(); }}
-        return safeRelayout(layoutUpdate);
-      }}
       xZoomEl.addEventListener('input', (e) => {{
         const v = Number(e.target.value || 1);
         const valEl = panel.querySelector('#te-sf-xzoom-val');
@@ -3564,6 +3600,15 @@ def _plotly_interactive_controls_html(
         schedulePrefsSave();
       }});
     }}
+    // Shift+scroll (mouse or trackpad) zooms X around the cursor; plain scroll
+    // moves the page. Capture on the plot so Plotly drag layers do not eat it.
+    gd.addEventListener('wheel', (e) => {{
+      if(!e.shiftKey){{ return; }}
+      if(!panel.querySelector('#te-sf-xzoom')){{ return; }}
+      e.preventDefault();
+      e.stopPropagation();
+      applyShiftWheelXZoom(e);
+    }}, {{passive: false, capture: true}});
     if(GENOME_MODE){{
       const rowEl = panel.querySelector('#te-sf-rowsp');
       if(rowEl){{

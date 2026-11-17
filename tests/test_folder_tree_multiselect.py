@@ -167,6 +167,69 @@ def test_top_level_roots_can_move_up_down(qapp, tmp_path, monkeypatch):
     tree.close()
 
 
+def test_top_level_drag_reorder_keeps_both_roots(qapp, tmp_path):
+    """Dragging a main folder below another must not make it disappear."""
+
+    class _FakeDrop:
+        def __init__(self, pos: QPoint) -> None:
+            self._pos = pos
+            self._action = Qt.DropAction.IgnoreAction
+            self._accepted = False
+
+        def position(self):
+            return type("P", (), {"toPoint": lambda _s=None: self._pos})()
+
+        def setDropAction(self, action) -> None:  # noqa: N802
+            self._action = action
+
+        def accept(self) -> None:
+            self._accepted = True
+
+        def ignore(self) -> None:
+            self._accepted = False
+
+    tree = mw.FolderTreeWidget()
+    for name in ("TEviewer", "database"):
+        (tmp_path / name).mkdir()
+        item = QTreeWidgetItem([name])
+        item.setData(0, mw.ROLE_PATH, str(tmp_path / name))
+        tree.addTopLevelItem(item)
+    # Nested child must not count as a reorderable root.
+    nested = QTreeWidgetItem(["AnnoFlexi"])
+    nested.setData(0, mw.ROLE_PATH, str(tmp_path / "TEviewer" / "AnnoFlexi"))
+    nested.setFlags(nested.flags() & ~Qt.ItemFlag.ItemIsDragEnabled)
+    tree.topLevelItem(0).addChild(nested)
+    tree.topLevelItem(0).setExpanded(True)
+    tree.resize(320, 360)
+    tree.show()
+    qapp.processEvents()
+
+    te = tree.topLevelItem(0)
+    db = tree.topLevelItem(1)
+    # Nested selection alone is not a top-level drag source.
+    tree.clearSelection()
+    nested.setSelected(True)
+    assert tree._selected_top_level_items() == []
+
+    tree.clearSelection()
+    te.setSelected(True)
+    # Drop in the lower half of the database block → after database.
+    drop_pos = tree.visualItemRect(db).center()
+    drop_pos.setY(tree.visualItemRect(db).bottom() - 1)
+    tree._set_drop_line_y(tree._insertion_y_for_top_level_drop(drop_pos))
+    assert tree._drop_line_y is not None
+
+    assert tree._reorder_top_level_drop(_FakeDrop(drop_pos)) is True
+    assert tree.topLevelItemCount() == 2
+    assert [tree.topLevelItem(i).text(0) for i in range(2)] == ["database", "TEviewer"]
+    # Children stay with the moved root; nothing left selected after the move.
+    moved = tree.topLevelItem(1)
+    assert moved is not None and moved.childCount() == 1
+    assert moved.child(0).text(0) == "AnnoFlexi"
+    assert tree.selectedItems() == []
+    tree.close()
+
+
 def _branch_item(tree, tmp_path, name: str):
     parent = tmp_path / name
     parent.mkdir()

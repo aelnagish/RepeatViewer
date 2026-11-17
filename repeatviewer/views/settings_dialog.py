@@ -438,7 +438,9 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Preferences")
         self.setMinimumWidth(720)
-        self.setMinimumHeight(420)
+        # Tall enough for General with scroll; Toolbar fits the default set
+        # without a large empty list (see ToolbarCustomizeWidget).
+        self.setMinimumHeight(360)
         self._project = project
         self._settings = QSettings()
         self._plugin_registry = plugin_registry
@@ -905,6 +907,12 @@ class SettingsDialog(QDialog):
         layout.setSpacing(10)
         layout.addWidget(tabs)
         layout.addWidget(buttons)
+        # Prefer a compact first open (Toolbar list is fixed to the default set).
+        hint = self.sizeHint()
+        self.resize(
+            max(self.minimumWidth(), hint.width()),
+            max(self.minimumHeight(), min(hint.height(), 480)),
+        )
 
     def accept(self) -> None:
         if not self._toolbar_panel.has_visible_tools():
