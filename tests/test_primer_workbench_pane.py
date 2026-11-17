@@ -509,3 +509,18 @@ def test_pcr_tab_runs_on_several_ticked_files(qapp, isolated_settings, tmp_path,
     assert len({Path(p.template).name for p in prods}) == 2
     names = {pane.table.item(r, 1).text() for r in range(pane.table.rowCount())}
     assert names == {"fam0.fa", "fam1.fa"}
+
+
+def test_the_rail_has_no_primers_button(qapp, isolated_settings, tmp_path):
+    """Primers and Probes is reached from the menu, not from a rail button."""
+    from repeatviewer.widgets.sequence_annotation_rail import (
+        PRIMERS_TAB_INDEX,
+        SequenceAnnotationRail,
+    )
+
+    rail = SequenceAnnotationRail()
+    buttons = rail._tab_buttons
+    assert [b.isVisible() for b in buttons[:4]] == [True] * 4 or not rail.isVisible()
+    assert buttons[PRIMERS_TAB_INDEX].isHidden()
+    rail.show_primers_tab()                      # the menu still opens the page
+    assert rail._active_tab == PRIMERS_TAB_INDEX

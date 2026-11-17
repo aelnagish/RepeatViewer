@@ -715,9 +715,9 @@ def test_check_only_the_selected_primers(shared, tmp_path, qapp, settings):
     page.show()
     qapp.processEvents()
     assert page.settings().primer_names == ["pBV1_for", "pBV1_rev"]
-    assert page.tab_name() == "Map \u00b7 pBV1_for / pBV1_rev"
-    page.forward.setCurrentIndex(-1)
-    page.reverse.setCurrentIndex(-1)
+    assert page.tab_name() == "Map \u00b7 saved primers"
+    assert "2 chosen in the Database" in page.only_label.text()
+    page.only_all.click()                      # back to the whole Database
     assert page.settings().primer_names == []
     page.close()
 

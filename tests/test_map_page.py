@@ -105,6 +105,9 @@ def test_map_page_asks_for_files_and_primers(qapp, isolated_settings, tmp_path):
     files, _fwd, _rev = _files(tmp_path)
     page.set_files(files)
     page.run_map()
+    assert "No saved primers" in page.verdict.text()      # nothing to search yet
+    page.source.setCurrentIndex(page.source.findData(pj.MAP_SPECIFIC))
+    page.run_map()
     assert "at least one primer" in page.verdict.text()
     assert "2 files" in page.files_note.text()
     page.deleteLater()
@@ -125,4 +128,52 @@ def test_report_is_written_only_when_asked(qapp, isolated_settings, tmp_path):
     page.report_check.setChecked(True)
     _run(qapp, page)
     assert page.report_path.is_file() and "Report" in page.saved_note.text()
+    page.deleteLater()
+
+
+def test_map_searches_a_whole_primer_stock(qapp, isolated_settings, tmp_path):
+    """Saved primers: the stock is searched, no primer has to be named."""
+    import time
+
+    from repeatviewer.views.map_page import MapPage
+
+    r = random.Random(11)
+    seq = "".join(r.choice("ACGT") for _ in range(3000))
+    fasta = tmp_path / "CroSat4.fasta"
+    fasta.write_text(">CroSat4\n" + seq + "\n")
+    stock = tmp_path / "lab_primers.fa"
+    stock.write_text(">CroSat4_F\n" + seq[499:521] + "\n"
+                     ">CroSat4_R\n" + th.reverse_complement(seq[1378:1400]) + "\n"
+                     ">Unrelated_F\nACGTACGTACGTACGTACGTAC\n")
+
+    page = MapPage([fasta], database_path="")
+    assert page.settings().mode == pj.MAP_DATABASE
+    assert page.kinds_row.isVisibleTo(page) and not page.rows_specific[0].isVisibleTo(page)
+    page.stock_from.setCurrentIndex(1)                 # a FASTA of saved primers
+    page.primer_file.setText(str(stock))
+    assert page.primer_file_row.isVisibleTo(page)
+    s = page.settings()
+    assert s.primer_file == str(stock) and s.search_forward and s.search_reverse
+
+    page.run_map()
+    end = time.time() + 30
+    while page._busy and time.time() < end:
+        qapp.processEvents()
+        time.sleep(0.02)
+    assert "product" in page.verdict.text()
+    assert page.table.rowCount() == 1
+    assert page.table.item(0, 4).text() == "901 bp"    # the pair that binds
+    page.deleteLater()
+
+
+def test_consensus_rows_follow_test_on(qapp, isolated_settings, tmp_path):
+    from repeatviewer.views.map_page import MapPage
+
+    page = MapPage([], database_path="")
+    assert not page.threshold_row.isVisibleTo(page)
+    page.test_on.setCurrentIndex(page.test_on.findData(pj.TEST_ON_CONSENSUS))
+    assert page.threshold_row.isVisibleTo(page) and page.gaps_row.isVisibleTo(page)
+    page.threshold.setCurrentIndex(page.threshold.findData(0.75))
+    s = page.settings()
+    assert s.test_on == pj.TEST_ON_CONSENSUS and s.consensus_threshold == 0.75
     page.deleteLater()

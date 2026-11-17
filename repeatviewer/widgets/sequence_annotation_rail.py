@@ -893,6 +893,9 @@ class SequenceAnnotationRail(QWidget):
             tab_layout.addWidget(btn, 0, Qt.AlignmentFlag.AlignHCenter)
             self._tab_buttons.append(btn)
             btn.clicked.connect(lambda _checked=False, i=index: self._on_tab_clicked(i))
+        # Primers and Probes is reached from the menu, which opens this page on
+        # the item that was clicked, so the rail has no button of its own for it.
+        self._tab_buttons[PRIMERS_TAB_INDEX].setVisible(False)
         tab_layout.addStretch(1)
 
         root.addWidget(self._stack, 0)

@@ -21,6 +21,8 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
     QComboBox,
+    QFileDialog,
+    QLineEdit,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -36,12 +38,16 @@ from repeatviewer.widgets.help_button import make_help_button
 from repeatviewer.widgets.primer_design_pane import (
     BOX2_W,
     FIELD_W,
+    GAP,
     LABEL_W,
     _row,
+    _row_widget,
     _rule,
     _section,
     _spin,
 )
+
+HALF_W = (FIELD_W - GAP) // 2
 
 _SETTINGS_KEY = "primers/map_page"
 PANEL_W = 330
@@ -49,9 +55,16 @@ FORWARD, REVERSE, PROBE = "#1F57C3", "#C2410C", "#7A3E9D"
 MAX_DRAWN = 40
 
 PRIMERS_HELP = (
-    "Which primers to test. <b>Primer Database</b> uses the saved ones; pick a forward and "
-    "a reverse, or leave one empty to look for single binding sites.<br>"
-    "<b>Pairs only</b> keeps the primers that give a product with their partner."
+    "<b>Saved primers</b> searches your whole Primer Database (or a primers FASTA) for the "
+    "ones that bind the sequences, and reports the pairs that give a product. Leave "
+    "Forward / Reverse / Probe ticked to search all three kinds; <b>Pairs only</b> drops the "
+    "primers that bind alone.<br>"
+    "<b>These primers</b> tests the ones you name: a saved primer name or a sequence typed "
+    "5′→3′."
+)
+CONSENSUS_HELP = (
+    "For an alignment, the primers are tested on one consensus instead of every row. "
+    "The threshold decides how a column becomes one IUPAC code; 0 % takes the most common base."
 )
 SEQUENCES_HELP = (
     "The FASTA files ticked in the Files panel. <b>Consensus</b> tests the primers on one "
@@ -243,22 +256,72 @@ class MapPage(QWidget):
 
         sec, sl, _ = _section("Primers", panel, "Primers", PRIMERS_HELP)
         self.source = QComboBox(sec)
-        self.source.addItem("Primer Database", pj.MAP_DATABASE)
-        self.source.addItem("Typed in", pj.MAP_SPECIFIC)
+        self.source.addItem("Saved primers", pj.MAP_DATABASE)
+        self.source.addItem("These primers", pj.MAP_SPECIFIC)
         self.source.setFixedWidth(FIELD_W)
         i = self.source.findData(base.get("mode", pj.MAP_DATABASE))
         self.source.setCurrentIndex(max(0, i))
-        sl.addLayout(_row("From", self.source, parent=sec))
+        sl.addLayout(_row("Test", self.source, parent=sec))
+
+        # Saved primers: the Database, or a primers FASTA.
+        self.stock_from = QComboBox(sec)
+        self.stock_from.addItem("Primer Database", "db")
+        self.stock_from.addItem("A FASTA file", "file")
+        self.stock_from.setFixedWidth(FIELD_W)
+        self.stock_from.setCurrentIndex(1 if base.get("primer_file") else 0)
+        self.stock_from_row = _row_widget("From", self.stock_from, parent=sec)
+        sl.addWidget(self.stock_from_row)
+        self.primer_file = QLineEdit(sec)
+        self.primer_file.setText(str(base.get("primer_file") or ""))
+        self.primer_file.setPlaceholderText("Primers FASTA")
+        self.primer_file.setFixedWidth(FIELD_W - 30)
+        self.primer_file_button = QPushButton("…", sec)
+        self.primer_file_button.setFixedWidth(28)
+        self.primer_file_row = _row_widget("File", self.primer_file, self.primer_file_button,
+                                           parent=sec)
+        sl.addWidget(self.primer_file_row)
+        self.search_forward = QCheckBox("Forward", sec)
+        self.search_reverse = QCheckBox("Reverse", sec)
+        self.search_probe = QCheckBox("Probe", sec)
+        self.pairs_only = QCheckBox("Pairs only", sec)
+        for box, key, on in ((self.search_forward, "search_forward", True),
+                             (self.search_reverse, "search_reverse", True),
+                             (self.search_probe, "search_probe", True),
+                             (self.pairs_only, "pairs_only", False)):
+            box.setChecked(bool(base.get(key, on)))
+            box.setFixedWidth(HALF_W)
+        self.kinds_row = _row_widget("Search for", self.search_forward, self.search_reverse,
+                                     parent=sec)
+        self.kinds_row2 = _row_widget("", self.search_probe, self.pairs_only, parent=sec)
+        sl.addWidget(self.kinds_row)
+        sl.addWidget(self.kinds_row2)
+        self.only_label = QLabel("", sec)
+        self.only_label.setWordWrap(True)
+        self.only_label.setFixedWidth(FIELD_W - 60)
+        self.only_all = QPushButton("Use all", sec)
+        self.only_all.setFixedWidth(58)
+        self.only_row = _row_widget("Only", self.only_label, self.only_all, parent=sec)
+        sl.addWidget(self.only_row)
+
+        # These primers: a saved name, or a sequence typed in.
         self.forward = QComboBox(sec)
         self.reverse = QComboBox(sec)
-        for box in (self.forward, self.reverse):
+        self.probe = QComboBox(sec)
+        self.rows_specific = []
+        for box, label, key in ((self.forward, "Forward", "forward"),
+                                (self.reverse, "Reverse", "reverse"),
+                                (self.probe, "Probe", "probe")):
             box.setEditable(True)
+            box.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
             box.setFixedWidth(FIELD_W)
-        sl.addLayout(_row("Forward", self.forward, parent=sec))
-        sl.addLayout(_row("Reverse", self.reverse, parent=sec))
-        self.pairs_only = QCheckBox("Pairs only", sec)
-        self.pairs_only.setChecked(bool(base.get("pairs_only", False)))
-        sl.addLayout(_row("", self.pairs_only, parent=sec))
+            box.setSizeAdjustPolicy(
+                QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+            box.setMinimumContentsLength(12)
+            box.lineEdit().setPlaceholderText("Saved name, or a sequence 5′→3′")
+            row = _row_widget(label, box, parent=sec)
+            self.rows_specific.append(row)
+            sl.addWidget(row)
+        self._only_names = [str(n) for n in (base.get("primer_names") or []) if str(n).strip()]
         pl.addWidget(sec)
         pl.addWidget(_rule(panel))
 
@@ -270,6 +333,19 @@ class MapPage(QWidget):
         i = self.test_on.findData(base.get("test_on", pj.TEST_ON_SEQUENCES))
         self.test_on.setCurrentIndex(max(0, i))
         sl.addLayout(_row("Test on", self.test_on, parent=sec))
+        self.threshold = QComboBox(sec)
+        for text, value in (("0 % – Majority", 0.0), ("25 %", 0.25), ("50 %", 0.5),
+                            ("75 %", 0.75), ("95 %", 0.95), ("100 % – Identical", 1.0)):
+            self.threshold.addItem(text, value)
+        self.threshold.setFixedWidth(FIELD_W)
+        i = self.threshold.findData(float(base.get("consensus_threshold", 0.0) or 0.0))
+        self.threshold.setCurrentIndex(max(0, i))
+        self.threshold_row = _row_widget("Threshold", self.threshold, parent=sec)
+        sl.addWidget(self.threshold_row)
+        self.ignore_gaps = QCheckBox("Ignore gaps", sec)
+        self.ignore_gaps.setChecked(bool(base.get("consensus_ignore_gaps", True)))
+        self.gaps_row = _row_widget("", self.ignore_gaps, parent=sec)
+        sl.addWidget(self.gaps_row)
         self.files_note = QLabel(sec)
         self.files_note.setWordWrap(True)
         self.files_note.setIndent(LABEL_W + 2)
@@ -328,9 +404,14 @@ class MapPage(QWidget):
         self.map_button.clicked.connect(self.run_map)
         self.save_button.clicked.connect(self._on_save)
         self.defaults_button.clicked.connect(self._on_defaults)
-        self.source.currentIndexChanged.connect(self._fill_primers)
+        self.source.currentIndexChanged.connect(self._sync_rows)
+        self.stock_from.currentIndexChanged.connect(self._sync_rows)
+        self.test_on.currentIndexChanged.connect(self._sync_rows)
+        self.primer_file_button.clicked.connect(self._choose_primer_file)
+        self.only_all.clicked.connect(self._use_all_saved)
         self._fill_primers()
         self._apply_primers(base)
+        self._sync_rows()
         self._refresh_files()
         self._show_idle()
 
@@ -346,14 +427,13 @@ class MapPage(QWidget):
 
     def settings(self) -> pj.MapSettings:
         base = dict(getattr(self._options, "map", None) or {})
+        saved = str(self.source.currentData()) == pj.MAP_DATABASE
         base.update(
             mode=str(self.source.currentData()),
-            use_forward=bool(self.forward.currentText().strip()),
-            forward=self.forward.currentText().strip(),
-            use_reverse=bool(self.reverse.currentText().strip()),
-            reverse=self.reverse.currentText().strip(),
             pairs_only=self.pairs_only.isChecked(),
             test_on=str(self.test_on.currentData()),
+            consensus_threshold=float(self.threshold.currentData() or 0.0),
+            consensus_ignore_gaps=self.ignore_gaps.isChecked(),
             use_max_mismatches=True,
             max_mismatches=int(self.mismatches.value()),
             three_prime_exact=int(self.exact.value()),
@@ -363,10 +443,22 @@ class MapPage(QWidget):
             check_genome=self.genome_check.isChecked(),
             annotate=self.annotate_check.isChecked(),
         )
-        if str(self.source.currentData()) == pj.MAP_DATABASE:
-            names = [n for n in (self.forward.currentText().strip(),
-                                 self.reverse.currentText().strip()) if n]
-            base["primer_names"] = names
+        if saved:
+            on_file = str(self.stock_from.currentData()) == "file"
+            base.update(
+                primer_file=self.primer_file.text().strip() if on_file else "",
+                primer_names=[] if on_file else list(self._only_names),
+                search_forward=self.search_forward.isChecked(),
+                search_reverse=self.search_reverse.isChecked(),
+                search_probe=self.search_probe.isChecked(),
+            )
+        else:
+            f, r, p = (box.currentText().strip()
+                       for box in (self.forward, self.reverse, self.probe))
+            base.update(primer_file="", primer_names=[],
+                        use_forward=bool(f), forward=f,
+                        use_reverse=bool(r), reverse=r,
+                        use_probe=bool(p), probe=p)
         return pj.MapSettings.from_dict(base)
 
     def _on_save(self) -> None:
@@ -382,19 +474,62 @@ class MapPage(QWidget):
         self.size_min.setValue(d.product_min)
         self.size_max.setValue(d.product_max)
         self.pairs_only.setChecked(d.pairs_only)
+        self.search_forward.setChecked(d.search_forward)
+        self.search_reverse.setChecked(d.search_reverse)
+        self.search_probe.setChecked(d.search_probe)
+        self.threshold.setCurrentIndex(max(0, self.threshold.findData(d.consensus_threshold)))
+        self.ignore_gaps.setChecked(d.consensus_ignore_gaps)
         self.genome_check.setChecked(d.check_genome)
         self.annotate_check.setChecked(d.annotate)
         self.report_check.setChecked(False)
+        self._sync_rows()
+
+    def _sync_rows(self) -> None:
+        """Show the rows that belong to the choices made above them."""
+        saved = str(self.source.currentData()) == pj.MAP_DATABASE
+        on_file = str(self.stock_from.currentData()) == "file"
+        self.stock_from_row.setVisible(saved)
+        self.primer_file_row.setVisible(saved and on_file)
+        self.kinds_row.setVisible(saved)
+        self.kinds_row2.setVisible(saved)
+        self.only_row.setVisible(saved and not on_file and bool(self._only_names))
+        if self._only_names:
+            self.only_label.setText(f"{len(self._only_names)} chosen in the Database")
+        for row in self.rows_specific:
+            row.setVisible(not saved)
+        consensus = str(self.test_on.currentData()) == pj.TEST_ON_CONSENSUS
+        self.threshold_row.setVisible(consensus)
+        self.gaps_row.setVisible(consensus)
+        self._show_idle()
+
+    def _use_all_saved(self) -> None:
+        """Back to the whole Database after the Database sent a selection here."""
+        self._only_names = []
+        self._sync_rows()
+
+    def _choose_primer_file(self) -> None:
+        start = self.primer_file.text().strip() or str(
+            self._files[0].parent if self._files else Path.home())
+        path, _ = QFileDialog.getOpenFileName(self, "Primers FASTA", start,
+                                              "FASTA (*.fa *.fasta *.fas *.fna *.txt);;"
+                                              "All files (*)")
+        if path:
+            self.primer_file.setText(path)
+            self._show_idle()
 
     # ------------------------------------------------------------------ inputs
 
     def tab_name(self) -> str:
+        if str(self.source.currentData()) == pj.MAP_DATABASE:
+            return "Map · saved primers"
         names = [n for n in (self.forward.currentText().strip(),
-                             self.reverse.currentText().strip()) if n]
+                             self.reverse.currentText().strip(),
+                             self.probe.currentText().strip()) if n]
         return "Map · " + (" / ".join(names) if names else "primers")
 
     def set_files(self, files) -> None:
         self._files = [Path(p) for p in files]
+        self._fill_primers()
         self._refresh_files()
 
     def _refresh_files(self) -> None:
@@ -406,41 +541,57 @@ class MapPage(QWidget):
         self.files_note.setText(f"{len(self._files)} file"
                                 f"{'s' if len(self._files) != 1 else ''}: {names}{more}")
 
-    def _fill_primers(self) -> None:
-        """The Database names, or free text when the primers are typed in."""
-        database = str(self.source.currentData()) == pj.MAP_DATABASE
-        names: list[str] = []
-        if database:
-            try:
-                from repeatviewer.backends.primers.inventory import open_database
+    def _saved_primer_count(self) -> int:
+        try:
+            from repeatviewer.backends.primers.inventory import open_database
 
-                db = open_database(Path(self._database_path) if self._database_path else None)
-                names = [p.name for p in db.primers]
-            except Exception:  # noqa: BLE001 - no database yet
-                names = []
-        for box in (self.forward, self.reverse):
+            db = open_database(Path(self._database_path) if self._database_path else None)
+            return len(db.primers)
+        except Exception:  # noqa: BLE001 - no database yet
+            return 0
+
+    def _fill_primers(self) -> None:
+        """Offer the saved names (and the primers kept with the ticked files)."""
+        names: list[str] = []
+        try:
+            from repeatviewer.backends.primers.inventory import open_database
+
+            db = open_database(Path(self._database_path) if self._database_path else None)
+            names = [p.name for p in db.primers]
+        except Exception:  # noqa: BLE001 - no database yet
+            names = []
+        try:
+            from repeatviewer.backends.primers.on_sequence import load_sequence_primers
+
+            for path in self._files[:20]:
+                names += [p.name for p in load_sequence_primers(path)]
+        except Exception:  # noqa: BLE001 - the files may hold none
+            pass
+        seen: list[str] = []
+        for name in names:
+            if name and name not in seen:
+                seen.append(name)
+        for box in (self.forward, self.reverse, self.probe):
             text = box.currentText()
             box.blockSignals(True)
             box.clear()
             box.addItem("")
-            for name in names:
+            for name in seen:
                 box.addItem(name)
-            box.setEditable(not database)
             box.setCurrentText(text)
             box.blockSignals(False)
 
     def _apply_primers(self, base: dict) -> None:
-        """Fill Forward and Reverse from the settings this page was opened with.
+        """Fill the typed-in fields from the settings this page was opened with.
 
-        The Database can ask to test a pair it has selected ("Check a Sequence >
-        All settings"): the names arrive either in forward / reverse or, for a
-        stock check, in primer_names.
+        The Database can ask to test what it has selected ("Check a Sequence >
+        All settings"): the names arrive in forward / reverse / probe, or in
+        primer_names for a search of the stock.
         """
-        names = [str(n) for n in (base.get("primer_names") or []) if str(n).strip()]
-        chosen = [str(base.get("forward") or "").strip(), str(base.get("reverse") or "").strip()]
-        if not any(chosen) and names:
-            chosen = (names + ["", ""])[:2]
-        for box, text in zip((self.forward, self.reverse), chosen):
+        chosen = [str(base.get(k) or "").strip() for k in ("forward", "reverse", "probe")]
+        if not any(chosen) and self._only_names:
+            chosen = (list(self._only_names) + ["", "", ""])[:3]
+        for box, text in zip((self.forward, self.reverse, self.probe), chosen):
             if not text:
                 continue
             box.blockSignals(True)
@@ -458,9 +609,22 @@ class MapPage(QWidget):
             self._set_verdict("amber", "Tick the FASTA files to test in the Files panel.")
             return
         s = self.settings()
-        if not (s.forward or s.reverse):
-            self._set_verdict("amber", "Choose at least one primer.")
+        if s.mode == pj.MAP_SPECIFIC and not (s.forward or s.reverse or s.probe):
+            self._set_verdict("amber", "Name at least one primer: a saved name, or a "
+                                       "sequence typed 5′→3′.")
             return
+        if s.mode == pj.MAP_DATABASE:
+            if s.primer_file and not Path(s.primer_file).is_file():
+                self._set_verdict("amber", "The primers FASTA does not exist.")
+                return
+            if not (s.search_forward or s.search_reverse or s.search_probe):
+                self._set_verdict("amber", "Tick at least one kind to search for.")
+                return
+            if not s.primer_file and not self._saved_primer_count():
+                self._set_verdict("amber", "No saved primers yet. Add them in the Primer "
+                                           "Database, choose a primers FASTA, or switch to "
+                                           "These primers and name one.")
+                return
         self._busy = True
         self.map_button.setEnabled(False)
         self._set_verdict("", "Looking for binding sites…")
@@ -509,7 +673,15 @@ class MapPage(QWidget):
         self.verdict.setText(html.escape(text))
 
     def _show_idle(self) -> None:
-        self._set_verdict("", "Choose the primers and press Map.")
+        if str(self.source.currentData()) == pj.MAP_DATABASE:
+            where = (Path(self.primer_file.text().strip()).name
+                     if str(self.stock_from.currentData()) == "file"
+                     and self.primer_file.text().strip() else "the Primer Database")
+            what = (f"the {len(self._only_names)} primers chosen in the Database"
+                    if self._only_names else f"every primer in {where}")
+            self._set_verdict("", f"Map searches {what} against the ticked files.")
+        else:
+            self._set_verdict("", "Name a forward, a reverse or a probe, then press Map.")
         self.picture.set_payload(None)
 
     def _fill(self, payload: dict) -> None:
