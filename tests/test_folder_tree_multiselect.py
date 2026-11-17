@@ -111,6 +111,21 @@ def test_multi_selection_offers_deleting_all(tree, monkeypatch):
     assert "Delete 2 folders" in labels
 
 
+def test_folder_context_menu_includes_reveal(tree, monkeypatch):
+    labels = []
+
+    class RecordingMenu(mw.QMenu):
+        def exec(self, *args, **kwargs):
+            labels.extend(a.text() for a in self.actions() if a.text())
+
+    monkeypatch.setattr(mw, "QMenu", RecordingMenu)
+    _click(tree, "a")
+    item_a = tree.topLevelItem(0).child(0)
+    tree._show_context_menu(tree.visualItemRect(item_a).center())
+    assert "Reveal in Finder" in labels or "Show in File Manager" in labels
+    assert "Copy Path" in labels
+
+
 def _branch_item(tree, tmp_path, name: str):
     parent = tmp_path / name
     parent.mkdir()

@@ -2186,6 +2186,15 @@ class FolderTreeWidget(QTreeWidget):
                     "Copy Path",
                     lambda fs=list(folders): self._copy_folder_paths_to_clipboard(fs),
                 )
+                reveal_label = (
+                    "Reveal in Finder"
+                    if platform.system() == "Darwin"
+                    else "Show in File Manager"
+                )
+                menu.addAction(
+                    reveal_label,
+                    lambda f=folder: reveal_in_file_manager(f),
+                )
                 window = self.window()
                 if hasattr(window, "_clipboard_can_paste") and window._clipboard_can_paste():
                     menu.addAction(
@@ -2196,6 +2205,15 @@ class FolderTreeWidget(QTreeWidget):
                 menu.addAction(
                     f"Copy {len(folders)} Paths",
                     lambda fs=list(folders): self._copy_folder_paths_to_clipboard(fs),
+                )
+                reveal_label = (
+                    "Reveal in Finder"
+                    if platform.system() == "Darwin"
+                    else "Show in File Manager"
+                )
+                menu.addAction(
+                    reveal_label,
+                    lambda fs=list(folders): reveal_in_file_manager(fs[0]),
                 )
             if len(folders) == 1:
                 menu.addAction(
