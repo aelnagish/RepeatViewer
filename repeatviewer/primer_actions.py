@@ -508,12 +508,14 @@ class PrimerActionsMixin:
                                  primer_names: list[str] | None = None,
                                  database_path: str = "", strict: dict | None = None,
                                  sequence: str = "", probes: bool = False) -> None:
-        """Map Primers; ``check_stock``: preset to test the Database primers (the
-        selected ones, or all) on a sequence. ``probes``: look for probes, which
-        have no partner and no product, so the answer is sites and copy counts."""
+        """Map as a tab: where the primers bind on the selected files.
+
+        ``probes``: a probe binds on its own, so no pairs, no products and no
+        3' end rule. ``check_stock``: the Database asked to test its primers.
+        """
         if not self._primers_ready():
             return
-        from repeatviewer.views.primer_dialogs import MapPrimersDialog
+        from repeatviewer.views.map_page import MapPage
 
         opts = self._primer_options
         if check_stock:
@@ -523,61 +525,21 @@ class PrimerActionsMixin:
             # A selection from the Database window is for that one check only.
             opts = replace(opts, map={**opts.map, "primer_names": []})
         if probes:
-            # A probe binds on its own: no pairs, no products, and the 3' rule is
-            # a PCR idea, so what counts is total mismatches.
             opts = replace(opts, map={**opts.map, "search_forward": False,
                                       "search_reverse": False, "search_probe": True,
                                       "pairs_only": False, "three_prime_exact": 0,
                                       "use_max_mismatches": True})
-        dialog = MapPrimersDialog(
-            initial=opts,
-            files=self._primer_candidate_files(),
-            project_genome=self._genome_path_resolved(),
-            parent=self,
-        )
+        files = self._primer_candidate_files()
         if sequence:
-            dialog._input_define.setChecked(True)
-            dialog._seq_row.set_path(Path(sequence))
-
-        def _no_sequence(d) -> str:
-            files = d.run_files() or (
-                self._primer_candidate_files() if d.uses_selected() else [])
-            return "" if files else (
-                "Choose the sequences: click a FASTA in the Files panel (or fill "
-                "Sequences with Define inputs), then Run.")
-
-        # Checked before the window closes, so OK brings you back to it.
-        dialog._run_check = _no_sequence
-
-        def _forget_selection() -> None:
-            if self._primer_options.map.get("primer_names"):
-                self._save_primer_options(replace(
-                    self._primer_options, map={**self._primer_options.map, "primer_names": []}))
-
-        def _accepted(d) -> None:
-            self._save_primer_options(d.options())
-            if not d.should_run():
-                _forget_selection()
-                self._set_status_message("Map Primers settings saved", 4000)
-                return
-            files = d.run_files() or (
-                self._primer_candidate_files() if d.uses_selected() else [])
-            if not files:
-                QMessageBox.information(
-                    self, "Map Primers",
-                    "Choose the sequences: click a FASTA in the Files panel (or fill "
-                    "Sequences with Define inputs), then Run.",
-                )
-                return
-            missing = [p for p in files if not Path(p).is_file()]
-            if missing:
-                QMessageBox.warning(self, "Map Primers",
-                                    f"The file does not exist:\n{missing[0]}")
-                return
-            self._start_primer_job(PRIMER_JOB_MAP, files, self._primer_options)
-            _forget_selection()   # the job already has its own copy of the settings
-
-        self._present_te_viz_dialog(dialog, _accepted)
+            files = [Path(sequence)] + [p for p in files if str(p) != sequence]
+        page = MapPage(files, options=opts,
+                       database_path=database_path or opts.database_path)
+        tabs = getattr(self, "_preview_tabs", None)
+        if tabs is None:
+            return
+        tabs.open_tool_tab(page, page.tab_name())
+        self._ensure_preview_visible()
+        self._map_page = page
 
     def _quick_map_primers_right_click(self) -> None:
         if not self._primers_ready():

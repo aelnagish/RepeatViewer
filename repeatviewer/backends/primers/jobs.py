@@ -738,11 +738,14 @@ def map_primer_list(ms: MapSettings, db: PrimerDatabase | None) -> list[Primer]:
     return chosen
 
 
-def run_map(inputs: list[Path], ms: MapSettings, *, database_path: Path | None = None,
-            progress: ProgressFn = None, cancel: CancelFn = None,
-            out_dir: Path | None = None,
-            report_path: Path | None = None) -> tuple[Path, list[Path], dict]:
-    """Test primers against the selected sequences (Geneious' Map Primers)."""
+def map_payload(inputs: list[Path], ms: MapSettings, *, database_path: Path | None = None,
+                progress: ProgressFn = None, cancel: CancelFn = None,
+                annotate: bool = True) -> tuple[dict, list, list]:
+    """Everything Map works out, without writing a file.
+
+    Returns the payload, the binding sites and the products, so a window can
+    show them and write the report only when the user asks.
+    """
     inputs = [Path(p).expanduser().resolve() for p in inputs]
     if not inputs:
         raise PrimerError("Select the sequences to test in the Files panel first.")
@@ -842,8 +845,7 @@ def run_map(inputs: list[Path], ms: MapSettings, *, database_path: Path | None =
     if ms.check_genome and ms.genome_fasta:
         _say(progress, f"Searching {Path(ms.genome_fasta).name}")
         payload["genome"] = _map_genome(primers, ms, progress, cancel)
-    layout = plan_outputs(inputs[0], MAP_TAG, out_dir, report_path=report_path)
-    if ms.annotate and sites:
+    if ms.annotate and annotate and sites:
         by_file: dict[Path, dict[str, list]] = {}
         rid_file = {rid: path for rid, _seq, path in templates}
         cons_ids = {rid for rid, _s, _p in templates if rid.endswith(" consensus")}
@@ -869,6 +871,18 @@ def run_map(inputs: list[Path], ms: MapSettings, *, database_path: Path | None =
                     payload.setdefault("annotated", []).append(str(path))
             except Exception as exc:  # noqa: BLE001
                 payload["warnings"].append(f"Could not add annotations to {fasta.name}: {exc}")
+    return payload, sites, products
+
+
+def run_map(inputs: list[Path], ms: MapSettings, *, database_path: Path | None = None,
+            progress: ProgressFn = None, cancel: CancelFn = None,
+            out_dir: Path | None = None,
+            report_path: Path | None = None) -> tuple[Path, list[Path], dict]:
+    """Test primers against the selected sequences (Geneious' Map Primers)."""
+    payload, sites, products = map_payload(inputs, ms, database_path=database_path,
+                                           progress=progress, cancel=cancel)
+    layout = plan_outputs(Path(inputs[0]).expanduser().resolve(), MAP_TAG, out_dir,
+                          report_path=report_path)
     _say(progress, "Writing results")
     files = write_result(layout, payload, sites=sites, products=products)
     return layout.main, files, payload
