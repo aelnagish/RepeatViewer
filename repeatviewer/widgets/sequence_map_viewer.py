@@ -7471,12 +7471,15 @@ class AutoAnnotationSettingsDialog(QDialog):
         self,
         settings: AutoAnnotationSettings,
         parent: QWidget | None = None,
+        *,
+        show_tsd: bool = True,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Feature detection settings")
         self.setMinimumWidth(_SETTINGS_DIALOG_MIN_WIDTH)
         self._panel = AutoAnnotationSettingsPanel(settings, self)
         self._tsd_panel = TsdSearchSettingsPanel(self)
+        self._tsd_panel.setVisible(bool(show_tsd))
         body = QWidget(self)
         body_layout = QVBoxLayout(body)
         body_layout.setContentsMargins(0, 0, 0, 0)
@@ -10878,17 +10881,25 @@ class SequenceMapPanel(QWidget):
 
     def _open_auto_annotation_settings(self) -> None:
         self._auto_ann_settings = load_auto_annotation_settings()
-        dialog = AutoAnnotationSettingsDialog(self._auto_ann_settings, parent=self)
+        # Single-sequence map: TSD is MSA-only — omit its settings block.
+        dialog = AutoAnnotationSettingsDialog(
+            self._auto_ann_settings, parent=self, show_tsd=False
+        )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         self._auto_ann_settings = dialog.settings()
         save_auto_annotation_settings(self._auto_ann_settings)
-        save_tsd_search_options(dialog.tsd_options())
+        if dialog._tsd_panel.isVisible():
+            save_tsd_search_options(dialog.tsd_options())
         self._broadcast_shared_annotation_settings_changed()
         self.statusMessage.emit("Auto annotation settings saved.")
 
     def _selected_auto_annotation_modes(self) -> list[AutoAnnotationMode]:
-        return [mode for mode, check in self._auto_ann_checks.items() if check.isChecked()]
+        return [
+            mode
+            for mode, check in self._auto_ann_checks.items()
+            if check.isChecked() and not check.isHidden()
+        ]
 
     def _open_similarity_annotation_settings(self) -> None:
         self._similarity_ann_settings = load_similarity_annotation_settings()

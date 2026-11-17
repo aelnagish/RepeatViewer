@@ -6514,6 +6514,9 @@ class MultiSequenceOverviewPanel(QWidget):
     def _sync_mode_specific_controls(self) -> None:
         msa = self.is_msa_mode()
         self._rail.set_msa_display_mode(msa)
+        # TSD checkbox visibility follows MSA; keep "All" in sync.
+        if getattr(self, "_auto_ann_checks", None):
+            self._sync_auto_annotation_all_check()
         self._rail.set_nucleotide_color_context("msa" if msa else "multi")
         self._rail.sync_color_scheme_combos()
         settings = self._overview_display_settings()
@@ -7335,7 +7338,9 @@ class MultiSequenceOverviewPanel(QWidget):
 
     def _selected_auto_annotation_modes(self) -> list[AutoAnnotationMode]:
         return [
-            mode for mode, check in self._auto_ann_checks.items() if check.isChecked()
+            mode
+            for mode, check in self._auto_ann_checks.items()
+            if check.isChecked() and not check.isHidden()
         ]
 
     def _selected_similarity_databases(self) -> list[SimilarityDatabaseRun]:
@@ -7373,12 +7378,17 @@ class MultiSequenceOverviewPanel(QWidget):
         from repeatviewer.widgets.sequence_map_viewer import AutoAnnotationSettingsDialog
 
         self._auto_ann_settings = load_auto_annotation_settings()
-        dialog = AutoAnnotationSettingsDialog(self._auto_ann_settings, parent=self)
+        dialog = AutoAnnotationSettingsDialog(
+            self._auto_ann_settings,
+            parent=self,
+            show_tsd=self.is_msa_mode(),
+        )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         self._auto_ann_settings = dialog.settings()
         save_auto_annotation_settings(self._auto_ann_settings)
-        save_tsd_search_options(dialog.tsd_options())
+        if dialog._tsd_panel.isVisible():
+            save_tsd_search_options(dialog.tsd_options())
         self.statusMessage.emit("Auto annotation settings saved.")
 
     def _open_similarity_annotation_settings(self) -> None:

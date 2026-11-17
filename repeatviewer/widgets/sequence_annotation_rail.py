@@ -556,6 +556,11 @@ class _FlowLayout(QLayout):
         line_height = 0
         space = self.spacing()
         for item in self._items:
+            widget = item.widget()
+            # Hidden chips (e.g. TSD when not MSA) must not reserve space —
+            # otherwise the next wrap row (PBS) starts indented.
+            if widget is not None and widget.isHidden():
+                continue
             hint = item.sizeHint()
             next_x = x + hint.width() + space
             if line_height and next_x - space > effective.right() + 1:
@@ -1880,6 +1885,9 @@ class SequenceAnnotationRail(QWidget):
                     "Target site duplications near putative TE boundaries "
                     "(MSA only; set boundaries under Setting)."
                 )
+                # Hidden until set_msa_display_mode(True); single-seq / multi
+                # unaligned overviews must not offer TSD.
+                check.hide()
             elif label == "PBS":
                 check.setToolTip(
                     "Primer binding site inside the 5′ LTR (Neumann 2019 "
@@ -3019,10 +3027,26 @@ class SequenceAnnotationRail(QWidget):
     def _emit_boundary_guides_changed(self, _checked: bool = False) -> None:
         self.boundaryGuidesChanged.emit(self.boundary_guide_keys())
 
+    def _sync_feature_detect_tsd_visible(self) -> None:
+        """Show Feature detection → TSD only for MSA files."""
+        check = (getattr(self, "auto_ann_checks", None) or {}).get("TSD")
+        if check is None:
+            return
+        show = bool(getattr(self, "_msa_display_mode", False))
+        check.setVisible(show)
+        if not show and check.isChecked():
+            check.setChecked(False)
+        # Relayout the chip row so PBS stays left-aligned when TSD is hidden.
+        host = check.parentWidget()
+        if host is not None and host.layout() is not None:
+            host.layout().invalidate()
+            host.updateGeometry()
+
     def set_msa_display_mode(self, enabled: bool) -> None:
         """Toggle controls that apply only to aligned residue columns."""
         self._msa_display_mode = bool(enabled)
         visible = bool(getattr(self, "_overview_mode", False)) and self._msa_display_mode
+        self._sync_feature_detect_tsd_visible()
         self.msa_coloring_label.setVisible(visible)
         self.msa_coloring_header.setVisible(visible)
         self.msa_coloring_mode_host.setVisible(visible)
