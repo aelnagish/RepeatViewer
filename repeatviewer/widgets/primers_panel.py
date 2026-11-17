@@ -218,8 +218,8 @@ class PrimersPanel(QWidget):
         grid.setContentsMargins(0, 0, 0, 0)
         grid.setHorizontalSpacing(6)
         grid.setVerticalSpacing(6)
-        self.add_button = QPushButton("Add Primer…", self)
-        self.database_button = QPushButton("From Database…", self)
+        self.add_button = QPushButton("Add Primer", self)
+        self.database_button = QPushButton("From Database", self)
         self.design_button = QPushButton("Design", self)
         self.design_button.setToolTip("Design new primers around a region of this sequence")
         self.pcr_button = QPushButton("Run PCR", self)
@@ -362,8 +362,8 @@ class PrimersPanel(QWidget):
         il.addLayout(apply_row)
         self._pending: tuple[str, str] | None = None   # (name, sequence before the drag)
         self.fix_button = QPushButton("Fix Mismatches to Match Template", self.inspector)
-        self.edit_button = QPushButton("Edit Primer…", self.inspector)
-        self.genome_button = QPushButton("Sites in Genome…", self.inspector)
+        self.edit_button = QPushButton("Edit Primer", self.inspector)
+        self.genome_button = QPushButton("Sites in Genome", self.inspector)
         for b in (self.fix_button, self.edit_button, self.genome_button):
             b.setMinimumWidth(0)
             b.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
@@ -810,7 +810,7 @@ class PrimersPanel(QWidget):
         if not names:
             return
         menu = QMenu(self)
-        menu.addAction("Edit Primer…", lambda: self.edit_primer(names[0]))
+        menu.addAction("Edit Primer", lambda: self.edit_primer(names[0]))
         menu.addAction("Copy Sequence", lambda: self._copy_sequences(names))
         menu.addAction("Add to Primer Database", lambda: self._add_to_database(names))
         menu.addSeparator()

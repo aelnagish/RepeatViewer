@@ -6,38 +6,70 @@ primer inventory. Everything runs on your computer; nothing is sent online.
 
 | Where | What |
 |-------|------|
-| **Tools → Primers and Probes → Design** | Design primers or FISH probes |
-| **Tools → Primers and Probes → Map** | Test primers against sequences, like Geneious' *Map Primers* |
+| **Tools → Primers and Probes → Design** | Design primers (**Primers**), FISH probes for a repeat (**Repetitive Probes**) or painting probes (**Chromosome Painting Probes**) |
+| **Tools → Primers and Probes → Map** | Test primers or probes against sequences, like Geneious' *Map Primers* |
 | **Tools → Primers and Probes → Database** | The lab's primer inventory |
-| **Tools → Primers and Probes → In-silico PCR** | The PCR window |
-| **Primers** tab of the sequence side panel | Primers on the open sequence |
+| **Tools → Primers and Probes → In-silico PCR**, **Restriction Digest**, **Gel** | The products of a PCR, a digest of the sequence, the expected gel |
+| **Tools → Primers and Probes → Sanger Check**, **Cloning** | Check a clone against its Sanger reads; plan putting a product into a vector |
+
+Every item opens the same tab, **Primers and Probes**, on the matching section.
 
 The toolbar can also show a **Primers and Probes** button (**File → Setting →
-Toolbar → Add buttons…**). It offers Design, Map and Database; right-click
-designs with the saved settings, or opens the Design window (choose on its
-**Options** tab).
+Toolbar → Add buttons…**). It offers the same items; right-click designs with
+the saved settings.
 
 ## Quick start
 
 1. Click the FASTA you want primers for in the Files panel.
-2. Choose **Tools → Primers and Probes → Design**.
-3. Under **Settings**, choose the **Mode** (keep *Standard PCR* for an ordinary
-   pair) and click **Run**.
-4. The report `<name>_primers.html` opens. If **Ask which pairs to add to the
-   sequence after the run** is on, tick the pairs you want and click **Add to
-   Sequence**; they then appear in the sequence's **Primers** tab.
-5. Tick two primers in the **Primers** tab and click **Run PCR** to see their
-   products and the gel.
+2. Choose **Tools → Primers and Probes → Design → Primers**. The **Primers and
+   Probes** tab opens on the **Design** section, with your sequence.
+3. Drag on the map over the part to amplify, keep **Mode** on *Standard PCR*
+   and click **Design**.
+4. The candidate pairs appear in the list under the map and as arrows above the
+   sequence. Tick the pairs you want and click **Keep Ticked**: their primers
+   are now on the sequence.
+5. Click the **PCR** section to see the products of the ticked primers and the
+   expected gel.
+
+## The workspace
+
+**Primers and Probes** is one tab. The row on top holds its sections: **Design**,
+**Painting**, **Map**, **Database**, **PCR**, **Digest**, **Gel**, **Sanger
+Check** and **Cloning**. A section keeps what you did in it while you look at
+another one.
+
+**Design**, **PCR** and **Digest** work on one sequence:
+
+- **Sequence** shows the file. Click a FASTA's name in the Files panel to work
+  on it, or press **Browse**. Ticking a file's box does not change it.
+  **Record** chooses the sequence in a file that holds several.
+- The **map** shows the sequence. What a section adds is drawn in rows of its
+  own above the bases, so no letter is covered: enzyme names, one row for each
+  candidate pair, and the primer you are editing. A region you chose is a light
+  tint behind them.
+- The **list under the map** holds what Design found (*candidate*) and the
+  primers already on the sequence (*on the sequence*); in **PCR** it holds the
+  products. Drag the border between the map and the list to give one of them
+  more room.
+- The **panel on the right** holds the settings of the section.
+
+The other sections are whole pages of their own. **Map** and **Database** open
+without a sequence.
+
+> **Tip.** A path field in the panel (for example *Avoid file*) is filled by a
+> click in the Files panel: put the cursor in the field first, then click the
+> file. To open a file in a tab of its own while the workspace is in front,
+> right-click it and choose **Open in Additional Tab**.
 
 ## Design
 
-![The Design window.](img/primer_design.png)
+The settings are in the panel on the right of the **Design** section.
 
-The window has the tabs **Primers** and **Options**.
-
-**Inputs**: **Use selected sequences** (the FASTA selected in the Files panel;
-its name is shown) or **Define inputs** (a template FASTA for this run). Every
-sequence in the template file is used, up to 20.
+**Run on**: **This one** designs on the open sequence. The candidates appear in
+the list under the map and nothing is written until you press **Keep Ticked**
+or **Open Report**. **Selected files** runs the design as a job on every FASTA
+ticked in the Files panel and writes the report files beside them, with the
+same settings.
 
 **Mode** is the kind of design. Changing it loads sensible starting values
 (size, Tm, product size); **Restore Defaults** brings them back.
@@ -91,9 +123,9 @@ the wash and how far it stays above the wash temperature.
 5′ tails (M13, T7, restriction sites, or your own) and the Tm calculation (salt,
 Mg²⁺, dNTP and oligo concentration).
 
-**Options**: what right-click on the toolbar button does; **Ask which pairs to
-add to the sequence after the run**; **Add the designed primers to the Primer
-Database**; the process window.
+**Options**: **Ask which pairs to add here** (for a run on selected files);
+**Add them to the Database**. **Restore Defaults** brings the starting values
+of the mode back, **Save** keeps the settings for the next time.
 
 ### Design results
 
@@ -114,47 +146,55 @@ found it explains why (for example how many primers failed on Tm or GC). Common
 fixes: widen the Tm range or the product size; for satellite oligos lower *Min
 coverage* or allow more mismatches.
 
-## Design beside the sequence
-
-Open a FASTA in Preview and click the **Primers** tab on the right of the
-Annotation view. The tab has two pages, **Design** and **Primer**, and is wider
-than the other tabs so the settings fit.
+## Design on the sequence
 
 1. **Region**: drag on the map or the bases; the range appears in *From* and
    *to* (or type it). Choose what the region is for:
-   - **Amplify**: primers sit outside the region and the product covers all of it.
-   - **Inside**: primers and product stay inside the region.
-   - **Avoid**: no primer may sit in the region (a SNP, a methylated site, a repeat).
-2. **Settings**: Standard PCR or qPCR, primer size, Tm and product size.
-   **Design Window…** opens the full Design window (GC, tails, salt, Ladder PCR,
-   FISH probes, several files).
-3. **Design**: the pairs appear under **Candidates**, best first. Click a pair to
-   see its product on the sequence; tick the ones you want and press **Keep
-   Ticked**. They are added to this sequence's primers (Primer page). Nothing is
-   written before that. **Open Report** writes the usual primer report.
+   - **Amplify**: the primers sit outside the region, one on each side, and the
+     product covers all of it.
+   - **Inside**: both primers and the product stay inside the region.
+   - **Avoid**: no primer may sit in the region (a SNP, a methylated site, a
+     repeat).
+
+   For probes only **Inside** and **Avoid** are offered: a probe sits in the
+   region or keeps out of it.
+2. **Settings**: the mode, primer size, Tm, GC and product size; **Advanced**
+   has the finer rules and the salt.
+3. **Design**: the pairs appear in the list under the map, best first, and
+   each pair gets a row of arrows above the sequence (the selected pair is
+   filled, the others are outlined). Click a pair to see it; tick the ones you
+   want and press **Keep Ticked**. They are added to this sequence's primers.
+   Nothing is written before that. **Open Report** writes the usual primer
+   report.
 
 When the region and the settings cannot work together (for example a 1,500 bp
 region to amplify with products of at most 1,000 bp), an amber note says why
-before you run, and **Set Product Range to Fit** changes the product range.
-Nothing is blocked: the settings guide the automatic design, your choice wins.
+before you run, and **Fit** changes the product range. Nothing is blocked: the
+settings guide the automatic design, your choice wins.
 
 ## Primers on the sequence
 
-The **Primers** tab of the sequence side panel lists the primers kept with this
-FASTA. Each is drawn on the sequence as an arrow where it binds (blue: points
-right; orange: points left); mismatches are red on the bases.
+The list under the map shows the primers kept with this FASTA as *on the
+sequence*. Each is drawn as an arrow where it binds (blue: points right;
+orange: points left).
 
-![The Primers tab: three primers on the demo element, with the numbers of the selected one.](img/rail_primers.png)
-
-- **Add Primer…** types a new one, **From Database…** picks saved ones,
-  **Design…** opens Design for this sequence.
-- **Click** a primer to see its numbers and jump to it: Tm, hairpin and
-  self-dimer ΔG, where and how well it binds. **Double-click** opens **Edit
-  Primer**.
+- **Add Primer** types a new one, **From Database** picks saved ones.
+- **Click** a primer to see its details in the panel on the right and jump to
+  it: Tm, hairpin and self-dimer ΔG, where and how well it binds. While a
+  primer is selected the design settings are folded to one line, **Design
+  Settings**; **Show** opens them again. Clicking a candidate also brings them
+  back.
+- The selected primer is drawn as a bar in its own row right above its bases.
+  **Drag** the bar to move the primer, or drag one of its ends to make it
+  longer or shorter. A base that does not match the template is red on the
+  primer.
 - **Snap to Tm** shortens or lengthens the primer along the template to reach a
   Tm; **Fix Mismatches to Match Template** makes it match this sequence;
-  **Sites in Genome…** shows where it binds in a genome.
-- **Tick** two primers and click **Run PCR** to see their products.
+  **Edit Primer** opens the primer with its tail and checks; **Sites in Genome**
+  shows where it binds in a genome.
+- **Right-click** a primer in the list to edit it, copy its sequence, add it to
+  the Primer Database or remove it.
+- The **tick** marks the primers that the **PCR** section uses.
 
 A **tail** is the 5′ part that does not bind (lower-case letters). It is copied
 into the product from cycle 3 on, so two Tm values are shown: **annealed** (the
@@ -172,8 +212,9 @@ follow it when it is renamed or moved.
 
 ## In-silico PCR
 
-**Tools → Primers and Probes → In-silico PCR**, or **Run PCR** in the Primers
-tab.
+**Tools → Primers and Probes → In-silico PCR**, or the **PCR** section of the
+workspace. The products are listed under the map and drawn in the expected gel
+in the panel.
 
 ![The PCR window: templates and primers on the left, products in the middle, a quick gel on the right.](img/pcr.png)
 
@@ -227,7 +268,9 @@ copy-number assay.
 
 ## The gel
 
-A `.rvgel` file opens as an agarose gel. Every lane is a ladder, the products of
+A `.rvgel` file opens as an agarose gel, in the **Gel** section of the workspace
+(every **Open in a Gel** button, **Tools → Primers and Probes → Gel**, or a
+click on a gel in the Files panel while the workspace is in front). Every lane is a ladder, the products of
 a PCR run, or products cut with a restriction enzyme. The gel is saved as it
 changes.
 
@@ -256,7 +299,8 @@ PCR with more mismatches), and expected bands **not seen**.
 
 ## Map: test primers on sequences
 
-**Tools → Primers and Probes → Map**. Tabs: **Map Primers** | **Options**.
+**Tools → Primers and Probes → Map → Primers** (or **Repetitive Probes**). It
+opens as the **Map** section of the workspace, with its settings on the right.
 
 ![The Map Primers window.](img/primer_map.png)
 
@@ -283,7 +327,9 @@ whether it worked, who ordered it and when, and every change since.
 
 ![The Primer Database window.](img/primer_database.png)
 
-### The window
+It opens as the **Database** section of the workspace.
+
+### The page
 
 - **Filter** searches every field; the boxes next to it show one organism, one
   person or one status.
@@ -346,8 +392,8 @@ the **Sequence** (click a FASTA in the Files panel) and how strict to be
 
 ## Chromosome painting (Chorus2)
 
-Choose **Mode → FISH probes → Chromosome painting (Chorus2)**. The tabs change
-to **Chorus2**, **Selection** and **Options**.
+Choose **Tools → Primers and Probes → Design → Chromosome Painting Probes**. It
+opens as the **Painting** section of the workspace.
 [Chorus2](https://github.com/zhangtaolab/Chorus2) (Zhang et al. 2021) finds
 oligos that occur once in the genome along every chromosome. RepeatViewer runs
 it, or reads what it produced on a server, and then picks the pool you order.

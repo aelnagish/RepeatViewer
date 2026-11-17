@@ -698,3 +698,23 @@ def test_the_database_is_a_section_and_opens_once(qapp, isolated_settings, two_f
     host._open_primer_database()                             # the menu again: the same one
     assert page.hosted_page("database") is holder and host._primer_database_dialog is dialog
     assert page.section() == pw.SECTION_DATABASE
+
+
+def test_layout_rules_in_the_workspace(qapp, isolated_settings, two_files):
+    """No three dots on buttons, no second heading, no emptied section left behind."""
+    from PySide6.QtWidgets import QPushButton
+
+    page = _page(two_files[0])
+    dotted = sorted(
+        b.text() for b in page.findChildren(QPushButton)
+        if ("…" in b.text() or "..." in b.text())
+        and b.text() != "Browse…")                             # the app-wide path field
+    assert dotted == []
+    assert page.primers.add_button.text() == "Add Primer"
+    assert page.primers.edit_button.text() == "Edit Primer"
+    assert page.primers.genome_button.text() == "Sites in Genome"
+    assert page.panel._rail.primers_page_title.isHidden()
+    pcr = page.primers.pcr_pane
+    assert page.bottom.isAncestorOf(pcr.products_title) and page.bottom.isAncestorOf(pcr.table)
+    hidden = [w for w in pcr.findChildren(type(page.bottom)) if w.isHidden()]
+    assert hidden                                              # the emptied Products section

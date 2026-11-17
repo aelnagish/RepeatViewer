@@ -1623,6 +1623,8 @@ class SequenceAnnotationRail(QWidget):
         layout.setSpacing(8)
         title, _rule = _page_title_with_rule("Primers", page)
         layout.addWidget(title)
+        # The Primers and Probes workspace names its sections itself and hides this.
+        self.primers_page_title = title
         self.primers_panel = PrimersPanel(page, width=self._module_width)
         layout.addWidget(self.primers_panel, 1)
         return self._wrap_scroll(page)

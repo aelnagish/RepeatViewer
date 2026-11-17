@@ -477,8 +477,6 @@ class PrimersWorkspacePage(QWidget):
         bar = QHBoxLayout()
         bar.setContentsMargins(0, 0, 0, 0)
         bar.setSpacing(8)
-        primers.add_button.setText("Add Primer")
-        primers.database_button.setText("From Database")
         self.list_note = design.cand_note
         for button in (primers.add_button, primers.database_button):
             button.setSizePolicy(QPushButton().sizePolicy())
@@ -493,9 +491,16 @@ class PrimersWorkspacePage(QWidget):
         products = QWidget(self.bottom_stack)
         pl = QVBoxLayout(products)
         pl.setContentsMargins(0, 0, 0, 0)
+        pl.setSpacing(6)
+        # The Products section of the PCR pane held only this table: its title
+        # (with the count) comes along and the emptied section is not shown.
+        products_section = primers.pcr_pane.table.parentWidget()
         primers.pcr_pane.table.setMinimumHeight(96)
-        pl.addWidget(primers.pcr_pane.table)
+        pl.addWidget(primers.pcr_pane.products_title)
+        pl.addWidget(primers.pcr_pane.table, 1)
         self.bottom_stack.addWidget(products)
+        if products_section is not None and products_section is not primers.pcr_pane:
+            products_section.hide()
 
         design.table.setParent(self._kept)
         primers.table.setParent(self._kept)
@@ -650,6 +655,9 @@ class PrimersWorkspacePage(QWidget):
         # The workspace shows one page of the rail and never another, so the
         # strip of rail buttons has no job here.
         rail._tab_strip.hide()
+        heading = getattr(rail, "primers_page_title", None)
+        if heading is not None:
+            heading.hide()          # the section row already says where we are
         rail.set_panel_collapsed(False, persist=False)
         self.panel.show_primers_tab()
         self._sync_records()
