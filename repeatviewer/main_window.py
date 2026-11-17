@@ -5332,7 +5332,15 @@ class MainWindow(
                 source_files=getattr(self, "_last_job_source_files", []),
                 open_preview=False,
             )
-        # Prefer sorted BAM (after Sort and index) over raw SAM/PAF.
+        # A written .rvmap opens in the contig view. Without one: sorted BAM
+        # (after Sort and index), else the raw SAM / PAF.
+        if rvmap.is_file() and rvmap.suffix.lower() == ".rvmap":
+            self._auto_open_outputs([rvmap])
+            self._set_status_message(
+                f"Mapping completed: {rvmap.name}",
+                12000, override_file_link=True,
+            )
+            return
         alignment = next(
             (
                 p
@@ -17761,26 +17769,29 @@ class MainWindow(
             self._open_te_genome_map_after_blast(pending_fastas, pending_map_opts, result)
 
         failures = result.get("failures", [])
+        # "total" counts progress units (sequences / phases); failures and
+        # source_files count input files. Compare files with files.
+        total_n = int(result.get("total_files") or result.get("total", 0))
         if cancelled:
             done_n = len(result.get("source_files") or [])
         else:
-            done_n = max(0, int(result.get("total", 0)) - len(failures))
+            done_n = max(0, total_n - len(failures))
         if result.get("workflow_name"):
             title = f"Workflow {result['workflow_name']}"
             unit = "step(s)"
         else:
             title = MainWindow._job_display_title(func_name or "")
-            unit = "sequence(s)"
+            unit = "file(s)" if result.get("total_files") else "sequence(s)"
         finished_files = [p for p in created_paths if p.is_file()]
         if cancelled:
             self._job_handled_cancel_result = True
             if finished_files:
                 summary = (
                     f"{title} stopped — showing {len(finished_files)} finished file(s) "
-                    f"({done_n}/{result['total']} {unit})"
+                    f"({done_n}/{total_n} {unit})"
                 )
             else:
-                summary = f"{title} stopped — 0/{result['total']} {unit} finished"
+                summary = f"{title} stopped — 0/{total_n} {unit} finished"
         else:
             summary = f"{title} finished — {done_n}/{result['total']} {unit}"
         if created_paths:

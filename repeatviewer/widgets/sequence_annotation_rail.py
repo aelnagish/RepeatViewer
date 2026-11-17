@@ -1,4 +1,4 @@
-"""Geneious-style right rail for the Annotation preview (Display / Annotation / Find / Others)."""
+"""right rail for the Annotation preview (Display / Annotation / Find / Others)."""
 
 from __future__ import annotations
 
