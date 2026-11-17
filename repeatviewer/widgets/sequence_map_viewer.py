@@ -423,6 +423,13 @@ def _annotation_too_long_message(length: int = 0) -> str:
 _BUCKET_DRAW_PPB = 1.0
 _WRAP_MIN_PPB = 4.0
 _WRAP_LINE_RULER = 12
+# Rows above the bases for what the Primers and Probes workspace draws (enzyme
+# names, candidate pairs, the primer being edited), so nothing sits on the letters.
+_OVERLAY_LANE_H = 14
+_OVERLAY_LANE_GAP = 2
+_OVERLAY_PAD = 4
+_OVERLAY_ENZYME_ROWS = 2
+_OVERLAY_MAX_CANDIDATES = 8
 _WRAP_LINE_GAP = 6
 _NO_COLOR_FG = QColor("#222222")
 _NO_COLOR_BG = QColor("#fafafa")
@@ -837,6 +844,27 @@ def _base_colors(base: str, *, is_protein: bool = False) -> tuple[QColor, QColor
     return _NO_COLOR_BG, _NO_COLOR_FG
 
 
+def _feature_paint_colors(color: QColor) -> tuple[QColor, QColor, QColor]:
+    """(fill, outline, text) of a feature bar in ``color``.
+
+    The fill is the colour lightened, the outline the colour itself a little
+    darker, the text dark or white, whichever reads better on the fill. A faded
+    colour (alpha) stays faded.
+    """
+    alpha = color.alpha()
+    fill = QColor(
+        int(color.red() + (255 - color.red()) * 0.45),
+        int(color.green() + (255 - color.green()) * 0.45),
+        int(color.blue() + (255 - color.blue()) * 0.45),
+        alpha,
+    )
+    outline = QColor(color).darker(125)
+    outline.setAlpha(alpha)
+    light = (0.299 * fill.red() + 0.587 * fill.green() + 0.114 * fill.blue()) >= 140
+    text = QColor("#1c1c1e") if light else QColor("#ffffff")
+    return fill, outline, text
+
+
 def _draw_directed_feature(
     painter: QPainter,
     rect: QRectF,
@@ -846,49 +874,57 @@ def _draw_directed_feature(
     label: str = "",
     label_point_size: int = 7,
 ) -> None:
-    """Draw a feature bar with a directional arrowhead on the leading end."""
+    """Draw a feature bar: one flat shape with a pointed leading end.
+
+    Lightened fill, a thin outline of the same colour, and the name inside the
+    bar (the callers pass a name only when it fits).
+    """
     if rect.width() < 2 or rect.height() < 2:
         return
-    arrow_w = min(rect.height() * 0.9, max(4.0, rect.width() * 0.18))
-    body = QRectF(rect)
+    fill, outline, text_color = _feature_paint_colors(color)
+    if rect.width() < 5:
+        # a sliver: too small for a shape or an outline
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(outline)
+        painter.drawRect(rect)
+        return
+    arrow_w = min(rect.height() * 0.6, max(3.0, rect.width() * 0.18))
+    mid = rect.center().y()
+    path = QPainterPath()
     if forward:
-        tip_x = rect.right()
-        base_x = rect.right() - arrow_w
-        body.setRight(base_x)
-        arrow = QPolygonF(
-            [
-                QPointF(tip_x, rect.center().y()),
-                QPointF(base_x, rect.top()),
-                QPointF(base_x, rect.bottom()),
-            ]
-        )
+        path.moveTo(rect.left(), rect.top())
+        path.lineTo(rect.right() - arrow_w, rect.top())
+        path.lineTo(rect.right(), mid)
+        path.lineTo(rect.right() - arrow_w, rect.bottom())
+        path.lineTo(rect.left(), rect.bottom())
     else:
-        tip_x = rect.left()
-        base_x = rect.left() + arrow_w
-        body.setLeft(base_x)
-        arrow = QPolygonF(
-            [
-                QPointF(tip_x, rect.center().y()),
-                QPointF(base_x, rect.top()),
-                QPointF(base_x, rect.bottom()),
-            ]
-        )
+        path.moveTo(rect.right(), rect.top())
+        path.lineTo(rect.left() + arrow_w, rect.top())
+        path.lineTo(rect.left(), mid)
+        path.lineTo(rect.left() + arrow_w, rect.bottom())
+        path.lineTo(rect.right(), rect.bottom())
+    path.closeSubpath()
+    painter.save()
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    pen = QPen(outline, 1.0)
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    painter.setPen(pen)
+    painter.setBrush(fill)
+    painter.drawPath(path)
+    painter.restore()
     painter.setPen(Qt.PenStyle.NoPen)
     painter.setBrush(color)
-    if body.width() > 0.5:
-        painter.drawRect(body)
-    painter.drawPolygon(arrow)
     pt = max(0, min(24, int(label_point_size)))
     if label and pt > 0 and rect.width() > 28:
-        painter.setPen(QColor("#ffffff"))
+        painter.setPen(text_color)
         label_font = QFont(painter.font())
         label_font.setPointSize(pt)
         painter.setFont(label_font)
-        text_rect = rect.adjusted(3, 0, -3, 0)
+        text_rect = rect.adjusted(4, 0, -3, 0)
         if not forward:
-            text_rect = text_rect.adjusted(arrow_w * 0.4, 0, 0, 0)
+            text_rect = text_rect.adjusted(arrow_w, 0, 0, 0)
         else:
-            text_rect = text_rect.adjusted(0, 0, -arrow_w * 0.4, 0)
+            text_rect = text_rect.adjusted(0, 0, -arrow_w, 0)
         painter.drawText(text_rect, Qt.AlignmentFlag.AlignVCenter, label)
 
 
@@ -3037,8 +3073,55 @@ class SequenceMapCanvas(QWidget):
         return self._font_point_size
 
     def _sequence_top(self) -> int:
-        # Flush to the top so the selection box lines up with the sequence track.
-        return 0
+        # Flush to the top so the selection box lines up with the sequence track,
+        # unless the workspace needs rows above the bases.
+        return 0 if self.uses_wrap() else self._overlay_band_height()
+
+    # ---- rows above the bases (Primers and Probes workspace) ----------------
+
+    def _overlay_rows(self) -> tuple[int, int, int]:
+        """(enzyme rows, candidate rows, edit-primer rows) needed above the bases."""
+        enzymes = _OVERLAY_ENZYME_ROWS if getattr(self, "_enzyme_sites", None) else 0
+        _region, cands, _selected = getattr(self, "_workbench_state", (None, [], -1))
+        candidates = min(len(cands), _OVERLAY_MAX_CANDIDATES)
+        edit = 1 if getattr(self, "_edit_primer", None) else 0
+        return enzymes, candidates, edit
+
+    def _overlay_band_height(self) -> int:
+        rows = sum(self._overlay_rows())
+        if rows <= 0:
+            return 0
+        return rows * (_OVERLAY_LANE_H + _OVERLAY_LANE_GAP) + _OVERLAY_PAD
+
+    def _wrap_ruler_h(self) -> int:
+        """Height above the bases of a wrapped line: its ruler, then the rows."""
+        return _WRAP_LINE_RULER + self._overlay_band_height()
+
+    def _lane_top(self, base_top: float, row: int) -> float:
+        """Top of row ``row`` (0 = highest) above bases whose strip starts at ``base_top``."""
+        return (float(base_top) - self._overlay_band_height() + _OVERLAY_PAD / 2
+                + row * (_OVERLAY_LANE_H + _OVERLAY_LANE_GAP))
+
+    def _overlay_changed(self) -> None:
+        """What is drawn above the bases changed: make room (or give it back)."""
+        height = self._overlay_band_height()
+        if height != getattr(self, "_overlay_band_last", 0):
+            self._overlay_band_last = height
+            self._invalidate_seq_layer_cache()
+            self._update_geometry()
+        self.update()
+
+    def overlay_boxes(self) -> list[tuple[str, QRectF]]:
+        """Every graphic of the rows above the bases, as (name, rectangle).
+
+        The paint methods draw exactly these, so a test can check that none of
+        them covers another or reaches into the bases.
+        """
+        boxes: list[tuple[str, QRectF]] = []
+        self._layout_enzymes(boxes, None)
+        self._layout_candidates(boxes, None)
+        self._layout_edit_primer(boxes, None)
+        return boxes
 
     def set_sequence(
         self,
@@ -3186,10 +3269,18 @@ class SequenceMapCanvas(QWidget):
         if state == getattr(self, "_edit_primer", None):
             return
         self._edit_primer = state
-        self.update()
+        self._overlay_changed()
+
+    def _edit_row(self) -> int:
+        enzymes, candidates, _edit = self._overlay_rows()
+        return enzymes + candidates
 
     def _edit_primer_hit(self, x: float, y: float):
-        """'left' / 'right' / 'move' when (x, y) is on the editable primer, else None."""
+        """'left' / 'right' / 'move' when (x, y) is on the editable primer, else None.
+
+        The primer is drawn in its own row above the bases; its bases count too,
+        so it can still be dragged "on the bases".
+        """
         state = getattr(self, "_edit_primer", None)
         if not state:
             return None
@@ -3197,8 +3288,9 @@ class SequenceMapCanvas(QWidget):
         _, cell_h_f, _ = self._cell_size()
         span_h = float(cell_h_f + self._extra_display_height())
         _, _, cell_w, _ = self._nucleotide_cell_geometry()
+        row = self._edit_row()
         for x1, x2, top in self._base_spans(a, b):
-            if not (top - 3 <= y <= top + span_h + 3):
+            if not (self._lane_top(top, row) - 2 <= y <= top + span_h + 3):
                 continue
             edge = min(max(5.0, cell_w * 0.8), max(2.0, (x2 - x1) / 3))
             if x1 - 4 <= x <= x1 + edge:
@@ -3209,27 +3301,70 @@ class SequenceMapCanvas(QWidget):
                 return "move"
         return None
 
-    def _paint_edit_primer(self, painter: QPainter, clip: QRectF) -> None:
+    @staticmethod
+    def _arrow_path(x1: float, y: float, w: float, h: float, right: bool) -> QPainterPath:
+        head = min(h * 0.9, w / 2)
+        mid = y + h / 2
+        path = QPainterPath()
+        if right:
+            path.moveTo(x1, y)
+            path.lineTo(x1 + w - head, y)
+            path.lineTo(x1 + w, mid)
+            path.lineTo(x1 + w - head, y + h)
+            path.lineTo(x1, y + h)
+        else:
+            path.moveTo(x1 + w, y)
+            path.lineTo(x1 + head, y)
+            path.lineTo(x1, mid)
+            path.lineTo(x1 + head, y + h)
+            path.lineTo(x1 + w, y + h)
+        path.closeSubpath()
+        return path
+
+    def _layout_edit_primer(self, boxes: list, painter: QPainter | None,
+                            clip: QRectF | None = None) -> None:
+        """The primer being edited: a bar in its own row, right above its bases."""
         state = getattr(self, "_edit_primer", None)
         if not state:
             return
         (a, b), strand, flagged = state
-        _, cell_h_f, _ = self._cell_size()
-        span_h = float(cell_h_f + self._extra_display_height())
         colour = QColor(224, 138, 0) if flagged else (
             QColor(31, 87, 195) if strand == "+" else QColor(194, 65, 12))
         fill = QColor(colour)
-        fill.setAlpha(70)
-        painter.save()
+        fill.setAlpha(60)
+        row = self._edit_row()
+        _, _, cell_w, _ = self._nucleotide_cell_geometry()
+        marks = [int(m) for m in (getattr(self, "_primer_marks", None) or [])
+                 if int(a) <= int(m) <= int(b)]
         for x1, x2, top in self._base_spans(a, b):
-            rect = QRectF(x1, top - 2, max(3.0, x2 - x1), span_h + 4)
-            if not clip.intersects(rect.adjusted(-6, 0, 6, 0)):
+            rect = QRectF(x1, self._lane_top(top, row), max(3.0, x2 - x1), _OVERLAY_LANE_H)
+            boxes.append(("edit primer", rect))
+            if painter is None or (clip is not None
+                                   and not clip.intersects(rect.adjusted(-6, 0, 6, 0))):
                 continue
-            painter.fillRect(rect, fill)
-            painter.setPen(QPen(colour, 2))
-            painter.drawRect(rect)
-            for hx in (rect.left() - 3, rect.right() - 3):
-                painter.fillRect(QRectF(hx, rect.top(), 6, rect.height()), colour)
+            path = self._arrow_path(rect.left(), rect.top(), rect.width(), rect.height(),
+                                    strand == "+")
+            painter.fillPath(path, fill)
+            painter.setPen(QPen(colour, 1.6))
+            painter.drawPath(path)
+            # a mismatch is a red base on the primer, not on the sequence
+            for pos in marks:
+                mx, my = self._index_to_xy(pos - 1)
+                if abs(my - top) > 1.0:
+                    continue
+                cell = QRectF(mx + 1, rect.top() + 2, max(2.0, float(cell_w) - 2),
+                              rect.height() - 4)
+                painter.fillRect(cell, QColor("#d0342c"))
+            # the two ends can be dragged
+            for hx in (rect.left() - 2, rect.right() - 2):
+                painter.fillRect(QRectF(hx, rect.top(), 4, rect.height()), colour)
+
+    def _paint_edit_primer(self, painter: QPainter, clip: QRectF) -> None:
+        if not getattr(self, "_edit_primer", None):
+            return
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        self._layout_edit_primer([], painter, clip)
         painter.restore()
 
     def set_workbench_overlay(self, region, candidates, selected: int = -1) -> None:
@@ -3237,6 +3372,7 @@ class SequenceMapCanvas(QWidget):
 
         ``region``: (start, end, use) 1-based or None; ``candidates``: list of
         (f_start, f_end, r_start, r_end) 1-based; ``selected``: index drawn solid.
+        Each candidate gets a row of its own above the bases.
         """
         region = tuple(region) if region else None
         cands = [tuple(int(v) for v in c) for c in (candidates or [])]
@@ -3244,78 +3380,77 @@ class SequenceMapCanvas(QWidget):
         if state == getattr(self, "_workbench_state", (None, [], -1)):
             return
         self._workbench_state = state
-        self.update()
+        self._overlay_changed()
 
     def set_enzyme_sites(self, sites) -> None:
-        """Primer workbench Enzymes tab: restriction sites on the bases.
+        """Primer workbench Enzymes tab: restriction sites.
 
         ``sites``: (start, end, cut, label, blocked, tooltip), 1-based; ``cut`` is
-        the base right of the top-strand cut. Blocked sites are drawn red and dashed.
+        the base right of the top-strand cut. The names sit in rows above the
+        bases; blocked sites are drawn red and dashed.
         """
         state = [tuple(x) for x in (sites or [])]
         if state == getattr(self, "_enzyme_sites", []):
             return
         self._enzyme_sites = state
-        self.update()
+        self._overlay_changed()
 
-    def _enzyme_site_at(self, x: float, y: float):
-        sites = getattr(self, "_enzyme_sites", None)
-        if not sites:
-            return None
-        _, cell_h_f, _ = self._cell_size()
-        span_h = float(cell_h_f + self._extra_display_height())
-        best, best_d = None, 6.0
-        for site in sites:
-            start, end, cut = int(site[0]), int(site[1]), int(site[2])
-            for x1, _x2, top in self._base_spans(cut, cut):
-                if not (top - 2 <= y <= top + span_h + 2):
-                    continue
-                d = abs(x - x1)
-                if d < best_d:
-                    best, best_d = site, d
-            if best is site:
-                continue
-            for x1, x2, top in self._base_spans(start, end):
-                if top - 2 <= y <= top + span_h + 2 and x1 <= x <= x2 and best is None:
-                    best = site
-        return best
-
-    def _paint_enzyme_sites(self, painter: QPainter, clip: QRectF) -> None:
+    def _layout_enzymes(self, boxes: list, painter: QPainter | None,
+                        clip: QRectF | None = None) -> None:
         sites = getattr(self, "_enzyme_sites", None)
         if not sites:
             return
         _, cell_h_f, _ = self._cell_size()
         span_h = float(cell_h_f + self._extra_display_height())
+        _enzymes, candidates, edit = self._overlay_rows()
         cut_c, block_c = QColor(31, 41, 55), QColor(194, 65, 12)
-        painter.save()
-        font = painter.font()
+        font = QFont(self.font())
         font.setPointSizeF(max(6.5, font.pointSizeF() * 0.78))
-        painter.setFont(font)
-        fm = painter.fontMetrics()
-        last_right: dict[float, float] = {}
+        fm = QFontMetrics(font)
+        if painter is not None:
+            painter.setFont(font)
+        last_right: dict[tuple[float, int], float] = {}
         for start, end, cut, label, blocked, _tip in sites:
             colour = block_c if blocked else cut_c
-            tint = QColor(colour)
-            tint.setAlpha(46 if blocked else 22)
-            for x1, x2, top in self._base_spans(int(start), int(end)):
-                rect = QRectF(x1, top, max(1.0, x2 - x1), span_h)
-                if clip.intersects(rect):
-                    painter.fillRect(rect, tint)
+            if painter is not None:
+                tint = QColor(colour)
+                tint.setAlpha(40 if blocked else 20)
+                for x1, x2, top in self._base_spans(int(start), int(end)):
+                    rect = QRectF(x1, top, max(1.0, x2 - x1), span_h)
+                    if clip is None or clip.intersects(rect):
+                        painter.fillRect(rect, tint)      # a tint behind the letters
             for x, _x2, top in self._base_spans(int(cut), int(cut)):
-                if x < clip.left() - 60 or x > clip.right() + 4:
+                if clip is not None and (x < clip.left() - 80 or x > clip.right() + 80):
                     continue
-                pen = QPen(colour, 2.0 if not blocked else 1.6,
-                           Qt.PenStyle.DashLine if blocked else Qt.PenStyle.SolidLine)
-                painter.setPen(pen)
-                painter.drawLine(QPointF(x, top - 1), QPointF(x, top + span_h + 1))
                 text = f"{label} ×" if blocked else str(label)
-                w = fm.horizontalAdvance(text)
-                if x + 3 >= last_right.get(top, -1e9) and fm.height() <= span_h + 2:
-                    back = QRectF(x + 2, top, w + 4, fm.height())
-                    painter.fillRect(back, QColor(255, 255, 255, 210))
-                    painter.setPen(colour)
-                    painter.drawText(back, Qt.AlignmentFlag.AlignCenter, text)
-                    last_right[top] = x + w + 10
+                w = fm.horizontalAdvance(text) + 4
+                left = max(0.0, x - w / 2)
+                row = next((r for r in range(_OVERLAY_ENZYME_ROWS)
+                            if left >= last_right.get((top, r), -1e9)), None)
+                rows_end = self._lane_top(top, _OVERLAY_ENZYME_ROWS) - _OVERLAY_LANE_GAP
+                pen = QPen(colour, 1.2,
+                           Qt.PenStyle.DashLine if blocked else Qt.PenStyle.SolidLine)
+                if row is not None:
+                    back = QRectF(left, self._lane_top(top, row), w, _OVERLAY_LANE_H)
+                    last_right[(top, row)] = back.right() + 6
+                    boxes.append((f"enzyme {label}", back))
+                    if painter is not None:
+                        painter.setPen(colour)
+                        painter.drawText(back, Qt.AlignmentFlag.AlignCenter, text)
+                        painter.setPen(pen)
+                        # the leader ends above any candidate or primer row
+                        stop = top - 1 if (candidates + edit) == 0 else rows_end
+                        painter.drawLine(QPointF(x, back.bottom()), QPointF(x, stop))
+                if painter is not None:
+                    # the cut itself: a thin line between two letters
+                    painter.setPen(pen)
+                    painter.drawLine(QPointF(x, top), QPointF(x, top + span_h))
+
+    def _paint_enzyme_sites(self, painter: QPainter, clip: QRectF) -> None:
+        if not getattr(self, "_enzyme_sites", None):
+            return
+        painter.save()
+        self._layout_enzymes([], painter, clip)
         painter.restore()
 
     def _base_spans(self, a: int, b: int) -> list[tuple[float, float, float]]:
@@ -3338,72 +3473,90 @@ class SequenceMapCanvas(QWidget):
             start = line_end + 1
         return out
 
+    def _layout_candidates(self, boxes: list, painter: QPainter | None,
+                           clip: QRectF | None = None) -> None:
+        """Candidate pairs, one row each: forward arrow, dotted line, reverse arrow."""
+        _region, cands, selected = getattr(self, "_workbench_state", (None, [], -1))
+        if not cands:
+            return
+        enzymes, rows, _edit = self._overlay_rows()
+        fwd_c, rev_c = QColor(31, 87, 195), QColor(194, 65, 12)
+        h = _OVERLAY_LANE_H - 4
+        font = QFont(self.font())
+        font.setPointSizeF(max(6.5, font.pointSizeF() * 0.78))
+        fm = QFontMetrics(font)
+        if painter is not None:
+            painter.setFont(font)
+        for i, (fs, fe, rs, re_) in enumerate(cands):
+            solid = i == selected
+            # One row per pair. With more pairs than rows the last row shows the
+            # selected one (the list under the map has them all).
+            if i < rows - 1 or solid:
+                row = enzymes + min(i, rows - 1)
+            elif i == rows - 1 and not (rows - 1 < selected < len(cands)):
+                row = enzymes + rows - 1
+            else:
+                continue
+            last = None
+            for (a, b, colour, right) in ((fs, fe, fwd_c, True), (rs, re_, rev_c, False)):
+                for x1, x2, top in self._base_spans(int(a), int(b)):
+                    y = self._lane_top(top, row) + 2
+                    w = max(4.0, x2 - x1)
+                    rect = QRectF(x1, y, w, h)
+                    boxes.append((f"pair {i + 1} {'forward' if right else 'reverse'}", rect))
+                    last = rect
+                    if painter is None or (clip is not None and not clip.intersects(
+                            rect.adjusted(-4, -2, 4, 2))):
+                        continue
+                    path = self._arrow_path(x1, y, w, h, right)
+                    painter.fillPath(path, colour if solid else _MAP_PAPER)
+                    painter.setPen(QPen(colour, 1.4))
+                    painter.drawPath(path)
+            if painter is not None:
+                # the product, as a dotted line in the pair's own row
+                painter.setPen(QPen(QColor(60, 60, 67, 200 if solid else 110), 1,
+                                    Qt.PenStyle.DotLine))
+                for x1, x2, top in self._base_spans(int(fe) + 1, int(rs) - 1):
+                    yy = self._lane_top(top, row) + 2 + h / 2
+                    painter.drawLine(QPointF(x1 + 2, yy), QPointF(x2 - 2, yy))
+            if last is not None:
+                text = f"Pair {i + 1}"
+                label = QRectF(last.right() + 5, last.top() - 2, fm.horizontalAdvance(text) + 2,
+                               _OVERLAY_LANE_H)
+                boxes.append((f"pair {i + 1} label", label))
+                if painter is not None and (clip is None or clip.intersects(label)):
+                    painter.setPen(QColor(28, 28, 30) if solid else QColor(90, 93, 99))
+                    painter.drawText(label, Qt.AlignmentFlag.AlignVCenter
+                                     | Qt.AlignmentFlag.AlignLeft, text)
+
     def _paint_workbench(self, painter: QPainter, clip: QRectF) -> None:
-        region, cands, selected = getattr(self, "_workbench_state", (None, [], -1))
+        region, cands, _selected = getattr(self, "_workbench_state", (None, [], -1))
         if not region and not cands:
             return
         _, cell_h_f, _ = self._cell_size()
         span_h = float(cell_h_f + self._extra_display_height())
+        band = float(self._overlay_band_height())
         painter.save()
         if region:
+            # the region is a tint behind the rows and the bases, never a graphic on them
             a, b, use = region
             colour = {"amplify": QColor(31, 87, 195), "inside": QColor(30, 130, 76),
                       "avoid": QColor(120, 120, 128)}.get(str(use), QColor(31, 87, 195))
             fill = QColor(colour)
-            fill.setAlpha(38)
-            fill.setAlpha(46)
-            pen = QPen(colour, 1.5, Qt.PenStyle.DashLine)
+            fill.setAlpha(30)
+            pen = QPen(colour, 1.2, Qt.PenStyle.DashLine)
             for x1, x2, top in self._base_spans(int(a), int(b)):
-                rect = QRectF(x1, top - 2, max(2.0, x2 - x1), span_h + 4)
+                rect = QRectF(x1, top - band, max(2.0, x2 - x1), span_h + band)
                 if clip.intersects(rect):
                     painter.fillRect(rect, fill)
                     if use == "avoid":
-                        painter.fillRect(rect, QBrush(QColor(120, 120, 128, 70),
+                        painter.fillRect(rect, QBrush(QColor(120, 120, 128, 50),
                                                       Qt.BrushStyle.BDiagPattern))
                     painter.setPen(pen)
-                    painter.drawRect(rect)
-        fwd_c, rev_c = QColor(31, 87, 195), QColor(194, 65, 12)
-        arrow_h = max(4.0, span_h * 0.42)
-        outline = QPen(QColor(255, 255, 255, 200), 1)
-        order = [i for i in range(len(cands)) if i != selected] + (
-            [selected] if 0 <= selected < len(cands) else [])
-        for i in order:
-            fs, fe, rs, re_ = cands[i]
-            solid = i == selected
-            alpha = 220 if solid else 130
-            for (a, b, colour, right) in ((fs, fe, fwd_c, True), (rs, re_, rev_c, False)):
-                c = QColor(colour)
-                c.setAlpha(alpha)
-                for x1, x2, top in self._base_spans(int(a), int(b)):
-                    # forward arrows on the top half of the bases, reverse on the bottom half
-                    y = top + 1.0 if right else top + span_h - arrow_h - 1.0
-                    w = max(4.0, x2 - x1)
-                    head = min(arrow_h * 0.9, w / 2)
-                    mid = y + arrow_h / 2
-                    path = QPainterPath()
-                    if right:
-                        path.moveTo(x1, y)
-                        path.lineTo(x1 + w - head, y)
-                        path.lineTo(x1 + w, mid)
-                        path.lineTo(x1 + w - head, y + arrow_h)
-                        path.lineTo(x1, y + arrow_h)
-                    else:
-                        path.moveTo(x1 + w, y)
-                        path.lineTo(x1 + head, y)
-                        path.lineTo(x1, mid)
-                        path.lineTo(x1 + head, y + arrow_h)
-                        path.lineTo(x1 + w, y + arrow_h)
-                    path.closeSubpath()
-                    if clip.intersects(path.boundingRect()):
-                        painter.fillPath(path, c)
-                        painter.setPen(outline if solid else QPen(QColor(255, 255, 255, 110), 1))
-                        painter.drawPath(path)
-            if solid:
-                spans = self._base_spans(int(fe) + 1, int(rs) - 1)
-                painter.setPen(QPen(QColor(60, 60, 67, 160), 1, Qt.PenStyle.DotLine))
-                for x1, x2, top in spans:
-                    yy = top + span_h / 2
-                    painter.drawLine(QPointF(x1, yy), QPointF(x2, yy))
+                    painter.drawLine(rect.topLeft(), rect.bottomLeft())
+                    painter.drawLine(rect.topRight(), rect.bottomRight())
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        self._layout_candidates([], painter, clip)
         painter.restore()
 
     def set_primer_marks(self, positions: list[int]) -> None:
@@ -3633,7 +3786,7 @@ class SequenceMapCanvas(QWidget):
     def _line_block_height(self, line: int) -> float:
         if not self.uses_wrap():
             return 0.0
-        height = _WRAP_LINE_RULER + self._seq_row_height()
+        height = self._wrap_ruler_h() + self._seq_row_height()
         annot_rows = self._feature_rows_on_line(line)
         if annot_rows > 0:
             height += annot_rows * (_TRACK_HEIGHT + _TRACK_GAP)
@@ -3672,7 +3825,7 @@ class SequenceMapCanvas(QWidget):
     def _content_height(self) -> int:
         if self.uses_wrap():
             return int(self._sequence_block_height()) + 8
-        return max(
+        return self._overlay_band_height() + max(
             _SEQUENCE_ROW + 2,
             int(self._seq_row_height() + self._extra_display_height()) + 2,
         )
@@ -3710,7 +3863,7 @@ class SequenceMapCanvas(QWidget):
             col = index % bpl
             _, origin_y, cell_w, _ = self._nucleotide_cell_geometry()
             x = _LEFT_MARGIN + col * cell_w
-            y = int(self._line_top(line) + _WRAP_LINE_RULER)
+            y = int(self._line_top(line) + self._wrap_ruler_h())
             return float(x), float(y)
         _, origin_y, cell_w, _ = self._nucleotide_cell_geometry()
         x = _LEFT_MARGIN + index * cell_w - self._scroll_px
@@ -3729,7 +3882,7 @@ class SequenceMapCanvas(QWidget):
                     continue
                 rel_y = y - top
                 bpl = self._bases_per_line()
-                if rel_y < _WRAP_LINE_RULER + self._seq_row_height():
+                if rel_y < self._wrap_ruler_h() + self._seq_row_height():
                     col = int((x - _LEFT_MARGIN) / cell_w)
                     if col < 0:
                         col = 0
@@ -3754,7 +3907,7 @@ class SequenceMapCanvas(QWidget):
                 if not segments:
                     continue
                 row_for_seg, _ = _pack_interval_rows(segments)
-                track_base = self._line_top(line) + _WRAP_LINE_RULER + self._seq_row_height()
+                track_base = self._line_top(line) + self._wrap_ruler_h() + self._seq_row_height()
                 row_h = _TRACK_HEIGHT + _TRACK_GAP
                 for seg_i, (feat_idx, start_bp, end_bp) in enumerate(segments):
                     row = row_for_seg[seg_i]
@@ -3828,7 +3981,7 @@ class SequenceMapCanvas(QWidget):
                 line_start_bp = line * bpl + 1
                 line_end_bp = min(seq_len, (line + 1) * bpl)
                 ruler_y = self._line_top(line)
-                seq_y = ruler_y + _WRAP_LINE_RULER
+                seq_y = ruler_y + self._wrap_ruler_h()
                 last_label_x = -1e9
                 for bp in range(line_start_bp, line_end_bp + 1):
                     idx = bp - 1
@@ -3996,7 +4149,7 @@ class SequenceMapCanvas(QWidget):
                         line_end,
                         show_letters=show_letters,
                         origin_y_override=int(
-                            self._line_top(line) + _WRAP_LINE_RULER
+                            self._line_top(line) + self._wrap_ruler_h()
                         ),
                     )
             return
@@ -4162,7 +4315,7 @@ class SequenceMapCanvas(QWidget):
                 if not segments:
                     continue
                 row_for_seg, _ = _pack_interval_rows(segments)
-                track_base = self._line_top(line) + _WRAP_LINE_RULER + _SEQUENCE_ROW
+                track_base = self._line_top(line) + self._wrap_ruler_h() + _SEQUENCE_ROW
                 row_h = _TRACK_HEIGHT + _TRACK_GAP
                 for seg_i, (feat_idx, start_bp, end_bp) in enumerate(segments):
                     row = row_for_seg[seg_i]
@@ -4233,22 +4386,25 @@ class SequenceMapCanvas(QWidget):
         painter.end()
 
     def _paint_primer_marks(self, painter: QPainter, clip: QRectF) -> None:
-        """Red boxes on bases where a primer does not match the template."""
+        """Bases where a primer does not match the template.
+
+        With the primer drawn in its row above the bases, the mismatches are red
+        bases on that primer (``_layout_edit_primer``). Without it they are a
+        red line under the base, so no letter is covered.
+        """
+        if getattr(self, "_edit_primer", None):
+            return
         _, _, cell_w, _ = self._nucleotide_cell_geometry()
         if cell_w <= 0:
             return
         _, cell_h_f, _ = self._cell_size()
         height = float(cell_h_f + self._extra_display_height())
         painter.save()
-        painter.setPen(QPen(QColor("#d0342c"), 1.5))
-        fill = QColor("#d0342c")
-        fill.setAlpha(70)
         for pos in self._primer_marks:
             x, y = self._index_to_xy(pos - 1)
-            rect = QRectF(x, y, max(2.0, float(cell_w)), height)
+            rect = QRectF(x, y + height - 2.0, max(2.0, float(cell_w)), 2.0)
             if clip.intersects(rect):
-                painter.fillRect(rect, fill)
-                painter.drawRect(rect)
+                painter.fillRect(rect, QColor("#d0342c"))
         painter.restore()
 
     def _paint_selection_overlay(self, painter: QPainter, clip: QRectF) -> None:
