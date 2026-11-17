@@ -150,11 +150,9 @@ class PcrActionsMixin:
                     path = source
         folder = Path(path).parent if path else None
         page = CloningPage(insert, insert_name=insert_name, folder=folder, features=features)
-        tabs = getattr(self, "_preview_tabs", None)
-        if tabs is None:
+        if getattr(self, "_preview_tabs", None) is None:
             return
-        tabs.open_tool_tab(page, page.tab_name())
-        self._ensure_preview_visible()
+        self._host_in_workspace("cloning", page)
         self._cloning_page = page
 
     def _open_sanger_dialog(self, *, expected: str = "", expected_name: str = "",
@@ -178,11 +176,9 @@ class PcrActionsMixin:
         page = SangerPage(expected, expected_name=expected_name, folder=folder)
         if reads:
             page.add_reads(reads)
-        tabs = getattr(self, "_preview_tabs", None)
-        if tabs is None:
+        if getattr(self, "_preview_tabs", None) is None:
             return
-        tabs.open_tool_tab(page, page.tab_name())
-        self._ensure_preview_visible()
+        self._host_in_workspace("sanger", page)
         self._sanger_page = page
 
     # ------------------------------------------------------------- templates
@@ -311,6 +307,16 @@ class PcrActionsMixin:
         if self._current_folder and Path(path).parent == Path(self._current_folder):
             self._populate_file_list(self._current_folder, new_outputs=[path],
                                      source_files=[], open_preview=False)
+        if Path(path).suffix.lower() == ".rvgel":
+            # a gel belongs to the Gel section of the Primers and Probes workspace
+            ensure = getattr(self, "_ensure_primers_workspace", None)
+            workspace = ensure() if ensure is not None else None
+            tabs = getattr(self, "_preview_tabs", None)
+            if workspace is not None and tabs is not None:
+                workspace.show_gel(Path(path))
+                tabs.setCurrentWidget(workspace)
+                self._ensure_preview_visible()
+                return
         self._open_preview_tab(path, replace=False)
 
     # ------------------------------------------------------------- genome view, bench card

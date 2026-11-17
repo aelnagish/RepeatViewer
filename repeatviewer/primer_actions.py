@@ -278,10 +278,74 @@ class PrimerActionsMixin:
             return True
         return bool(tabs.confirm_leave_page(page))
 
+    def _workspace_sequence_candidate(self):
+        """The FASTA selected in Files, for a workspace that has no sequence yet."""
+        for p in self._primer_candidate_files():
+            return Path(p)
+        return None
+
+    def _ensure_primers_workspace(self):
+        """The workspace tab, made (without a sequence) when there is none. None without tabs."""
+        from repeatviewer.views.primers_workspace import PrimersWorkspacePage
+
+        tabs = getattr(self, "_preview_tabs", None)
+        if tabs is None:
+            return None
+        workspace = self._primers_workspace()
+        if workspace is None:
+            workspace = PrimersWorkspacePage()
+            self._wire_primers_workspace(workspace)
+            tabs.open_tool_tab(workspace, workspace.tab_name())
+        return workspace
+
+    def _host_in_workspace(self, section: str, page) -> bool:
+        """Show a tool page (Map, Database, Sanger Check…) as a section of the workspace."""
+        tabs = getattr(self, "_preview_tabs", None)
+        workspace = self._ensure_primers_workspace()
+        if tabs is None or workspace is None:
+            return False
+        workspace.host_page(section, page)
+        tabs.setCurrentWidget(workspace)
+        self._ensure_preview_visible()
+        return True
+
+    def _open_workspace_section(self, key: str) -> None:
+        """A section clicked in the workspace that has no page yet: open it as its menu item does."""
+        openers = {
+            "painting": "_open_painting_settings",
+            "map": "_open_map_primers_dialog",
+            "database": "_open_primer_database",
+            "gel": "_open_gel_document",
+            "sanger": "_open_sanger_dialog",
+            "cloning": "_open_cloning_dialog",
+        }
+        if str(key) == "gel":
+            # A click on the section must not write a file: open the gel that is
+            # selected in Files, else offer to start one.
+            chosen = [p for p in self._selected_files()
+                      if Path(p).is_file() and Path(p).suffix.lower() == ".rvgel"]
+            workspace = self._primers_workspace()
+            if chosen:
+                self._show_new_output(Path(chosen[0]))
+            elif workspace is not None:
+                workspace.show_gel_placeholder(self._new_gel_document)
+            return
+        opener = getattr(self, openers.get(str(key), ""), None)
+        if opener is not None:
+            opener()
+
     def _wire_primers_workspace(self, workspace) -> None:
         status = getattr(self, "_set_status_message", None)
         if status is not None:
             workspace.statusMessage.connect(lambda text: status(str(text), 6000))
+        workspace.sequence_provider = self._workspace_sequence_candidate
+        workspace.sectionRequested.connect(self._open_workspace_section)
+        opened = getattr(self, "_on_preview_open_requested", None)
+        if opened is not None:
+            workspace.openFileRequested.connect(opened)
+        written = getattr(self, "_on_preview_file_written", None)
+        if written is not None:
+            workspace.fileWritten.connect(written)
         workspace.annotationsSaved.connect(self._on_workspace_annotations_saved)
         extracted = getattr(self, "_on_preview_sequence_extracted", None)
         if extracted is not None:
@@ -298,7 +362,7 @@ class PrimerActionsMixin:
             saved(written)
         workspace = self._primers_workspace()
         tabs = getattr(self, "_preview_tabs", None)
-        if workspace is not None and tabs is not None:
+        if workspace is not None and tabs is not None and workspace.sequence_path() is not None:
             tabs.reload_paths([workspace.sequence_path()])
 
     def _on_file_annotations_saved_for_workspace(self, written: object) -> None:
@@ -309,7 +373,7 @@ class PrimerActionsMixin:
         try:
             saved = Path(str(written))
             sequence = workspace.sequence_path()
-            if saved.parent.resolve() != sequence.parent.resolve():
+            if sequence is None or saved.parent.resolve() != sequence.parent.resolve():
                 return
             if not (saved.name.startswith(sequence.stem + ".")
                     or saved.name.startswith(sequence.name)):
@@ -319,11 +383,16 @@ class PrimerActionsMixin:
         workspace.reload_annotations()
 
     def _primers_workspace_takes_file(self, path: Path) -> bool:
-        """A FASTA clicked in Files while the workspace is in front becomes its sequence.
+        """A file clicked in Files while the workspace is in front.
 
-        True when the click was used here, so Preview does not open the file.
-        Right-click > Open in Additional Tab still opens it in a tab of its own.
+        A path field of the workspace that had the cursor takes it; a gel opens
+        in the Gel section; a FASTA becomes the sequence when Design, PCR or
+        Digest is shown. True when the click was used here, so Preview does not
+        open the file. Right-click > Open in Additional Tab still opens it in a
+        tab of its own.
         """
+        from repeatviewer.views.primers_workspace import SEQUENCE_SECTIONS
+
         tabs = getattr(self, "_preview_tabs", None)
         workspace = self._primers_workspace()
         if tabs is None or workspace is None or tabs.currentWidget() is not workspace:
@@ -332,10 +401,12 @@ class PrimerActionsMixin:
             target = Path(path)
             if not target.is_file():
                 return False
-            # a path field of the workspace that had the cursor takes the file
             if workspace.fill_armed_path(target):
                 return True
-            if not is_primer_fasta(target):
+            if target.suffix.lower() == ".rvgel":
+                workspace.show_gel(target)
+                return True
+            if workspace.section() not in SEQUENCE_SECTIONS or not is_primer_fasta(target):
                 return False
         except OSError:
             return False
@@ -349,7 +420,6 @@ class PrimerActionsMixin:
         from repeatviewer.views.primers_workspace import (
             PANEL_DESIGN,
             PANEL_PRIMER,
-            PrimersWorkspacePage,
             same_file,
             section_key,
         )
@@ -364,26 +434,23 @@ class PrimerActionsMixin:
         tabs = getattr(self, "_preview_tabs", None)
         if tabs is None:
             return None
-        workspace = self._primers_workspace()
-        if workspace is None:
-            if not self._leave_file_page_for_workspace(path):
-                return None
-            workspace = PrimersWorkspacePage(path, section=section_key(tab))
-            if workspace.panel._map.data() is None:
-                workspace.deleteLater()
-                QMessageBox.information(
-                    self, "Primers and Probes",
-                    f"{path.name} has no sequence view, so the workspace cannot "
-                    "open on it. Click a FASTA in the Files panel and try again.",
-                )
-                return None
-            self._wire_primers_workspace(workspace)
-            tabs.open_tool_tab(workspace, workspace.tab_name())
-        else:
-            if (not same_file(path, workspace.sequence_path())
-                    and self._leave_file_page_for_workspace(path)):
-                workspace.set_sequence(path)
-            tabs.setCurrentWidget(workspace)
+        made = self._primers_workspace() is None
+        workspace = self._ensure_primers_workspace()
+        if (not same_file(path, workspace.sequence_path())
+                and self._leave_file_page_for_workspace(path)):
+            workspace.set_sequence(path)
+        if not workspace.has_sequence():
+            if made:
+                index = tabs.indexOf(workspace)
+                if index >= 0:
+                    tabs._close_tab(index, ask=False)
+            QMessageBox.information(
+                self, "Primers and Probes",
+                f"{path.name} has no sequence view, so the workspace cannot "
+                "open on it. Click a FASTA in the Files panel and try again.",
+            )
+            return None
+        tabs.setCurrentWidget(workspace)
         # Design opens on its settings, "primer" on the primers of the sequence.
         page = {"design": PANEL_DESIGN, "primer": PANEL_PRIMER}.get(tab)
         workspace.set_section(section_key(tab), page=page)
@@ -416,8 +483,7 @@ class PrimerActionsMixin:
             return
         page = PaintingPage(options=self._primer_options,
                             start_job=self._start_painting_from_page)
-        tabs.open_tool_tab(page, page.tab_name())
-        self._ensure_preview_visible()
+        self._host_in_workspace("painting", page)
         self._painting_page = page
 
     def _start_painting_from_page(self, settings: dict) -> None:
@@ -621,11 +687,9 @@ class PrimerActionsMixin:
             files = [Path(sequence)] + [p for p in files if str(p) != sequence]
         page = MapPage(files, options=opts,
                        database_path=database_path or opts.database_path)
-        tabs = getattr(self, "_preview_tabs", None)
-        if tabs is None:
+        if getattr(self, "_preview_tabs", None) is None:
             return
-        tabs.open_tool_tab(page, page.tab_name())
-        self._ensure_preview_visible()
+        self._host_in_workspace("map", page)
         self._map_page = page
 
     def _quick_map_primers_right_click(self) -> None:
@@ -647,11 +711,16 @@ class PrimerActionsMixin:
         tabs = getattr(self, "_preview_tabs", None)
         existing = self._primer_database_dialog
         if existing is not None and tabs is not None:
+            # already open as the Database section of the workspace: show it
             try:
-                for index in range(tabs.count()):
-                    if tabs.widget(index) is getattr(existing, "parent", lambda: None)():
-                        tabs.setCurrentIndex(index)
-                        return
+                workspace = self._primers_workspace()
+                holder = getattr(existing, "parent", lambda: None)()
+                if (workspace is not None and holder is not None
+                        and workspace.hosted_page("database") is holder):
+                    tabs.setCurrentWidget(workspace)
+                    workspace.set_section("database")
+                    self._ensure_preview_visible()
+                    return
             except RuntimeError:
                 self._primer_database_dialog = None
         path = self._primer_options.database_path or None
@@ -685,8 +754,7 @@ class PrimerActionsMixin:
         from repeatviewer.views.tool_page import ToolDialogPage
 
         page = ToolDialogPage(dialog, "Primer Database")
-        tabs.open_tool_tab(page, page.tab_name())
-        self._ensure_preview_visible()
+        self._host_in_workspace("database", page)
 
     # ------------------------------------------------------------- jobs
 

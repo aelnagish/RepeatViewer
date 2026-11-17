@@ -36,12 +36,30 @@ from PySide6.QtWidgets import (
 TAB_NAME = "Primers and Probes"
 
 SECTION_DESIGN = "design"
+SECTION_PAINTING = "painting"
+SECTION_MAP = "map"
+SECTION_DATABASE = "database"
 SECTION_PCR = "pcr"
 SECTION_DIGEST = "digest"
+SECTION_GEL = "gel"
+SECTION_SANGER = "sanger"
+SECTION_CLONING = "cloning"
 SECTIONS: tuple[tuple[str, str], ...] = (
     (SECTION_DESIGN, "Design"),
+    (SECTION_PAINTING, "Painting"),
+    (SECTION_MAP, "Map"),
+    (SECTION_DATABASE, "Database"),
     (SECTION_PCR, "PCR"),
     (SECTION_DIGEST, "Digest"),
+    (SECTION_GEL, "Gel"),
+    (SECTION_SANGER, "Sanger Check"),
+    (SECTION_CLONING, "Cloning"),
+)
+# Sections that work on the sequence (its map, the list under it, the panel).
+# The others are whole pages of their own, put into the workspace when opened.
+SEQUENCE_SECTIONS = (SECTION_DESIGN, SECTION_PCR, SECTION_DIGEST)
+NO_SEQUENCE_TEXT = (
+    "Click a FASTA's name in Files, or press Browse, to choose the sequence to work on."
 )
 
 # Pages of the PrimersPanel behind each section. Design holds two for now: the
@@ -110,8 +128,11 @@ def section_key(name: str | None) -> str:
     text = str(name or "").strip().lower()
     if text in ("enzymes", "digest"):
         return SECTION_DIGEST
-    if text == "pcr":
-        return SECTION_PCR
+    if text in ("sanger", "sanger check"):
+        return SECTION_SANGER
+    for key, _label in SECTIONS:
+        if text == key:
+            return key
     return SECTION_DESIGN
 
 
@@ -132,17 +153,29 @@ class PrimersWorkspacePage(QWidget):
     sequenceExtracted = Signal(object)   # path of a FASTA written from the map
     sequenceChanged = Signal(object)     # Path of the sequence now worked on
 
-    def __init__(self, fasta_path: Path, parent: QWidget | None = None, *,
+    sectionRequested = Signal(str)       # a section with no page yet: the window opens it
+    openFileRequested = Signal(object)   # a file to open in RepeatViewer (from a gel)
+    fileWritten = Signal(object)         # a file written by a hosted page (a gel)
+
+    def __init__(self, fasta_path: Path | None = None, parent: QWidget | None = None, *,
                  section: str = SECTION_DESIGN) -> None:
         super().__init__(parent)
+        from repeatviewer.widgets.help_button import make_help_button
         from repeatviewer.widgets.path_browse import PathBrowseRow
-        from repeatviewer.widgets.sequence_map_viewer import SequenceMapPanel
 
         # A tool page, not the preview of a file: the tabs must never treat it
         # as the page of the FASTA it works on.
         self.path = None
         self._syncing = False
-        self._sequence_path = Path(fasta_path).expanduser().resolve()
+        self._sequence_path: Path | None = None
+        self.panel = None                 # the sequence view, made with the first sequence
+        self.primers = None               # its PrimersPanel
+        self._armed_row = None
+        self._hosted: dict[str, QWidget] = {}
+        self._shown_section = SECTION_DESIGN
+        # Called for the sequence to work on when a sequence section is shown
+        # and there is none yet (the FASTA selected in Files).
+        self.sequence_provider = None
         # Inside a tab a page does not paint its own background, and the white
         # Preview page would show through.
         self.setAutoFillBackground(True)
@@ -160,64 +193,76 @@ class PrimersWorkspacePage(QWidget):
             self.sections.setTabData(index, key)
         root.addWidget(self.sections)
 
+        self.body = QStackedWidget(self)
+        root.addWidget(self.body, 1)
+        self.seq_page = QWidget(self.body)
+        self._seq_layout = QVBoxLayout(self.seq_page)
+        self._seq_layout.setContentsMargins(0, 0, 0, 0)
+        self._seq_layout.setSpacing(0)
+        self.body.addWidget(self.seq_page)
+
         row = QHBoxLayout()
         row.setContentsMargins(12, 6, 12, 6)
         row.setSpacing(8)
-        row.addWidget(QLabel("Sequence", self))
+        row.addWidget(QLabel("Sequence", self.seq_page))
         self.sequence_row = PathBrowseRow(
-            self,
-            initial=self._sequence_path,
+            self.seq_page,
             browse_title="Choose the Sequence to Work On",
             file_filter=FASTA_FILTER,
-            start_dir=str(self._sequence_path.parent),
             elide_middle=True,
             minimum_width=260,
         )
         self.sequence_row.setMaximumWidth(460)
         self.sequence_row.set_default_tooltip(
-            "The file the workspace works on. Click a FASTA in Files to use it, "
-            "or press Browse. Double-click a file in Files to open it in its own tab."
+            "The file the workspace works on. Click a FASTA's name in Files to use it, "
+            "or press Browse."
         )
         row.addWidget(self.sequence_row, 1)
-        self.record_label = QLabel("Record", self)
+        self.record_label = QLabel("Record", self.seq_page)
         row.addWidget(self.record_label)
-        self.record_combo = QComboBox(self)
+        self.record_combo = QComboBox(self.seq_page)
         self.record_combo.setMinimumWidth(180)
         self.record_combo.setToolTip("For a file with several sequences: the one to work on.")
         row.addWidget(self.record_combo)
+        self.record_label.hide()
+        self.record_combo.hide()
         row.addStretch(2)
-        from repeatviewer.widgets.help_button import make_help_button
+        row.addWidget(make_help_button(self.seq_page, "Sequence", SEQUENCE_HELP))
+        self._seq_layout.addLayout(row)
+        self.no_sequence = QLabel(NO_SEQUENCE_TEXT, self.seq_page)
+        self.no_sequence.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.no_sequence.setWordWrap(True)
+        self.no_sequence.setStyleSheet("color: palette(placeholder-text);")
+        self._seq_layout.addWidget(self.no_sequence, 1)
 
-        row.addWidget(make_help_button(self, "Sequence", SEQUENCE_HELP))
-        root.addLayout(row)
-
-        self.panel = SequenceMapPanel(self._sequence_path, self, autoload=False)
-        root.addWidget(self.panel, 1)
-        self.panel.statusMessage.connect(self._on_panel_status)
-        self.panel.annotationsSaved.connect(self.annotationsSaved.emit)
-        self.panel.sequenceExtracted.connect(self.sequenceExtracted.emit)
-        self.panel.activeSequenceChanged.connect(self._on_panel_record_changed)
-
-        rail = self.panel._rail
-        # The workspace shows one page of the rail and never another, so the
-        # strip of rail buttons has no job here.
-        rail._tab_strip.hide()
-        rail.set_panel_collapsed(False, persist=False)
-
-        self.primers = self.panel.primers_panel()
-        self._armed_row = None
-        self._build_list_area()
-        self._build_settings_header()
         app = QApplication.instance()
         if app is not None:
             app.focusChanged.connect(self._on_focus_changed)
         self.sections.currentChanged.connect(self._on_section_changed)
-        self.primers.tabs.currentChanged.connect(self._on_panel_page_changed)
         self.record_combo.activated.connect(self._on_record_chosen)
         self.sequence_row.path_changed.connect(self._on_sequence_field_changed)
 
-        self._load(self._sequence_path)
+        if fasta_path is not None:
+            self.set_sequence(fasta_path)
         self.set_section(section, page=PANEL_DESIGN)
+
+    def _build_sequence_part(self, path: Path) -> None:
+        """The sequence view, the list under it and the panel: made once."""
+        from repeatviewer.widgets.sequence_map_viewer import SequenceMapPanel
+
+        self.panel = SequenceMapPanel(path, self.seq_page, autoload=False)
+        self._seq_layout.addWidget(self.panel, 1)
+        self.panel.statusMessage.connect(self._on_panel_status)
+        self.panel.annotationsSaved.connect(self.annotationsSaved.emit)
+        self.panel.sequenceExtracted.connect(self.sequenceExtracted.emit)
+        self.panel.activeSequenceChanged.connect(self._on_panel_record_changed)
+        self.primers = self.panel.primers_panel()
+        self._build_list_area()
+        self._build_settings_header()
+        self.primers.tabs.currentChanged.connect(self._on_panel_page_changed)
+
+    def has_sequence(self) -> bool:
+        return self.panel is not None and self._sequence_path is not None
 
     def _on_panel_status(self, text: str) -> None:
         # Changing the sequence ends a Transfer session the view never had here;
@@ -231,7 +276,8 @@ class PrimersWorkspacePage(QWidget):
     def tab_name(self) -> str:
         return TAB_NAME
 
-    def sequence_path(self) -> Path:
+    def sequence_path(self) -> Path | None:
+        """The FASTA worked on, or None when no sequence was chosen yet."""
         return self._sequence_path
 
     def primers_panel(self):
@@ -240,33 +286,125 @@ class PrimersWorkspacePage(QWidget):
     # ---------------------------------------------------------------- sections
 
     def section(self) -> str:
-        return str(self.sections.tabData(self.sections.currentIndex()) or SECTION_DESIGN)
+        """The section that is shown."""
+        return self._shown_section
 
-    def set_section(self, section: str, *, page: int | None = None) -> None:
-        """Show ``section``.
+    def _select_in_bar(self, key: str) -> None:
+        self._syncing = True
+        try:
+            for index in range(self.sections.count()):
+                if self.sections.tabData(index) == key:
+                    self.sections.setCurrentIndex(index)
+                    break
+        finally:
+            self._syncing = False
 
-        Design has two pages (settings, primers): it keeps the one it was on,
-        unless ``page`` names one.
+    def set_section(self, section: str, *, page: int | None = None) -> bool:
+        """Show ``section``. False when it has nothing to show (its page was not opened).
+
+        Design has two panel pages (settings, the selected primer): it keeps the
+        one it was on, unless ``page`` names one.
         """
         key = section_key(section)
-        if page is not None and int(page) in _PANEL_PAGES[key]:
-            self._syncing = True
-            try:
-                self.primers.tabs.setCurrentIndex(int(page))
-            finally:
-                self._syncing = False
-        for index in range(self.sections.count()):
-            if self.sections.tabData(index) == key:
-                if self.sections.currentIndex() != index:
-                    self.sections.setCurrentIndex(index)   # runs _on_section_changed
-                else:
-                    self._apply_section(key)
-                return
+        if key in SEQUENCE_SECTIONS:
+            self._shown_section = key
+            self._select_in_bar(key)
+            self.body.setCurrentWidget(self.seq_page)
+            if not self.has_sequence() and callable(self.sequence_provider):
+                wanted = self.sequence_provider()
+                if wanted:
+                    self.set_sequence(wanted)
+            if self.has_sequence():
+                if page is not None and int(page) in _PANEL_PAGES[key]:
+                    self._syncing = True
+                    try:
+                        self.primers.tabs.setCurrentIndex(int(page))
+                    finally:
+                        self._syncing = False
+                self._apply_section(key)
+            return True
+        if key not in self._hosted:
+            # nothing opened for this section yet: the window makes its page
+            self.sectionRequested.emit(key)
+        hosted = self._hosted.get(key)
+        if hosted is None:
+            self._select_in_bar(self._shown_section)      # stay where we were
+            return False
+        self._shown_section = key
+        self._select_in_bar(key)
+        self.body.setCurrentWidget(hosted)
+        return True
 
-    def _on_section_changed(self, _index: int) -> None:
+    def _on_section_changed(self, index: int) -> None:
         if self._syncing:
             return
-        self._apply_section(self.section())
+        self.set_section(str(self.sections.tabData(index) or SECTION_DESIGN))
+
+    # ------------------------------------------------ pages of other sections
+
+    def host_page(self, section: str, widget: QWidget, *, show: bool = True) -> None:
+        """Put the page of a section (Map, Database, Sanger Check…) into the workspace.
+
+        A page already there for that section is closed and replaced.
+        """
+        key = section_key(section)
+        old = self._hosted.pop(key, None)
+        if old is not None and old is not widget:
+            self.body.removeWidget(old)
+            try:
+                old.close()             # a hosted window saves or asks as it would
+                old.deleteLater()
+            except RuntimeError:
+                pass
+        self._hosted[key] = widget
+        if self.body.indexOf(widget) < 0:
+            self.body.addWidget(widget)
+        if show:
+            self.set_section(key)
+
+    def hosted_page(self, section: str):
+        return self._hosted.get(section_key(section))
+
+    def show_gel(self, path: Path | str) -> None:
+        """The Gel section on this gel file (.rvgel)."""
+        from repeatviewer.widgets.gel_view import GelDocumentPanel
+
+        panel = self._hosted.get(SECTION_GEL)
+        if not isinstance(panel, GelDocumentPanel):
+            panel = GelDocumentPanel(self)
+            panel.openRequested.connect(self.openFileRequested.emit)
+            panel.fileWritten.connect(self.fileWritten.emit)
+            self.host_page(SECTION_GEL, panel, show=False)
+        panel.load(Path(path))
+        self.set_section(SECTION_GEL)
+
+    def show_gel_placeholder(self, new_gel) -> None:
+        """The Gel section before any gel was opened: say how, and offer a new one."""
+        page = QWidget(self)
+        lay = QVBoxLayout(page)
+        lay.addStretch(1)
+        note = QLabel("Click a gel (.rvgel) in Files to open it here, or start an empty one.",
+                      page)
+        note.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        note.setStyleSheet("color: palette(placeholder-text);")
+        lay.addWidget(note)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        button = QPushButton("New Gel", page)
+        button.clicked.connect(lambda: new_gel())
+        row.addWidget(button)
+        row.addStretch(1)
+        lay.addLayout(row)
+        lay.addStretch(1)
+        self.new_gel_button = button
+        self.host_page(SECTION_GEL, page)
+
+    def gel_path(self) -> Path | None:
+        panel = self._hosted.get(SECTION_GEL)
+        try:
+            return panel.path() if panel is not None else None
+        except (AttributeError, RuntimeError):
+            return None
 
     def _apply_section(self, key: str) -> None:
         pages = _PANEL_PAGES[key]
@@ -293,7 +431,7 @@ class PrimersWorkspacePage(QWidget):
 
     def _on_panel_page_changed(self, index: int) -> None:
         """The panel moved by itself (kept pairs open the primer page, say)."""
-        if self._syncing:
+        if self._syncing or self._shown_section not in SEQUENCE_SECTIONS:
             return
         key = section_of_panel_page(index)
         if key != self.section():
@@ -501,14 +639,23 @@ class PrimersWorkspacePage(QWidget):
 
     # ---------------------------------------------------------------- sequence
 
-    def _load(self, path: Path) -> None:
-        self._sequence_path = Path(path).expanduser().resolve()
-        self.panel.load_path(self._sequence_path)
+    def _load(self, path: Path) -> bool:
+        """Load ``path`` into the sequence view. False when it holds no sequence."""
+        target = Path(path).expanduser().resolve()
+        if self.panel is None:
+            self._build_sequence_part(target)
+        self._sequence_path = target
+        self.panel.load_path(target)
         rail = self.panel._rail
+        # The workspace shows one page of the rail and never another, so the
+        # strip of rail buttons has no job here.
         rail._tab_strip.hide()
         rail.set_panel_collapsed(False, persist=False)
         self.panel.show_primers_tab()
         self._sync_records()
+        # A file that could not be read leaves the old sequence on the map, but
+        # no record in the list: that is how a failed load shows.
+        return self.record_combo.count() > 0 and self.panel._map.data() is not None
 
     def _sync_records(self) -> None:
         source = self.panel._sequence_combo
@@ -539,7 +686,8 @@ class PrimersWorkspacePage(QWidget):
 
     def _show_sequence_in_field(self) -> None:
         self.sequence_row.set_path(self._sequence_path, emit=False)
-        self.sequence_row.set_start_dir(str(self._sequence_path.parent))
+        if self._sequence_path is not None:
+            self.sequence_row.set_start_dir(str(self._sequence_path.parent))
 
     def _on_sequence_field_changed(self) -> None:
         """Browse, or a path typed into the field."""
@@ -561,16 +709,36 @@ class PrimersWorkspacePage(QWidget):
             return True
         if not self.confirm_leave():
             return False
-        self._load(target)
+        previous = self._sequence_path
+        if not self._load(target):
+            self.statusMessage.emit(f"{target.name} has no sequence to work on.")
+            if previous is not None:
+                self._load(previous)
+            else:
+                self._sequence_path = None
+            self._sync_sequence_shown()
+            self._show_sequence_in_field()
+            return False
+        self._sync_sequence_shown()
         self._show_sequence_in_field()
-        # The page in front draws its overlays for the new sequence.
-        self._apply_section(self.section())
+        if self._shown_section in SEQUENCE_SECTIONS:
+            # The page in front draws its overlays for the new sequence.
+            self._apply_section(self._shown_section)
         self.sequenceChanged.emit(self._sequence_path)
         return True
 
+    def _sync_sequence_shown(self) -> None:
+        has = self.has_sequence()
+        if self.panel is not None:
+            self.panel.setVisible(has)
+        self.no_sequence.setVisible(not has)
+        if not has:
+            self.record_label.hide()
+            self.record_combo.hide()
+
     def reload_annotations(self) -> None:
         """The sequence's annotations were saved somewhere else: show them."""
-        if self.has_unsaved_changes():
+        if not self.has_sequence() or self.has_unsaved_changes():
             return
         record = self.record_combo.currentData()
         self.panel.load_path(self._sequence_path, fit_after_load=False)
@@ -578,11 +746,14 @@ class PrimersWorkspacePage(QWidget):
             self.panel.ensure_active_sequence(str(record))
         self.panel.show_primers_tab()
         self._sync_records()
-        self._apply_section(self.section())
+        if self._shown_section in SEQUENCE_SECTIONS:
+            self._apply_section(self._shown_section)
 
     # ------------------------------------------------------------ leaving safely
 
     def has_unsaved_changes(self) -> bool:
+        if not self.has_sequence():
+            return False
         try:
             return bool(self.panel.has_unsaved_annotation_changes())
         except RuntimeError:

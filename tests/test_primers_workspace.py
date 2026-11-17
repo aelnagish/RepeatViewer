@@ -49,7 +49,8 @@ def test_sections_drive_the_panel(qapp, isolated_settings, two_files):
     page = _page(two_files[0])
     assert page.tab_name() == "Primers and Probes" and page.path is None
     labels = [page.sections.tabText(i) for i in range(page.sections.count())]
-    assert labels == ["Design", "PCR", "Digest"]
+    assert labels == ["Design", "Painting", "Map", "Database", "PCR", "Digest", "Gel",
+                      "Sanger Check", "Cloning"]
     tabs = page.primers.tabs
 
     assert page.section() == pw.SECTION_DESIGN and tabs.currentIndex() == pw.PANEL_DESIGN
@@ -195,6 +196,11 @@ def make_host(qapp):
             self._primer_options = load_primer_options()
             self.selected = list(selected)
             self.status = []
+            self._current_folder = None
+            self.previewed = []
+
+        def _open_preview_tab(self, path, replace=False):
+            self.previewed.append(path)
 
         def _selected_files(self):
             return list(self.selected)
@@ -494,3 +500,201 @@ def test_a_path_field_that_had_the_cursor_takes_the_clicked_file(
     # the next click is an ordinary one again
     assert host._primers_workspace_takes_file(other)
     assert page.sequence_path() == other.resolve()
+
+
+def test_a_workspace_without_a_sequence(qapp, isolated_settings, two_files, tmp_path):
+    from repeatviewer.views import primers_workspace as pw
+
+    page = pw.PrimersWorkspacePage()
+    assert not page.has_sequence() and page.sequence_path() is None
+    assert not page.no_sequence.isHidden() and page.panel is None
+    assert page.set_section("pcr") and page.section() == pw.SECTION_PCR     # nothing breaks
+    assert not page.has_unsaved_changes() and page.confirm_leave()
+    page.reload_annotations()
+
+    empty = tmp_path / "empty.fa"
+    empty.write_text("")
+    said = []
+    page.statusMessage.connect(said.append)
+    assert not page.set_sequence(empty)
+    assert not page.has_sequence() and not page.no_sequence.isHidden()
+    assert said and "empty.fa" in said[-1]
+
+    # the FASTA selected in Files is taken when a sequence section is shown
+    page.sequence_provider = lambda: two_files[0]
+    assert page.set_section("design")
+    assert page.has_sequence() and page.sequence_path() == two_files[0].resolve()
+    assert page.no_sequence.isHidden() and not page.panel.isHidden()
+    assert page.sequence_row.path() == two_files[0].resolve()
+    # a file without a sequence keeps the one that was there
+    assert not page.set_sequence(empty)
+    assert page.sequence_path() == two_files[0].resolve() and page.has_sequence()
+
+
+def test_pages_of_other_sections_live_in_the_workspace(qapp, isolated_settings, two_files):
+    from repeatviewer.views import primers_workspace as pw
+
+    closed = []
+
+    class Tool(QLabel):
+        def closeEvent(self, event):
+            closed.append(self.text())
+            super().closeEvent(event)
+
+    page = _page(two_files[0])
+    first = Tool("map one")
+    page.host_page("map", first)
+    assert page.section() == pw.SECTION_MAP and page.body.currentWidget() is first
+    assert page.sections.tabText(page.sections.currentIndex()) == "Map"
+    assert page.hosted_page("map") is first
+
+    page.sections.setCurrentIndex(0)                         # a click on Design
+    assert page.section() == pw.SECTION_DESIGN and page.body.currentWidget() is page.seq_page
+    asked = []
+    page.sectionRequested.connect(asked.append)
+    page.sections.setCurrentIndex(2)                         # a click on Map: its page is kept
+    assert page.body.currentWidget() is first and asked == []
+
+    second = Tool("map two")                                 # the menu opens Map again
+    page.host_page("map", second)
+    assert closed == ["map one"] and page.body.currentWidget() is second
+    assert page.body.indexOf(first) < 0
+
+    # a section nobody opens a page for: the workspace stays where it was
+    page.sections.setCurrentIndex(8)                         # Cloning
+    assert asked == ["cloning"]
+    assert page.section() == pw.SECTION_MAP and page.sections.currentIndex() == 2
+    assert page.body.currentWidget() is second
+    # and one that is opened on request
+    page.sectionRequested.connect(
+        lambda key: page.host_page(key, Tool("made " + key)) if key == "sanger" else None)
+    page.sections.setCurrentIndex(7)                         # Sanger Check
+    assert page.section() == pw.SECTION_SANGER
+    assert page.body.currentWidget().text() == "made sanger"
+    assert pw.section_key("Sanger Check") == pw.SECTION_SANGER
+    assert pw.section_key("nonsense") == pw.SECTION_DESIGN
+
+
+def test_map_sanger_cloning_painting_open_inside_the_workspace(
+        qapp, isolated_settings, two_files, make_host):
+    pytest.importorskip("PySide6.QtPdf")
+    from repeatviewer.views import primers_workspace as pw
+    from repeatviewer.views.cloning_page import CloningPage
+    from repeatviewer.views.map_page import MapPage
+    from repeatviewer.views.painting_page import PaintingPage
+    from repeatviewer.views.sanger_page import SangerPage
+    from repeatviewer.widgets.preview_tabs import PreviewTabWidget
+
+    knob, other = two_files
+    tabs = PreviewTabWidget()
+    host = make_host(tabs, [])
+    host._open_map_primers_dialog()
+    page = host._primers_workspace()
+    assert page is not None and tabs.currentWidget() is page
+    assert not page.has_sequence()                           # Map needs no open sequence
+    assert page.section() == pw.SECTION_MAP and isinstance(page.hosted_page("map"), MapPage)
+
+    host.selected = [knob]
+    host._open_sanger_dialog()
+    assert page.section() == pw.SECTION_SANGER
+    assert isinstance(page.hosted_page("sanger"), SangerPage)
+    host._open_cloning_dialog()
+    assert page.section() == pw.SECTION_CLONING
+    assert isinstance(page.hosted_page("cloning"), CloningPage)
+    host._open_painting_settings()
+    assert page.section() == pw.SECTION_PAINTING
+    assert isinstance(page.hosted_page("painting"), PaintingPage)
+    assert [tabs.tabText(i) for i in range(tabs.count())] == ["Primers and Probes"]
+
+    # a FASTA clicked while Map is shown does not become the sequence
+    page.set_section("map")
+    assert not host._primers_workspace_takes_file(other)
+    assert not page.has_sequence()
+    # Design from the section row takes the FASTA selected in Files
+    page.sections.setCurrentIndex(0)
+    assert page.section() == pw.SECTION_DESIGN and page.sequence_path() == knob.resolve()
+    assert host._primers_workspace_takes_file(other)         # now a click sets it
+    assert page.sequence_path() == other.resolve()
+    # and the pages opened before are still there
+    page.sections.setCurrentIndex(2)
+    assert isinstance(page.body.currentWidget(), MapPage)
+
+
+def test_gels_open_in_the_gel_section(qapp, isolated_settings, two_files, tmp_path, make_host):
+    pytest.importorskip("PySide6.QtPdf")
+    from repeatviewer.backends.primers import gel_doc as gd
+    from repeatviewer.views import primers_workspace as pw
+    from repeatviewer.widgets.gel_view import GelDocumentPanel
+    from repeatviewer.widgets.preview_tabs import PreviewTabWidget
+
+    def gel(name):
+        doc = gd.GelDoc()
+        doc.lanes = [gd.ladder_lane(doc.ladder)]
+        doc.title = name
+        path = tmp_path / f"{name}.rvgel"
+        doc.save(path)
+        return path
+
+    one, two = gel("one"), gel("two")
+    report = tmp_path / "report.html"
+    report.write_text("<html></html>")
+    tabs = PreviewTabWidget()
+    host = make_host(tabs, [two_files[0]])
+
+    host._show_new_output(report)                            # other outputs open as before
+    assert host.previewed == [report] and host._primers_workspace() is None
+
+    host._show_new_output(one)                               # "Open in a Gel" ends here
+    page = host._primers_workspace()
+    assert tabs.currentWidget() is page and page.section() == pw.SECTION_GEL
+    assert isinstance(page.hosted_page("gel"), GelDocumentPanel)
+    assert page.gel_path() == one and host.previewed == [report]
+
+    assert host._primers_workspace_takes_file(two)           # a gel clicked in Files
+    assert page.gel_path() == two and page.section() == pw.SECTION_GEL
+
+
+def test_the_gel_section_writes_nothing_by_itself(qapp, isolated_settings, two_files,
+                                                  tmp_path, make_host):
+    pytest.importorskip("PySide6.QtPdf")
+    from repeatviewer.backends.primers import design as dz
+    from repeatviewer.views import primers_workspace as pw
+    from repeatviewer.widgets.preview_tabs import PreviewTabWidget
+
+    tabs = PreviewTabWidget()
+    host = make_host(tabs, [two_files[0]])
+    made = []
+    host._new_gel_document = lambda: made.append("new")
+    host._design_in_panel(dz.MODE_PCR)
+    page = host._primers_workspace()
+    page.sections.setCurrentIndex(6)                         # a click on Gel
+    assert page.section() == pw.SECTION_GEL and made == []
+    assert not list(tmp_path.glob("*.rvgel"))
+    page.new_gel_button.click()
+    assert made == ["new"]
+
+
+def test_the_database_is_a_section_and_opens_once(qapp, isolated_settings, two_files,
+                                                  tmp_path, make_host):
+    pytest.importorskip("PySide6.QtPdf")
+    from dataclasses import replace
+
+    from repeatviewer.views import primers_workspace as pw
+    from repeatviewer.views.tool_page import ToolDialogPage
+    from repeatviewer.widgets.preview_tabs import PreviewTabWidget
+
+    tabs = PreviewTabWidget()
+    host = make_host(tabs, [])
+    host._primer_options = replace(host._primer_options,
+                                   database_path=str(tmp_path / "Primer Database"))
+    host._primer_database_dialog = None
+    host._save_primer_options = lambda *a, **k: None
+    host._open_primer_database()
+    page = host._primers_workspace()
+    holder = page.hosted_page("database")
+    assert isinstance(holder, ToolDialogPage) and page.section() == pw.SECTION_DATABASE
+    dialog = host._primer_database_dialog
+    page.set_section("pcr")
+    host._open_primer_database()                             # the menu again: the same one
+    assert page.hosted_page("database") is holder and host._primer_database_dialog is dialog
+    assert page.section() == pw.SECTION_DATABASE
