@@ -18,12 +18,16 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
+    QApplication,
     QComboBox,
     QHBoxLayout,
     QLabel,
     QMessageBox,
+    QPushButton,
+    QSplitter,
+    QStackedWidget,
     QTabBar,
     QVBoxLayout,
     QWidget,
@@ -52,6 +56,45 @@ _PANEL_PAGES: dict[str, tuple[int, ...]] = {
 FASTA_FILTER = (
     "FASTA (*.fa *.fasta *.fna *.fas *.fsa *.ffn *.seq *.aln *.mfa *.gz);;All files (*)"
 )
+
+
+SEQUENCE_HELP = (
+    "<b>Sequence</b>: the file the workspace works on. Click a FASTA's name in Files to "
+    "use it, or press Browse. Ticking a file's box does not change it.<br>"
+    "<b>Record</b>: for a file with several sequences, the one to work on.<br>"
+    "To open a file in a tab of its own instead, right-click it in Files and choose "
+    "Open in Additional Tab."
+)
+SETTINGS_HEADER_HELP = (
+    "The design settings are shown as one line while a primer is selected, to make room "
+    "for its details.<br>"
+    "<b>Show</b>: opens all settings again.<br>"
+    "<b>Restore Defaults</b>: puts every setting back to its default.<br>"
+    "<b>Design</b>: runs the design again with these settings. Primers already on the "
+    "sequence are kept."
+)
+LIST_HELP = (
+    "One list for what Design found and for the primers already on this sequence.<br>"
+    "<b>candidate</b>: found by the last Design run. Click it to see it on the sequence, "
+    "tick the ones to keep and press <b>Keep Ticked</b>. Nothing is written before that.<br>"
+    "<b>on the sequence</b>: a primer of this sequence. Click it to see its details on "
+    "the right and its binding site on the map; the tick marks the primers that PCR uses. "
+    "Right-click it to edit, copy, save to the Primer Database or remove it.<br>"
+    "<b>Add Primer</b>, <b>From Database</b>: put a primer on the sequence by hand, or "
+    "from your saved primers.<br>"
+    "<b>Open Report</b>: writes the usual primer report for the last Design run."
+)
+
+
+def _path_row_of(widget):
+    """The PathBrowseRow a focused widget belongs to, or None."""
+    from repeatviewer.widgets.path_browse import PathBrowseRow
+
+    while widget is not None:
+        if isinstance(widget, PathBrowseRow):
+            return widget
+        widget = widget.parentWidget()
+    return None
 
 
 def section_of_panel_page(index: int) -> str:
@@ -143,6 +186,9 @@ class PrimersWorkspacePage(QWidget):
         self.record_combo.setToolTip("For a file with several sequences: the one to work on.")
         row.addWidget(self.record_combo)
         row.addStretch(2)
+        from repeatviewer.widgets.help_button import make_help_button
+
+        row.addWidget(make_help_button(self, "Sequence", SEQUENCE_HELP))
         root.addLayout(row)
 
         self.panel = SequenceMapPanel(self._sequence_path, self, autoload=False)
@@ -159,6 +205,12 @@ class PrimersWorkspacePage(QWidget):
         rail.set_panel_collapsed(False, persist=False)
 
         self.primers = self.panel.primers_panel()
+        self._armed_row = None
+        self._build_list_area()
+        self._build_settings_header()
+        app = QApplication.instance()
+        if app is not None:
+            app.focusChanged.connect(self._on_focus_changed)
         self.sections.currentChanged.connect(self._on_section_changed)
         self.primers.tabs.currentChanged.connect(self._on_panel_page_changed)
         self.record_combo.activated.connect(self._on_record_chosen)
@@ -221,29 +273,231 @@ class PrimersWorkspacePage(QWidget):
         tabs = self.primers.tabs
         before = tabs.currentIndex()
         target = before if before in pages else pages[0]
+        if target == PANEL_PRIMER and not self.primers._selected:
+            target = PANEL_DESIGN           # the primer page needs a primer
         self._syncing = True
         try:
-            # Show and select the page first: hiding the tab in front would let
-            # the tab bar pick a neighbour by itself.
-            tabs.setTabVisible(target, True)
             tabs.setCurrentIndex(target)
-            for index in range(tabs.count()):
-                tabs.setTabVisible(index, index in pages)
-            tabs.setVisible(len(pages) > 1)
+            # The sections above and the list under the map do the panel's
+            # own tab bar's job.
+            tabs.setVisible(False)
         finally:
             self._syncing = False
         if target == before:
             # The page stayed the same, so its signal did not fire: let it draw
             # its overlays (region and candidates, products, enzyme sites).
             self.primers._on_workbench_tab(target)
+        self.bottom.setVisible(key in (SECTION_DESIGN, SECTION_PCR))
+        self.bottom_stack.setCurrentIndex(1 if key == SECTION_PCR else 0)
+        self._sync_settings_summary()
 
     def _on_panel_page_changed(self, index: int) -> None:
-        """The panel moved by itself (kept pairs open the primer list, say)."""
+        """The panel moved by itself (kept pairs open the primer page, say)."""
         if self._syncing:
             return
         key = section_of_panel_page(index)
         if key != self.section():
             self.set_section(key)
+        elif int(index) == PANEL_PRIMER and not self.primers._selected:
+            # nothing to show there: stay on the settings
+            QTimer.singleShot(0, lambda: self._show_design_page(PANEL_DESIGN))
+        self._sync_settings_summary()
+
+    # ------------------------------------------------- the list under the map
+
+    def _build_list_area(self) -> None:
+        """Candidates and primers on the sequence under the map; PCR products too."""
+        from repeatviewer.widgets.help_button import make_help_button
+        from repeatviewer.widgets.primers_workspace_list import WorkspaceList
+
+        primers = self.primers
+        design = primers.design_pane
+        # The two tables stay the source of the list, but are never shown.
+        self._kept = QWidget(self)
+        self._kept.hide()
+        candidates_section = design.table.parentWidget()
+        self.list = WorkspaceList(
+            design.table, primers.table, self,
+            primer_columns=(primers.COL_TICK, primers.COL_NAME, primers.COL_TM,
+                            primers.COL_SITE))
+        self.list.context_menu_for_primer = primers._on_context_menu
+        self.list.setMinimumHeight(96)
+
+        self.bottom = QWidget(self)
+        self.bottom.setAutoFillBackground(True)
+        outer = QVBoxLayout(self.bottom)
+        outer.setContentsMargins(12, 6, 12, 8)
+        outer.setSpacing(0)
+        self.bottom_stack = QStackedWidget(self.bottom)
+        outer.addWidget(self.bottom_stack)
+
+        page = QWidget(self.bottom_stack)
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(6)
+        lay.addWidget(self.list, 1)
+        bar = QHBoxLayout()
+        bar.setContentsMargins(0, 0, 0, 0)
+        bar.setSpacing(8)
+        primers.add_button.setText("Add Primer")
+        primers.database_button.setText("From Database")
+        self.list_note = design.cand_note
+        for button in (primers.add_button, primers.database_button):
+            button.setSizePolicy(QPushButton().sizePolicy())
+            bar.addWidget(button)
+        bar.addWidget(self.list_note, 1)
+        bar.addWidget(make_help_button(page, "Primers", LIST_HELP))
+        bar.addWidget(design.report_button)
+        bar.addWidget(design.keep_button)
+        lay.addLayout(bar)
+        self.bottom_stack.addWidget(page)
+
+        products = QWidget(self.bottom_stack)
+        pl = QVBoxLayout(products)
+        pl.setContentsMargins(0, 0, 0, 0)
+        primers.pcr_pane.table.setMinimumHeight(96)
+        pl.addWidget(primers.pcr_pane.table)
+        self.bottom_stack.addWidget(products)
+
+        design.table.setParent(self._kept)
+        primers.table.setParent(self._kept)
+        candidates_section.hide()
+        # the two buttons of the old primer page that the workspace replaces
+        primers.design_button.hide()
+        primers.pcr_button.hide()
+
+        # under the map, left of the settings; the user can drag the border
+        layout = self.panel.layout()
+        index = layout.indexOf(self.panel._map)
+        self.splitter = QSplitter(Qt.Orientation.Vertical, self.panel)
+        self.splitter.setChildrenCollapsible(False)
+        layout.insertWidget(max(0, index), self.splitter, 1)
+        self.splitter.addWidget(self.panel._map)
+        self.splitter.addWidget(self.bottom)
+        self.splitter.setStretchFactor(0, 1)
+        self.splitter.setStretchFactor(1, 0)
+        self.splitter.setSizes([600, 190])
+
+        self.list.picked.connect(self._on_list_picked)
+        self.list.cellClicked.connect(self._on_list_cell_clicked)
+
+    def _on_list_picked(self, kind: str) -> None:
+        from repeatviewer.widgets.primers_workspace_list import KIND_PRIMER
+
+        if self.section() != SECTION_DESIGN:
+            return
+        self._show_design_page(PANEL_PRIMER if kind == KIND_PRIMER else PANEL_DESIGN)
+
+    def _on_list_cell_clicked(self, row: int, column: int) -> None:
+        """A click on the row that is already selected opens its page again."""
+        from repeatviewer.widgets.primers_workspace_list import COL_TICK
+
+        kind = self.list.kind_of_row(row)
+        if kind and column != COL_TICK:
+            self._on_list_picked(kind)
+
+    def _show_design_page(self, page: int) -> None:
+        """Design settings, or the details of the selected primer."""
+        if self.section() != SECTION_DESIGN:
+            return
+        if int(page) == PANEL_PRIMER and not self.primers._selected:
+            page = PANEL_DESIGN
+        self._syncing = True
+        try:
+            self.primers.tabs.setCurrentIndex(int(page))
+        finally:
+            self._syncing = False
+        self._sync_settings_summary()
+
+    # ------------------------------------------- settings folded to one line
+
+    def _build_settings_header(self) -> None:
+        """On top of the primer details: the design settings as one line."""
+        from repeatviewer.widgets.help_button import make_help_button
+
+        design = self.primers.design_pane
+        page = self.primers.pages.widget(PANEL_PRIMER)
+        header = QWidget(page)
+        lay = QVBoxLayout(header)
+        lay.setContentsMargins(0, 0, 0, 6)
+        lay.setSpacing(6)
+        top = QHBoxLayout()
+        top.setContentsMargins(0, 0, 0, 0)
+        top.addWidget(QLabel("<b>Design Settings</b>", header), 1)
+        self.show_settings_button = QPushButton("Show", header)
+        top.addWidget(self.show_settings_button)
+        top.addWidget(make_help_button(header, "Design Settings", SETTINGS_HEADER_HELP))
+        lay.addLayout(top)
+        self.settings_summary = QLabel(header)
+        self.settings_summary.setWordWrap(True)
+        self.settings_summary.setStyleSheet("color: palette(placeholder-text);")
+        lay.addWidget(self.settings_summary)
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.addStretch(1)
+        self.header_defaults_button = QPushButton("Restore Defaults", header)
+        self.header_design_button = QPushButton("Design", header)
+        row.addWidget(self.header_defaults_button)
+        row.addWidget(self.header_design_button)
+        lay.addLayout(row)
+        page.layout().insertWidget(0, header)
+        self.settings_header = header
+
+        self.show_settings_button.clicked.connect(
+            lambda: self._show_design_page(PANEL_DESIGN))
+        self.header_defaults_button.clicked.connect(design.defaults_button.click)
+        self.header_defaults_button.clicked.connect(self._sync_settings_summary)
+
+        def design_again() -> None:
+            self._show_design_page(PANEL_DESIGN)
+            design.design_button.click()
+
+        self.header_design_button.clicked.connect(design_again)
+
+    def settings_summary_text(self) -> str:
+        design = self.primers.design_pane
+        parts = [design.mode.currentText()]
+        try:
+            region = design.region()
+        except Exception:  # noqa: BLE001 - a half-typed range is no region
+            region = None
+        if region is not None:
+            parts.append(f"region {region.start:,} to {region.end:,}")
+        if not design.is_probe_mode():
+            parts.append(f"Tm {design.tm_min.value():g} to {design.tm_max.value():g} °C")
+        return ", ".join(parts)
+
+    def _sync_settings_summary(self, *_args) -> None:
+        self.settings_summary.setText(self.settings_summary_text())
+
+    # ------------------------------------------ path fields filled from Files
+
+    def _on_focus_changed(self, _old, new) -> None:
+        """Remember the path field the cursor was in when the user goes to Files."""
+        if new is None:
+            return
+        try:
+            if not self.isAncestorOf(new):
+                return                      # focus left the workspace: keep the field
+        except RuntimeError:
+            return
+        row = _path_row_of(new)
+        self._armed_row = row if row is not None and row is not self.sequence_row else None
+
+    def fill_armed_path(self, path: Path | str) -> bool:
+        """Put a file clicked in Files into the path field the cursor was in."""
+        row = self._armed_row
+        if row is None:
+            return False
+        try:
+            if not row.isVisible():
+                return False
+            row.set_path(Path(path))
+        except RuntimeError:
+            self._armed_row = None
+            return False
+        self._armed_row = None
+        return True
 
     # ---------------------------------------------------------------- sequence
 

@@ -330,7 +330,12 @@ class PrimerActionsMixin:
             return False
         try:
             target = Path(path)
-            if not (target.is_file() and is_primer_fasta(target)):
+            if not target.is_file():
+                return False
+            # a path field of the workspace that had the cursor takes the file
+            if workspace.fill_armed_path(target):
+                return True
+            if not is_primer_fasta(target):
                 return False
         except OSError:
             return False

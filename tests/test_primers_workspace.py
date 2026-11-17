@@ -53,20 +53,24 @@ def test_sections_drive_the_panel(qapp, isolated_settings, two_files):
     tabs = page.primers.tabs
 
     assert page.section() == pw.SECTION_DESIGN and tabs.currentIndex() == pw.PANEL_DESIGN
-    assert not tabs.isHidden()
-    assert [tabs.isTabVisible(i) for i in range(4)] == [True, True, False, False]
+    assert tabs.isHidden()                           # the sections do its job
+    assert not page.bottom.isHidden() and page.bottom_stack.currentIndex() == 0
 
     page.set_section("pcr")
     assert page.section() == pw.SECTION_PCR and tabs.currentIndex() == pw.PANEL_PCR
-    assert tabs.isHidden() and page.primers.pcr_pane.active
+    assert page.primers.pcr_pane.active
+    assert not page.bottom.isHidden() and page.bottom_stack.currentIndex() == 1
+    assert page.bottom.isAncestorOf(page.primers.pcr_pane.table)   # products under the map
 
     page.set_section("enzymes")                      # the old name of Digest
     assert page.section() == pw.SECTION_DIGEST and tabs.currentIndex() == pw.PANEL_ENZYMES
     assert page.primers.enzyme_pane.active and not page.primers.pcr_pane.active
+    assert page.bottom.isHidden()
 
     page.sections.setCurrentIndex(0)                 # a click on Design
-    assert tabs.currentIndex() == pw.PANEL_DESIGN and not tabs.isHidden()
+    assert tabs.currentIndex() == pw.PANEL_DESIGN and tabs.isHidden()
     assert page.primers.design_pane.overlay_enabled
+    assert not page.bottom.isHidden() and page.bottom_stack.currentIndex() == 0
 
 
 def test_the_panel_can_move_the_section(qapp, isolated_settings, two_files):
@@ -74,10 +78,13 @@ def test_the_panel_can_move_the_section(qapp, isolated_settings, two_files):
 
     page = _page(two_files[0], section="pcr")
     assert page.section() == pw.SECTION_PCR
-    page.primers.tabs.setCurrentIndex(pw.PANEL_PRIMER)   # kept pairs open the primer list
+    page.primers.tabs.setCurrentIndex(pw.PANEL_DESIGN)   # the panel went to Design by itself
     assert page.section() == pw.SECTION_DESIGN
-    assert page.primers.tabs.currentIndex() == pw.PANEL_PRIMER
-    assert [page.primers.tabs.isTabVisible(i) for i in range(4)] == [True, True, False, False]
+    assert page.bottom_stack.currentIndex() == 0
+    # the primer page needs a primer: with none selected the settings stay
+    page.primers.tabs.setCurrentIndex(pw.PANEL_PRIMER)
+    qapp.processEvents()
+    assert page.primers.tabs.currentIndex() == pw.PANEL_DESIGN
     assert pw.section_of_panel_page(3) == pw.SECTION_DIGEST
 
 
@@ -318,3 +325,172 @@ def test_a_file_without_a_sequence_is_refused(qapp, isolated_settings, tmp_path,
     host = make_host(tabs, [empty])
     assert host._design_in_panel(dz.MODE_PCR) is None
     assert host._primers_workspace() is None and said and "empty.fa" in said[0]
+
+
+TEMPLATE = ("GGCATCGATCGATTACGGA" * 3 + "CCTGCTAGTCGTAGACCTTGAA" + _seq(5, 200)
+            + "GGCATACGATTTGCAGCAAGT" + "TTGACCGGTA" * 4)
+
+
+def _names(page, kind_label):
+    from repeatviewer.widgets import primers_workspace_list as wl
+
+    return [page.list.item(r, wl.COL_NAME).text() for r in range(page.list.rowCount())
+            if page.list.item(r, wl.COL_KIND).text() == kind_label]
+
+
+def _wait(app, pane, seconds=20):
+    import time
+
+    end = time.time() + seconds
+    while pane._busy and time.time() < end:
+        app.processEvents()
+        time.sleep(0.02)
+    app.processEvents()
+
+
+def test_the_list_under_the_map_shows_the_primers(qapp, isolated_settings, tmp_path):
+    from repeatviewer.views import primers_workspace as pw
+    from repeatviewer.widgets import primers_workspace_list as wl
+
+    fasta = _fasta(tmp_path / "t.fa", [("t", TEMPLATE)])
+    page = _page(fasta)
+    primers = page.primers
+    # the two source tables are kept but never shown; their buttons sit under the map
+    assert page._kept.isHidden()
+    assert primers.table.parentWidget() is page._kept
+    assert primers.design_pane.table.parentWidget() is page._kept
+    for button in (primers.add_button, primers.database_button,
+                   primers.design_pane.report_button, primers.design_pane.keep_button):
+        assert page.bottom.isAncestorOf(button)
+    assert primers.add_button.text() == "Add Primer"
+    assert primers.database_button.text() == "From Database"
+    assert page.splitter.indexOf(page.panel._map) == 0 and page.splitter.indexOf(page.bottom) == 1
+    assert page.list.rowCount() == 0
+
+    primers.add_primers([Primer("F", "CCTGCTAGTCGTAGACCTTGAA"),
+                         Primer("R", "ACTTGCTGCAAATCGTATGCC")], tick=False)
+    qapp.processEvents()
+    assert _names(page, "on the sequence") == ["F", "R"] and page.list.counts() == (0, 2)
+
+    # a tick in the list is a tick of the primer
+    row = page.list.row_of(wl.KIND_PRIMER, 0)
+    from PySide6.QtCore import Qt
+
+    page.list.item(row, wl.COL_TICK).setCheckState(Qt.CheckState.Checked)
+    qapp.processEvents()
+    assert primers._ticked == {"F"}
+    page.list.item(row, wl.COL_TICK).setCheckState(Qt.CheckState.Unchecked)
+    qapp.processEvents()
+    assert primers._ticked == set()
+
+    # the primer just added is the selected one: its details show, with the
+    # settings folded to one line
+    assert page.list.currentRow() == page.list.row_of(wl.KIND_PRIMER, 1)
+    assert primers._selected == "R" and primers.tabs.currentIndex() == pw.PANEL_PRIMER
+    assert "Standard PCR" in page.settings_summary.text() and "Tm" in page.settings_summary.text()
+    page.show_settings_button.click()
+    assert primers.tabs.currentIndex() == pw.PANEL_DESIGN
+    page.list.cellClicked.emit(page.list.row_of(wl.KIND_PRIMER, 1), wl.COL_NAME)   # same row again
+    assert primers.tabs.currentIndex() == pw.PANEL_PRIMER
+
+    # a click on another primer in the list
+    page.show_settings_button.click()
+    page.list.selectRow(page.list.row_of(wl.KIND_PRIMER, 0))
+    assert primers._selected == "F" and primers.tabs.currentIndex() == pw.PANEL_PRIMER
+    # a primer picked somewhere else (a click on the map) is followed
+    page.show_settings_button.click()
+    primers._select_row_of("R")
+    qapp.processEvents()
+    assert page.list.currentRow() == page.list.row_of(wl.KIND_PRIMER, 1)
+    assert primers._selected == "R" and primers.tabs.currentIndex() == pw.PANEL_PRIMER
+    primers._select_row_of("F")
+    qapp.processEvents()
+    assert page.list.currentRow() == page.list.row_of(wl.KIND_PRIMER, 0)
+    assert primers._selected == "F" and primers.tabs.currentIndex() == pw.PANEL_PRIMER
+
+    # in PCR a picked primer does not pull the workspace back to Design
+    page.set_section("pcr")
+    primers._select_row_of("R")
+    qapp.processEvents()
+    assert page.section() == pw.SECTION_PCR
+    # back in Design the selected primer's details are there
+    page.set_section("design")
+    assert primers.tabs.currentIndex() in (pw.PANEL_DESIGN, pw.PANEL_PRIMER)
+
+
+def test_candidates_join_the_list_and_keep_ticked_works(qapp, isolated_settings, tmp_path):
+    from PySide6.QtCore import Qt
+
+    from repeatviewer.views import primers_workspace as pw
+    from repeatviewer.widgets import primers_workspace_list as wl
+
+    fasta = _fasta(tmp_path / "long.fa", [("long", _seq(10, 3000))])
+    page = _page(fasta)
+    primers, design = page.primers, page.primers.design_pane
+    primers.on_sequence_selection(1400, 1600)
+    design.prod_min.setValue(250)
+    design.prod_max.setValue(600)
+    design.run_design()
+    _wait(qapp, design)
+    n = design.table.rowCount()
+    assert n > 0 and page.list.counts() == (n, 0)
+    assert _names(page, "candidate")[0] == "Pair 1"
+    assert page.list.item(0, wl.COL_TICK).checkState() == Qt.CheckState.Checked   # best pair
+    assert page.list.currentRow() == 0                                            # and shown
+    assert "region 1,400 to 1,600" in page.settings_summary_text()
+
+    if n > 1:
+        page.list.item(1, wl.COL_TICK).setCheckState(Qt.CheckState.Checked)
+        qapp.processEvents()
+        assert len(design.ticked_pairs()) == 2
+        page.list.item(1, wl.COL_TICK).setCheckState(Qt.CheckState.Unchecked)
+        qapp.processEvents()
+    assert len(design.ticked_pairs()) == 1
+
+    design.keep_button.click()                       # the real button, now under the map
+    qapp.processEvents()
+    assert len(primers.primers()) == 2
+    assert page.list.counts() == (n, 2) and len(_names(page, "on the sequence")) == 2
+
+    # a click on a candidate goes back to the settings and drops the primer selection
+    page.list.selectRow(page.list.row_of(wl.KIND_PRIMER, 0))
+    assert primers.tabs.currentIndex() == pw.PANEL_PRIMER
+    page.list.selectRow(0)
+    assert primers.tabs.currentIndex() == pw.PANEL_DESIGN and primers._selected == ""
+
+    # another sequence: the list empties with its sources
+    other = _fasta(tmp_path / "o.fa", [("o", _seq(11, 800))])
+    assert page.set_sequence(other)
+    qapp.processEvents()
+    assert page.list.counts() == (0, 0)
+
+
+def test_a_path_field_that_had_the_cursor_takes_the_clicked_file(
+        qapp, isolated_settings, two_files, tmp_path, make_host):
+    pytest.importorskip("PySide6.QtPdf")
+    from repeatviewer.backends.primers import design as dz
+    from repeatviewer.widgets.preview_tabs import PreviewTabWidget
+
+    knob, other = two_files
+    families = _fasta(tmp_path / "families.fa", [("x", _seq(7, 300))])
+    tabs = PreviewTabWidget()
+    host = make_host(tabs, [knob])
+    host._design_in_panel(dz.MODE_FISH)
+    page = host._primers_workspace()
+    tabs.resize(1300, 800)
+    tabs.show()
+    qapp.processEvents()
+    field = page.primers.design_pane.avoid_path
+    assert field.isVisible()                          # Repetitive Probes shows it
+
+    assert not page.fill_armed_path(families)         # no field had the cursor
+    page._on_focus_changed(None, page.sequence_row.line_edit())
+    assert not page.fill_armed_path(families)         # the Sequence field is not one of them
+    page._on_focus_changed(None, field.line_edit())   # the cursor goes into Avoid file
+    page._on_focus_changed(field.line_edit(), tabs)   # then to Files: still armed
+    assert host._primers_workspace_takes_file(families)
+    assert field.path() == families.resolve()
+    assert page.sequence_path() == knob.resolve()     # the sequence did not change
+    # the next click is an ordinary one again
+    assert host._primers_workspace_takes_file(other)
+    assert page.sequence_path() == other.resolve()

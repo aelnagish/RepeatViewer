@@ -62,12 +62,14 @@ REGION_HELP = (
     "<b>Amplify</b>: primers sit outside the region and the product covers all of it.<br>"
     "<b>Inside</b>: both primers and the product stay inside the region.<br>"
     "<b>Avoid</b>: no primer may sit in the region (a SNP, a methylated site, a repeat).<br>"
+    "For probes only Inside and Avoid are offered: a probe sits in the region or keeps "
+    "out of it.<br>"
     "When the region and the settings cannot work together, an amber note says why "
     "and offers the settings that fit. Nothing is blocked."
 )
 RUN_ON_HELP = (
-    "<b>This one</b>: the open sequence. The design runs here, the candidates appear below "
-    "and nothing is written until you press Keep Ticked or Open Report.<br>"
+    "<b>This one</b>: the open sequence. The design runs here, the candidates appear in the "
+    "list under the map and nothing is written until you press Keep Ticked or Open Report.<br>"
     "<b>Selected files</b>: every FASTA ticked in the Files panel. That is the long run: "
     "the progress bar, the report files beside the inputs, and the usual file colours. "
     "Both use exactly the settings on this page."
