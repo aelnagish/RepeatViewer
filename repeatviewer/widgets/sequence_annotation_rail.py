@@ -41,15 +41,18 @@ from repeatviewer.backends.annotation_colors import (
 )
 from repeatviewer.backends.sequence_features import (
     ALWAYS_ANNOTATION_VISIBILITY_KINDS,
+    FEATURE_TYPE_COLORS,
     SequenceFeature,
     annotation_visibility_label,
     collect_annotation_visibility_keys,
 )
 
 # Boundary prediction rows: (key, label, guide color).
+# LTR / TIR match the default feature-annotation colours so MSA boundary lines
+# match the Feature detection / annotation legend.
 BOUNDARY_ROWS: tuple[tuple[str, str, str], ...] = (
-    ("ltr", "LTR", "#ff7f0e"),
-    ("tir", "TIR", "#8c564b"),
+    ("ltr", "LTR", FEATURE_TYPE_COLORS["LTR"]),
+    ("tir", "TIR", FEATURE_TYPE_COLORS["TIR"]),
     ("msa_identity", "MSA identity", "#1f77b4"),
     ("coverage", "Genome Cov", "#2ca02c"),
     ("poly_a", "PolyA", "#9467bd"),

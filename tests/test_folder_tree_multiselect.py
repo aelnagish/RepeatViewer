@@ -230,6 +230,37 @@ def test_top_level_drag_reorder_keeps_both_roots(qapp, tmp_path):
     tree.close()
 
 
+def test_move_up_keeps_active_files_folder(qapp, tmp_path):
+    """Move up/down must not steal the Files-panel highlight from another root."""
+    tree = mw.FolderTreeWidget()
+    items = {}
+    for name in ("data", "RepeatMasker_output", "database"):
+        (tmp_path / name).mkdir()
+        item = QTreeWidgetItem([name])
+        item.setData(0, mw.ROLE_PATH, str(tmp_path / name))
+        tree.addTopLevelItem(item)
+        items[name] = item
+    tree.resize(320, 360)
+    tree.show()
+    qapp.processEvents()
+
+    data_path = tmp_path / "data"
+    tree.set_active_folder(data_path)
+    assert tree._active_folder_key == str(data_path.resolve())
+
+    # Move RepeatMasker up while browsing data — data stays the active folder.
+    tree._move_top_level_item(items["RepeatMasker_output"], -1)
+    assert [tree.topLevelItem(i).text(0) for i in range(3)] == [
+        "RepeatMasker_output",
+        "data",
+        "database",
+    ]
+    assert tree._active_folder_key == str(data_path.resolve())
+    assert tree.selectedItems() == []
+    assert tree.currentItem() is items["data"]
+    tree.close()
+
+
 def _branch_item(tree, tmp_path, name: str):
     parent = tmp_path / name
     parent.mkdir()

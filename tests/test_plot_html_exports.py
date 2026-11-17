@@ -12,11 +12,14 @@ def test_density_plot_wheel_does_not_scroll_zoom() -> None:
         panel_mode="genome",
     )
     assert "applyShiftWheelXZoom" in html
-    assert "if(!e.shiftKey){ return; }" in html
+    assert "teWheelWantsXZoom" in html
+    assert "teShiftDown" in html
     assert "gd.addEventListener('wheel'" in html
     # macOS Shift+scroll often arrives as deltaX — handler must use either axis.
     assert "Number(e.deltaX)" in html
     assert "capture: true" in html
+    # Zoom keeps the genome position under the cursor fixed.
+    assert "anchorX - frac * newSpan" in html
 
 
 def test_plot_controls_offer_svg_and_pdf_exports() -> None:
