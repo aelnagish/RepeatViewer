@@ -320,3 +320,28 @@ def test_design_finds_the_file_page_behind_a_tool_tab(qapp, tmp_path):
     assert isinstance(page, FilePreviewPage) and page.path == fa.resolve()
     panel = page._ensure_annotation_panel()
     assert panel.primers_panel().tabs.currentIndex() == 0
+
+
+def test_toolbar_popup_lists_what_is_inside_design_and_map(qapp):
+    """The toolbar popup is a flat list: a submenu must show its items, not a dead row."""
+    pytest.importorskip("PySide6.QtPdf")   # the main window needs it
+    from PySide6.QtWidgets import QLabel, QMenu, QPushButton
+
+    from repeatviewer.main_window import _ToolbarPopup
+
+    fired: list[str] = []
+    menu = QMenu()
+    design = menu.addMenu("Design")
+    design.addAction("Primers", lambda: fired.append("design primers"))
+    design.addAction("Repetitive Probes", lambda: fired.append("design probes"))
+    map_menu = menu.addMenu("Map")
+    map_menu.addAction("Primers", lambda: fired.append("map primers"))
+    menu.addAction("Database", lambda: fired.append("database"))
+
+    popup = _ToolbarPopup(list(menu.actions()))
+    rows = [w for w in popup._panel.children() if isinstance(w, (QLabel, QPushButton))]
+    assert [(type(w).__name__, w.text()) for w in rows] == [
+        ("QLabel", "Design"), ("QPushButton", "Primers"), ("QPushButton", "Repetitive Probes"),
+        ("QLabel", "Map"), ("QPushButton", "Primers"), ("QPushButton", "Database")]
+    rows[4].click()                              # Map > Primers
+    assert fired == ["map primers"]

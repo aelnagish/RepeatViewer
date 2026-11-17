@@ -524,3 +524,18 @@ def test_the_rail_has_no_primers_button(qapp, isolated_settings, tmp_path):
     assert buttons[PRIMERS_TAB_INDEX].isHidden()
     rail.show_primers_tab()                      # the menu still opens the page
     assert rail._active_tab == PRIMERS_TAB_INDEX
+
+
+def test_the_rail_never_comes_back_on_primers(qapp, isolated_settings):
+    """A file opened later (or after a restart) does not show the Primers page by itself."""
+    from repeatviewer.widgets.sequence_annotation_rail import (
+        PRIMERS_TAB_INDEX,
+        SequenceAnnotationRail,
+    )
+
+    rail = SequenceAnnotationRail()
+    before = rail._active_tab
+    rail.show_primers_tab()                      # the menu opened it
+    assert rail._active_tab == PRIMERS_TAB_INDEX
+    again = SequenceAnnotationRail()             # the next file, or the next start
+    assert again._active_tab == before != PRIMERS_TAB_INDEX

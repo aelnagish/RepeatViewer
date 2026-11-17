@@ -3131,6 +3131,9 @@ class SequenceAnnotationRail(QWidget):
             except (TypeError, ValueError):
                 tab = _DEFAULT_TAB_INDEX
             tab = max(0, min(tab, self._stack.count() - 1))
+            if tab == PRIMERS_TAB_INDEX:
+                # Primers and Probes opens from its menu only, never by itself.
+                tab = _DEFAULT_TAB_INDEX
             self._active_tab = tab
             self._stack.setCurrentIndex(tab)
             self._sync_width_for_tab(tab)
@@ -3163,7 +3166,10 @@ class SequenceAnnotationRail(QWidget):
     def _save_rail_ui_state(self, *_args) -> None:
         settings = self._settings()
         try:
-            settings.setValue(_SETTINGS_TAB_KEY, int(self._active_tab))
+            if self._active_tab != PRIMERS_TAB_INDEX:
+                # The Primers page is not remembered: the next file opens on the
+                # tab that was in use before the menu brought Primers up.
+                settings.setValue(_SETTINGS_TAB_KEY, int(self._active_tab))
             settings.setValue(_SETTINGS_COLLAPSED_KEY, bool(self._panel_collapsed))
             sections = getattr(self, "_annotation_sections", None) or {}
             expanded = [

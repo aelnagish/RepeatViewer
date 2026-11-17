@@ -195,7 +195,11 @@ class PrimerActionsMixin:
     def _populate_primers_menu(self, menu: QMenu) -> None:
         from repeatviewer.backends.primers import design as dz
 
-        design_menu = menu.addMenu(PRIMER_MENU_ITEMS[0])
+        # Submenus are made with their parent and kept by name: a submenu that
+        # only a local variable holds can be freed by Python on some PySide
+        # builds, and its items then do nothing when clicked.
+        design_menu = QMenu(PRIMER_MENU_ITEMS[0], menu)
+        menu.addMenu(design_menu)
         primers, probes, painting = DESIGN_SUBMENU_ITEMS
         a = design_menu.addAction(primers, lambda: self._design_in_panel(dz.MODE_PCR))
         a.setToolTip("PCR primers on the sequence, in the Primers panel")
@@ -204,7 +208,9 @@ class PrimerActionsMixin:
         a = design_menu.addAction(painting, self._open_painting_settings)
         a.setToolTip("Chromosome painting probes over a genome (Chorus2)")
 
-        map_menu = menu.addMenu(PRIMER_MENU_ITEMS[1])
+        map_menu = QMenu(PRIMER_MENU_ITEMS[1], menu)
+        menu.addMenu(map_menu)
+        menu._rv_submenus = (design_menu, map_menu)
         a = map_menu.addAction(MAP_SUBMENU_ITEMS[0], lambda: self._open_map_primers_dialog())
         a.setToolTip("Where primers bind, and what they amplify")
         a = map_menu.addAction(MAP_SUBMENU_ITEMS[1],

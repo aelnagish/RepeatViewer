@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
     QTextBrowser,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
@@ -93,7 +94,19 @@ _FORM: tuple[tuple[str, str, str], ...] = (
     ("note", "Note:", "line"),
 )
 _MULTI_SKIP = ("name", "sequence", "aliases")
-_FORM_FIELD_W = 300   # every form field the same width (two columns)
+_FORM_FIELD_MIN_W = 120   # the field columns share the width equally above this
+# Where each field sits: rows of (field, cells it spans); four cells to a row.
+# Identity first, then the sequence, what it is for, where the tube is, and
+# the order; the note closes the form with the tube's state beside it.
+_FORM_COLS = 4
+_FORM_LAYOUT: tuple[tuple[tuple[str, int], ...], ...] = (
+    (("name", 1), ("kind", 1), ("pair", 1), ("aliases", 1)),
+    (("sequence", 4),),
+    (("organism", 1), ("target", 1), ("status", 1), ("tested", 1)),
+    (("box", 1), ("freezer", 1), ("room", 1), ("concentration", 1)),
+    (("tm_supplier", 1), ("anneal_temp", 1), ("ordered_by", 1), ("ordered_on", 1)),
+    (("note", 3), ("dissolved", 1)),
+)
 
 
 def _one_decimal(value) -> str:
@@ -266,42 +279,41 @@ class PrimerDatabaseDialog(QDialog):
         hh.setSortIndicator(0, Qt.SortOrder.AscendingOrder)
         self._table.itemSelectionChanged.connect(self._on_selection)
 
-        # ---- form: two columns of equal, compact fields; labels right-aligned in one width
+        # ---- form: four equal columns; labels right-aligned in one width
         self._form_host = QWidget(self)
         grid = QGridLayout(self._form_host)
         grid.setContentsMargins(0, 0, 0, 0)
-        grid.setHorizontalSpacing(10)
+        grid.setHorizontalSpacing(8)
         grid.setVerticalSpacing(6)
         self._fields: dict[str, QWidget] = {}
         labels: list[QLabel] = []
-        wide_fields: list[QWidget] = []
-        row = col = 0
-        for key, label, kind in _FORM:
-            w = self._make_field(key, kind)
-            self._fields[key] = w
-            wide = kind == "seq" or key in ("note", "aliases")
-            if wide and col == 1:
-                row, col = row + 1, 0
-            lab = QLabel(label, self._form_host)
-            lab.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            labels.append(lab)
-            grid.addWidget(lab, row, col * 2)
-            align = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
-            grid.addWidget(w, row, col * 2 + 1, 1, 3 if wide else 1, align)
-            if wide:
-                wide_fields.append(w)
-                row, col = row + 1, 0
-            else:
-                w.setFixedWidth(_FORM_FIELD_W)
-                col += 1
-                if col == 2:
-                    row, col = row + 1, 0
+        spec = {key: (label, kind) for key, label, kind in _FORM}
+        for row, cells in enumerate(_FORM_LAYOUT):
+            col = 0
+            for key, span in cells:
+                label, kind = spec[key]
+                w = self._make_field(key, kind)
+                w.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+                w.setMinimumWidth(_FORM_FIELD_MIN_W)
+                self._fields[key] = w
+                if label:
+                    lab = QLabel(label, self._form_host)
+                    lab.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                    labels.append(lab)
+                    grid.addWidget(lab, row, col * 2)
+                    # No alignment: the field fills its cells, so every column
+                    # is equally wide whatever the width of the window or tab.
+                    grid.addWidget(w, row, col * 2 + 1, 1, span * 2 - 1)
+                else:               # a checkbox: its own text is the label
+                    grid.addWidget(w, row, col * 2 + 1, 1, span * 2 - 1)
+                col += span
         label_w = max(lab.sizeHint().width() for lab in labels)
         for lab in labels:
             lab.setFixedWidth(label_w)
-        for w in wide_fields:
-            w.setFixedWidth(2 * _FORM_FIELD_W + label_w + 2 * grid.horizontalSpacing())
-        grid.setColumnStretch(4, 1)
+        for c in range(_FORM_COLS):
+            grid.setColumnMinimumWidth(c * 2, label_w)
+            grid.setColumnStretch(c * 2 + 1, 1)
+        grid.setRowStretch(len(_FORM_LAYOUT), 1)
         self._form_title = QLabel(self)
         self._history_btn = QPushButton("History…", self)
         self._history_btn.setToolTip("Every change to this primer: who, when, what")
@@ -328,8 +340,9 @@ class PrimerDatabaseDialog(QDialog):
         split = QSplitter(Qt.Orientation.Vertical, self)
         split.addWidget(self._table)
         split.addWidget(bottom)
-        split.setStretchFactor(0, 3)
-        split.setStretchFactor(1, 2)
+        # The form is six rows: the table takes whatever height is left.
+        split.setStretchFactor(0, 1)
+        split.setStretchFactor(1, 0)
         self._split_main = split
 
         # ---- buttons
@@ -810,7 +823,7 @@ class PrimerDatabaseDialog(QDialog):
 
     def _make_field(self, key: str, kind: str) -> QWidget:
         if kind == "check":
-            w = QCheckBox("Dissolved (water added to the tube)", self)
+            w = QCheckBox("Dissolved (water added)", self)
             w.setTristate(False)
             w.toggled.connect(self._form_touched)
             return w
