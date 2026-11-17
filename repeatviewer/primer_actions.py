@@ -227,18 +227,128 @@ class PrimerActionsMixin:
 
     # ------------------------------------------------- the panel beside the sequence
 
+    def _primers_workspace(self):
+        """The open Primers and Probes workspace tab, or None."""
+        from repeatviewer.views.primers_workspace import PrimersWorkspacePage
+
+        tabs = getattr(self, "_preview_tabs", None)
+        if tabs is None:
+            return None
+        try:
+            for index in range(tabs.count()):
+                page = tabs.widget(index)
+                if isinstance(page, PrimersWorkspacePage):
+                    return page
+        except RuntimeError:
+            pass
+        return None
+
     def _panel_target_file(self):
-        """The FASTA the Primers panel should open: the selected one, else the open one."""
+        """The FASTA the workspace should work on.
+
+        The one selected in Files, else the one the workspace already shows,
+        else the file of the tab in front.
+        """
         for p in self._primer_candidate_files():
             return Path(p)
+        workspace = self._primers_workspace()
+        if workspace is not None:
+            return workspace.sequence_path()
         tabs = getattr(self, "_preview_tabs", None)
         current = tabs.currentWidget() if tabs is not None else None
         path = getattr(current, "path", None)
         return Path(path) if path else None
 
+    def _leave_file_page_for_workspace(self, path: Path) -> bool:
+        """Unsaved annotation edits in the file's own tab are settled first.
+
+        The workspace saves primers into the same annotation file, so two views
+        with different unsaved states would overwrite each other.
+        """
+        tabs = getattr(self, "_preview_tabs", None)
+        if tabs is None:
+            return True
+        page = tabs.page_for_path(path)
+        if page is None:
+            return True
+        try:
+            if not page.has_unsaved_annotations():
+                return True
+        except (AttributeError, RuntimeError):
+            return True
+        return bool(tabs.confirm_leave_page(page))
+
+    def _wire_primers_workspace(self, workspace) -> None:
+        status = getattr(self, "_set_status_message", None)
+        if status is not None:
+            workspace.statusMessage.connect(lambda text: status(str(text), 6000))
+        workspace.annotationsSaved.connect(self._on_workspace_annotations_saved)
+        extracted = getattr(self, "_on_preview_sequence_extracted", None)
+        if extracted is not None:
+            workspace.sequenceExtracted.connect(extracted)
+        tabs = getattr(self, "_preview_tabs", None)
+        if tabs is not None and not getattr(self, "_workspace_follows_file_saves", False):
+            tabs.annotationsSaved.connect(self._on_file_annotations_saved_for_workspace)
+            self._workspace_follows_file_saves = True
+
+    def _on_workspace_annotations_saved(self, written: object) -> None:
+        """The workspace saved annotations: Files and the file's own tab follow."""
+        saved = getattr(self, "_on_preview_annotations_saved", None)
+        if saved is not None:
+            saved(written)
+        workspace = self._primers_workspace()
+        tabs = getattr(self, "_preview_tabs", None)
+        if workspace is not None and tabs is not None:
+            tabs.reload_paths([workspace.sequence_path()])
+
+    def _on_file_annotations_saved_for_workspace(self, written: object) -> None:
+        """A file's own tab saved annotations: the workspace on that file follows."""
+        workspace = self._primers_workspace()
+        if workspace is None or not written:
+            return
+        try:
+            saved = Path(str(written))
+            sequence = workspace.sequence_path()
+            if saved.parent.resolve() != sequence.parent.resolve():
+                return
+            if not (saved.name.startswith(sequence.stem + ".")
+                    or saved.name.startswith(sequence.name)):
+                return
+        except OSError:
+            return
+        workspace.reload_annotations()
+
+    def _primers_workspace_takes_file(self, path: Path) -> bool:
+        """A FASTA clicked in Files while the workspace is in front becomes its sequence.
+
+        True when the click was used here, so Preview does not open the file.
+        Right-click > Open in Additional Tab still opens it in a tab of its own.
+        """
+        tabs = getattr(self, "_preview_tabs", None)
+        workspace = self._primers_workspace()
+        if tabs is None or workspace is None or tabs.currentWidget() is not workspace:
+            return False
+        try:
+            target = Path(path)
+            if not (target.is_file() and is_primer_fasta(target)):
+                return False
+        except OSError:
+            return False
+        if self._leave_file_page_for_workspace(target):
+            workspace.set_sequence(target)
+        return True
+
     def _open_primers_panel(self, *, tab: str = "design", mode: str | None = None,
                             digest: bool = False):
-        """Show a FASTA in the Annotation view with the Primers panel on ``tab``."""
+        """Show the Primers and Probes workspace on ``tab``; returns its PrimersPanel."""
+        from repeatviewer.views.primers_workspace import (
+            PANEL_DESIGN,
+            PANEL_PRIMER,
+            PrimersWorkspacePage,
+            same_file,
+            section_key,
+        )
+
         path = self._panel_target_file()
         if path is None:
             QMessageBox.information(
@@ -249,27 +359,31 @@ class PrimerActionsMixin:
         tabs = getattr(self, "_preview_tabs", None)
         if tabs is None:
             return None
-        tabs.show_annotation_for_path(path)
+        workspace = self._primers_workspace()
+        if workspace is None:
+            if not self._leave_file_page_for_workspace(path):
+                return None
+            workspace = PrimersWorkspacePage(path, section=section_key(tab))
+            if workspace.panel._map.data() is None:
+                workspace.deleteLater()
+                QMessageBox.information(
+                    self, "Primers and Probes",
+                    f"{path.name} has no sequence view, so the workspace cannot "
+                    "open on it. Click a FASTA in the Files panel and try again.",
+                )
+                return None
+            self._wire_primers_workspace(workspace)
+            tabs.open_tool_tab(workspace, workspace.tab_name())
+        else:
+            if (not same_file(path, workspace.sequence_path())
+                    and self._leave_file_page_for_workspace(path)):
+                workspace.set_sequence(path)
+            tabs.setCurrentWidget(workspace)
+        # Design opens on its settings, "primer" on the primers of the sequence.
+        page = {"design": PANEL_DESIGN, "primer": PANEL_PRIMER}.get(tab)
+        workspace.set_section(section_key(tab), page=page)
         self._ensure_preview_visible()
-        # The page of this file, not whatever tab happens to be in front: a tool
-        # tab (Map, Sanger, a gel) can be the current one.
-        find = getattr(tabs, "page_for_path", None)
-        page = find(path) if find is not None else tabs.currentWidget()
-        panel = None
-        ensure = getattr(page, "_ensure_annotation_panel", None)
-        if ensure is not None:
-            panel = ensure()
-        if panel is None:
-            QMessageBox.information(
-                self, "Primers and Probes",
-                f"{path.name} has no sequence view, so the Primers panel cannot "
-                "open on it. Click a FASTA in the Files panel and try again.",
-            )
-            return None
-        panel.show_primers_tab()
-        primers = panel.primers_panel()
-        index = {"design": 0, "primer": 1, "pcr": 2, "enzymes": 3}.get(tab, 0)
-        primers.tabs.setCurrentIndex(index)
+        primers = workspace.primers_panel()
         if mode is not None:
             pane = primers.design_pane
             modes = [pane.mode.itemData(i) for i in range(pane.mode.count())]

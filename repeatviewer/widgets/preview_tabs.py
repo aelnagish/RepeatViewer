@@ -3757,7 +3757,10 @@ class PreviewTabWidget(QTabWidget):
         not to save), False to stay (Cancel, or saving failed).
         """
         if not isinstance(page, FilePreviewPage):
-            return True
+            # A tool page that holds unsaved work (the Primers and Probes
+            # workspace) asks for itself.
+            ask = getattr(page, "confirm_leave", None)
+            return bool(ask()) if callable(ask) else True
         text_dirty = page.has_unsaved_text()
         annot_dirty = page.has_unsaved_annotations()
         if not (text_dirty or annot_dirty):
@@ -4399,6 +4402,11 @@ class PreviewTabWidget(QTabWidget):
     def close_all_tabs(self) -> None:
         if not self.confirm_close_pages(self.unsaved_pages()):
             return
+        for index in range(self.count()):
+            # Tool pages with unsaved work (the Primers and Probes workspace).
+            page = self.widget(index)
+            if not isinstance(page, FilePreviewPage) and not self.confirm_leave_page(page):
+                return
         while self.count():
             widget = self.widget(0)
             if isinstance(widget, FilePreviewPage):

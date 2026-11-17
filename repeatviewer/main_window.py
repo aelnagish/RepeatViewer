@@ -3308,6 +3308,12 @@ class MainWindow(
         ):
             event.ignore()
             return
+        # The Primers and Probes workspace can hold unsaved annotation edits too.
+        workspace_of = getattr(self, "_primers_workspace", None)
+        workspace = workspace_of() if workspace_of is not None else None
+        if workspace is not None and not workspace.confirm_leave():
+            event.ignore()
+            return
         if self._find_dialog is not None:
             self._find_dialog.save_settings()
         # Save the layout first: tearing down web previews below can crash on some
@@ -10360,6 +10366,11 @@ class MainWindow(
                     return
             except OSError:
                 pass
+        # The Primers and Probes workspace in front: a clicked FASTA becomes
+        # the sequence it works on, and no file tab opens over it.
+        takes = getattr(self, "_primers_workspace_takes_file", None)
+        if takes is not None and takes(path):
+            return
         self._open_file_in_preview(path)
 
     def _resolve_te_masking_input_path(self, path: Path) -> Path | None:

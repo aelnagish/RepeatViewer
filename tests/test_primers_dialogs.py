@@ -275,7 +275,7 @@ def test_the_old_windows_are_gone():
         importlib.import_module("repeatviewer.views.pcr_dialog")
 
 
-def test_design_finds_the_file_page_behind_a_tool_tab(qapp, tmp_path):
+def test_design_opens_the_workspace_behind_a_tool_tab(qapp, tmp_path):
     """A tool tab that comes and goes must not send Design to the wrong tab."""
     import random
 
@@ -285,7 +285,8 @@ def test_design_finds_the_file_page_behind_a_tool_tab(qapp, tmp_path):
 
     from repeatviewer.pcr_actions import PcrActionsMixin
     from repeatviewer.primer_actions import PrimerActionsMixin
-    from repeatviewer.widgets.preview_tabs import FilePreviewPage, PreviewTabWidget
+    from repeatviewer.views.primers_workspace import PrimersWorkspacePage
+    from repeatviewer.widgets.preview_tabs import PreviewTabWidget
 
     r = random.Random(3)
     fa = tmp_path / "CroSat4.fasta"
@@ -310,16 +311,23 @@ def test_design_finds_the_file_page_behind_a_tool_tab(qapp, tmp_path):
     host = Host()
     tabs.open_tool_tab(QLabel("one"), "Sanger Check")
     host._design_in_panel(dz.MODE_PCR)
-    assert isinstance(tabs.currentWidget(), FilePreviewPage)
+    assert isinstance(tabs.currentWidget(), PrimersWorkspacePage)
 
     # The same tool runs again: its old tab goes, every tab after it moves up.
     tabs.open_tool_tab(QLabel("two"), "Sanger Check")
-    assert tabs.page_for_path(fa) is not None
     host._design_in_panel(dz.MODE_PCR)
     page = tabs.currentWidget()
-    assert isinstance(page, FilePreviewPage) and page.path == fa.resolve()
-    panel = page._ensure_annotation_panel()
-    assert panel.primers_panel().tabs.currentIndex() == 0
+    assert isinstance(page, PrimersWorkspacePage) and page.sequence_path() == fa.resolve()
+    assert page.primers_panel().tabs.currentIndex() == 0
+    # A window left behind would be found by find_main_window in later tests.
+    from PySide6.QtCore import QCoreApplication, QEvent
+    from PySide6.QtTest import QTest
+
+    QTest.qWait(200)             # queued refreshes finish before their widgets go
+    for widget in (host, tabs):
+        widget.close()
+        widget.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
 
 
 def test_toolbar_popup_lists_what_is_inside_design_and_map(qapp):
