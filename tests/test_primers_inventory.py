@@ -538,7 +538,6 @@ def test_window_people(qapp, settings, shared, monkeypatch):
 
     from repeatviewer.views.primer_database_dialog import (
         PeopleDialog,
-        PeoplePicker,
         PrimerDatabaseDialog,
     )
 
@@ -549,18 +548,16 @@ def test_window_people(qapp, settings, shared, monkeypatch):
     assert d._table.rowCount() == 8
     assert d._person.currentText() == "Nici (8)"
     d._person.setCurrentIndex(0)
-    # The form shows names; the picker sets people.
+    # The form shows names; the drop-down sets people.
     d._table.selectRow(_row_of(d, "ITS4"))
     qapp.processEvents()
     field = d._fields["ordered_by"]
-    assert field._text.text() == "Anna"
+    assert field.currentText() == "Anna"
     db = d.database()
-    picker = PeoplePicker(db, field.value(), d)
     monkeypatch.setattr(QInputDialog, "getText", lambda *a, **k: ("Daniel", True))
-    picker._add()
-    assert picker.chosen() == [inv.person_id("Anna"), inv.person_id("Daniel")]
-    field.set_value(picker.chosen())
-    d._form_touched()
+    field._add_person()
+    assert field.value() == [inv.person_id("Anna"), inv.person_id("Daniel")]
+    assert field.currentText() == "Anna, Daniel"
     assert d._save_btn.isEnabled()
     d._save_form()
     assert db.ordered_by_text(db.record_by_name("ITS4")) == "Anna, Daniel"
@@ -631,9 +628,7 @@ def test_window_remembers_its_layout(qapp, settings, shared):
     d.show()
     d.resize(1100, 650)
     d._table.setColumnWidth(_COL["name"], 222)
-    d._split_main.setSizes([300, 500])
     qapp.processEvents()
-    bottom = d._split_main.sizes()
     d.close()
     e = PrimerDatabaseDialog(shared)
     e.show()
@@ -642,8 +637,12 @@ def test_window_remembers_its_layout(qapp, settings, shared):
     assert e._table.columnWidth(_COL["name"]) == 222
     e._fill()   # a refill keeps the user's column widths
     assert e._table.columnWidth(_COL["name"]) == 222
-    got = e._split_main.sizes()
-    assert abs(got[0] / sum(got) - bottom[0] / sum(bottom)) < 0.05
+    # The form is only as high as its rows; the table has the rest.
+    assert e._form_host.height() == e._form_host.sizeHint().height()
+    assert e._table.height() > e._form_host.height()
+    sizes = {(w.width(), w.height()) for k, w in e._fields.items()
+             if k not in ("sequence", "note", "dissolved")}
+    assert len(sizes) == 1   # text fields and drop-down menus are one size
     e.close()
 
 

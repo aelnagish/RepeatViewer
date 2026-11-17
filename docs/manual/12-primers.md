@@ -290,7 +290,7 @@ whether it worked, who ordered it and when, and every change since.
 - Select a primer to edit it below the table, then **Save Changes**. Select
   several to set a field on all of them at once (for example a new box, or
   *Used up*).
-- **History…** lists every change to the selected primer: who, when, what.
+- **History** lists every change to the selected primer: who, when, what.
 - **Pair** is found from the names (`_for`/`_rev`, `_fwd`/`_rev1`,
   `_FW`/`_RV`, `_F`/`_R`); write it in *Pairs with* when the names do not show
   it.
@@ -303,8 +303,8 @@ whether it worked, who ordered it and when, and every change since.
   **Organisms** and **Targets**.
 - **Find Duplicates**: the same sequence under two names, reverse complements,
   one primer inside another.
-- **Export…**: the whole table (TSV), a FASTA, or an order sheet.
-- **Import…**: a CSV, TSV or Excel sheet. The header row is found and known
+- **Export**: the whole table (TSV), a FASTA, or an order sheet.
+- **Import**: a CSV, TSV or Excel sheet. The header row is found and known
   columns are read (name, sequence, organism, target, Tm, dissolved volume,
   ordered by, ordered on, box, freezer, room, status, tested, annealing,
   concentration, pair, note). Before importing it shows what is new, what is
@@ -333,7 +333,7 @@ two people change the same field of one primer, the later change wins.
 ### Check a new sequence against the stock
 
 Before designing and ordering for a new plant, see what the lab already has:
-select the primers to test (none = all) and click **Check a Sequence…**. Give
+select the primers to test (none = all) and click **Check a Sequence**. Give
 the **Sequence** (click a FASTA in the Files panel) and how strict to be
 (product size; mismatches, by default up to 2 but with the last 3 bases at the
 3′ end matching). The report starts with **From your Primer Database**:
