@@ -155,6 +155,57 @@ class PcrActionsMixin:
 
     def _open_sanger_dialog(self, *, expected: str = "", expected_name: str = "",
                             path=None) -> None:
+        """Sanger Check as a tab in the middle, with its settings on the right."""
+        from repeatviewer.views.sanger_dialog import _read_fasta
+        from repeatviewer.views.sanger_page import SangerPage
+
+        picked = [Path(p) for p in self._selected_files()] if hasattr(self, "_selected_files") \
+            else []
+        reads = [p for p in picked if p.suffix.lower() in sanger_read_suffixes()]
+        if not expected:
+            source = Path(path) if path else next(
+                (p for p in picked if p not in reads and p.is_file()), None)
+            if source is not None:
+                records = _read_fasta(source)
+                if records:
+                    expected_name, expected = records[0][0], records[0][1]
+                    path = source
+        folder = Path(path).parent if path else (reads[0].parent if reads else None)
+        page = SangerPage(expected, expected_name=expected_name, folder=folder)
+        if reads:
+            page.add_reads(reads)
+        tabs = getattr(self, "_preview_tabs", None)
+        if tabs is None:
+            return
+        tabs.open_tool_tab(page, page.tab_name())
+        self._ensure_preview_visible()
+        self._sanger_page = page
+
+    def _open_cloning_dialog(self, *, insert: str = "", insert_name: str = "",
+                             path=None, features=()) -> None:
+        from repeatviewer.views.cloning_dialog import CloningDialog
+        from repeatviewer.views.sanger_dialog import _read_fasta
+
+        if not insert:
+            source = Path(path) if path else next(
+                (p for p in (self._selected_files() if hasattr(self, "_selected_files") else [])
+                 if Path(p).is_file()), None)
+            if source is not None:
+                records = _read_fasta(Path(source))
+                if records:
+                    insert_name, insert = records[0][0], records[0][1]
+                    path = source
+        folder = Path(path).parent if path else None
+        dlg = CloningDialog(insert, insert_name=insert_name, folder=folder, features=features,
+                            parent=self)
+        dlg.setWindowFlag(Qt.WindowType.Tool, True)
+        dlg.show()
+        self._cloning_dialog = dlg
+
+    # ------------------------------------------------------------- Sanger
+
+    def _open_sanger_dialog(self, *, expected: str = "", expected_name: str = "",
+                            path=None) -> None:
         from repeatviewer.views.sanger_dialog import SangerDialog, _read_fasta
 
         picked = [Path(p) for p in self._selected_files()] if hasattr(self, "_selected_files") \
