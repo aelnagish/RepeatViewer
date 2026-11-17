@@ -341,6 +341,24 @@ def _is_dark(widget: QWidget) -> bool:
     return widget.palette().color(QPalette.ColorRole.Window).lightness() < 128
 
 
+def _group_predicted_boundaries_by_edge(
+    guides: list[tuple[int, QColor, bool]],
+) -> list[tuple[int, list[tuple[QColor, bool]]]]:
+    """Group guides by column edge (dashed methods first, solid last)."""
+    by_edge: dict[int, list[tuple[QColor, bool]]] = {}
+    order: list[int] = []
+    for edge, color, solid in guides:
+        key = int(edge)
+        if key not in by_edge:
+            by_edge[key] = []
+            order.append(key)
+        by_edge[key].append((color, bool(solid)))
+    return [
+        (edge, sorted(by_edge[edge], key=lambda g: bool(g[1])))
+        for edge in order
+    ]
+
+
 def _wheel_delta_y(event: QWheelEvent) -> int:
     """Vertical pixels for a wheel/trackpad event (do not steal horizontal swipes)."""
     pixel = event.pixelDelta()
@@ -4425,7 +4443,9 @@ class _BarsCanvas(QWidget):
     ) -> None:
         """Full-height guides at predicted boundary column edges.
 
-        Method guides are dashed; the final boundary is solid and drawn last.
+        One method → dashed (or solid) line in that colour. Several methods on
+        the same column → one shared vertical line that alternates colours
+        along its length (e.g. LTR, then MSA identity, then Genome Cov).
         """
         if not self._msa_mode or not self._predicted_boundaries:
             return
@@ -4435,21 +4455,43 @@ class _BarsCanvas(QWidget):
         clip_left = float(clip.left()) - 1.0
         clip_right = float(clip.right()) + 1.0
         letters = self._msa_shows_letters()
-        for edge, color, solid in sorted(
-            self._predicted_boundaries, key=lambda g: bool(g[2])
+        # ~2 cm colour run on a typical display (≈75–96 px/inch).
+        alt_seg_px = 72.0
+        for edge, items in _group_predicted_boundaries_by_edge(
+            self._predicted_boundaries
         ):
             x = float(self._bar_pad) + float(edge) * ppb
             if not (clip_left <= x <= clip_right):
                 continue
-            width = (3.0 if letters else 2.0) + (1.0 if solid else 0.0)
-            pen = QPen(
-                color,
-                width,
-                Qt.PenStyle.SolidLine if solid else Qt.PenStyle.DashLine,
-            )
-            pen.setCosmetic(True)
-            painter.setPen(pen)
-            painter.drawLine(QPointF(x, y0), QPointF(x, y1))
+            n = len(items)
+            any_solid = any(solid for _color, solid in items)
+            base_width = (3.0 if letters else 2.0) + (1.0 if any_solid else 0.0)
+            if n <= 1:
+                color, solid = items[0]
+                pen = QPen(
+                    color,
+                    base_width,
+                    Qt.PenStyle.SolidLine if solid else Qt.PenStyle.DashLine,
+                )
+                pen.setCosmetic(True)
+                painter.setPen(pen)
+                painter.drawLine(QPointF(x, y0), QPointF(x, y1))
+                continue
+            # Same column: cycle method colours down the line; 2× thicker so
+            # overlapping methods read clearly as one shared boundary.
+            width = base_width * 2.0
+            y = y0
+            index = 0
+            while y < y1 - 0.5:
+                color, _solid = items[index % n]
+                y_end = min(y1, y + alt_seg_px)
+                pen = QPen(color, width, Qt.PenStyle.SolidLine)
+                pen.setCosmetic(True)
+                pen.setCapStyle(Qt.PenCapStyle.FlatCap)
+                painter.setPen(pen)
+                painter.drawLine(QPointF(x, y), QPointF(x, y_end))
+                y = y_end
+                index += 1
         painter.setPen(Qt.PenStyle.NoPen)
 
     def _paint_msa_rows_pixel_sample(

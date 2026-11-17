@@ -727,6 +727,36 @@ def test_msa_standard_extent_for_boundary_guides(
     panel.close()
 
 
+def test_coincident_boundary_guides_group_by_edge() -> None:
+    """Methods that share a column stay one line (colours alternate along it)."""
+    from PySide6.QtGui import QColor
+
+    from repeatviewer.widgets.multi_sequence_overview import (
+        _group_predicted_boundaries_by_edge,
+    )
+
+    orange = QColor("#c0392b")
+    blue = QColor("#1f77b4")
+    green = QColor("#2ca02c")
+    guides = [
+        (6477, orange, False),
+        (25836, orange, False),
+        (6477, blue, False),
+        (25836, blue, False),
+        (5226, green, False),
+        (25836, green, False),
+    ]
+    grouped = dict(_group_predicted_boundaries_by_edge(guides))
+    assert len(grouped[5226]) == 1
+    assert len(grouped[6477]) == 2
+    assert len(grouped[25836]) == 3
+    assert {c.name() for c, _s in grouped[25836]} == {
+        orange.name(),
+        blue.name(),
+        green.name(),
+    }
+
+
 def test_show_reference_boundaries_persists_across_new_msa(
     qapp: QApplication, tmp_path: Path
 ) -> None:
