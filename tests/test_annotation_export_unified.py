@@ -132,6 +132,29 @@ def test_image_only_dialog_has_no_annotation_types(qapp, tmp_path: Path, fmt) ->
         dialog.close()
 
 
+def test_export_type_combo_wide_enough_for_labels(qapp, tmp_path: Path) -> None:
+    """Type must not stay at ~55 px or the popup shows \"…\" instead of PNG/SVG."""
+    from repeatviewer.views.export_annotation_view_dialog import (
+        ExportAnnotationViewDialog,
+    )
+
+    dialog = ExportAnnotationViewDialog(
+        source_path=tmp_path / "x.fa",
+        title="Export dotplot",
+        name_tag="dotplot",
+        default_format="pdf",
+    )
+    try:
+        assert dialog._type.minimumWidth() >= 100
+        view = dialog._type.view()
+        assert view is not None
+        assert view.minimumWidth() >= 100
+        for i in range(dialog._type.count()):
+            assert dialog._type.itemText(i) in {"PDF", "PNG", "SVG"}
+    finally:
+        dialog.close()
+
+
 def test_unsaved_annotation_marker_and_discard(qapp, tmp_path: Path) -> None:
     from repeatviewer.widgets.sequence_map_viewer import SequenceMapPanel
 

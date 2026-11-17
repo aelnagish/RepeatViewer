@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 from PySide6.QtCore import QRectF
 
 from repeatviewer.widgets.dotplot_view import (
@@ -383,3 +384,72 @@ def test_non_overlapping_prefers_sequence_end() -> None:
     assert 810 in shown
     assert 800 not in shown
     assert 0 in shown
+
+
+def test_export_line_width_scales_with_dpi() -> None:
+    """Display Line width must thicken on high-DPI PDF/PNG pages."""
+    from repeatviewer.widgets.dotplot_view import (
+        _export_line_width_px,
+        _line_width_px,
+    )
+
+    assert _line_width_px(22) == pytest.approx(2.2)
+    # SVG / 72 dpi: same as screen mapping, floored at 1 px.
+    assert _export_line_width_px(8, 72) == pytest.approx(1.0)
+    assert _export_line_width_px(22, 72) == pytest.approx(2.2)
+    # Default PDF dpi: thicker strokes so step changes stay visible on A4.
+    assert _export_line_width_px(8, 400) == pytest.approx(8 * 0.1 * 400 / 72.0)
+    assert _export_line_width_px(22, 400) == pytest.approx(22 * 0.1 * 400 / 72.0)
+    assert _export_line_width_px(22, 400) > _export_line_width_px(8, 400)
+
+
+def test_pdf_export_applies_line_width_and_clears_cache(qapp, tmp_path) -> None:
+    """PDF used to skip export-pen setup and keep DeviceCoordinateCache."""
+    from PySide6.QtWidgets import QGraphicsItem
+
+    from repeatviewer.backends.dotplot import (
+        STRAND_FORWARD,
+        DotplotResult,
+        DotplotSegment,
+    )
+    from repeatviewer.widgets.dotplot_view import (
+        DotplotCanvas,
+        _export_line_width_px,
+    )
+
+    canvas = DotplotCanvas()
+    canvas.resize(400, 400)
+    canvas.show()
+    qapp.processEvents()
+    canvas.show_result(
+        DotplotResult(
+            sequence_id="seq",
+            sequence_length=100,
+            word_size=10,
+            segments=[DotplotSegment(10, 10, 40, STRAND_FORWARD)],
+            include_reverse=False,
+        )
+    )
+    qapp.processEvents()
+    canvas.set_line_width_step(22)
+    assert canvas._item is not None
+    canvas._item.setCacheMode(QGraphicsItem.CacheMode.DeviceCoordinateCache)
+
+    widths: list[float | None] = []
+    original = canvas._item.set_export_pen_px
+
+    def _record(width: float | None) -> None:
+        widths.append(width)
+        original(width)
+
+    canvas._item.set_export_pen_px = _record  # type: ignore[method-assign]
+    out = tmp_path / "dotplot.pdf"
+    canvas.export_to_path(out, dpi=400, title="t")
+    assert out.is_file() and out.stat().st_size > 0
+    expected = _export_line_width_px(22, 400)
+    assert any(
+        w is not None and abs(float(w) - expected) < 1e-6 for w in widths
+    )
+    assert widths[-1] is None
+    assert canvas._item.cacheMode() == QGraphicsItem.CacheMode.DeviceCoordinateCache
+    canvas.deleteLater()

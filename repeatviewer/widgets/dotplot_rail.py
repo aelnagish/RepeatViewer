@@ -354,6 +354,33 @@ class DotplotRail(QWidget):
         scroll.viewport().setMinimumWidth(0)
         return scroll
 
+    def _shell_with_sticky_title(self, title: str, body: QWidget) -> QWidget:
+        """Pin ``title`` above the scroll body (Annotation Display pattern)."""
+        shell = QWidget()
+        shell.setMinimumWidth(0)
+        shell.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding
+        )
+        self._fill_rail_surface(shell)
+        shell_layout = QVBoxLayout(shell)
+        shell_layout.setContentsMargins(0, 0, 0, 0)
+        shell_layout.setSpacing(0)
+
+        title_host = QWidget(shell)
+        title_host.setMinimumWidth(0)
+        title_layout = QVBoxLayout(title_host)
+        title_layout.setContentsMargins(10, 10, 10, 0)
+        title_layout.setSpacing(0)
+        title_layout.addWidget(_page_title_with_rule(title, title_host))
+        shell_layout.addWidget(title_host, 0)
+
+        scroll = self._wrap_scroll(body)
+        scroll.setStyleSheet(
+            "QScrollArea { background: transparent; border: none; }"
+        )
+        shell_layout.addWidget(scroll, 1)
+        return shell
+
     def _form_layout(self) -> QFormLayout:
         form = QFormLayout()
         form.setContentsMargins(0, 0, 0, 0)
@@ -386,9 +413,8 @@ class DotplotRail(QWidget):
     def _build_display_page(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setContentsMargins(10, 6, 10, 6)
         layout.setSpacing(8)
-        layout.addWidget(_page_title_with_rule("Display", page))
 
         spin_expand = QSizePolicy.Policy.Expanding
 
@@ -803,7 +829,7 @@ class DotplotRail(QWidget):
         self.view_y_btn.setEnabled(False)
         layout.addWidget(self.sel_row)
         layout.addStretch(1)
-        return self._wrap_scroll(page)
+        return self._shell_with_sticky_title("Display", page)
 
     def _on_zoom_slider(self, value: int) -> None:
         if self._updating_zoom_slider:

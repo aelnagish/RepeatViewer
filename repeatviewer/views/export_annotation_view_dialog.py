@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 )
 
 from repeatviewer.widgets.combo_boxes import NoWheelComboBox as QComboBox
+from repeatviewer.widgets.combo_boxes import size_export_format_combo
 from repeatviewer.widgets.file_conflict import confirm_existing_file_path
 from repeatviewer.widgets.path_browse import PathBrowseRow
 from repeatviewer.widgets.spin_boxes import NoWheelSpinBox as QSpinBox
@@ -231,6 +232,7 @@ class ExportAnnotationViewDialog(QDialog):
         if idx < 0:
             idx = self._type.findData(default_format)
         self._type.setCurrentIndex(max(0, idx))
+        size_export_format_combo(self._type)
         self._last_fmt = self._current_fmt()
 
         self._dpi = QSpinBox(self)
@@ -238,6 +240,7 @@ class ExportAnnotationViewDialog(QDialog):
         self._dpi.setSingleStep(25)
         self._dpi.setValue(saved_dpi)
         self._dpi.setSuffix(" DPI")
+        self._dpi.setMinimumWidth(max(110, self._dpi.sizeHint().width()))
 
         self._auto_gff3 = QCheckBox("Also write GFF3 on every Save", self)
         self._auto_gff3.setChecked(_auto_gff3_enabled())

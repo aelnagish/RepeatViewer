@@ -109,7 +109,6 @@ from repeatviewer.widgets.preview_controls import (
 )
 from repeatviewer.widgets.sequence_annotation_rail import (
     _h_divider,
-    _page_title_with_rule,
     _section_label,
 )
 from repeatviewer.widgets.spin_boxes import NoWheelDoubleSpinBox, NoWheelSlider, NoWheelSpinBox
@@ -1905,10 +1904,9 @@ class TreePanel(QWidget):
     def _build_find_page(self) -> QWidget:
         page = QWidget(self)
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(10, 10, 10, 10)
+        # Title is pinned above the scroll by TreeDisplayRail.
+        layout.setContentsMargins(10, 6, 10, 6)
         layout.setSpacing(8)
-        title, _rule = _page_title_with_rule("Find", page)
-        layout.addWidget(title)
         self._find_query = QLineEdit(page)
         self._find_query.setPlaceholderText("Tip name or trait value…")
         self._find_query.setClearButtonEnabled(True)

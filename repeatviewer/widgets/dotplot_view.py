@@ -238,6 +238,17 @@ def _line_width_px(step: int) -> float:
     return step * _LINE_WIDTH_PX_PER_STEP
 
 
+def _export_line_width_px(step: int, dpi: int) -> float:
+    """Cosmetic pen width for PDF/PNG/SVG export device pixels.
+
+    Screen Line width uses ~72–96 dpi cosmetic pixels. High-DPI A4 export
+    (default 400) must scale the same step so thicker UI values stay visible
+    and track the Display control.
+    """
+    dpi = max(50, min(600, int(dpi)))
+    return max(1.0, _line_width_px(step) * (dpi / 72.0))
+
+
 # Zoom limits are relative to the scale that fits the whole plot, not absolute.
 # A 190 kb window fits at ~0.004 px/base, so an absolute lower bound of 0.02
 # silently blocked every zoom attempt.
@@ -2098,19 +2109,26 @@ class DotplotCanvas(QGraphicsView):
 
         suffix = path.suffix.lower()
         dpi = max(50, min(600, int(dpi)))
-        if suffix == ".pdf":
-            self.render_to_pdf(path, title=title, subtitle=subtitle, dpi=dpi)
-            return
+        # SVG paints in 72 pt/in logical space; PDF/PNG use the requested dpi.
+        export_dpi = 72 if suffix == ".svg" else dpi
 
         item = self._item
         prev_cache = None
         if item is not None:
             prev_cache = item.cacheMode()
             # DeviceCoordinateCache is for the on-screen viewport; painting to
-            # a QImage/SVG with it active yields a sparse/stale plot.
+            # PDF/PNG/SVG with it active yields a sparse/stale plot that ignores
+            # the current Line width.
             item.setCacheMode(QGraphicsItem.CacheMode.NoCache)
+            item.set_export_pen_px(
+                _export_line_width_px(self._line_width_step, export_dpi)
+            )
 
         try:
+            if suffix == ".pdf":
+                self.render_to_pdf(path, title=title, subtitle=subtitle, dpi=dpi)
+                return
+
             if suffix == ".svg":
                 try:
                     from PySide6.QtSvg import QSvgGenerator  # type: ignore
@@ -2122,8 +2140,6 @@ class DotplotCanvas(QGraphicsView):
                 # grid. That keeps the SVG resolution-independent so Preview and
                 # browsers can scale it without looking like an upscaled bitmap.
                 page = QRect(0, 0, 595, 842)  # A4 at 72 pt/in
-                if item is not None:
-                    item.set_export_pen_px(_line_width_px(self._line_width_step))
                 gen = QSvgGenerator()
                 gen.setFileName(str(path))
                 gen.setSize(page.size())
@@ -2141,9 +2157,6 @@ class DotplotCanvas(QGraphicsView):
 
             if suffix == ".png":
                 page = self._a4_page_rect(dpi)
-                # Same cosmetic width the PDF path uses on the A4 device.
-                if item is not None:
-                    item.set_export_pen_px(_line_width_px(self._line_width_step))
                 img = QImage(page.size(), QImage.Format.Format_ARGB32)
                 # Match QPdfWriter font metrics / physical size metadata.
                 dpm = int(round(dpi / 0.0254))
