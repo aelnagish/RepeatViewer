@@ -424,6 +424,10 @@ class PrimersPanel(QWidget):
     def show_design_tab(self) -> None:
         self.tabs.setCurrentIndex(0)
 
+    def show_pcr_tab(self) -> None:
+        """The PCR page; it picks up the ticked primers of this sequence by itself."""
+        self.tabs.setCurrentIndex(2)
+
     def push_workbench_overlay(self) -> None:
         """Redraw what the current page shows on the sequence (rail tab shown again)."""
         self.design_pane.push_overlay()
@@ -1029,12 +1033,8 @@ class PrimersPanel(QWidget):
         self.show_design_tab()
 
     def _on_pcr(self) -> None:
-        mw = find_main_window()
-        if mw is None or self._path is None:
-            return
-        opener = getattr(mw, "_open_pcr_window", None)
-        if opener is not None:
-            opener(templates=[self._path], primers=self.ticked_primers())
+        """The PCR page of this panel, with the ticked primers already chosen."""
+        self.show_pcr_tab()
 
     def _on_genome(self) -> None:
         mw = find_main_window()

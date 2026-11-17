@@ -3,6 +3,7 @@
 import json
 import random
 import time
+from pathlib import Path
 
 import pytest
 from PySide6.QtCore import QCoreApplication, QSettings, Qt
@@ -458,3 +459,53 @@ def test_probe_mode_shows_the_fish_rows_and_designs_probes(qapp, isolated_settin
     pane._on_keep()
     assert len(kept) == 1 and len(kept[0]) == 1
     assert "probe" in kept[0][0].note.lower() or kept[0][0].kind == "probe"
+
+
+def test_pcr_tab_runs_on_several_ticked_files(qapp, isolated_settings, tmp_path, monkeypatch):
+    """Run on: Selected files tests one pair on every ticked FASTA, file column and all."""
+    from repeatviewer.backends.primers import thermo as th
+    from repeatviewer.backends.primers.oligos import Primer
+    from repeatviewer.widgets import primer_pcr_pane as pp
+    from repeatviewer.widgets.primers_panel import PrimersPanel
+
+    r = random.Random(21)
+    seq = "".join(r.choice("ACGT") for _ in range(2000))
+    files = []
+    for i in range(2):
+        fa = tmp_path / f"fam{i}.fa"
+        fa.write_text(f">fam{i}\n" + seq + "\n")
+        files.append(fa)
+
+    class MW:
+        def _pcr_template_candidates(self):
+            return list(files)
+
+    monkeypatch.setattr("repeatviewer.widgets.primers_panel.find_main_window",
+                        lambda: MW(), raising=False)
+
+    panel = PrimersPanel(width=330)
+    panel.set_host(_Host(files[0], seq))
+    panel.reload()
+    panel.add_primers([Primer("F", seq[199:221]),
+                       Primer("R", th.reverse_complement(seq[1098:1120]))])
+    panel.tabs.setCurrentIndex(2)
+    pane = panel.pcr_pane
+    assert pane.run_where() == pp.RUN_THIS
+
+    for b in pane.run_group.buttons():
+        if b.property("run") == pp.RUN_FILES:
+            b.click()
+    assert pane.run_where() == pp.RUN_FILES
+    assert pane.templates() == files
+    assert pane.table.columnCount() == 5
+    assert pane.table.horizontalHeaderItem(1).text() == "File"
+    assert "2 files" in pane.run_note.text()
+
+    end = time.time() + 20
+    while (pane._result is None or pane._timer.isActive()) and time.time() < end:
+        qapp.processEvents()
+        time.sleep(0.02)
+    prods = pane.products()
+    assert len({Path(p.template).name for p in prods}) == 2
+    names = {pane.table.item(r, 1).text() for r in range(pane.table.rowCount())}
+    assert names == {"fam0.fa", "fam1.fa"}

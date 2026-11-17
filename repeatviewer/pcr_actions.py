@@ -100,8 +100,8 @@ class PcrActionsMixin:
     # ------------------------------------------------------------- menu
 
     def _populate_pcr_menu_items(self, menu) -> None:
-        a = menu.addAction("In-silico PCR", lambda: self._open_pcr_window())
-        a.setToolTip("In-silico PCR: products of the primers on the selected sequences")
+        a = menu.addAction("In-silico PCR", self._open_pcr_in_panel)
+        a.setToolTip("In-silico PCR: products of the primers on this sequence or the ticked files")
         a = menu.addAction("Restriction Digest", self._open_digest_in_panel)
         a.setToolTip("Restriction map and digest of the sequence, with your methylation data")
         a = menu.addAction("Gel", self._open_gel_document)
@@ -112,6 +112,10 @@ class PcrActionsMixin:
         menu.addSeparator()
         a = menu.addAction("Cloning", lambda: self._open_cloning_dialog())
         a.setToolTip("Put a PCR product into a vector: orientation, colony PCR, warnings")
+
+    def _open_pcr_in_panel(self) -> None:
+        """PCR page of the Primers panel, live on the open sequence."""
+        self._open_primers_panel(tab="pcr")
 
     def _open_digest_in_panel(self) -> None:
         """Enzymes page of the Primers panel, on its Digest view."""

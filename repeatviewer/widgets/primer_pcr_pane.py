@@ -31,13 +31,28 @@ from PySide6.QtWidgets import (
 
 from repeatviewer.backends.primers import pcr
 from repeatviewer.backends.primers import thermo as th
-from repeatviewer.widgets.primer_design_pane import FIELD_W, LABEL_W, _row, _rule, _section
+from repeatviewer.widgets.primer_design_pane import (
+    FIELD_W,
+    GAP,
+    LABEL_W,
+    _row,
+    _rule,
+    _section,
+)
 
 _SETTINGS_KEY = "primers/workbench_pcr"
 # The PCR rows have longer labels: wider label column, the same right edge.
 # Older name for the shared label column, kept so nothing outside breaks.
 PCR_LABEL_W = LABEL_W
 
+RUN_THIS = "this"
+RUN_FILES = "files"
+RUN_ON_HELP = (
+    "<b>This one</b>: the open sequence, live, as you change anything.<br>"
+    "<b>Selected files</b>: every FASTA ticked in the Files panel, so one pair can be tested "
+    "on many satellite families at once. The products of all of them are listed together, "
+    "each with the file it came from."
+)
 PCR_HELP = (
     "<b>Forward</b>, <b>Reverse</b>: primers of this sequence (Primer page).<br>"
     "<b>Kind</b>: Standard lists every product; Satellite ladder groups products that step "
@@ -89,6 +104,29 @@ class PcrPane(QWidget):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(10)
+
+        sec, sl, _ = _section("Run on", self, "Run on", RUN_ON_HELP)
+        from PySide6.QtWidgets import QButtonGroup
+
+        self.run_group = QButtonGroup(self)
+        self.run_group.setExclusive(True)
+        buttons = []
+        for i, (key, text) in enumerate(((RUN_THIS, "This one"), (RUN_FILES, "Selected files"))):
+            b = QPushButton(text, sec)
+            b.setCheckable(True)
+            b.setProperty("run", key)
+            b.setFixedWidth((FIELD_W - GAP) // 2)
+            self.run_group.addButton(b, i)
+            buttons.append(b)
+        buttons[0].setChecked(True)
+        sl.addLayout(_row("Sequence", *buttons, parent=sec, label_w=PCR_LABEL_W))
+        self.run_note = QLabel("", sec)
+        self.run_note.setWordWrap(True)
+        self.run_note.setIndent(PCR_LABEL_W + GAP)
+        self.run_note.setStyleSheet("color: palette(placeholder-text);")
+        sl.addWidget(self.run_note)
+        lay.addWidget(sec)
+        lay.addWidget(_rule(self))
 
         sec, sl, _ = _section("Primers", self, "PCR", PCR_HELP)
         self.forward = _combo([], sec)
@@ -168,6 +206,7 @@ class PcrPane(QWidget):
                     self.polymerase):
             box.currentIndexChanged.connect(self.schedule)
         self.table.itemSelectionChanged.connect(self.push_overlay)
+        self.run_group.idClicked.connect(lambda _i: self._on_run_where())
         self.fit_button.clicked.connect(self._on_fit)
         self.bench_button.clicked.connect(self._on_bench)
         self.gel_button.clicked.connect(self._on_gel)
@@ -222,19 +261,72 @@ class PcrPane(QWidget):
 
     # ------------------------------------------------------------------ live run
 
+    def _on_run_where(self) -> None:
+        """Switching between one file and many: new columns, new run."""
+        many = self.run_where() == RUN_FILES
+        self.table.setColumnCount(5 if many else 4)
+        self.table.setHorizontalHeaderLabels(
+            ["", "File", "Range", "Size", "mm F / R"] if many
+            else ["", "Range", "Size", "mm F / R"])
+        for c, w in enumerate((30, 110, 96, 70) if many else (30, 96, 70)):
+            self.table.setColumnWidth(c, w)
+        self._update_run_note()
+        self.push_overlay()
+        self.schedule()
+
+    def _update_run_note(self, files=None) -> None:
+        files = list(files if files is not None else self.templates())
+        if self.run_where() == RUN_THIS:
+            self.run_note.setText("The open sequence, live.")
+            return
+        if not files:
+            self.run_note.setText("No file ticked in Files.")
+            return
+        names = ", ".join(p.name for p in files[:2])
+        more = f" and {len(files) - 2} more" if len(files) > 2 else ""
+        self.run_note.setText(f"{len(files)} file{'s' if len(files) != 1 else ''}: "
+                              f"{names}{more}")
+
     def schedule(self, *_a) -> None:
         if self.active:
             self._timer.start()
 
+    def run_where(self) -> str:
+        button = self.run_group.checkedButton()
+        return str(button.property("run")) if button is not None else RUN_THIS
+
+    def templates(self) -> list[Path]:
+        """The file (or files) the PCR runs on."""
+        if self.run_where() == RUN_FILES:
+            from repeatviewer.widgets.primers_panel import find_main_window
+
+            mw = find_main_window()
+            chosen = getattr(mw, "_pcr_template_candidates", None)
+            if chosen is not None:
+                try:
+                    return [Path(p) for p in chosen()]
+                except Exception:  # noqa: BLE001 - nothing ticked
+                    return []
+            return []
+        path = self._panel.fasta_path()
+        return [Path(path)] if path else []
+
     def _run(self) -> None:
         f, r = self.chosen()
-        path = self._panel.fasta_path()
+        files = self.templates()
         self._generation += 1
         gen = self._generation
-        if f is None or r is None or path is None:
+        self._update_run_note(files)
+        if f is None or r is None or not files:
             self._result = None
             self._fill()
-            self._show_status("Choose a forward and a reverse primer.", None)
+            if files:
+                note = "Choose a forward and a reverse primer."
+            elif self.run_where() == RUN_FILES:
+                note = "Tick the FASTA files to test in the Files panel."
+            else:
+                note = "Open a sequence to run the PCR on."
+            self._show_status(note, None)
             return
         s = self.settings()
         QSettings().setValue(_SETTINGS_KEY, __import__("json").dumps(s.to_dict()))
@@ -243,7 +335,7 @@ class PcrPane(QWidget):
 
         def work() -> None:
             try:
-                res = pcr.run_pcr([Path(path)], primers, s)
+                res = pcr.run_pcr(files, primers, s)
             except Exception as exc:  # noqa: BLE001 - shown in the pane
                 relay.done.emit(gen, None, str(exc))
                 return
@@ -279,6 +371,9 @@ class PcrPane(QWidget):
         for r, p in enumerate(prods):
             vals = [p.label or str(r + 1), f"{p.start:,}–{p.end:,}", f"{p.size:,} bp",
                     f"{p.mm_forward} / {p.mm_reverse}"]
+            if self.run_where() == RUN_FILES:
+                vals.insert(1, Path(getattr(p, "template", "") or "").name
+                            or str(getattr(p, "record", "")))
             for c, v in enumerate(vals):
                 self.table.setItem(r, c, QTableWidgetItem(v))
         self.table.blockSignals(False)
@@ -363,9 +458,12 @@ class PcrPane(QWidget):
         cands, selected = [], -1
         rows = self.table.selectionModel().selectedRows() if self.table.selectionModel() else []
         chosen_row = rows[0].row() if rows else -1
+        here = str(self._panel.fasta_path() or "")
         for i, p in enumerate(self.products()):
             if p.record and seq_id and p.record != seq_id:
                 continue
+            if here and p.template and str(p.template) != here:
+                continue   # a product of another ticked file: not on this map
             cands.append((p.start, p.start + flen - 1, p.end - rlen + 1, p.end))
             if i == chosen_row:
                 selected = len(cands) - 1
