@@ -210,7 +210,13 @@ def test_menu_texts_and_file_family(qapp):
     from PySide6.QtWidgets import QMenu
 
     from repeatviewer.browser_file_groups import file_family_key
-    from repeatviewer.primer_actions import PRIMER_MANUAL, PRIMER_MENU_ITEMS, PrimerActionsMixin
+    from repeatviewer.primer_actions import (
+        DESIGN_SUBMENU_ITEMS,
+        MAP_SUBMENU_ITEMS,
+        PRIMER_MANUAL,
+        PRIMER_MENU_ITEMS,
+        PrimerActionsMixin,
+    )
 
     class _Host(PrimerActionsMixin):
         pass
@@ -218,7 +224,13 @@ def test_menu_texts_and_file_family(qapp):
     menu = QMenu()
     _Host()._populate_primers_menu(menu)
     texts = [a.text() for a in menu.actions() if not a.isSeparator()]
-    assert texts == list(PRIMER_MENU_ITEMS) == ["Design", "Map", "Database"]
+    # the submenus come first, then the items; the PCR mixin adds the rest
+    assert texts == ["Design", "Map", "Database"]
+    submenus = [a.menu() for a in menu.actions() if a.menu() is not None]
+    assert [a.text() for a in menu.actions() if a.menu() is not None] == ["Design", "Map"]
+    assert [x.text() for x in submenus[0].actions()] == list(DESIGN_SUBMENU_ITEMS)
+    assert [x.text() for x in submenus[1].actions()] == list(MAP_SUBMENU_ITEMS)
+    assert list(PRIMER_MENU_ITEMS)[:3] == ["Design", "Map", "Database"]
     assert all("." not in t and "…" not in t for t in texts)
     assert PRIMER_MANUAL.is_file()
     html = PRIMER_MANUAL.read_text(encoding="utf-8")
@@ -427,3 +439,55 @@ def test_tail_box_pads_six_bases_and_warns(qapp, isolated_settings):
     dlg.apply_tail.click()
     assert dlg._clean().startswith("atgaattc")
     dlg.deleteLater()
+
+
+def test_menu_items_open_the_panel_not_a_window(qapp, tmp_path):
+    """Design and Restriction Digest show the sequence with the right panel page."""
+    from PySide6.QtWidgets import QMenu
+
+    from repeatviewer.backends.primers import design as dz
+    from repeatviewer.pcr_actions import PcrActionsMixin
+    from repeatviewer.primer_actions import PrimerActionsMixin
+
+    opened: list[tuple] = []
+
+    class _Host(PrimerActionsMixin, PcrActionsMixin):
+        def _primers_ready(self):
+            return True
+
+        def _open_primers_panel(self, *, tab="design", mode=None, digest=False):
+            opened.append((tab, mode, digest))
+            return None
+
+    host = _Host()
+    menu = QMenu()
+    host._populate_primers_menu(menu)
+    design = [a for a in menu.actions() if a.text() == "Design"][0].menu()
+    [a for a in design.actions() if a.text() == "Primers"][0].trigger()
+    [a for a in design.actions() if a.text() == "Repetitive Probes"][0].trigger()
+    [a for a in menu.actions() if a.text() == "Restriction Digest"][0].trigger()
+    assert opened == [("design", dz.MODE_PCR, False),
+                      ("design", dz.MODE_FISH, False),
+                      ("enzymes", None, True)]
+
+
+def test_map_for_probes_drops_the_pcr_rules(qapp):
+    """Map > Repetitive Probes searches probes only, with no 3' end rule."""
+    from dataclasses import replace
+
+    from repeatviewer.job_options import load_primer_options
+
+    opts = load_primer_options()
+    ms = dict(opts.map)
+    ms.update(search_forward=False, search_reverse=False, search_probe=True,
+              pairs_only=False, three_prime_exact=0, use_max_mismatches=True)
+    probe_opts = replace(opts, map=ms)
+    assert probe_opts.map["search_probe"] is True
+    assert probe_opts.map["search_forward"] is False
+    assert probe_opts.map["three_prime_exact"] == 0
+
+    from repeatviewer.backends.primers import jobs as pj
+
+    settings = pj.MapSettings.from_dict(probe_opts.map)
+    assert settings.search_probe and not settings.search_forward
+    assert settings.three_prime_exact == 0 and not settings.pairs_only

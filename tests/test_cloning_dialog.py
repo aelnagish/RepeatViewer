@@ -102,5 +102,6 @@ def test_menu_offers_cloning(qapp):
 
     menu = QMenu()
     _Host()._populate_primers_menu(menu)
-    assert [a.text() for a in menu.actions()] == [
-        "Design", "Map", "Database", "In-silico PCR", "Sanger Check", "Cloning"]
+    texts = [a.text() for a in menu.actions() if not a.isSeparator()]
+    assert texts == ["Design", "Map", "Database", "In-silico PCR", "Restriction Digest",
+                     "Gel", "Sanger Check", "Cloning"]

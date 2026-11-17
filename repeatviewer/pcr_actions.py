@@ -102,10 +102,31 @@ class PcrActionsMixin:
     def _populate_pcr_menu_items(self, menu) -> None:
         a = menu.addAction("In-silico PCR", lambda: self._open_pcr_window())
         a.setToolTip("In-silico PCR: products of the primers on the selected sequences")
+        a = menu.addAction("Restriction Digest", self._open_digest_in_panel)
+        a.setToolTip("Restriction map and digest of the sequence, with your methylation data")
+        a = menu.addAction("Gel", self._open_gel_document)
+        a.setToolTip("A gel: open the selected one, or start an empty one")
+        menu.addSeparator()
         a = menu.addAction("Sanger Check", lambda: self._open_sanger_dialog())
         a.setToolTip("Sanger reads (.ab1) of a clone against the sequence it should carry")
+        menu.addSeparator()
         a = menu.addAction("Cloning", lambda: self._open_cloning_dialog())
         a.setToolTip("Put a PCR product into a vector: orientation, colony PCR, warnings")
+
+    def _open_digest_in_panel(self) -> None:
+        """Enzymes page of the Primers panel, on its Digest view."""
+        self._open_primers_panel(tab="enzymes", digest=True)
+
+    def _open_gel_document(self) -> None:
+        """Open the selected gel, or make an empty one to fill in."""
+        from repeatviewer.backends.primers import gel_doc as gd
+
+        chosen = [p for p in self._selected_files()
+                  if Path(p).is_file() and Path(p).suffix.lower() == gd.GEL_SUFFIX]
+        if chosen:
+            self._show_new_output(Path(chosen[0]))
+            return
+        self._new_gel_document()
 
     # ------------------------------------------------------------- cloning
 

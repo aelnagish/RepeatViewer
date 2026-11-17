@@ -47,7 +47,17 @@ _PHASES = (
 PRIMER_JOB_STEPS = 4
 
 # Tools > Primers and Probes: three items; the design type is the Mode inside Design.
-PRIMER_MENU_ITEMS: tuple[str, ...] = ("Design", "Map", "Database")
+# Tools > Primers and Probes. Design and Map open submenus; everything else is
+# one item. Nothing here opens a tool window of its own: an item shows the work
+# in the main window and selects the page it belongs to.
+PRIMER_MENU_ITEMS: tuple[str, ...] = (
+    "Design", "Map", "Database", "In-silico PCR", "Restriction Digest", "Gel",
+    "Sanger Check", "Cloning",
+)
+DESIGN_SUBMENU_ITEMS: tuple[str, ...] = (
+    "Primers", "Repetitive Probes", "Chromosome Painting Probes",
+)
+MAP_SUBMENU_ITEMS: tuple[str, ...] = ("Primers", "Repetitive Probes")
 PRIMER_MANUAL = Path(__file__).resolve().parent / "assets" / "manuals" / "primers_and_probes.html"
 
 
@@ -185,17 +195,90 @@ class PrimerActionsMixin:
     # ------------------------------------------------------------- menu
 
     def _populate_primers_menu(self, menu: QMenu) -> None:
-        design, map_, database = PRIMER_MENU_ITEMS
-        a = menu.addAction(design, lambda: self._open_primer_design_dialog())
-        a.setToolTip("Design PCR primers or FISH probes (choose the type in Mode)")
-        a = menu.addAction(map_, lambda: self._open_map_primers_dialog())
-        a.setToolTip("Test primers against sequences: binding sites and products")
-        a = menu.addAction(database, self._open_primer_database)
+        from repeatviewer.backends.primers import design as dz
+
+        design_menu = menu.addMenu(PRIMER_MENU_ITEMS[0])
+        primers, probes, painting = DESIGN_SUBMENU_ITEMS
+        a = design_menu.addAction(primers, lambda: self._design_in_panel(dz.MODE_PCR))
+        a.setToolTip("PCR primers on the sequence, in the Primers panel")
+        a = design_menu.addAction(probes, lambda: self._design_in_panel(dz.MODE_FISH))
+        a.setToolTip("Oligo probes found in every copy of a repeat")
+        a = design_menu.addAction(painting, self._open_painting_settings)
+        a.setToolTip("Chromosome painting probes over a genome (Chorus2)")
+
+        map_menu = menu.addMenu(PRIMER_MENU_ITEMS[1])
+        a = map_menu.addAction(MAP_SUBMENU_ITEMS[0], lambda: self._open_map_primers_dialog())
+        a.setToolTip("Where primers bind, and what they amplify")
+        a = map_menu.addAction(MAP_SUBMENU_ITEMS[1],
+                               lambda: self._open_map_primers_dialog(probes=True))
+        a.setToolTip("Where probes bind, and how many copies they hit")
+
+        a = menu.addAction(PRIMER_MENU_ITEMS[2], self._open_primer_database)
         a.setToolTip("Your saved primers, with Tm, hairpin and dimer checks")
+        menu.addSeparator()
         populate = getattr(self, "_populate_pcr_menu_items", None)
         if populate is not None:
             populate(menu)
         menu.setToolTipsVisible(True)
+
+    # ------------------------------------------------- the panel beside the sequence
+
+    def _panel_target_file(self):
+        """The FASTA the Primers panel should open: the selected one, else the open one."""
+        for p in self._primer_candidate_files():
+            return Path(p)
+        tabs = getattr(self, "_preview_tabs", None)
+        current = tabs.currentWidget() if tabs is not None else None
+        path = getattr(current, "path", None)
+        return Path(path) if path else None
+
+    def _open_primers_panel(self, *, tab: str = "design", mode: str | None = None,
+                            digest: bool = False):
+        """Show a FASTA in the Annotation view with the Primers panel on ``tab``."""
+        path = self._panel_target_file()
+        if path is None:
+            QMessageBox.information(
+                self, "Primers and Probes",
+                "Click the FASTA to work on in the Files panel first.",
+            )
+            return None
+        tabs = getattr(self, "_preview_tabs", None)
+        if tabs is None:
+            return None
+        tabs.show_annotation_for_path(path)
+        self._ensure_preview_visible()
+        page = tabs.currentWidget()
+        panel = None
+        ensure = getattr(page, "_ensure_annotation_panel", None)
+        if ensure is not None:
+            panel = ensure()
+        if panel is None:
+            return None
+        panel.show_primers_tab()
+        primers = panel.primers_panel()
+        index = {"design": 0, "primer": 1, "pcr": 2, "enzymes": 3}.get(tab, 0)
+        primers.tabs.setCurrentIndex(index)
+        if mode is not None:
+            pane = primers.design_pane
+            modes = [pane.mode.itemData(i) for i in range(pane.mode.count())]
+            if mode in modes:
+                pane.mode.setCurrentIndex(modes.index(mode))
+        if digest:
+            enzymes = primers.enzyme_pane
+            if enzymes.ticked_rows():
+                enzymes.digest_button.click()
+        return primers
+
+    def _design_in_panel(self, mode: str) -> None:
+        if not self._primers_ready():
+            return
+        self._open_primers_panel(tab="design", mode=mode)
+
+    def _open_painting_settings(self) -> None:
+        """Chromosome painting: a genome job, so it keeps its own settings window."""
+        from repeatviewer.backends.primers import design as dz
+
+        self._open_primer_design_dialog(mode=dz.MODE_PAINTING)
 
     def _open_primers_manual(self) -> None:
         from PySide6.QtCore import QUrl
@@ -417,9 +500,10 @@ class PrimerActionsMixin:
     def _open_map_primers_dialog(self, *, check_stock: bool = False,
                                  primer_names: list[str] | None = None,
                                  database_path: str = "", strict: dict | None = None,
-                                 sequence: str = "") -> None:
+                                 sequence: str = "", probes: bool = False) -> None:
         """Map Primers; ``check_stock``: preset to test the Database primers (the
-        selected ones, or all) on a sequence."""
+        selected ones, or all) on a sequence. ``probes``: look for probes, which
+        have no partner and no product, so the answer is sites and copy counts."""
         if not self._primers_ready():
             return
         from repeatviewer.views.primer_dialogs import MapPrimersDialog
@@ -431,6 +515,13 @@ class PrimerActionsMixin:
         elif opts.map.get("primer_names"):
             # A selection from the Database window is for that one check only.
             opts = replace(opts, map={**opts.map, "primer_names": []})
+        if probes:
+            # A probe binds on its own: no pairs, no products, and the 3' rule is
+            # a PCR idea, so what counts is total mismatches.
+            opts = replace(opts, map={**opts.map, "search_forward": False,
+                                      "search_reverse": False, "search_probe": True,
+                                      "pairs_only": False, "three_prime_exact": 0,
+                                      "use_max_mismatches": True})
         dialog = MapPrimersDialog(
             initial=opts,
             files=self._primer_candidate_files(),
