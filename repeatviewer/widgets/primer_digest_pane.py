@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (
 
 from repeatviewer.backends.primers import array_digest as ad
 from repeatviewer.backends.primers import gel_doc as gd
-from repeatviewer.widgets.primer_design_pane import BOX_W, _row, _rule, _section, _spin
+from repeatviewer.widgets.primer_design_pane import BOX2_W, _row, _rule, _section, _spin
 from repeatviewer.widgets.primer_pcr_pane import FIELD_W, PCR_LABEL_W
 
 _SETTINGS_KEY = "primers/workbench_digest"
@@ -119,15 +119,16 @@ class DigestPage(QWidget):
         self.agarose.setDecimals(1)
         self.agarose.setSuffix(" %")
         self.agarose.setValue(float(s.get("agarose", 1.2)))
-        self.agarose.setFixedWidth(BOX_W + 10)
+        self.agarose.setFixedWidth(BOX2_W)
         self.agarose.setKeyboardTracking(False)
         self.ladder = QComboBox(sec)
         self.ladder.addItem("Automatic", "")
         for name in gd.LADDERS:
             self.ladder.addItem(name, name)
         self.ladder.setCurrentIndex(max(0, self.ladder.findData(s.get("ladder", ""))))
-        self.ladder.setFixedWidth(FIELD_W - BOX_W - 10 - 4)
-        sl.addLayout(_row("Agarose", self.agarose, self.ladder, parent=sec, label_w=PCR_LABEL_W))
+        self.ladder.setFixedWidth(FIELD_W)
+        sl.addLayout(_row("Agarose", self.agarose, parent=sec, label_w=PCR_LABEL_W))
+        sl.addLayout(_row("Ladder", self.ladder, parent=sec, label_w=PCR_LABEL_W))
         from repeatviewer.widgets.gel_view import GelView
 
         self.gel = GelView(sec, compact=True)

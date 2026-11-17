@@ -36,10 +36,23 @@ from repeatviewer.backends.primers import workbench as wb
 from repeatviewer.widgets.help_button import make_help_button
 
 _SETTINGS_KEY = "primers/workbench_design"
-LABEL_W = 60
-BOX_W = 60
-JOIN_W = 26
+
+# One grid for every panel of the Primers rail: a label column and a field
+# column of fixed width. Whatever sits in the field column fills it edge to
+# edge, so the left edges line up when the user switches tabs.
+#   three boxes: 3 * BOX3_W + 2 * GAP3   = FIELD_W (min, opt, max in a header)
+#   two boxes:   2 * BOX2_W + JOIN2_W     = FIELD_W
+#   one box:     BOX2_W + JOIN2_W (the unit) stays on the same left edge
+LABEL_W = 86
+FIELD_W = 186
+BOX3_W = 60
+GAP3 = 3
+BOX2_W = 80
+JOIN2_W = 26
 GAP = 2
+# Older name, kept so nothing outside breaks.
+BOX_W = BOX2_W
+JOIN_W = JOIN2_W
 
 REGION_HELP = (
     "<b>Region</b>: drag on the map (or the bases) and the range appears here, or type it.<br>"
@@ -82,7 +95,14 @@ def _section(title: str, parent: QWidget, help_title: str, help_text: str):
     return box, lay, lab
 
 
-def _row(label: str, *widgets, parent: QWidget, joins=(), label_w: int = LABEL_W) -> QHBoxLayout:
+def _row(label: str, *widgets, parent: QWidget, joins=(), label_w: int = LABEL_W,
+         unit: str = "") -> QHBoxLayout:
+    """One grid row: the label column, then widgets filling the field column.
+
+    ``joins`` are the small words between the boxes ("opt", "max", "to"); their
+    width follows the number of boxes, so every row ends at the same place.
+    ``unit`` is a trailing word ("°C", "reads") in a join-sized column.
+    """
     row = QHBoxLayout()
     row.setContentsMargins(0, 0, 0, 0)
     row.setSpacing(GAP)
@@ -90,20 +110,29 @@ def _row(label: str, *widgets, parent: QWidget, joins=(), label_w: int = LABEL_W
     lab.setFixedWidth(label_w)
     lab.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
     row.addWidget(lab)
+    if len(widgets) >= 3:
+        row.setSpacing(GAP3)
+    join_w = JOIN2_W
     for i, w in enumerate(widgets):
         if i and i - 1 < len(joins) and joins[i - 1]:
             j = QLabel(joins[i - 1], parent)
             j.setEnabled(False)
-            j.setFixedWidth(JOIN_W)
+            j.setFixedWidth(join_w)
             j.setAlignment(Qt.AlignmentFlag.AlignCenter)
             row.addWidget(j)
         row.addWidget(w)
+    if unit:
+        u = QLabel(unit, parent)
+        u.setEnabled(False)
+        u.setFixedWidth(JOIN2_W)
+        u.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        row.addWidget(u)
     row.addStretch(1)
     return row
 
 
 def _spin(lo: float, hi: float, value: float, *, decimals: int = 0, suffix: str = "",
-          parent: QWidget):
+          parent: QWidget, width: int = BOX2_W):
     box = QDoubleSpinBox(parent) if decimals else QSpinBox(parent)
     if decimals:
         box.setDecimals(decimals)
@@ -111,9 +140,32 @@ def _spin(lo: float, hi: float, value: float, *, decimals: int = 0, suffix: str 
     box.setValue(value)
     if suffix:
         box.setSuffix(suffix)
-    box.setFixedWidth(BOX_W)
+    box.setFixedWidth(width)
     box.setKeyboardTracking(False)
     return box
+
+
+def _spin3(lo: float, hi: float, value: float, *, decimals: int = 0, parent: QWidget):
+    """A box for a three-box row (min, opt, max)."""
+    return _spin(lo, hi, value, decimals=decimals, parent=parent, width=BOX3_W)
+
+
+def _triple_header(parent: QWidget, label_w: int = LABEL_W) -> QHBoxLayout:
+    """The one "min opt max" line above a group of three-box rows."""
+    row = QHBoxLayout()
+    row.setContentsMargins(0, 0, 0, 0)
+    row.setSpacing(GAP3)
+    pad = QLabel("", parent)
+    pad.setFixedWidth(label_w)
+    row.addWidget(pad)
+    for word in ("min", "opt", "max"):
+        w = QLabel(word, parent)
+        w.setEnabled(False)
+        w.setFixedWidth(BOX3_W)
+        w.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        row.addWidget(w)
+    row.addStretch(1)
+    return row
 
 
 class DesignPane(QWidget):
@@ -143,8 +195,8 @@ class DesignPane(QWidget):
         sec, sl, _ = _section("Region", self, "Region", REGION_HELP)
         self.region_from = _spin(1, 2_000_000_000, 1, parent=sec)
         self.region_to = _spin(1, 2_000_000_000, 1, parent=sec)
-        self.region_from.setFixedWidth(BOX_W + 16)
-        self.region_to.setFixedWidth(BOX_W + 16)
+        self.region_from.setFixedWidth(BOX2_W)
+        self.region_to.setFixedWidth(BOX2_W)
         sl.addLayout(_row("From", self.region_from, self.region_to, parent=sec, joins=("to",)))
         self.use_group = QButtonGroup(self)
         self.use_group.setExclusive(True)
@@ -155,7 +207,7 @@ class DesignPane(QWidget):
             b.setProperty("use", use)
             b.setMinimumWidth(0)
             b.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-            b.setFixedWidth((3 * BOX_W + 2 * JOIN_W + 4 * GAP - 2 * GAP) // 3)
+            b.setFixedWidth((FIELD_W - 2 * GAP) // 3)
             self.use_group.addButton(b, i)
             use_row.append(b)
         use_row[0].setChecked(True)
@@ -191,20 +243,19 @@ class DesignPane(QWidget):
         self.mode = QComboBox(sec)
         for m in wb.WORKBENCH_MODES:
             self.mode.addItem(dz.MODE_LABELS[m], m)
-        self.mode.setFixedWidth(3 * BOX_W + 2 * JOIN_W + 4 * GAP)
+        self.mode.setFixedWidth(FIELD_W)
         i = self.mode.findData(s.mode)
         self.mode.setCurrentIndex(max(0, i))
         sl.addLayout(_row("Mode", self.mode, parent=sec))
-        self.size_min = _spin(5, 60, s.size_min, parent=sec)
-        self.size_opt = _spin(5, 60, s.size_opt, parent=sec)
-        self.size_max = _spin(5, 60, s.size_max, parent=sec)
-        sl.addLayout(_row("Size", self.size_min, self.size_opt, self.size_max, parent=sec,
-                          joins=("opt", "max")))
-        self.tm_min = _spin(20, 95, s.tm_min, decimals=1, parent=sec)
-        self.tm_opt = _spin(20, 95, s.tm_opt, decimals=1, parent=sec)
-        self.tm_max = _spin(20, 95, s.tm_max, decimals=1, parent=sec)
-        sl.addLayout(_row("Tm (°C)", self.tm_min, self.tm_opt, self.tm_max, parent=sec,
-                          joins=("opt", "max")))
+        sl.addLayout(_triple_header(sec))
+        self.size_min = _spin3(5, 60, s.size_min, parent=sec)
+        self.size_opt = _spin3(5, 60, s.size_opt, parent=sec)
+        self.size_max = _spin3(5, 60, s.size_max, parent=sec)
+        sl.addLayout(_row("Size", self.size_min, self.size_opt, self.size_max, parent=sec))
+        self.tm_min = _spin3(20, 95, s.tm_min, decimals=1, parent=sec)
+        self.tm_opt = _spin3(20, 95, s.tm_opt, decimals=1, parent=sec)
+        self.tm_max = _spin3(20, 95, s.tm_max, decimals=1, parent=sec)
+        sl.addLayout(_row("Tm (°C)", self.tm_min, self.tm_opt, self.tm_max, parent=sec))
         self.prod_min = _spin(10, 100_000, s.product_min, parent=sec)
         self.prod_max = _spin(10, 100_000, s.product_max, parent=sec)
         sl.addLayout(_row("Product", self.prod_min, self.prod_max, parent=sec, joins=("to",)))

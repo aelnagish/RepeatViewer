@@ -31,12 +31,12 @@ from PySide6.QtWidgets import (
 
 from repeatviewer.backends.primers import pcr
 from repeatviewer.backends.primers import thermo as th
-from repeatviewer.widgets.primer_design_pane import BOX_W, GAP, JOIN_W, LABEL_W, _row, _rule, _section
+from repeatviewer.widgets.primer_design_pane import FIELD_W, LABEL_W, _row, _rule, _section
 
 _SETTINGS_KEY = "primers/workbench_pcr"
 # The PCR rows have longer labels: wider label column, the same right edge.
-PCR_LABEL_W = 86
-FIELD_W = LABEL_W + 3 * BOX_W + 2 * JOIN_W + 4 * GAP - PCR_LABEL_W
+# Older name for the shared label column, kept so nothing outside breaks.
+PCR_LABEL_W = LABEL_W
 
 PCR_HELP = (
     "<b>Forward</b>, <b>Reverse</b>: primers of this sequence (Primer page).<br>"
