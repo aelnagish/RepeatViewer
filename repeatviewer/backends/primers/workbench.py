@@ -9,6 +9,7 @@ here blocks a choice; :func:`region_advice` explains a conflict and offers a fix
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 from repeatviewer.backends.motif_search import parse_position
 from repeatviewer.backends.primers import design as dz
@@ -22,7 +23,9 @@ USES = (USE_AMPLIFY, USE_INSIDE, USE_AVOID)
 USE_LABELS = {USE_AMPLIFY: "Amplify", USE_INSIDE: "Inside", USE_AVOID: "Avoid"}
 
 #: Modes the workbench designs itself; Ladder and FISH stay in the Design window.
-WORKBENCH_MODES = (dz.MODE_PCR, dz.MODE_QPCR)
+WORKBENCH_MODES = (dz.MODE_PCR, dz.MODE_QPCR, dz.MODE_FISH)
+# For probes "Amplify" makes no sense: a probe sits in the region or keeps out of it.
+PROBE_USES = (USE_INSIDE, USE_AVOID)
 
 
 @dataclass
@@ -273,3 +276,66 @@ def primer_flags(primer_seq: str, placement, s: dz.DesignSettings,
                                              and placement.end <= region.end):
             flags.append(f"Outside the Inside region ({region.start:,} to {region.end:,})")
     return flags
+
+
+# --------------------------------------------------------------------------
+# Repetitive probes on the open file
+# --------------------------------------------------------------------------
+
+
+def file_records(path, limit: int = 2000) -> list[tuple[str, str]]:
+    """(name, sequence) of the records in a FASTA, for the probe coverage check."""
+    from repeatviewer.backends.primers import binding as bd
+
+    out = []
+    for name, seq in bd.iter_fasta(Path(path)):
+        out.append((name, seq))
+        if len(out) >= limit:
+            break
+    return out
+
+
+def design_probes(path, seq_id: str, seq: str, s: dz.DesignSettings,
+                  region: Region | None = None) -> dz.Primer3Run:
+    """Repetitive probes on the open sequence, checked against every copy in the file.
+
+    ``region`` with use *inside* limits the search to that stretch; with use
+    *avoid* the stretch is left out. Probes that would melt off in the
+    stringent wash are dropped by :func:`design.design_fish`.
+    """
+    from repeatviewer.backends.primers import low_complexity as lc
+
+    members = file_records(path) if path else []
+    if not members:
+        members = [(seq_id or "sequence", seq)]
+    avoid: list[tuple[str, str]] = []
+    if s.fish_avoid_fasta:
+        try:
+            avoid = file_records(s.fish_avoid_fasta)
+        except OSError:
+            avoid = []
+    skip: list[lc.Region] = []
+    if s.fish_skip_unsuitable:
+        skip = lc.unsuitable_regions(seq)
+    start = 0
+    template = seq
+    if region is not None and region.use == USE_INSIDE:
+        start = region.start - 1
+        template = seq[start:region.end]
+        skip = [lc.Region(max(0, r.start - start), r.end - start, r.kind, r.note)
+                for r in skip if r.end > start and r.start < region.end]
+    elif region is not None and region.use == USE_AVOID:
+        skip = skip + [lc.Region(region.start - 1, region.end, "region",
+                                 "the region you marked Avoid")]
+    pairs = dz.design_fish(seq_id or "sequence", template, members, s, avoid=avoid or None,
+                           skip=skip or None)
+    if start:
+        for pair in pairs:
+            if pair.probe is not None:
+                pair.probe.start += start
+                pair.probe.end += start
+    explain = []
+    if not pairs:
+        explain.append("No probe passed the coverage, Tm, GC or wash rules. "
+                       "Widen the Tm range or lower the coverage.")
+    return dz.Primer3Run(pairs=pairs, explain=explain)

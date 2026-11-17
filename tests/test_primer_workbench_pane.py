@@ -394,3 +394,67 @@ def test_design_on_selected_files_asks_for_the_job(qapp, isolated_settings, tmp_
     assert asked[0]["annotate_design"] and asked[0]["save_design_to_database"]
     assert asked[0]["settings"]["size_opt"] == pane.size_opt.value()
     assert not pane._busy                        # the panel itself ran nothing
+
+
+def test_probe_mode_shows_the_fish_rows_and_designs_probes(qapp, isolated_settings, tmp_path):
+    from repeatviewer.backends.primers import design as dz
+    from repeatviewer.backends.primers import workbench as wb
+    from repeatviewer.widgets.primers_panel import PrimersPanel
+
+    r = random.Random(5)
+    mono = "".join(r.choice("ACGT") for _ in range(170))
+    copies = []
+    for _ in range(12):
+        m = list(mono)
+        for _ in range(4):
+            m[r.randrange(170)] = r.choice("ACGT")
+        copies.append("".join(m))
+    fa = tmp_path / "CroSat3.fa"
+    fa.write_text("".join(f">m{i}\n{c}\n" for i, c in enumerate(copies)))
+
+    panel = PrimersPanel(width=330)
+    panel.set_host(_Host(fa, copies[0]))
+    panel.reload()
+    pane = panel.design_pane
+    assert not pane.is_probe_mode() and pane.product_row.isVisibleTo(pane)
+
+    modes = [pane.mode.itemData(i) for i in range(pane.mode.count())]
+    assert dz.MODE_FISH in modes
+    pane.mode.setCurrentIndex(modes.index(dz.MODE_FISH))
+    assert pane.mode.currentText() == "Repetitive Probes"
+    # PCR rows go, probe rows come
+    assert not pane.product_row.isVisibleTo(pane)
+    assert not pane.tm_diff_row.isVisibleTo(pane)
+    assert not pane.probe_row.isVisibleTo(pane)
+    assert pane.cross_section.isVisibleTo(pane) and pane.hyb_section.isVisibleTo(pane)
+    assert pane.wash_section.isVisibleTo(pane)
+    assert pane.num_label.text() == "Probes"
+    shown = {str(b.property("use")) for b in pane.use_group.buttons() if b.isVisibleTo(pane)}
+    assert shown == set(wb.PROBE_USES)          # no Amplify for a probe
+
+    # the lab protocol is the default, and it reaches the settings
+    s = pane.settings()
+    assert (s.hyb.formamide_pct, s.hyb.ssc, s.hyb.temp_c) == (50.0, 2.0, 37.0)
+    assert (s.hyb.wash_formamide_pct, s.hyb.wash_ssc, s.hyb.wash_temp_c) == (20.0, 0.1, 42.0)
+    pane.min_cov.setValue(90)
+    pane.cov_mm.setValue(2)
+    s = pane.settings()
+    assert s.mode == dz.MODE_FISH and s.min_coverage == 0.9 and s.coverage_mismatches == 2
+
+    pane.run_design()
+    end = time.time() + 40
+    while pane._busy and time.time() < end:
+        qapp.processEvents()
+        time.sleep(0.02)
+    assert pane.table.rowCount() >= 1
+    assert pane.table.horizontalHeaderItem(1).text() == "Probe"
+    assert pane.table.item(0, 1).text() == "P1"
+    assert "nt" in pane.table.item(0, 2).text() and "°C" in pane.table.item(0, 3).text()
+    assert "probes" in pane.cand_title.text().lower()
+
+    # keeping a probe adds one primer, not a pair
+    kept = []
+    pane.keepRequested.connect(kept.append)
+    pane._on_keep()
+    assert len(kept) == 1 and len(kept[0]) == 1
+    assert "probe" in kept[0][0].note.lower() or kept[0][0].kind == "probe"

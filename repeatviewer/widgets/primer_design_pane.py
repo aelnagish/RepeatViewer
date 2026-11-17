@@ -82,6 +82,20 @@ ADVANCED_HELP = (
     "<b>Probe</b>: size and Tm of the hydrolysis probe, when one is picked.<br>"
     "<b>Na, Mg, dNTP</b>: the reaction the Tm is worked out for."
 )
+CROSS_HELP = (
+    "<b>Min coverage</b>: the share of the copies in this file a probe has to match.<br>"
+    "<b>Mismatches</b>: how many are tolerated when counting a match.<br>"
+    "<b>Avoid file</b>: a FASTA of the other families. A probe matching any of them is "
+    "dropped, so the signal stays on one array.<br>"
+    "<b>Leave out low-complexity</b>: simple repeats and inverted repeats are skipped; they "
+    "give smeared signal."
+)
+HYB_HELP = (
+    "Your hybridisation mix and stringent wash. The probe Tm is worked out for these "
+    "conditions (0.60 °C less per % formamide, Hutton 1977), not for PCR salt, so the "
+    "numbers can be compared with the bench protocol.<br>"
+    "A probe whose Tm in the wash is below the wash temperature melts off and is dropped."
+)
 OPTIONS_HELP = (
     "What happens when a run on the selected files finishes.<br>"
     "Right-clicking a FASTA in the Files panel always runs Design with the settings saved "
@@ -173,6 +187,17 @@ def _spin(lo: float, hi: float, value: float, *, decimals: int = 0, suffix: str 
 def _spin3(lo: float, hi: float, value: float, *, decimals: int = 0, parent: QWidget):
     """A box for a three-box row (min, opt, max)."""
     return _spin(lo, hi, value, decimals=decimals, parent=parent, width=BOX3_W)
+
+
+def _row_widget(label: str, *widgets, parent: QWidget, joins=(), label_w: int = LABEL_W,
+                unit: str = "") -> QWidget:
+    """A grid row inside a widget, so the whole row can be shown or hidden."""
+    box = QWidget(parent)
+    lay = QVBoxLayout(box)
+    lay.setContentsMargins(0, 0, 0, 0)
+    lay.setSpacing(0)
+    lay.addLayout(_row(label, *widgets, parent=box, joins=joins, label_w=label_w, unit=unit))
+    return box
 
 
 def _triple_header(parent: QWidget, label_w: int = LABEL_W) -> QHBoxLayout:
@@ -301,7 +326,8 @@ class DesignPane(QWidget):
         sl.addLayout(_row("Mode", self.mode, parent=sec))
         self.probe_check = QCheckBox("Hydrolysis probe (TaqMan)", sec)
         self.probe_check.setChecked(bool(s.pick_probe))
-        sl.addLayout(_row("", self.probe_check, parent=sec))
+        self.probe_row = _row_widget("", self.probe_check, parent=sec)
+        sl.addWidget(self.probe_row)
         sl.addLayout(_triple_header(sec))
         self.size_min = _spin3(5, 60, s.size_min, parent=sec)
         self.size_opt = _spin3(5, 60, s.size_opt, parent=sec)
@@ -313,14 +339,26 @@ class DesignPane(QWidget):
         sl.addLayout(_row("Tm (°C)", self.tm_min, self.tm_opt, self.tm_max, parent=sec))
         self.prod_min = _spin(10, 100_000, s.product_min, parent=sec)
         self.prod_max = _spin(10, 100_000, s.product_max, parent=sec)
-        sl.addLayout(_row("Product", self.prod_min, self.prod_max, parent=sec, joins=("to",)))
+        self.product_row = _row_widget("Product", self.prod_min, self.prod_max, parent=sec,
+                                       joins=("to",))
+        sl.addWidget(self.product_row)
         self.gc_min = _spin(0, 100, s.gc_min, decimals=1, parent=sec)
         self.gc_max = _spin(0, 100, s.gc_max, decimals=1, parent=sec)
         sl.addLayout(_row("GC (%)", self.gc_min, self.gc_max, parent=sec, joins=("to",)))
         self.tm_diff = _spin(0, 20, s.max_tm_diff, decimals=1, parent=sec)
-        sl.addLayout(_row("Max Tm diff", self.tm_diff, parent=sec))
+        self.tm_diff_row = _row_widget("Max Tm diff", self.tm_diff, parent=sec)
+        sl.addWidget(self.tm_diff_row)
         self.num_return = _spin(1, 100, s.num_return, parent=sec)
-        sl.addLayout(_row("Pairs", self.num_return, parent=sec))
+        self.num_label = QLabel("Pairs", sec)
+        self.num_label.setFixedWidth(LABEL_W)
+        self.num_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        nr = QHBoxLayout()
+        nr.setContentsMargins(0, 0, 0, 0)
+        nr.setSpacing(GAP)
+        nr.addWidget(self.num_label)
+        nr.addWidget(self.num_return)
+        nr.addStretch(1)
+        sl.addLayout(nr)
         lay.addWidget(sec)
         lay.addWidget(_rule(self))
 
@@ -344,17 +382,25 @@ class DesignPane(QWidget):
         ab.addLayout(_row("GC clamp", self.gc_clamp, parent=self.adv_body))
         self.end_stab = _spin(0, 20, s.max_end_stability, decimals=1, parent=self.adv_body)
         ab.addLayout(_row("Max 3′ stability", self.end_stab, parent=self.adv_body))
-        ab.addLayout(_triple_header(self.adv_body))
+        self.probe_head = QWidget(self.adv_body)
+        ph = QVBoxLayout(self.probe_head)
+        ph.setContentsMargins(0, 0, 0, 0)
+        ph.setSpacing(0)
+        ph.addLayout(_triple_header(self.probe_head))
+        ab.addWidget(self.probe_head)
         self.probe_size_min = _spin3(5, 60, s.probe_size_min, parent=self.adv_body)
         self.probe_size_opt = _spin3(5, 60, s.probe_size_opt, parent=self.adv_body)
         self.probe_size_max = _spin3(5, 60, s.probe_size_max, parent=self.adv_body)
-        ab.addLayout(_row("Probe size", self.probe_size_min, self.probe_size_opt,
-                          self.probe_size_max, parent=self.adv_body))
+        self.probe_size_row = _row_widget("Probe size", self.probe_size_min,
+                                          self.probe_size_opt, self.probe_size_max,
+                                          parent=self.adv_body)
+        ab.addWidget(self.probe_size_row)
         self.probe_tm_min = _spin3(20, 95, s.probe_tm_min, decimals=1, parent=self.adv_body)
         self.probe_tm_opt = _spin3(20, 95, s.probe_tm_opt, decimals=1, parent=self.adv_body)
         self.probe_tm_max = _spin3(20, 95, s.probe_tm_max, decimals=1, parent=self.adv_body)
-        ab.addLayout(_row("Probe Tm (°C)", self.probe_tm_min, self.probe_tm_opt,
-                          self.probe_tm_max, parent=self.adv_body))
+        self.probe_tm_row = _row_widget("Probe Tm (°C)", self.probe_tm_min, self.probe_tm_opt,
+                                        self.probe_tm_max, parent=self.adv_body)
+        ab.addWidget(self.probe_tm_row)
         self.na = _spin(0, 1000, s.thermo.monovalent_mM, decimals=1, parent=self.adv_body)
         ab.addLayout(_row("Na (mM)", self.na, parent=self.adv_body))
         self.mg = _spin(0, 100, s.thermo.divalent_mM, decimals=1, parent=self.adv_body)
@@ -365,6 +411,61 @@ class DesignPane(QWidget):
         sl.addWidget(self.adv_body)
         lay.addWidget(sec)
         lay.addWidget(_rule(self))
+
+        # ---- Cross-hybridisation (probes only)
+        sec, sl, _ = _section("Cross-hybridisation", self, "Cross-hybridisation", CROSS_HELP)
+        self.min_cov = _spin(0, 100, round(s.min_coverage * 100), suffix=" %", parent=sec)
+        sl.addLayout(_row("Min coverage", self.min_cov, parent=sec))
+        self.cov_mm = _spin(0, 10, s.coverage_mismatches, parent=sec)
+        sl.addLayout(_row("Mismatches", self.cov_mm, parent=sec))
+        from repeatviewer.widgets.path_browse import PathBrowseRow
+
+        self.avoid_path = PathBrowseRow(
+            sec, initial=s.fish_avoid_fasta or None,
+            placeholder="Other families (FASTA, optional)",
+            browse_title="Repeats the probes must not match",
+            file_filter="FASTA (*.fa *.fasta *.fas *.fna);;All files (*)",
+            browse_below=True, elide_middle=True)
+        self.avoid_path.setFixedWidth(FIELD_W)
+        sl.addLayout(_row("Avoid file", self.avoid_path, parent=sec))
+        self.avoid_others = QCheckBox("Avoid the other selected files", sec)
+        self.avoid_others.setChecked(bool(s.fish_avoid_other_inputs))
+        self.skip_unsuitable = QCheckBox("Leave out low-complexity", sec)
+        self.skip_unsuitable.setChecked(bool(s.fish_skip_unsuitable))
+        for box in (self.avoid_others, self.skip_unsuitable):
+            sl.addLayout(_row("", box, parent=sec))
+        self.cross_section = sec
+        self.cross_rule = _rule(self)
+        lay.addWidget(sec)
+        lay.addWidget(self.cross_rule)
+
+        # ---- Hybridisation and wash (probes only)
+        sec, sl, _ = _section("Hybridisation", self, "Hybridisation", HYB_HELP)
+        self.hyb_fa = _spin(0, 100, s.hyb.formamide_pct, decimals=1, suffix=" %", parent=sec)
+        sl.addLayout(_row("Formamide", self.hyb_fa, parent=sec))
+        self.hyb_ssc = _spin(0.01, 20, s.hyb.ssc, decimals=2, suffix=" ×", parent=sec)
+        sl.addLayout(_row("SSC", self.hyb_ssc, parent=sec))
+        self.hyb_temp = _spin(0, 99, s.hyb.temp_c, decimals=1, suffix=" °C", parent=sec)
+        sl.addLayout(_row("Temperature", self.hyb_temp, parent=sec))
+        self.hyb_nm = _spin(0.1, 10_000, s.hyb.probe_nM, decimals=1, suffix=" nM", parent=sec)
+        sl.addLayout(_row("Probe", self.hyb_nm, parent=sec))
+        self.hyb_section = sec
+        self.hyb_rule = _rule(self)
+        lay.addWidget(sec)
+        lay.addWidget(self.hyb_rule)
+
+        sec, sl, _ = _section("Stringent wash", self, "Stringent wash", HYB_HELP)
+        self.wash_fa = _spin(0, 100, s.hyb.wash_formamide_pct, decimals=1, suffix=" %",
+                             parent=sec)
+        sl.addLayout(_row("Formamide", self.wash_fa, parent=sec))
+        self.wash_ssc = _spin(0.01, 20, s.hyb.wash_ssc, decimals=2, suffix=" ×", parent=sec)
+        sl.addLayout(_row("SSC", self.wash_ssc, parent=sec))
+        self.wash_temp = _spin(0, 99, s.hyb.wash_temp_c, decimals=1, suffix=" °C", parent=sec)
+        sl.addLayout(_row("Temperature", self.wash_temp, parent=sec))
+        self.wash_section = sec
+        self.wash_rule = _rule(self)
+        lay.addWidget(sec)
+        lay.addWidget(self.wash_rule)
 
         # ---- Options
         sec, sl, _ = _section("Options", self, "Options", OPTIONS_HELP)
@@ -393,6 +494,8 @@ class DesignPane(QWidget):
         sec, sl, self.cand_title = _section("Candidates", self, "Candidates", CANDIDATES_HELP)
         self.table = QTableWidget(0, 4, sec)
         self.table.setHorizontalHeaderLabels(["", "Pair", "Product", "Tm F / R"])
+        self._probe_headers = ["", "Probe", "Length", "Tm"]
+        self._pair_headers = ["", "Pair", "Product", "Tm F / R"]
         self.table.verticalHeader().hide()
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
@@ -437,7 +540,9 @@ class DesignPane(QWidget):
         self.keep_button.clicked.connect(self._on_keep)
         self.report_button.clicked.connect(self._on_report)
         self.table.itemSelectionChanged.connect(self._on_pick)
+        self.mode.currentIndexChanged.connect(lambda _i: self._on_mode_changed())
         self._update_advanced_summary()
+        self._apply_mode()
         self._on_run_where()
         self._sync_buttons()
 
@@ -492,7 +597,18 @@ class DesignPane(QWidget):
         thermo = dict(d.get("thermo") or {})
         thermo.update(monovalent_mM=self.na.value(), divalent_mM=self.mg.value(),
                       dntp_mM=self.dntp.value())
+        hyb = dict(d.get("hyb") or {})
+        hyb.update(formamide_pct=self.hyb_fa.value(), ssc=self.hyb_ssc.value(),
+                   temp_c=self.hyb_temp.value(), probe_nM=self.hyb_nm.value(),
+                   wash_formamide_pct=self.wash_fa.value(), wash_ssc=self.wash_ssc.value(),
+                   wash_temp_c=self.wash_temp.value())
         d.update(mode=str(self.mode.currentData()),
+                 min_coverage=self.min_cov.value() / 100.0,
+                 coverage_mismatches=self.cov_mm.value(),
+                 fish_avoid_fasta=str(self.avoid_path.path() or ""),
+                 fish_avoid_other_inputs=self.avoid_others.isChecked(),
+                 fish_skip_unsuitable=self.skip_unsuitable.isChecked(),
+                 hyb=hyb,
                  size_min=self.size_min.value(), size_opt=self.size_opt.value(),
                  size_max=self.size_max.value(), tm_min=self.tm_min.value(),
                  tm_opt=self.tm_opt.value(), tm_max=self.tm_max.value(),
@@ -563,7 +679,9 @@ class DesignPane(QWidget):
                            (self.probe_tm_max, base.probe_tm_max),
                            (self.na, base.thermo.monovalent_mM),
                            (self.mg, base.thermo.divalent_mM),
-                           (self.dntp, base.thermo.dntp_mM)):
+                           (self.dntp, base.thermo.dntp_mM),
+                           (self.min_cov, round(base.min_coverage * 100)),
+                           (self.cov_mm, base.coverage_mismatches)):
             box.setValue(value)
         self.probe_check.setChecked(bool(base.pick_probe))
         self._update_advanced_summary()
@@ -585,6 +703,37 @@ class DesignPane(QWidget):
             f"Poly-X {self.poly_x.value()} · GC clamp {self.gc_clamp.value()} · "
             f"3′ stability {self.end_stab.value():g} · Na {self.na.value():g} mM, "
             f"Mg {self.mg.value():g} mM, dNTP {self.dntp.value():g} mM{probe}")
+
+    def is_probe_mode(self) -> bool:
+        return str(self.mode.currentData()) == dz.MODE_FISH
+
+    def _on_mode_changed(self) -> None:
+        """A new mode brings its own conditions, as the Design window did."""
+        self._on_defaults()
+        self._apply_mode()
+
+    def _apply_mode(self) -> None:
+        """Show the rows that belong to the chosen mode, hide the rest."""
+        probes = self.is_probe_mode()
+        for w in (self.probe_row, self.product_row, self.tm_diff_row, self.probe_head,
+                  self.probe_size_row, self.probe_tm_row):
+            w.setVisible(not probes)
+        for w in (self.cross_section, self.cross_rule, self.hyb_section, self.hyb_rule,
+                  self.wash_section, self.wash_rule):
+            w.setVisible(probes)
+        self.num_label.setText("Probes" if probes else "Pairs")
+        self.cand_title.setText("<b>Probes</b>" if probes else "<b>Candidates</b>")
+        uses = wb.PROBE_USES if probes else wb.USES
+        for b in self.use_group.buttons():
+            use = str(b.property("use"))
+            b.setVisible(use in uses)
+            if use == wb.USE_AMPLIFY and probes and b.isChecked():
+                for other in self.use_group.buttons():
+                    if other.property("use") == wb.USE_INSIDE:
+                        other.setChecked(True)
+            b.setFixedWidth((FIELD_W - (len(uses) - 1) * GAP) // len(uses))
+        self.keep_button.setText("Keep Ticked")
+        self._update_advice()
 
     def _on_run_where(self) -> None:
         files = self.run_where() == RUN_FILES
@@ -645,12 +794,20 @@ class DesignPane(QWidget):
         self._save_settings()
         self._busy = True
         self._sync_buttons()
-        self.cand_note.setText("Designing…")
+        self.cand_note.setText("Looking for probes…" if self.is_probe_mode() else "Designing…")
         relay = self._relay
+        path = None
+        if self._host is not None:
+            try:
+                path = self._host.primers_host_path()
+            except Exception:  # noqa: BLE001 - no file open
+                path = None
+        probes = self.is_probe_mode()
 
         def work() -> None:
             try:
-                run = wb.design_candidates(sid, seq, s, region)
+                run = (wb.design_probes(path, sid, seq, s, region) if probes
+                       else wb.design_candidates(sid, seq, s, region))
             except Exception as exc:  # noqa: BLE001 - shown in the pane
                 relay.done.emit(None, str(exc))
                 return
@@ -680,6 +837,9 @@ class DesignPane(QWidget):
 
     def _fill(self, run: dz.Primer3Run) -> None:
         pairs = run.pairs
+        probes = self.is_probe_mode()
+        self.table.setHorizontalHeaderLabels(self._probe_headers if probes
+                                             else self._pair_headers)
         self.table.blockSignals(True)
         self.table.setRowCount(len(pairs))
         for r, p in enumerate(pairs):
@@ -688,21 +848,29 @@ class DesignPane(QWidget):
                           | Qt.ItemFlag.ItemIsSelectable)
             tick.setCheckState(Qt.CheckState.Checked if r == 0 else Qt.CheckState.Unchecked)
             self.table.setItem(r, 0, tick)
-            tms = (f"{p.forward.tm:.1f} / {p.reverse.tm:.1f}"
-                   if p.forward is not None and p.reverse is not None else "")
-            for c, v in enumerate((f"Pair {r + 1}", f"{p.product_size:,} bp", tms), start=1):
+            if probes and p.probe is not None:
+                length = p.probe.end - p.probe.start + 1
+                cells = (f"P{r + 1}", f"{length} nt", f"{p.probe.tm:.1f} °C")
+            else:
+                tms = (f"{p.forward.tm:.1f} / {p.reverse.tm:.1f}"
+                       if p.forward is not None and p.reverse is not None else "")
+                cells = (f"Pair {r + 1}", f"{p.product_size:,} bp", tms)
+            for c, v in enumerate(cells, start=1):
                 self.table.setItem(r, c, QTableWidgetItem(v))
         self.table.blockSignals(False)
         n = len(pairs)
-        self.cand_title.setText(f"<b>Candidates</b> &nbsp;<span style='color:gray'>"
-                                f"{n} pair{'s' if n != 1 else ''}</span>")
+        word = "probe" if probes else "pair"
+        self.cand_title.setText(f"<b>{'Probes' if probes else 'Candidates'}</b> &nbsp;"
+                                f"<span style='color:gray'>{n} {word}"
+                                f"{'s' if n != 1 else ''}</span>")
         self.push_overlay()
         if pairs:
-            self.cand_note.setText("Click a pair to see it on the sequence. Tick the ones to keep.")
+            self.cand_note.setText(
+                f"Click a {word} to see it on the sequence. Tick the ones to keep.")
             self.table.selectRow(0)
         else:
             why = "; ".join(run.explain[:2]) if run.explain else ""
-            self.cand_note.setText("No pair met the conditions." + (f" {why}" if why else ""))
+            self.cand_note.setText(f"No {word} met the conditions." + (f" {why}" if why else ""))
 
     def _on_pick(self) -> None:
         rows = self.table.selectionModel().selectedRows()
@@ -710,6 +878,19 @@ class DesignPane(QWidget):
             return
         p = self._run.pairs[rows[0].row()]
         self.push_overlay()
+        if self.is_probe_mode() and p.probe is not None:
+            self._shown = (int(p.probe.start), int(p.probe.end))
+            try:
+                show = (getattr(self._host, "primers_host_show_range", None)
+                        or self._host.primers_host_show)
+                show(p.probe.start, p.probe.end)
+            except Exception:  # noqa: BLE001 - showing is a convenience
+                pass
+            notes = "; ".join(p.notes[:2])
+            self.cand_note.setText(
+                f"P{rows[0].row() + 1}: {p.probe.start:,} – {p.probe.end:,}."
+                + (f" {notes}." if notes else ""))
+            return
         if p.forward is None or p.reverse is None:
             return
         self._shown = (int(p.forward.start), int(p.reverse.end))
@@ -738,6 +919,8 @@ class DesignPane(QWidget):
             for p in self._run.pairs:
                 if p.forward is not None and p.reverse is not None:
                     cands.append((p.forward.start, p.forward.end, p.reverse.start, p.reverse.end))
+                elif p.probe is not None:
+                    cands.append((p.probe.start, p.probe.end, p.probe.start, p.probe.end))
             rows = self.table.selectionModel().selectedRows() if self.table.selectionModel() else []
             if rows:
                 selected = rows[0].row()

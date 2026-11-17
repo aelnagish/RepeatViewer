@@ -45,7 +45,7 @@ MODE_LABELS = {
     MODE_PCR: "Standard PCR",
     MODE_QPCR: "qPCR",
     MODE_LADDER: "Ladder PCR",
-    MODE_FISH: "Satellite repeat oligos",
+    MODE_FISH: "Repetitive Probes",
     "painting": "Chromosome painting (Chorus2)",
 }
 # Chromosome painting is a FISH-probe mode run by Chorus2 (see ``painting.py``),
