@@ -275,10 +275,25 @@ class PrimerActionsMixin:
         self._open_primers_panel(tab="design", mode=mode)
 
     def _open_painting_settings(self) -> None:
-        """Chromosome painting: a genome job, so it keeps its own settings window."""
-        from repeatviewer.backends.primers import design as dz
+        """Chromosome painting as a tab: a genome job, with its own settings panel."""
+        if not self._primers_ready():
+            return
+        from repeatviewer.views.painting_page import PaintingPage
 
-        self._open_primer_design_dialog(mode=dz.MODE_PAINTING)
+        tabs = getattr(self, "_preview_tabs", None)
+        if tabs is None:
+            return
+        page = PaintingPage(options=self._primer_options,
+                            start_job=self._start_painting_from_page)
+        tabs.open_tool_tab(page, page.tab_name())
+        self._ensure_preview_visible()
+        self._painting_page = page
+
+    def _start_painting_from_page(self, settings: dict) -> None:
+        """Run Chorus2 (or the selection) with the settings of the painting tab."""
+        opts = replace(self._primer_options, painting=dict(settings or {}))
+        self._save_primer_options(opts)
+        self._start_painting_job(self._primer_options)
 
     def _open_primers_manual(self) -> None:
         from PySide6.QtCore import QUrl
