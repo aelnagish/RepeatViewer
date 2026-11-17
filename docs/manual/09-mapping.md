@@ -77,19 +77,19 @@ the reference has repeated names.
 
 ## What is written
 
-The mapper's alignment and the contig document sit next to the input; tables
-and FASTA go into `<input>_minimap_details/` (or `_hisat_details/`):
+The mapper's alignment and the contig document sit next to the input. Optional
+consensus / placed / unused FASTA and the variants table are written beside
+them when those options are on. A temporary `_details/` workspace is used
+while the run works, then deleted:
 
 | File | Contents |
 |------|----------|
 | `<input>_minimap.paf` or `.sam` | The mapper's alignment (opens in Preview) |
 | `<input>_minimap.rvmap` | Contig-view snapshot of the run |
-| `…_report.html` | Run report: numbers, coverage plot, features, most frequent differences, methods text, citations |
-| `…_consensus.fa` | Consensus of the mapped reads, with the reference annotations moved onto it |
-| `…_mapped.fa` | The placed reads, turned to the reference strand, with lifted annotations |
-| `…_unused.fa` | Reads not placed, with the reason in the header |
-| `…_variants.tsv`, `…_features.tsv`, `…_reads.tsv` | Every difference; every reference feature in every read; every placement |
-| `…_methods.txt`, `…_commands.txt` | A methods paragraph and the exact command lines |
+| `…_consensus.fa` | Consensus of the mapped reads (optional) |
+| `…_mapped.fa` | The placed reads, on the reference strand (optional) |
+| `…_unused.fa` | Reads not placed (optional) |
+| `…_variants.tsv` | Differences table (optional) |
 
 A `<input>_minimap.rvmap` (or `_hisat`) contig document next to the alignment
 opens in Contig view. A second run writes `_2`; nothing is overwritten. No

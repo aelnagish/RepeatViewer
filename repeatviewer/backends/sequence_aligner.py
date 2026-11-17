@@ -160,12 +160,21 @@ def combined_alignment_output_stem(
     seq_files: list[Path],
     *,
     engine: str = ALIGNER_MAFFT,
+    sequence_count: int | None = None,
 ) -> str:
-    """Basename stem for combined MSA: ``{first.name}_cmafft`` / ``_cmuscle``."""
+    """Basename stem for combined MSA: ``_cmafft`` / ``_cmuscle``.
+
+    When only one input file is combined, or the merge has a single sequence,
+    use the normal ``_mafft`` / ``_muscle`` suffix (no ``c`` prefix).
+    """
     if not seq_files:
         raise ValueError("No FASTA files to align.")
     from repeatviewer.tool_output_paths import kept_input_name
 
+    single_input = len(seq_files) == 1
+    single_seq = sequence_count is not None and int(sequence_count) <= 1
+    if single_input or single_seq:
+        return alignment_output_stem(seq_files[0], engine=engine)
     if engine == ALIGNER_MUSCLE:
         tool = "cmuscle"
     elif engine == ALIGNER_MAFFT:
@@ -785,7 +794,9 @@ def run_alignment_combined(
         raise ValueError("Selected FASTA files contain no sequences.")
     if len(records) < 2:
         raise ValueError("Combined alignment needs at least two sequences.")
-    output_stem = combined_alignment_output_stem(resolved, engine=engine)
+    output_stem = combined_alignment_output_stem(
+        resolved, engine=engine, sequence_count=len(records)
+    )
     desired = _next_available_fasta(parent, output_stem)
     combined = parent / f".repeatviewer_{desired.stem}_input.fa"
     SeqIO.write(records, str(combined), "fasta")

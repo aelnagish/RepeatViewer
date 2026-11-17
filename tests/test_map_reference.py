@@ -465,6 +465,8 @@ def test_minimap2_satellite_end_to_end(tmp_path):
     assert data["engine"] == MAP_ENGINE_MINIMAP2
     assert data["summary"]["n_placed"] == 3 and data["summary"]["n_reversed"] == 1
     assert data["details"]["raw"] == paf.name
+    assert data.get("details_dir", "") == ""
+    assert not (tmp_path / "variants.fa_minimap_details").exists()
     contig = data["contigs"][0]
     reads = {r["name"]: r for r in contig["reads"]}
     assert reads["v2"]["strand"] == "-"
@@ -472,17 +474,16 @@ def test_minimap2_satellite_end_to_end(tmp_path):
     status_v3 = {x[0]: x[1] for x in reads["v3"]["lift"]}
     assert status_v3[motif_f] == mr.STATUS_LOST                # the 30-bp deletion
     assert [u[0] for u in data["unused"]] == ["junk"]
-    details = tmp_path / data["details_dir"]
-    for key in ("consensus", "mapped", "unused", "variants", "features", "reads", "report"):
-        assert (details / data["details"][key]).is_file(), key
-    assert not (details / paf.name).exists()
-    mapped = (details / data["details"]["mapped"]).read_text()
+    for key in ("consensus", "mapped", "unused", "variants"):
+        assert (tmp_path / data["details"][key]).is_file(), key
+    mapped = (tmp_path / data["details"]["mapped"]).read_text()
     assert ">v2_reversed " in mapped
-    mapped_sidecar = sidecar_path(details / data["details"]["mapped"])
+    mapped_sidecar = sidecar_path(tmp_path / data["details"]["mapped"])
     assert mapped_sidecar.is_file()
-    consensus_sidecar = sidecar_path(details / data["details"]["consensus"])
+    consensus_sidecar = sidecar_path(tmp_path / data["details"]["consensus"])
     assert "Motif_E" in consensus_sidecar.read_text(encoding="utf-8")
-    assert report.is_file() and "Methods text" in report.read_text()
+    # Report is scratch-only; return value is the .rvmap after details cleanup.
+    assert report == rvmap
 
 
 def test_missing_reference_is_a_clear_error(tmp_path):

@@ -140,7 +140,7 @@ DELETE_SAM_INFO = (
 GENERATE_RVMAP_INFO = (
     "Write a <code>.rvmap</code> contig-view document beside the alignment "
     "(consensus, coverage, placements, lift-over). Turn off for huge runs when "
-    "you only need the SAM/PAF and <code>_details/</code> tables."
+    "you only need the SAM/PAF (and optional consensus / placed FASTA)."
 )
 CIGAR_INFO = (
     "PAF only: add a CIGAR string with <code>-c</code> (base-level alignment). "

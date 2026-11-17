@@ -727,6 +727,37 @@ def test_msa_standard_extent_for_boundary_guides(
     panel.close()
 
 
+def test_show_reference_boundaries_persists_across_new_msa(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    """Unchecking Show reference boundaries must stay off on the next MSA."""
+    from PySide6.QtCore import QSettings
+
+    a = tmp_path / "a.fa"
+    b = tmp_path / "b.fa"
+    a.write_text(">x\nACGT\n>y\nACGT\n")
+    b.write_text(">p\nTTTT\n>q\nTTTT\n")
+    first = MultiSequenceOverviewPanel(a)
+    first.load_path(a, msa_mode=True)
+    first._rail.show_standard_boundaries.setChecked(False)
+    first._save_overview_display_settings()
+    first.close()
+
+    s = QSettings("RepeatViewer", "RepeatViewer")
+    s.beginGroup("annotation_overview_display")
+    assert s.value("show_standard_boundaries", True, type=bool) is False
+    s.endGroup()
+
+    second = MultiSequenceOverviewPanel(b)
+    second.load_path(b, msa_mode=True)
+    assert second._rail.show_standard_boundaries.isChecked() is False
+    assert second._bars.show_msa_standard_boundaries() is False
+    # Restore default for other tests in this process.
+    second._rail.show_standard_boundaries.setChecked(True)
+    second._save_overview_display_settings()
+    second.close()
+
+
 def test_msa_copy_sequence_without_gap_strips_dashes(
     qapp: QApplication, tmp_path: Path, monkeypatch
 ) -> None:

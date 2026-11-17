@@ -6683,16 +6683,9 @@ class MultiSequenceOverviewPanel(QWidget):
                 )
             )
             sort_mode = str(s.value("sequence_sort_mode", "original") or "original")
-            show_std_bounds_raw = s.value("show_standard_boundaries", True)
-            if isinstance(show_std_bounds_raw, str):
-                show_std_bounds = show_std_bounds_raw.strip().lower() in {
-                    "1",
-                    "true",
-                    "yes",
-                    "on",
-                }
-            else:
-                show_std_bounds = bool(show_std_bounds_raw)
+            show_std_bounds = s.value(
+                "show_standard_boundaries", True, type=bool
+            )
         finally:
             s.endGroup()
         track_h = max(1, min(10, track_h))
@@ -6782,6 +6775,8 @@ class MultiSequenceOverviewPanel(QWidget):
     def _on_show_standard_boundaries_changed(self, enabled: bool) -> None:
         self._bars.set_show_msa_standard_boundaries(bool(enabled))
         self._sync_scale_standard_boundaries()
+        # Remember across new MSA opens (same as other Display options).
+        self._save_overview_display_settings()
 
     def zoom_to_reference_boundary(self, side: str) -> bool:
         """Zoom to nucleotide level centered on the left or right reference edge.

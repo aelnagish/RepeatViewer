@@ -33,7 +33,7 @@ input file name with its extension, for example `reads.fa` →
 | `<name>_self_dot.paf`, `<first>_multi_dot.paf` | Dotplot, built-in | Dotplot data |
 | `<name>_flexidot.html`, `.gff`, `_legend.png` | Dotplot, Flexidot | Dotplot and its legend |
 | `<name>_msa_plot.png`, `.pdf` | MSA plot | Alignment figure |
-| `<name>_minimap.paf` or `.sam`, `<name>_minimap_details/` | Mapping | Alignment; report, consensus, tables |
+| `<name>_minimap.paf` or `.sam`, `<name>_minimap.rvmap` | Mapping | Alignment and contig view; optional `…_consensus.fa` / `…_mapped.fa` beside them |
 | `<name>.sorted.bam`, `.bai`, `.crai` | Samtools Sort and Index, Mapping | Sorted alignment and its index |
 | `<name>.bam`, `.sam`, `.cram` | Samtools Convert | Alignment in another format |
 | `<name>_iqtree.treefile`, `<name>_iqtree_details/` | Tree | Tree; report, alignment, logs |

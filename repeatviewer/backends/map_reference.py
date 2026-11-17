@@ -18,11 +18,12 @@ like Geneious Prime's "Map to Reference", with additions for repeat work:
 Results follow the RepeatViewer naming rule (full input name, then a suffix):
 the selected aligner output beside the input
 (``…_minimap.paf`` / ``…_minimap.sam`` / ``…_hisat.sam``), a contig-view
-document ``…_minimap.rvmap`` / ``…_hisat.rvmap``, and a matching ``_details/``
-folder with the report, consensus, mapped and unused sequences, and variant /
-feature / read tables. A second run becomes ``…_minimap_2…`` / ``…_hisat_2…``;
-nothing is overwritten. Older ``<alignment>.rv.json`` sidecars are still
-recognised if present, but new runs do not write them.
+document ``…_minimap.rvmap`` / ``…_hisat.rvmap``, and optional kept products
+(``…_consensus.fa``, ``…_mapped.fa``, …) next to those. A temporary
+``_details/`` scratch folder is used while the run works, then removed so it
+does not appear in Folders. A second run becomes ``…_minimap_2…`` /
+``…_hisat_2…``; nothing is overwritten. Older ``<alignment>.rv.json`` sidecars
+are still recognised if present, but new runs do not write them.
 
 Pure functions (parsers, projection, consensus, variants, lift-over) have no Qt
 dependency and are tested in ``tests/test_map_reference.py``.
@@ -1357,11 +1358,13 @@ class OutputLayout:
     def rvmap(self) -> Path:
         return self.parent / f"{self.base}{RVMAP_SUFFIX}"
 
-    def path(self, suffix: str) -> Path:
-        return self.details / f"{self.base}{suffix}"
+    def path(self, suffix: str, *, kept: bool = False) -> Path:
+        """Output path under ``parent`` (kept) or temporary ``details`` (scratch)."""
+        folder = self.parent if kept else self.details
+        return folder / f"{self.base}{suffix}"
 
     def alignment(self, suffix: str) -> Path:
-        """Selected aligner format (``.paf`` / ``.sam``) next to the run JSON."""
+        """Selected aligner format (``.paf`` / ``.sam``) next to the .rvmap."""
         ext = suffix if suffix.startswith(".") else f".{suffix}"
         return self.parent / f"{self.base}{ext}"
 
@@ -1482,6 +1485,14 @@ def alignment_for_run_json(path: Path) -> Path | None:
     return None
 
 
+_KEPT_PRODUCT_SUFFIXES = (
+    "_consensus.fa",
+    "_mapped.fa",
+    "_unused.fa",
+    "_variants.tsv",
+)
+
+
 def _base_outputs_exist(parent: Path, base: str) -> bool:
     """True when a previous run already claimed this base name."""
     if (parent / f"{base}{RVMAP_SUFFIX}").exists():
@@ -1491,11 +1502,14 @@ def _base_outputs_exist(parent: Path, base: str) -> bool:
             return True
         if (parent / f"{base}{ext}{RUN_JSON_SUFFIX}").exists():
             return True
+    for suffix in _KEPT_PRODUCT_SUFFIXES:
+        if (parent / f"{base}{suffix}").exists():
+            return True
     return False
 
 
 def plan_outputs(inputs: list[Path], *, engine: str | None = None) -> OutputLayout:
-    """``<input>_minimap`` / ``_hisat`` (or ``_2``, ``_3`` …) and details folder."""
+    """``<input>_minimap`` / ``_hisat`` (or ``_2``, ``_3`` …) plus scratch details."""
     parent = Path(inputs[0]).expanduser().resolve().parent
     engine_key = engine or MAP_ENGINE_MINIMAP2
     engine_tag = OUTPUT_ENGINE_TAG.get(engine_key, "minimap")
@@ -2507,7 +2521,7 @@ def _write_outputs(run: MapRun, layout: OutputLayout, info: InputInfo, created: 
     # Consensus, with the reference annotations moved to consensus coordinates.
     detailed = [c for c in run.contigs if c.detailed and c.consensus]
     if o.save_consensus and detailed:
-        path = layout.path("_consensus.fa")
+        path = layout.path("_consensus.fa", kept=True)
         _write_fasta(path, [(f"{c.ref_id}_consensus", c.consensus) for c in detailed])
         feats = {f"{c.ref_id}_consensus": _consensus_features(c) for c in detailed}
         if any(feats.values()):
@@ -2522,8 +2536,12 @@ def _write_outputs(run: MapRun, layout: OutputLayout, info: InputInfo, created: 
     for rec in run.records:
         by_name.setdefault(rec.name, []).append(rec)
     feats_of = {c.ref_id: c.features for c in run.contigs}
-    mapped_path = layout.path("_mapped.fa") if o.save_mapped and run.records else None
-    unused_path = layout.path("_unused.fa") if o.save_unused and run.unused else None
+    mapped_path = (
+        layout.path("_mapped.fa", kept=True) if o.save_mapped and run.records else None
+    )
+    unused_path = (
+        layout.path("_unused.fa", kept=True) if o.save_unused and run.unused else None
+    )
     if mapped_path or unused_path:
         say("Writing the placed and unused sequences…")
         mapped_out = mapped_path.open("w", encoding="utf-8", newline="\n") if mapped_path else None
@@ -2568,7 +2586,7 @@ def _write_outputs(run: MapRun, layout: OutputLayout, info: InputInfo, created: 
             details["unused"] = unused_path.name
 
     if o.save_variants and any(c.variants for c in run.contigs):
-        path = layout.path("_variants.tsv")
+        path = layout.path("_variants.tsv", kept=True)
         with path.open("w", encoding="utf-8", newline="\n") as out:
             out.write("sequence\tposition\tref\talt\tcount\tdepth\tfrequency\tcontext\tfeatures\n")
             for c in run.contigs:
@@ -2579,6 +2597,7 @@ def _write_outputs(run: MapRun, layout: OutputLayout, info: InputInfo, created: 
         details["variants"] = path.name
 
     if any(r.lifted for r in run.records):
+        # Scratch only — removed with ``_details/`` after the run.
         path = layout.path("_features.tsv")
         with path.open("w", encoding="utf-8", newline="\n") as out:
             out.write("sequence\treference\tfeature\ttype\tref_start\tref_end\tstatus\t"
@@ -2590,8 +2609,6 @@ def _write_outputs(run: MapRun, layout: OutputLayout, info: InputInfo, created: 
                     out.write(f"{fasta_id(r)}\t{r.ref_id}\t{f.name}\t{f.feature_type}\t{f.start}\t"
                               f"{f.end}\t{lf.status}\t{lf.differences}\t{lf.identity:.4f}\t"
                               f"{lf.start or ''}\t{lf.end or ''}\n")
-        created.append(path)
-        details["features"] = path.name
 
     path = layout.path("_reads.tsv")
     with path.open("w", encoding="utf-8", newline="\n") as out:
@@ -2602,8 +2619,6 @@ def _write_outputs(run: MapRun, layout: OutputLayout, info: InputInfo, created: 
                       f"{r.identity:.4f}\t{r.mismatches}\t{r.deleted}\t{r.inserted}\t"
                       f"{r.aligned_bp}\t{r.mapq if r.mapq >= 0 else ''}\t{r.kind}\t"
                       f"{r.query_length}\t{r.clipped}\n")
-    created.append(path)
-    details["reads"] = path.name
 
     if raw is not None:
         created.append(raw)
@@ -2612,25 +2627,25 @@ def _write_outputs(run: MapRun, layout: OutputLayout, info: InputInfo, created: 
     path = layout.path("_methods.txt")
     path.write_text(methods + "\n\nReferences\n" + "\n".join(CITATIONS[run.engine]) + "\n",
                     encoding="utf-8")
-    created.append(path)
     path = layout.path("_commands.txt")
     path.write_text(f"RepeatViewer Mapping, run {run.stamp}\n"
                     f"{ENGINE_NAMES[run.engine]} {run.engine_version}\n\n"
                     + "\n".join(run.commands) + "\n", encoding="utf-8")
-    created.append(path)
 
     report = layout.path("_report.html")
-    details["report"] = report.name
     write_rvmap = bool(getattr(o, "generate_rvmap", True))
     rvmap = layout.rvmap
     title = f"{output_base_name(run.queries)} mapped to {run.reference.name}"
-    listed = ([rvmap] if write_rvmap else []) + [*created, report]
+    listed = ([rvmap] if write_rvmap else []) + list(created)
     report.write_text(report_html(run, listed, title), encoding="utf-8")
-    created.append(report)
 
     if not write_rvmap:
         primary = raw if raw is not None else report
-        return primary, list(created), report
+        kept = [p for p in created if p.is_file()]
+        # Drop the temporary ``_details/`` workspace (work + tables + report).
+        shutil.rmtree(layout.details, ignore_errors=True)
+        primary_out = primary if primary.is_file() else (raw if raw is not None and raw.is_file() else layout.rvmap)
+        return primary_out, kept, primary_out
 
     payload = {
         "format": RVMAP_FORMAT, "version": RVMAP_VERSION, "created": run.stamp,
@@ -2650,7 +2665,7 @@ def _write_outputs(run: MapRun, layout: OutputLayout, info: InputInfo, created: 
                     if run.records else None},
         "warnings": run.warnings,
         "alignment": raw.name if raw is not None else "",
-        "details_dir": layout.details.name,
+        "details_dir": "",
         "details": details,
         "unused": [[n, r] for n, r in list(run.unused.items())[:10_000]],
         "contigs": [],
@@ -2679,7 +2694,11 @@ def _write_outputs(run: MapRun, layout: OutputLayout, info: InputInfo, created: 
         }
         payload["contigs"].append(entry)
     rvmap.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
-    return rvmap, [rvmap, *created], report
+    kept = [p for p in created if p.is_file()]
+    # Aligners need a work directory during the run; drop ``_details/`` afterward
+    # so Folders stays clear (minimap2 / HISAT2).
+    shutil.rmtree(layout.details, ignore_errors=True)
+    return rvmap, [rvmap, *kept], rvmap
 
 
 # --------------------------------------------------------------------------

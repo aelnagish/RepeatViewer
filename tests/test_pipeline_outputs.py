@@ -107,6 +107,13 @@ def test_kept_input_name_used_by_align_and_combine(tmp_path: Path) -> None:
     assert alignment_output_stem(a, engine="muscle") == "reads.fa_muscle"
     assert combined_alignment_output_stem([a, b], engine="mafft") == "reads.fa_cmafft"
     assert combined_alignment_output_stem([a, b], engine="muscle") == "reads.fa_cmuscle"
+    # One file (or one sequence): normal _mafft / _muscle, not _cmafft.
+    assert combined_alignment_output_stem([a], engine="mafft") == "reads.fa_mafft"
+    assert combined_alignment_output_stem([a], engine="muscle") == "reads.fa_muscle"
+    assert (
+        combined_alignment_output_stem([a, b], engine="mafft", sequence_count=1)
+        == "reads.fa_mafft"
+    )
     assert add_to_msa_output_stem(a, engine="mafft") == "reads.fa_amafft"
     assert add_to_msa_output_stem(a, engine="muscle") == "reads.fa_amuscle"
     first = _next_available_fasta(tmp_path, "reads.fa_cmafft")

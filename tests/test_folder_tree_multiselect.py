@@ -126,6 +126,47 @@ def test_folder_context_menu_includes_reveal(tree, monkeypatch):
     assert "Copy Path" in labels
 
 
+def test_top_level_roots_can_move_up_down(qapp, tmp_path, monkeypatch):
+    """Main workspace folders can change position (Move up / Move down)."""
+    tree = mw.FolderTreeWidget()
+    ordered: list[list[str]] = []
+    tree.root_order_changed.connect(
+        lambda: ordered.append(
+            [tree.topLevelItem(i).text(0) for i in range(tree.topLevelItemCount())]
+        )
+    )
+    for name in ("first", "second", "third"):
+        (tmp_path / name).mkdir()
+        item = QTreeWidgetItem([name])
+        item.setData(0, mw.ROLE_PATH, str(tmp_path / name))
+        tree.addTopLevelItem(item)
+    tree.resize(300, 300)
+    tree.show()
+    qapp.processEvents()
+
+    second = tree.topLevelItem(1)
+    tree._move_top_level_item(second, -1)
+    assert [tree.topLevelItem(i).text(0) for i in range(3)] == [
+        "second",
+        "first",
+        "third",
+    ]
+    assert ordered[-1] == ["second", "first", "third"]
+
+    labels = []
+
+    class RecordingMenu(mw.QMenu):
+        def exec(self, *args, **kwargs):
+            labels.extend(a.text() for a in self.actions() if a.text())
+
+    monkeypatch.setattr(mw, "QMenu", RecordingMenu)
+    tree.clearSelection()
+    tree.topLevelItem(0).setSelected(True)
+    tree._show_context_menu(tree.visualItemRect(tree.topLevelItem(0)).center())
+    assert "Move up" in labels and "Move down" in labels
+    tree.close()
+
+
 def _branch_item(tree, tmp_path, name: str):
     parent = tmp_path / name
     parent.mkdir()
