@@ -1,5 +1,6 @@
 """Primer workbench Design tab (offscreen)."""
 
+import json
 import random
 import time
 
@@ -63,7 +64,7 @@ def test_design_tab_region_advice_and_keep(qapp, isolated_settings, tmp_path):
     panel.reload()
     panel.show_design_tab()
     pane = panel.design_pane
-    assert panel.pages.currentWidget() is pane
+    assert panel.pages.currentWidget().widget() is pane
     panel.on_sequence_selection(500, 1999)          # 1,500 bp, product max 1,000
     assert pane.region().length == 1500
     assert not pane.advice.isHidden() and pane.fit_button.isVisibleTo(pane)
@@ -309,3 +310,87 @@ def test_primer_chips_warn_about_a_restriction_tail(qapp, isolated_settings, tmp
     assert "Only 2 bases" in chips
     assert "also cuts the open sequence" in chips
     assert "carries EcoRI too" in chips and "A_R" in chips
+
+
+def test_design_tab_carries_the_window_settings(qapp, isolated_settings, tmp_path):
+    from repeatviewer.backends.primers import design as dz
+    from repeatviewer.widgets.primer_design_pane import RUN_FILES, RUN_THIS
+    from repeatviewer.widgets.primers_panel import PrimersPanel
+
+    r = random.Random(9)
+    seq = "".join(r.choice("ACGT") for _ in range(2000))
+    fa = tmp_path / "t.fa"
+    fa.write_text(">t\n" + seq + "\n")
+    panel = PrimersPanel(width=330)
+    panel.set_host(_Host(fa, seq))
+    panel.reload()
+    pane = panel.design_pane
+
+    # every condition of the old window is here and lands in the settings
+    pane.gc_min.setValue(35.0)
+    pane.gc_max.setValue(65.0)
+    pane.tm_diff.setValue(1.5)
+    pane.num_return.setValue(7)
+    pane.probe_check.setChecked(True)
+    pane.poly_x.setValue(3)
+    pane.gc_clamp.setValue(1)
+    pane.end_stab.setValue(8.0)
+    pane.probe_size_opt.setValue(24)
+    pane.probe_tm_opt.setValue(68.0)
+    pane.na.setValue(60.0)
+    pane.mg.setValue(2.0)
+    pane.dntp.setValue(0.8)
+    s = pane.settings()
+    assert (s.gc_min, s.gc_max, s.max_tm_diff, s.num_return) == (35.0, 65.0, 1.5, 7)
+    assert s.pick_probe and (s.max_poly_x, s.gc_clamp, s.max_end_stability) == (3, 1, 8.0)
+    assert (s.probe_size_opt, s.probe_tm_opt) == (24, 68.0)
+    assert (s.thermo.monovalent_mM, s.thermo.divalent_mM, s.thermo.dntp_mM) == (60.0, 2.0, 0.8)
+
+    # Advanced is closed until asked for
+    assert pane.adv_body.isHidden() and "Poly-X 3" in pane.adv_summary.text()
+    pane.adv_toggle.setChecked(True)
+    assert not pane.adv_body.isHidden() and pane.adv_toggle.text() == "Hide"
+
+    # Save writes the settings that right-click running reads
+    pane.save_button.click()
+    saved = dz.DesignSettings.from_dict(
+        json.loads(QSettings().value("primers/workbench_design")))
+    assert saved.gc_max == 65.0 and saved.num_return == 7
+    assert "Saved" in pane.saved_note.text()
+
+    # Restore Defaults puts the mode's own values back
+    pane.defaults_button.click()
+    assert pane.settings().gc_max == dz.DesignSettings().gc_max
+    assert not pane.probe_check.isChecked()
+
+
+def test_design_on_selected_files_asks_for_the_job(qapp, isolated_settings, tmp_path):
+    from repeatviewer.widgets.primer_design_pane import RUN_FILES
+    from repeatviewer.widgets.primers_panel import PrimersPanel
+
+    r = random.Random(10)
+    seq = "".join(r.choice("ACGT") for _ in range(1500))
+    fa = tmp_path / "t.fa"
+    fa.write_text(">t\n" + seq + "\n")
+    panel = PrimersPanel(width=330)
+    panel.set_host(_Host(fa, seq))
+    panel.reload()
+    pane = panel.design_pane
+    asked = []
+    pane.jobRequested.connect(asked.append)
+
+    panel.on_sequence_selection(100, 600)
+    assert pane.region() is not None
+    for b in pane.run_group.buttons():
+        if b.property("run") == RUN_FILES:
+            b.click()
+    assert pane.region_section.isHidden()        # the job runs on whole files
+    assert pane.region() is None
+    assert pane.design_button.text() == "Run"
+    pane.ask_check.setChecked(True)
+    pane.db_check.setChecked(True)
+    pane.design_button.click()
+    assert len(asked) == 1
+    assert asked[0]["annotate_design"] and asked[0]["save_design_to_database"]
+    assert asked[0]["settings"]["size_opt"] == pane.size_opt.value()
+    assert not pane._busy                        # the panel itself ran nothing

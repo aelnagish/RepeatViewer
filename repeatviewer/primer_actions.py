@@ -245,6 +245,24 @@ class PrimerActionsMixin:
     def _quick_primer_design_right_click(self) -> None:
         self._run_primer_design_default()
 
+    def _start_design_from_panel(self, payload: dict) -> None:
+        """Design on the selected files with the settings of the Primers panel."""
+        if not self._primers_ready():
+            return
+        files = self._primer_candidate_files()
+        if not files:
+            QMessageBox.information(
+                self, "Primer Design",
+                "Tick the FASTA files to design on in the Files panel first.",
+            )
+            return
+        opts = replace(self._primer_options,
+                       design=dict(payload.get("settings") or {}),
+                       annotate_design=bool(payload.get("annotate_design", True)),
+                       save_design_to_database=bool(payload.get("save_design_to_database")))
+        self._save_primer_options(opts)
+        self._start_primer_job(PRIMER_JOB_DESIGN, files, self._primer_options)
+
     def _open_primer_design_dialog(self, *, mode: str | None = None,
                                    files: list[Path] | None = None) -> None:
         if not self._primers_ready():

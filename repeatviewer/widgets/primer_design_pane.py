@@ -16,6 +16,7 @@ from PySide6.QtCore import QObject, QSettings, Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
+    QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QFrame,
@@ -23,6 +24,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QSpinBox,
     QTableWidget,
@@ -36,6 +38,8 @@ from repeatviewer.backends.primers import workbench as wb
 from repeatviewer.widgets.help_button import make_help_button
 
 _SETTINGS_KEY = "primers/workbench_design"
+RUN_THIS = "this"
+RUN_FILES = "files"
 
 # One grid for every panel of the Primers rail: a label column and a field
 # column of fixed width. Whatever sits in the field column fills it edge to
@@ -61,6 +65,27 @@ REGION_HELP = (
     "<b>Avoid</b>: no primer may sit in the region (a SNP, a methylated site, a repeat).<br>"
     "When the region and the settings cannot work together, an amber note says why "
     "and offers the settings that fit. Nothing is blocked."
+)
+RUN_ON_HELP = (
+    "<b>This one</b>: the open sequence. The design runs here, the candidates appear below "
+    "and nothing is written until you press Keep Ticked or Open Report.<br>"
+    "<b>Selected files</b>: every FASTA ticked in the Files panel. That is the long run: "
+    "the progress bar, the report files beside the inputs, and the usual file colours. "
+    "Both use exactly the settings on this page."
+)
+ADVANCED_HELP = (
+    "Primer3's finer rules and the salt the Tm is calculated for. The defaults suit most "
+    "PCR; change them when a template is unusual.<br>"
+    "<b>Max poly-X</b>: longest run of one base allowed in a primer.<br>"
+    "<b>GC clamp</b>: how many G or C bases the 3′ end must have.<br>"
+    "<b>Max 3′ stability</b>: largest −ΔG (kcal/mol) of the last five bases.<br>"
+    "<b>Probe</b>: size and Tm of the hydrolysis probe, when one is picked.<br>"
+    "<b>Na, Mg, dNTP</b>: the reaction the Tm is worked out for."
+)
+OPTIONS_HELP = (
+    "What happens when a run on the selected files finishes.<br>"
+    "Right-clicking a FASTA in the Files panel always runs Design with the settings saved "
+    "here, so press <b>Save</b> after changing them."
 )
 SETTINGS_HELP = (
     "<b>Mode</b>: Standard PCR or qPCR (short products). Ladder PCR and FISH probes, and "
@@ -173,6 +198,8 @@ class DesignPane(QWidget):
 
     keepRequested = Signal(list)
     designWindowRequested = Signal()
+    jobRequested = Signal(dict)        # design on the files selected in Files
+    settingsSaved = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -190,6 +217,29 @@ class DesignPane(QWidget):
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(10)
         s = self._load_settings()
+
+        # ---- Run on
+        sec, sl, _ = _section("Run on", self, "Run on", RUN_ON_HELP)
+        self.run_group = QButtonGroup(self)
+        self.run_group.setExclusive(True)
+        run_row = []
+        for i, (key, text) in enumerate(((RUN_THIS, "This one"), (RUN_FILES, "Selected files"))):
+            b = QPushButton(text, sec)
+            b.setCheckable(True)
+            b.setProperty("run", key)
+            b.setFixedWidth((FIELD_W - GAP) // 2)
+            self.run_group.addButton(b, i)
+            run_row.append(b)
+        run_row[0].setChecked(True)
+        sl.addLayout(_row("Sequence", *run_row, parent=sec))
+        self.run_note = QLabel("", sec)
+        self.run_note.setWordWrap(True)
+        self.run_note.setIndent(LABEL_W + GAP)
+        self.run_note.setStyleSheet("color: palette(placeholder-text);")
+        sl.addWidget(self.run_note)
+        lay.addWidget(sec)
+        lay.addWidget(_rule(self))
+        self.run_section = sec
 
         # ---- Region
         sec, sl, _ = _section("Region", self, "Region", REGION_HELP)
@@ -236,7 +286,9 @@ class DesignPane(QWidget):
         self.advice.hide()
         sl.addWidget(self.advice)
         lay.addWidget(sec)
-        lay.addWidget(_rule(self))
+        self.region_section = sec
+        self.region_rule = _rule(self)
+        lay.addWidget(self.region_rule)
 
         # ---- Settings
         sec, sl, _ = _section("Settings", self, "Settings", SETTINGS_HELP)
@@ -247,6 +299,9 @@ class DesignPane(QWidget):
         i = self.mode.findData(s.mode)
         self.mode.setCurrentIndex(max(0, i))
         sl.addLayout(_row("Mode", self.mode, parent=sec))
+        self.probe_check = QCheckBox("Hydrolysis probe (TaqMan)", sec)
+        self.probe_check.setChecked(bool(s.pick_probe))
+        sl.addLayout(_row("", self.probe_check, parent=sec))
         sl.addLayout(_triple_header(sec))
         self.size_min = _spin3(5, 60, s.size_min, parent=sec)
         self.size_opt = _spin3(5, 60, s.size_opt, parent=sec)
@@ -259,18 +314,78 @@ class DesignPane(QWidget):
         self.prod_min = _spin(10, 100_000, s.product_min, parent=sec)
         self.prod_max = _spin(10, 100_000, s.product_max, parent=sec)
         sl.addLayout(_row("Product", self.prod_min, self.prod_max, parent=sec, joins=("to",)))
-        self.window_button = QPushButton("Design Window…", sec)
-        self.window_button.setToolTip("GC, tails, salt, Ladder PCR, FISH probes, many files")
+        self.gc_min = _spin(0, 100, s.gc_min, decimals=1, parent=sec)
+        self.gc_max = _spin(0, 100, s.gc_max, decimals=1, parent=sec)
+        sl.addLayout(_row("GC (%)", self.gc_min, self.gc_max, parent=sec, joins=("to",)))
+        self.tm_diff = _spin(0, 20, s.max_tm_diff, decimals=1, parent=sec)
+        sl.addLayout(_row("Max Tm diff", self.tm_diff, parent=sec))
+        self.num_return = _spin(1, 100, s.num_return, parent=sec)
+        sl.addLayout(_row("Pairs", self.num_return, parent=sec))
+        lay.addWidget(sec)
+        lay.addWidget(_rule(self))
+
+        # ---- Advanced (closed by default; the summary says what is inside)
+        sec, sl, self.adv_title = _section("Advanced", self, "Advanced", ADVANCED_HELP)
+        self.adv_toggle = QPushButton("Show", sec)
+        self.adv_toggle.setCheckable(True)
+        self.adv_toggle.setFixedWidth(BOX2_W)
+        self.adv_summary = QLabel(sec)
+        self.adv_summary.setWordWrap(True)
+        self.adv_summary.setStyleSheet("color: palette(placeholder-text);")
+        sl.addLayout(_row("", self.adv_toggle, parent=sec))
+        sl.addWidget(self.adv_summary)
+        self.adv_body = QWidget(sec)
+        ab = QVBoxLayout(self.adv_body)
+        ab.setContentsMargins(0, 0, 0, 0)
+        ab.setSpacing(6)
+        self.poly_x = _spin(0, 20, s.max_poly_x, parent=self.adv_body)
+        ab.addLayout(_row("Max poly-X", self.poly_x, parent=self.adv_body))
+        self.gc_clamp = _spin(0, 5, s.gc_clamp, parent=self.adv_body)
+        ab.addLayout(_row("GC clamp", self.gc_clamp, parent=self.adv_body))
+        self.end_stab = _spin(0, 20, s.max_end_stability, decimals=1, parent=self.adv_body)
+        ab.addLayout(_row("Max 3′ stability", self.end_stab, parent=self.adv_body))
+        ab.addLayout(_triple_header(self.adv_body))
+        self.probe_size_min = _spin3(5, 60, s.probe_size_min, parent=self.adv_body)
+        self.probe_size_opt = _spin3(5, 60, s.probe_size_opt, parent=self.adv_body)
+        self.probe_size_max = _spin3(5, 60, s.probe_size_max, parent=self.adv_body)
+        ab.addLayout(_row("Probe size", self.probe_size_min, self.probe_size_opt,
+                          self.probe_size_max, parent=self.adv_body))
+        self.probe_tm_min = _spin3(20, 95, s.probe_tm_min, decimals=1, parent=self.adv_body)
+        self.probe_tm_opt = _spin3(20, 95, s.probe_tm_opt, decimals=1, parent=self.adv_body)
+        self.probe_tm_max = _spin3(20, 95, s.probe_tm_max, decimals=1, parent=self.adv_body)
+        ab.addLayout(_row("Probe Tm (°C)", self.probe_tm_min, self.probe_tm_opt,
+                          self.probe_tm_max, parent=self.adv_body))
+        self.na = _spin(0, 1000, s.thermo.monovalent_mM, decimals=1, parent=self.adv_body)
+        ab.addLayout(_row("Na (mM)", self.na, parent=self.adv_body))
+        self.mg = _spin(0, 100, s.thermo.divalent_mM, decimals=1, parent=self.adv_body)
+        ab.addLayout(_row("Mg (mM)", self.mg, parent=self.adv_body))
+        self.dntp = _spin(0, 100, s.thermo.dntp_mM, decimals=2, parent=self.adv_body)
+        ab.addLayout(_row("dNTP (mM)", self.dntp, parent=self.adv_body))
+        self.adv_body.hide()
+        sl.addWidget(self.adv_body)
+        lay.addWidget(sec)
+        lay.addWidget(_rule(self))
+
+        # ---- Options
+        sec, sl, _ = _section("Options", self, "Options", OPTIONS_HELP)
+        self.ask_check = QCheckBox("Ask which pairs to add here", sec)
+        self.db_check = QCheckBox("Add them to the Database", sec)
+        for box in (self.ask_check, self.db_check):
+            sl.addLayout(_row("", box, parent=sec))
         self.defaults_button = QPushButton("Restore Defaults", sec)
+        self.save_button = QPushButton("Save", sec)
         self.design_button = QPushButton("Design", sec)
         self.design_button.setDefault(True)
         br = QHBoxLayout()
         br.setContentsMargins(0, 2, 0, 0)
-        br.addWidget(self.window_button)
-        br.addStretch(1)
         br.addWidget(self.defaults_button)
+        br.addStretch(1)
+        br.addWidget(self.save_button)
         br.addWidget(self.design_button)
         sl.addLayout(br)
+        self.saved_note = QLabel("", sec)
+        self.saved_note.setStyleSheet("color: palette(placeholder-text);")
+        sl.addWidget(self.saved_note)
         lay.addWidget(sec)
         lay.addWidget(_rule(self))
 
@@ -310,13 +425,20 @@ class DesignPane(QWidget):
                   self.prod_min, self.prod_max):
             w.valueChanged.connect(self._update_advice)
         self.use_group.idClicked.connect(lambda _i: self._update_advice())
+        self.run_group.idClicked.connect(lambda _i: self._on_run_where())
         self.fit_button.clicked.connect(self._on_fit)
         self.design_button.clicked.connect(self.run_design)
         self.defaults_button.clicked.connect(self._on_defaults)
-        self.window_button.clicked.connect(self.designWindowRequested.emit)
+        self.save_button.clicked.connect(self._on_save)
+        self.adv_toggle.toggled.connect(self._on_advanced)
+        self.probe_check.toggled.connect(lambda _b: self._update_advanced_summary())
+        for box in (self.poly_x, self.gc_clamp, self.end_stab, self.na, self.mg, self.dntp):
+            box.valueChanged.connect(lambda _v: self._update_advanced_summary())
         self.keep_button.clicked.connect(self._on_keep)
         self.report_button.clicked.connect(self._on_report)
         self.table.itemSelectionChanged.connect(self._on_pick)
+        self._update_advanced_summary()
+        self._on_run_where()
         self._sync_buttons()
 
     # ------------------------------------------------------------- host / state
@@ -355,6 +477,8 @@ class DesignPane(QWidget):
         self._update_advice()
 
     def region(self) -> wb.Region | None:
+        if self.run_where() == RUN_FILES:
+            return None
         a, b = self.region_from.value(), self.region_to.value()
         if b - a < 1:
             return None
@@ -365,12 +489,42 @@ class DesignPane(QWidget):
     def settings(self) -> dz.DesignSettings:
         base = self._load_settings()
         d = base.to_dict()
+        thermo = dict(d.get("thermo") or {})
+        thermo.update(monovalent_mM=self.na.value(), divalent_mM=self.mg.value(),
+                      dntp_mM=self.dntp.value())
         d.update(mode=str(self.mode.currentData()),
                  size_min=self.size_min.value(), size_opt=self.size_opt.value(),
                  size_max=self.size_max.value(), tm_min=self.tm_min.value(),
                  tm_opt=self.tm_opt.value(), tm_max=self.tm_max.value(),
-                 product_min=self.prod_min.value(), product_max=self.prod_max.value())
+                 product_min=self.prod_min.value(), product_max=self.prod_max.value(),
+                 gc_min=self.gc_min.value(), gc_max=self.gc_max.value(),
+                 max_tm_diff=self.tm_diff.value(), num_return=self.num_return.value(),
+                 pick_probe=self.probe_check.isChecked(),
+                 max_poly_x=self.poly_x.value(), gc_clamp=self.gc_clamp.value(),
+                 max_end_stability=self.end_stab.value(),
+                 probe_size_min=self.probe_size_min.value(),
+                 probe_size_opt=self.probe_size_opt.value(),
+                 probe_size_max=self.probe_size_max.value(),
+                 probe_tm_min=self.probe_tm_min.value(),
+                 probe_tm_opt=self.probe_tm_opt.value(),
+                 probe_tm_max=self.probe_tm_max.value(),
+                 thermo=thermo)
         return dz.DesignSettings.from_dict(d)
+
+    def run_where(self) -> str:
+        btn = self.run_group.checkedButton()
+        return str(btn.property("run")) if btn is not None else RUN_THIS
+
+    def options(self) -> dict:
+        """What to do with a finished run on the selected files."""
+        return {"annotate_design": self.ask_check.isChecked(),
+                "save_design_to_database": self.db_check.isChecked()}
+
+    def set_options(self, annotate: bool, to_database: bool) -> None:
+        for box, value in ((self.ask_check, annotate), (self.db_check, to_database)):
+            box.blockSignals(True)
+            box.setChecked(bool(value))
+            box.blockSignals(False)
 
     def _load_settings(self) -> dz.DesignSettings:
         raw = QSettings().value(_SETTINGS_KEY, "")
@@ -390,12 +544,57 @@ class DesignPane(QWidget):
 
     def _on_defaults(self) -> None:
         p = dz.mode_preset(str(self.mode.currentData()))
-        for box, key in ((self.size_min, "size_min"), (self.size_opt, "size_opt"),
-                         (self.size_max, "size_max"), (self.tm_min, "tm_min"),
-                         (self.tm_opt, "tm_opt"), (self.tm_max, "tm_max"),
-                         (self.prod_min, "product_min"), (self.prod_max, "product_max")):
-            box.setValue(p[key])
+        base = dz.DesignSettings(**p)
+        for box, value in ((self.size_min, base.size_min), (self.size_opt, base.size_opt),
+                           (self.size_max, base.size_max), (self.tm_min, base.tm_min),
+                           (self.tm_opt, base.tm_opt), (self.tm_max, base.tm_max),
+                           (self.prod_min, base.product_min),
+                           (self.prod_max, base.product_max),
+                           (self.gc_min, base.gc_min), (self.gc_max, base.gc_max),
+                           (self.tm_diff, base.max_tm_diff),
+                           (self.num_return, base.num_return),
+                           (self.poly_x, base.max_poly_x), (self.gc_clamp, base.gc_clamp),
+                           (self.end_stab, base.max_end_stability),
+                           (self.probe_size_min, base.probe_size_min),
+                           (self.probe_size_opt, base.probe_size_opt),
+                           (self.probe_size_max, base.probe_size_max),
+                           (self.probe_tm_min, base.probe_tm_min),
+                           (self.probe_tm_opt, base.probe_tm_opt),
+                           (self.probe_tm_max, base.probe_tm_max),
+                           (self.na, base.thermo.monovalent_mM),
+                           (self.mg, base.thermo.divalent_mM),
+                           (self.dntp, base.thermo.dntp_mM)):
+            box.setValue(value)
+        self.probe_check.setChecked(bool(base.pick_probe))
+        self._update_advanced_summary()
         self._update_advice()
+
+    def _on_save(self) -> None:
+        self._save_settings()
+        self.saved_note.setText("Saved. Right-click a FASTA in Files to run with these.")
+        self.settingsSaved.emit()
+
+    def _on_advanced(self, shown: bool) -> None:
+        self.adv_toggle.setText("Hide" if shown else "Show")
+        self.adv_body.setVisible(shown)
+        self.adv_summary.setVisible(not shown)
+
+    def _update_advanced_summary(self) -> None:
+        probe = ", probe picked" if self.probe_check.isChecked() else ""
+        self.adv_summary.setText(
+            f"Poly-X {self.poly_x.value()} · GC clamp {self.gc_clamp.value()} · "
+            f"3′ stability {self.end_stab.value():g} · Na {self.na.value():g} mM, "
+            f"Mg {self.mg.value():g} mM, dNTP {self.dntp.value():g} mM{probe}")
+
+    def _on_run_where(self) -> None:
+        files = self.run_where() == RUN_FILES
+        self.region_section.setVisible(not files)
+        self.region_rule.setVisible(not files)
+        self.design_button.setText("Run" if files else "Design")
+        self.run_note.setText(
+            "Every FASTA ticked in Files, with the progress bar and report files."
+            if files else "The open sequence, live. Nothing is written yet.")
+        self.push_overlay()
 
     # ------------------------------------------------------------------ advice
 
@@ -429,6 +628,13 @@ class DesignPane(QWidget):
 
     def run_design(self) -> None:
         if self._busy:
+            return
+        if self.run_where() == RUN_FILES:
+            self._save_settings()
+            payload = {"settings": self.settings().to_dict()}
+            payload.update(self.options())
+            self.jobRequested.emit(payload)
+            self.cand_note.setText("Running on the selected files. See the progress bar.")
             return
         sid, seq = self._sequence()
         if not seq:

@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSizePolicy,
+    QScrollArea,
     QStackedWidget,
     QTabBar,
     QTableWidget,
@@ -141,6 +142,18 @@ class _Tile(QWidget):
         lay.addWidget(self.value)
 
 
+def _scrolled(inner: QWidget, parent: QWidget) -> QScrollArea:
+    """A page that scrolls when its contents are taller than the panel."""
+    area = QScrollArea(parent)
+    # room for the scroll bar, so nothing is clipped on the right
+    inner.setContentsMargins(0, 0, 12, 0)
+    area.setWidget(inner)
+    area.setWidgetResizable(True)
+    area.setFrameShape(QScrollArea.Shape.NoFrame)
+    area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+    return area
+
+
 class PrimersPanel(QWidget):
     """Rail page body. ``set_host`` must be called before use."""
 
@@ -183,7 +196,7 @@ class PrimersPanel(QWidget):
         self.pages = QStackedWidget(self)
         outer.addWidget(self.pages, 1)
         self.design_pane = DesignPane(self.pages)
-        self.pages.addWidget(self.design_pane)
+        self.pages.addWidget(_scrolled(self.design_pane, self.pages))
         primer_page = QWidget(self.pages)
         self.pages.addWidget(primer_page)
         from repeatviewer.widgets.primer_pcr_pane import PcrPane
@@ -197,6 +210,7 @@ class PrimersPanel(QWidget):
         self.tabs.currentChanged.connect(self._on_workbench_tab)
         self.design_pane.keepRequested.connect(self._on_keep_designed)
         self.design_pane.designWindowRequested.connect(self._on_design_window)
+        self.design_pane.jobRequested.connect(self._on_design_job)
         lay = QVBoxLayout(primer_page)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(8)
@@ -588,6 +602,33 @@ class PrimersPanel(QWidget):
         if added:
             self.tabs.setCurrentIndex(1)
 
+    def _page_of(self, widget) -> int:
+        """Index of the page holding this pane (it may sit in a scroll area)."""
+        for i in range(self.pages.count()):
+            page = self.pages.widget(i)
+            if page is widget or getattr(page, "widget", lambda: None)() is widget:
+                return i
+        return 0
+
+    def _load_design_options(self) -> None:
+        """The two after-the-run options come from the saved primer options."""
+        mw = find_main_window()
+        opts = getattr(mw, "_primer_options", None) if mw is not None else None
+        if opts is not None:
+            self.design_pane.set_options(bool(opts.annotate_design),
+                                         bool(opts.save_design_to_database))
+
+    def _on_design_job(self, payload: dict) -> None:
+        """Design on every FASTA ticked in the Files panel, through the usual job."""
+        mw = find_main_window()
+        start = getattr(mw, "_start_design_from_panel", None) if mw is not None else None
+        if start is None:
+            return
+        try:
+            start(payload)
+        except Exception:  # noqa: BLE001 - the window reports its own errors
+            pass
+
     def _on_design_window(self) -> None:
         mw = find_main_window()
         if mw is None or self._path is None:
@@ -623,6 +664,7 @@ class PrimersPanel(QWidget):
         same_file = self._path is not None and path == self._path
         if not same_file or seq_id != self._seq_id or len(template or "") != len(self._template):
             self.design_pane.reset_for_sequence()
+        self._load_design_options()
         new_sequence = not same_file or seq_id != self._seq_id or template != self._template
         self._path = path
         self._seq_id = seq_id
