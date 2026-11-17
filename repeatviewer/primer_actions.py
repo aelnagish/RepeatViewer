@@ -493,9 +493,16 @@ class PrimerActionsMixin:
         dialog.runRequested.connect(_run)
         dialog.allSettingsRequested.connect(_all)
         dialog.finished.connect(_closed)
-        dialog.show()
-        dialog.raise_()
-        dialog.activateWindow()
+        if tabs is None:            # no preview area (tests, headless): the old window
+            dialog.show()
+            dialog.raise_()
+            dialog.activateWindow()
+            return
+        from repeatviewer.views.tool_page import ToolDialogPage
+
+        page = ToolDialogPage(dialog, "Primer Database")
+        tabs.open_tool_tab(page, page.tab_name())
+        self._ensure_preview_visible()
 
     def _open_map_primers_dialog(self, *, check_stock: bool = False,
                                  primer_names: list[str] | None = None,
@@ -588,13 +595,14 @@ class PrimerActionsMixin:
             return
         from repeatviewer.views.primer_dialogs import PrimerDatabaseDialog
 
+        tabs = getattr(self, "_preview_tabs", None)
         existing = self._primer_database_dialog
-        if existing is not None:
+        if existing is not None and tabs is not None:
             try:
-                if existing.isVisible():
-                    existing.raise_()
-                    existing.activateWindow()
-                    return
+                for index in range(tabs.count()):
+                    if tabs.widget(index) is getattr(existing, "parent", lambda: None)():
+                        tabs.setCurrentIndex(index)
+                        return
             except RuntimeError:
                 self._primer_database_dialog = None
         path = self._primer_options.database_path or None
