@@ -1,4 +1,4 @@
-"""Tools > Primers in the main window (Design Primers, Map Primers, Primer Database).
+"""Tools > Primers and Probes in the main window (Design, Map, Database, painting).
 
 Kept out of ``main_window.py``: :class:`PrimerActionsMixin` is mixed into
 ``MainWindow`` and only uses the window's shared job / dialog helpers
@@ -18,10 +18,8 @@ from PySide6.QtWidgets import QMenu, QMessageBox
 
 from repeatviewer.backends.job_cancel import CANCELLED_MESSAGE
 from repeatviewer.job_options import (
-    PRIMER_DIALOG_TAB_PRIMERS,
     PrimerOptions,
     load_primer_options,
-    persistable_dialog_tab,
     save_primer_options,
 )
 
@@ -361,58 +359,6 @@ class PrimerActionsMixin:
         self._save_primer_options(opts)
         self._start_primer_job(PRIMER_JOB_DESIGN, files, self._primer_options)
 
-    def _open_primer_design_dialog(self, *, mode: str | None = None,
-                                   files: list[Path] | None = None) -> None:
-        if not self._primers_ready():
-            return
-        from repeatviewer.views.primer_dialogs import PrimerDesignDialog
-
-        opts = self._primer_options
-        if mode:
-            from repeatviewer.backends.primers import design as dz
-
-            current = opts.design_settings()
-            if current.mode != mode:
-                data = current.to_dict()
-                data.update(dz.mode_preset(mode))
-                data["mode"] = mode
-                opts = replace(opts, design=data, last_dialog_tab=PRIMER_DIALOG_TAB_PRIMERS)
-        start_files = list(files or [])
-        dialog = PrimerDesignDialog(
-            initial=opts,
-            files=start_files or self._primer_candidate_files(),
-            project_genome=self._genome_path_resolved(),
-            parent=self,
-        )
-
-        def _accepted(d) -> None:
-            self._save_primer_options(d.options())
-            if not d.should_run():
-                self._set_status_message("Primer Design settings saved", 4000)
-                return
-            if d.is_painting():
-                self._start_painting_job(self._primer_options)
-                return
-            # What the window shows; with Use selected and nothing shown yet, the panel.
-            files = d.template_files() or (
-                (start_files or self._primer_candidate_files())
-                if d.uses_selected() else [])
-            if not files:
-                QMessageBox.information(
-                    self, "Primer Design",
-                    "Choose the template: click a FASTA in the Files panel (or fill "
-                    "Template with Define inputs), then Run.",
-                )
-                return
-            missing = [p for p in files if not Path(p).is_file()]
-            if missing:
-                QMessageBox.warning(self, "Primer Design",
-                                    f"The template does not exist:\n{missing[0]}")
-                return
-            self._start_primer_job(PRIMER_JOB_DESIGN, files, self._primer_options)
-
-        self._present_te_viz_dialog(dialog, _accepted)
-
     # ------------------------------------------------------------- map
 
     @staticmethod
@@ -508,16 +454,9 @@ class PrimerActionsMixin:
         dialog.runRequested.connect(_run)
         dialog.allSettingsRequested.connect(_all)
         dialog.finished.connect(_closed)
-        if tabs is None:            # no preview area (tests, headless): the old window
-            dialog.show()
-            dialog.raise_()
-            dialog.activateWindow()
-            return
-        from repeatviewer.views.tool_page import ToolDialogPage
-
-        page = ToolDialogPage(dialog, "Primer Database")
-        tabs.open_tool_tab(page, page.tab_name())
-        self._ensure_preview_visible()
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
 
     def _open_map_primers_dialog(self, *, check_stock: bool = False,
                                  primer_names: list[str] | None = None,
@@ -605,22 +544,16 @@ class PrimerActionsMixin:
             dialog.deleteLater()
 
         dialog.finished.connect(_closed)
-        dialog.show()
-        dialog.raise_()
-        dialog.activateWindow()
+        if tabs is None:            # no preview area (tests, headless): the old window
+            dialog.show()
+            dialog.raise_()
+            dialog.activateWindow()
+            return
+        from repeatviewer.views.tool_page import ToolDialogPage
 
-    # ------------------------------------------------------------- tab memory
-
-    def _remember_primer_dialog_tab(self, dialog) -> bool:
-        """Cancel keeps the open tab (like the other tool windows)."""
-        from repeatviewer.views.primer_dialogs import MapPrimersDialog, PrimerDesignDialog
-
-        if isinstance(dialog, PrimerDesignDialog):
-            tab = persistable_dialog_tab(dialog.current_dialog_tab(),
-                                         first_tab=PRIMER_DIALOG_TAB_PRIMERS)
-            self._save_primer_options(replace(self._primer_options, last_dialog_tab=tab))
-            return True
-        return isinstance(dialog, MapPrimersDialog)
+        page = ToolDialogPage(dialog, "Primer Database")
+        tabs.open_tool_tab(page, page.tab_name())
+        self._ensure_preview_visible()
 
     # ------------------------------------------------------------- jobs
 
@@ -647,7 +580,7 @@ class PrimerActionsMixin:
                                "from the server\u201d.")
         if problem:
             if open_dialog_on_error:
-                self._open_primer_design_dialog()
+                self._open_painting_settings()
             QMessageBox.information(self, "Chromosome painting", problem)
             return
         self._start_primer_job(PRIMER_JOB_PAINTING, [Path(anchor).expanduser()], opts)

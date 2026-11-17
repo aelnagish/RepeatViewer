@@ -330,6 +330,7 @@ class MapPage(QWidget):
         self.defaults_button.clicked.connect(self._on_defaults)
         self.source.currentIndexChanged.connect(self._fill_primers)
         self._fill_primers()
+        self._apply_primers(base)
         self._refresh_files()
         self._show_idle()
 
@@ -425,6 +426,26 @@ class MapPage(QWidget):
             for name in names:
                 box.addItem(name)
             box.setEditable(not database)
+            box.setCurrentText(text)
+            box.blockSignals(False)
+
+    def _apply_primers(self, base: dict) -> None:
+        """Fill Forward and Reverse from the settings this page was opened with.
+
+        The Database can ask to test a pair it has selected ("Check a Sequence >
+        All settings"): the names arrive either in forward / reverse or, for a
+        stock check, in primer_names.
+        """
+        names = [str(n) for n in (base.get("primer_names") or []) if str(n).strip()]
+        chosen = [str(base.get("forward") or "").strip(), str(base.get("reverse") or "").strip()]
+        if not any(chosen) and names:
+            chosen = (names + ["", ""])[:2]
+        for box, text in zip((self.forward, self.reverse), chosen):
+            if not text:
+                continue
+            box.blockSignals(True)
+            if box.findText(text) < 0:
+                box.addItem(text)
             box.setCurrentText(text)
             box.blockSignals(False)
 

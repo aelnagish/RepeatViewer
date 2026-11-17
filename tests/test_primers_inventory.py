@@ -707,20 +707,19 @@ def test_check_only_the_selected_primers(shared, tmp_path, qapp, settings):
     st = payload["stock"]
     assert st["primers"] == 2
     assert [(r["forward"], r["reverse"]) for r in st["ready"]] == [("pBV1_for", "pBV1_rev")]
-    # The Map window shows what it will test, and can go back to all primers.
+    # The Map tab shows the two primers it will test, and can go back to all of them.
     from repeatviewer.job_options import PrimerOptions
-    from repeatviewer.views.primer_dialogs import MapPrimersDialog
+    from repeatviewer.views.map_page import MapPage
 
-    m = MapPrimersDialog(initial=PrimerOptions(map=ms.to_dict()), files=[])
-    m.show()
+    page = MapPage([fasta], options=PrimerOptions(map=ms.to_dict()), database_path=shared)
+    page.show()
     qapp.processEvents()
-    assert m._form_main.form.isRowVisible(m._only_field)
-    assert "2 selected" in m._only_label.text()
-    assert m.map_settings().primer_names == ["pBV1_for", "pBV1_rev"]
-    m._clear_only()
-    assert m.map_settings().primer_names == []
-    assert not m._form_main.form.isRowVisible(m._only_field)
-    m.close()
+    assert page.settings().primer_names == ["pBV1_for", "pBV1_rev"]
+    assert page.tab_name() == "Map \u00b7 pBV1_for / pBV1_rev"
+    page.forward.setCurrentIndex(-1)
+    page.reverse.setCurrentIndex(-1)
+    assert page.settings().primer_names == []
+    page.close()
 
 
 def test_former_member_is_a_status_not_a_role(tmp_path):

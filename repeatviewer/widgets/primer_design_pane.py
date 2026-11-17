@@ -24,7 +24,6 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QPushButton,
-    QScrollArea,
     QSizePolicy,
     QSpinBox,
     QTableWidget,
@@ -222,7 +221,6 @@ class DesignPane(QWidget):
     """``keepRequested`` carries the Primer objects of the ticked pairs."""
 
     keepRequested = Signal(list)
-    designWindowRequested = Signal()
     jobRequested = Signal(dict)        # design on the files selected in Files
     settingsSaved = Signal()
 

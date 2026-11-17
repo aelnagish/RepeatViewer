@@ -7657,7 +7657,7 @@ class MainWindow(
             self._add_toolbar_text_menu_button(
                 bar,
                 "Primers and Probes",
-                lambda: self._open_primer_design_dialog(),
+                lambda: self._design_in_panel(None),
                 lambda menu, skip_default=True: self._populate_primers_menu(menu),
                 tooltip=(
                     "Click: Design, Map or Database (as in Tools › Primers and Probes).\n"
@@ -10682,8 +10682,6 @@ class MainWindow(
         current_tab = getattr(dialog, "current_dialog_tab", None)
         if not callable(current_tab):
             return
-        if self._remember_primer_dialog_tab(dialog):
-            return
         if self._remember_ncbi_dialog_tab(dialog):
             return
         tab = current_tab()
@@ -10985,7 +10983,7 @@ class MainWindow(
             self._sync_samtools_params_dialog_from_files(panel_path)
             self._sync_tree_trait_dialog_from_files(panel_path)
             self._sync_primer_check_dialog_from_files(panel_path)
-            self._sync_pcr_window_from_files(panel_path)
+            self._sync_primer_genome_from_files(panel_path)
             filled_transfer = self._sync_transfer_source_from_files(panel_path)
             if not filled_transfer:
                 self._stop_transfer_session_on_file_navigation(panel_path)

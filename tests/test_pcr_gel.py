@@ -123,15 +123,12 @@ def test_windows_build(tmp_path, template):
     app = QApplication.instance() or QApplication([])
     from repeatviewer.views.bench_card_dialog import BenchCardDialog
     from repeatviewer.views.gel_photo_dialog import GelPhotoDialog
-    from repeatviewer.views.pcr_dialog import PcrWindow
     from repeatviewer.views.primer_genome_dialog import PrimerGenomeDialog
     from repeatviewer.widgets.gel_view import GelDocumentPanel
 
     res = pcr.run_pcr([template], [F, R], pcr.PcrSettings(mode=pcr.MODE_LADDER))
     out = pcr.write_outputs(res)
-    win = PcrWindow(pcr.PcrSettings(), templates=[template], primers=[F, R])
-    win.show_result(res, out)
-    assert win.table.rowCount() >= 6
+    assert out.get("files")
     doc = gd.gel_from_pcr(res)
     path = doc.save(tmp_path / "g.rvgel")
     panel = GelDocumentPanel()

@@ -109,7 +109,7 @@ def find_main_window():
     if app is None:
         return None
     for w in app.topLevelWidgets():
-        if hasattr(w, "_open_primer_design_dialog"):
+        if hasattr(w, "_open_primers_panel"):
             return w
     return None
 
@@ -209,7 +209,6 @@ class PrimersPanel(QWidget):
         self.pages.addWidget(self.enzyme_pane)
         self.tabs.currentChanged.connect(self._on_workbench_tab)
         self.design_pane.keepRequested.connect(self._on_keep_designed)
-        self.design_pane.designWindowRequested.connect(self._on_design_window)
         self.design_pane.jobRequested.connect(self._on_design_job)
         lay = QVBoxLayout(primer_page)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -632,15 +631,6 @@ class PrimersPanel(QWidget):
             start(payload)
         except Exception:  # noqa: BLE001 - the window reports its own errors
             pass
-
-    def _on_design_window(self) -> None:
-        mw = find_main_window()
-        if mw is None or self._path is None:
-            return
-        try:
-            mw._open_primer_design_dialog(files=[self._path])
-        except TypeError:
-            mw._open_primer_design_dialog()
 
     def primers(self) -> list[Primer]:
         return list(self._primers)
