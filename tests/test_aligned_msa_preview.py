@@ -757,6 +757,42 @@ def test_coincident_boundary_guides_group_by_edge() -> None:
     }
 
 
+def test_predicted_boundary_guides_mirror_onto_scale(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    """Boundary prediction guides extend through the scale like reference bounds."""
+    from PySide6.QtGui import QColor
+
+    path = tmp_path / "bounds.fa"
+    path.write_text(">a\nACGTACGTAC\n>b\nACGTACGTAC\n")
+    panel = MultiSequenceOverviewPanel(path)
+    panel.load_path(path, msa_mode=True)
+    red = QColor("#c0392b")
+    purple = QColor("#7b2cbf")
+    panel._boundary_guides = {
+        "ltr": [(2, red, False), (8, red, False)],
+        "tir": [(2, purple, False), (8, purple, False)],
+    }
+    for key in ("ltr", "tir"):
+        check, _label = panel._rail.boundary_row_widgets[key]
+        check.blockSignals(True)
+        check.setEnabled(True)
+        check.setChecked(True)
+        check.blockSignals(False)
+    panel._sync_boundary_guides()
+    scale_guides = panel._scale._predicted_boundaries
+    assert len(scale_guides) == 4
+    assert {(edge, c.name()) for edge, c, _s in scale_guides} == {
+        (2, red.name()),
+        (8, red.name()),
+        (2, purple.name()),
+        (8, purple.name()),
+    }
+    panel._clear_boundary_results()
+    assert panel._scale._predicted_boundaries == []
+    panel.close()
+
+
 def test_show_reference_boundaries_persists_across_new_msa(
     qapp: QApplication, tmp_path: Path
 ) -> None:

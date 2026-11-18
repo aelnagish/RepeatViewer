@@ -5333,6 +5333,8 @@ class _ScaleRuler(QWidget):
         self._region_sel: tuple[int, int] | None = None
         # Color vs standard: 0-based inclusive (first, last) nucleotide columns.
         self._standard_boundary_cols: tuple[int, int] | None = None
+        # Boundary prediction guides: (column edge, color, solid) — same as MSA bars.
+        self._predicted_boundaries: list[tuple[int, QColor, bool]] = []
         self._drag_origin_x: float | None = None
         self._drag_current_x: float | None = None
         self._rubber_active = False
@@ -5412,6 +5414,16 @@ class _ScaleRuler(QWidget):
         if new == self._standard_boundary_cols:
             return
         self._standard_boundary_cols = new
+        self.update()
+
+    def set_predicted_boundaries(
+        self, guides: list[tuple[int, QColor, bool]] | None
+    ) -> None:
+        """Mirror Boundary prediction guides through the scale ruler."""
+        new = list(guides or [])
+        if new == self._predicted_boundaries:
+            return
+        self._predicted_boundaries = new
         self.update()
 
     def _x_to_bp(self, x: float) -> float:
@@ -5738,6 +5750,45 @@ class _ScaleRuler(QWidget):
                 painter.drawLine(QPointF(x0, 0.0), QPointF(x0, h))
             if -2.0 <= x1 <= float(width) + 2.0 and abs(x1 - x0) > 0.5:
                 painter.drawLine(QPointF(x1, 0.0), QPointF(x1, h))
+            painter.setPen(Qt.PenStyle.NoPen)
+        # Boundary prediction: same full-height guides as on the MSA tracks.
+        if self._predicted_boundaries:
+            h = float(self.height())
+            letters = show_every_base
+            alt_seg_px = max(8.0, h / 3.0)
+            for edge_col, items in _group_predicted_boundaries_by_edge(
+                self._predicted_boundaries
+            ):
+                x = origin + float(edge_col) * ppb - scroll
+                if not (-2.0 <= x <= float(width) + 2.0):
+                    continue
+                n = len(items)
+                any_solid = any(solid for _color, solid in items)
+                base_width = (3.0 if letters else 2.0) + (1.0 if any_solid else 0.0)
+                if n <= 1:
+                    color, solid = items[0]
+                    pen = QPen(
+                        color,
+                        base_width,
+                        Qt.PenStyle.SolidLine if solid else Qt.PenStyle.DashLine,
+                    )
+                    pen.setCosmetic(True)
+                    painter.setPen(pen)
+                    painter.drawLine(QPointF(x, 0.0), QPointF(x, h))
+                    continue
+                width_pen = base_width * 2.0
+                y = 0.0
+                index = 0
+                while y < h - 0.5:
+                    color, _solid = items[index % n]
+                    y_end = min(h, y + alt_seg_px)
+                    pen = QPen(color, width_pen, Qt.PenStyle.SolidLine)
+                    pen.setCosmetic(True)
+                    pen.setCapStyle(Qt.PenCapStyle.FlatCap)
+                    painter.setPen(pen)
+                    painter.drawLine(QPointF(x, y), QPointF(x, y_end))
+                    y = y_end
+                    index += 1
             painter.setPen(Qt.PenStyle.NoPen)
         painter.end()
 
@@ -9713,6 +9764,7 @@ class MultiSequenceOverviewPanel(QWidget):
         self._boundary_guides = {}
         self._boundary_result = None
         self._rail.clear_boundary_results()
+        self._sync_boundary_guides()
 
     def _sync_boundary_guides(self, _keys: object = None) -> None:
         """Draw guides for the ticked Boundary prediction rows only."""
@@ -9724,6 +9776,9 @@ class MultiSequenceOverviewPanel(QWidget):
             for guide in items
         ]
         self._bars.set_predicted_boundaries(guides)
+        scale = getattr(self, "_scale", None)
+        if scale is not None:
+            scale.set_predicted_boundaries(guides)
 
     def _restore_boundaries_from_json(self) -> None:
         """Load ``*.boundaries_RV.json`` guides when MSA width still matches."""
