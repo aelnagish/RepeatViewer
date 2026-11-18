@@ -6465,6 +6465,19 @@ class MainWindow(
             if message:
                 self._set_status_message(message, 5000)
                 return
+        widget = self._edit_focus()[1]
+        if not isinstance(widget, (QLineEdit, QTextEdit, QPlainTextEdit)):
+            # The genome browser copies its visible locus (it has no Ctrl+C of its own:
+            # a second shortcut next to this menu item made both ambiguous).
+            parent = widget
+            while parent is not None:
+                copy_locus = getattr(parent, "copy_locus_to_clipboard", None)
+                if callable(copy_locus):
+                    message = copy_locus()
+                    if message:
+                        self._set_status_message(message, 5000)
+                    return
+                parent = parent.parentWidget()
         self._edit_forward_key("copy", QKeySequence.StandardKey.Copy)
 
     def _edit_paste(self) -> None:

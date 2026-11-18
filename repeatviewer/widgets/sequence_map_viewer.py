@@ -3446,6 +3446,29 @@ class SequenceMapCanvas(QWidget):
                     painter.setPen(pen)
                     painter.drawLine(QPointF(x, top), QPointF(x, top + span_h))
 
+    def _enzyme_site_at(self, x: float, y: float):
+        """The restriction site under the pointer (cut line first, then its span)."""
+        sites = getattr(self, "_enzyme_sites", None)
+        if not sites:
+            return None
+        _, cell_h_f, _ = self._cell_size()
+        span_h = float(cell_h_f + self._extra_display_height())
+        best, best_d = None, 6.0
+        for site in sites:
+            start, end, cut = int(site[0]), int(site[1]), int(site[2])
+            for x1, _x2, top in self._base_spans(cut, cut):
+                if not (top - 2 <= y <= top + span_h + 2):
+                    continue
+                d = abs(x - x1)
+                if d < best_d:
+                    best, best_d = site, d
+            if best is site:
+                continue
+            for x1, x2, top in self._base_spans(start, end):
+                if top - 2 <= y <= top + span_h + 2 and x1 <= x <= x2 and best is None:
+                    best = site
+        return best
+
     def _paint_enzyme_sites(self, painter: QPainter, clip: QRectF) -> None:
         if not getattr(self, "_enzyme_sites", None):
             return
