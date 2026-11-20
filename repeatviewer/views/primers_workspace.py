@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -59,7 +59,7 @@ SECTIONS: tuple[tuple[str, str], ...] = (
 # The others are whole pages of their own, put into the workspace when opened.
 SEQUENCE_SECTIONS = (SECTION_DESIGN, SECTION_PCR, SECTION_DIGEST)
 NO_SEQUENCE_TEXT = (
-    "Click a FASTA's name in Files, or press Browse, to choose the sequence to work on."
+    "Click a FASTA's name in Files to choose the sequence to work on."
 )
 
 # Pages of the PrimersPanel behind each section. Design holds two for now: the
@@ -200,10 +200,8 @@ class PrimersWorkspacePage(QWidget):
         self._seq_layout.setContentsMargins(0, 0, 0, 0)
         self._seq_layout.setSpacing(0)
         self.body.addWidget(self.seq_page)
-        row = QHBoxLayout()
-        row.setContentsMargins(12, 6, 12, 6)
-        row.setSpacing(8)
-        row.addWidget(QLabel("Sequence", self.seq_page))
+        # The file comes from a click on its name in Files. The field that
+        # used to show it stays as the (hidden) holder of the path.
         self.sequence_row = PathBrowseRow(
             self.seq_page,
             browse_title="Choose the Sequence to Work On",
@@ -216,18 +214,14 @@ class PrimersWorkspacePage(QWidget):
             "The file the workspace works on. Click a FASTA's name in Files to use it, "
             "or press Browse."
         )
-        row.addWidget(self.sequence_row, 1)
-        self.record_label = QLabel("Record", self.seq_page)
-        row.addWidget(self.record_label)
+        self.sequence_row.hide()
+        # Record sits in the Position row of the map once there is a map.
+        self.record_label = QLabel("Record:", self.seq_page)
         self.record_combo = QComboBox(self.seq_page)
         self.record_combo.setMinimumWidth(180)
         self.record_combo.setToolTip("For a file with several sequences: the one to work on.")
-        row.addWidget(self.record_combo)
         self.record_label.hide()
         self.record_combo.hide()
-        row.addStretch(2)
-        row.addWidget(make_help_button(self.seq_page, "Sequence", SEQUENCE_HELP))
-        self._seq_layout.addLayout(row)
         self.no_sequence = QLabel(NO_SEQUENCE_TEXT, self.seq_page)
         self.no_sequence.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.no_sequence.setWordWrap(True)
@@ -256,8 +250,53 @@ class PrimersWorkspacePage(QWidget):
         self.panel.sequenceExtracted.connect(self.sequenceExtracted.emit)
         self.panel.activeSequenceChanged.connect(self._on_panel_record_changed)
         self.primers = self.panel.primers_panel()
+        self._place_record_chooser()
         self._plain_settings_side()
         self._build_list_area()
+        self._guard_wheels()
+
+    # --------------------------------------------- the wheel changes no value
+
+    def _guard_wheels(self) -> None:
+        """Number boxes, drop-down menus and sliders ignore the mouse wheel.
+
+        A value changes with a click only; the wheel scrolls the panel.
+        """
+        from PySide6.QtWidgets import QAbstractSpinBox, QSlider
+
+        for kind in (QAbstractSpinBox, QComboBox, QSlider):
+            for w in self.findChildren(kind):
+                if not w.property("rvNoWheel"):
+                    w.setProperty("rvNoWheel", True)
+                    w.installEventFilter(self)
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802
+        if event.type() == QEvent.Type.Wheel and obj.property("rvNoWheel"):
+            event.ignore()          # the scroll area around it takes the wheel
+            return True
+        return super().eventFilter(obj, event)
+
+    def _place_record_chooser(self) -> None:
+        """Record goes into the Position row, before the length on the right."""
+        toolbar = getattr(self.panel._map, "_toolbar", None)
+        bar = toolbar.layout() if toolbar is not None else None
+        several = self.record_combo.count() > 1
+        if bar is None:
+            row = QHBoxLayout()
+            row.setContentsMargins(12, 6, 12, 6)
+            row.setSpacing(8)
+            row.addWidget(self.record_label)
+            row.addWidget(self.record_combo)
+            row.addStretch(1)
+            self._seq_layout.insertLayout(0, row)
+        else:
+            self.record_combo.setMaximumHeight(22)
+            at = max(0, bar.count() - 1)
+            bar.insertWidget(at, self.record_label, 0, Qt.AlignmentFlag.AlignVCenter)
+            bar.insertWidget(at + 1, self.record_combo, 0, Qt.AlignmentFlag.AlignVCenter)
+            bar.insertSpacing(at + 2, 12)
+        self.record_label.setVisible(several)
+        self.record_combo.setVisible(several)
 
     def _plain_settings_side(self) -> None:
         """No line between the map and the settings: the two colours say it."""
@@ -376,6 +415,7 @@ class PrimersWorkspacePage(QWidget):
         self._hosted[key] = widget
         if self.body.indexOf(widget) < 0:
             self.body.addWidget(widget)
+        self._guard_wheels()
         if show:
             self.set_section(key)
 
@@ -442,8 +482,9 @@ class PrimersWorkspacePage(QWidget):
             # The page stayed the same, so its signal did not fire: let it draw
             # its overlays (region and candidates, products, enzyme sites).
             self.primers._on_workbench_tab(target)
-        self.bottom.setVisible(key in (SECTION_DESIGN, SECTION_PCR))
-        self.bottom_stack.setCurrentIndex(1 if key == SECTION_PCR else 0)
+        self.bottom.setVisible(key in (SECTION_DESIGN, SECTION_PCR, SECTION_DIGEST))
+        self.bottom_stack.setCurrentIndex({SECTION_PCR: 1, SECTION_DIGEST: 2}.get(key, 0))
+        self._guard_wheels()
         self._sync_settings_summary()
 
     def _on_panel_page_changed(self, index: int) -> None:
@@ -522,6 +563,18 @@ class PrimersWorkspacePage(QWidget):
         pl.addWidget(primers.pcr_pane.products_title)
         pl.addWidget(_card(primers.pcr_pane.table, products), 1)
         self.bottom_stack.addWidget(products)
+
+        # Digest: the gel and the fragments of the lane, where there is room.
+        digest = primers.enzyme_pane.digest_page
+        digest_results = QWidget(self.bottom_stack)
+        dl = QHBoxLayout(digest_results)
+        dl.setContentsMargins(0, 0, 0, 0)
+        dl.setSpacing(10)
+        digest.gel.setMinimumHeight(160)
+        digest.table.setMinimumHeight(96)
+        dl.addWidget(_card(digest.gel, digest_results), 3)
+        dl.addWidget(_card(digest.table, digest_results), 2)
+        self.bottom_stack.addWidget(digest_results)
         if products_section is not None and products_section is not primers.pcr_pane:
             products_section.hide()
 
@@ -600,11 +653,12 @@ class PrimersWorkspacePage(QWidget):
         lay.addWidget(self.settings_summary)
         row = QHBoxLayout()
         row.setContentsMargins(0, 0, 0, 0)
-        row.addStretch(1)
+        row.setSpacing(6)
         self.header_defaults_button = QPushButton("Restore Defaults", header)
         self.header_design_button = QPushButton("Design", header)
         row.addWidget(self.header_defaults_button)
         row.addWidget(self.header_design_button)
+        row.addStretch(1)
         lay.addLayout(row)
         page.layout().insertWidget(0, header)
         self.settings_header = header
@@ -627,10 +681,18 @@ class PrimersWorkspacePage(QWidget):
         dl.addLayout(dtop)
         drow = QHBoxLayout()
         drow.setContentsMargins(0, 0, 0, 0)
-        drow.addStretch(1)
+        drow.setSpacing(6)
         drow.addWidget(design.defaults_button)
         drow.addWidget(design.design_button)
+        drow.addStretch(1)
         dl.addLayout(drow)
+        # Two equal buttons over the label and field columns of the form.
+        from repeatviewer.widgets.primer_design_pane import FIELD_W, GAP, LABEL_W
+
+        half = (LABEL_W + GAP + FIELD_W - 6) // 2
+        for b in (design.defaults_button, design.design_button,
+                  self.header_defaults_button, self.header_design_button):
+            b.setFixedWidth(half)
         design.layout().insertWidget(0, dh)
         design.layout().insertWidget(1, _rule(design))
         self.design_header = dh

@@ -13,7 +13,6 @@ import json
 import threading
 
 from PySide6.QtCore import QObject, QSettings, Qt, Signal
-from PySide6.QtGui import QPalette
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
@@ -154,7 +153,10 @@ def _row(label: str, *widgets, parent: QWidget, joins=(), label_w: int = LABEL_W
     lab = QLabel(label, parent)
     lab.setFixedWidth(label_w)
     lab.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-    if top:
+    if not label and widgets and all(isinstance(w, QCheckBox) for w in widgets):
+        # A tick box with its own text starts at the left edge, under the labels.
+        lab.hide()
+    elif top:
         # A field with Browse under it: the label sits beside the field, not
         # half way down between the field and the button.
         lab.setContentsMargins(0, 3, 0, 0)
@@ -214,11 +216,11 @@ def _row_widget(label: str, *widgets, parent: QWidget, joins=(), label_w: int = 
 
 
 def _results_surface(widget: QWidget) -> None:
-    """Input and results sit on white; settings keep the window colour."""
+    """The area around the result boxes: the window colour, as everywhere.
+
+    Only the boxes themselves (see ``_card``) and the input fields are white.
+    """
     widget.setAutoFillBackground(True)
-    pal = widget.palette()
-    pal.setColor(QPalette.ColorRole.Window, pal.color(QPalette.ColorRole.Base))
-    widget.setPalette(pal)
 
 
 def _card(widget: QWidget, parent: QWidget) -> QFrame:

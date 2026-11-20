@@ -111,15 +111,19 @@ class PcrPane(QWidget):
         self.run_group = QButtonGroup(self)
         self.run_group.setExclusive(True)
         buttons = []
+        holder = QWidget(sec)       # the state behind the drop-down menu
+        holder.hide()
         for i, (key, text) in enumerate(((RUN_THIS, "Open sequence"), (RUN_FILES, "Selected files"))):
-            b = QPushButton(text, sec)
+            b = QPushButton(text, holder)
             b.setCheckable(True)
             b.setProperty("run", key)
-            b.setFixedWidth((FIELD_W - GAP) // 2)
             self.run_group.addButton(b, i)
             buttons.append(b)
         buttons[0].setChecked(True)
-        sl.addLayout(_row("Input", *buttons, parent=sec, label_w=PCR_LABEL_W))
+        from repeatviewer.widgets.primer_design_pane import _choice_combo
+
+        self.run_combo = _choice_combo(self.run_group, "run", sec)
+        sl.addLayout(_row("Input", self.run_combo, parent=sec, label_w=PCR_LABEL_W))
         self.run_note = QLabel("", sec)
         self.run_note.setWordWrap(True)
         self.run_note.setIndent(PCR_LABEL_W + GAP)
@@ -133,6 +137,14 @@ class PcrPane(QWidget):
         self.reverse = _combo([], sec)
         sl.addLayout(_row("Forward", self.forward, parent=sec, label_w=PCR_LABEL_W))
         sl.addLayout(_row("Reverse", self.reverse, parent=sec, label_w=PCR_LABEL_W))
+        # Forward and Reverse list the primers on this sequence; this brings
+        # saved ones onto it.
+        self.database_button = QPushButton("From Database", sec)
+        self.database_button.setFixedWidth(FIELD_W)
+        self.database_button.setToolTip(
+            "Put saved primers on this sequence, so they can be chosen above")
+        self.database_button.clicked.connect(lambda: self._panel.database_button.click())
+        sl.addLayout(_row("Add", self.database_button, parent=sec, label_w=PCR_LABEL_W))
         self.kind = _combo([(pcr.MODE_LABELS[m], m) for m in pcr.MODES], sec, s.mode)
         sl.addLayout(_row("Kind", self.kind, parent=sec, label_w=PCR_LABEL_W))
         self.mismatches = _combo([("none" if n == 0 else f"up to {n}", n) for n in range(5)],

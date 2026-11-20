@@ -147,6 +147,11 @@ def _scrolled(inner: QWidget, parent: QWidget) -> QScrollArea:
     area = QScrollArea(parent)
     # room for the scroll bar, so nothing is clipped on the right
     inner.setContentsMargins(0, 0, 12, 0)
+    # Never wider than the panel: a wide child (a gel, a table) shrinks
+    # instead of pushing the help buttons under the scroll bar.
+    policy = inner.sizePolicy()
+    policy.setHorizontalPolicy(QSizePolicy.Policy.Ignored)
+    inner.setSizePolicy(policy)
     area.setWidget(inner)
     area.setWidgetResizable(True)
     area.setFrameShape(QScrollArea.Shape.NoFrame)

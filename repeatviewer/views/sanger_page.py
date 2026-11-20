@@ -213,9 +213,16 @@ class SangerPage(QWidget):
         pl.addWidget(_rule(panel))
 
         sec, sl, _ = _section("Expected", panel, "Expected", SANGER_HELP)
-        self.expected_button = QPushButton("Choose", sec)
-        self.expected_button.setFixedWidth(FIELD_W)
-        sl.addLayout(_row("Sequence", self.expected_button, parent=sec))
+        from repeatviewer.widgets.path_browse import PathBrowseRow
+
+        self.expected_path = PathBrowseRow(
+            sec, placeholder="Optional: click a FASTA in Files",
+            browse_title="Expected Sequence",
+            file_filter="Sequences (*.fa *.fasta *.fas *.fna *.txt *.seq);;All files (*)",
+            browse_below=True, elide_middle=True)
+        self.expected_path.setFixedWidth(FIELD_W)
+        self.expected_path.set_start_dir(str(self._folder))
+        sl.addLayout(_row("Sequence", self.expected_path, parent=sec, top=True))
         self.record_combo = QComboBox(sec)
         self.record_combo.setFixedWidth(FIELD_W)
         sl.addLayout(_row("Record", self.record_combo, parent=sec))
@@ -223,9 +230,17 @@ class SangerPage(QWidget):
         pl.addWidget(_rule(panel))
 
         sec, sl, _ = _section("Reads", panel, "Reads", SANGER_HELP)
-        self.add_button = QPushButton("Add Reads", sec)
-        self.add_button.setFixedWidth(FIELD_W)
-        sl.addLayout(_row("Files", self.add_button, parent=sec))
+        self.reads_path = PathBrowseRow(
+            sec, placeholder="Click an .ab1 in Files, or Browse",
+            browse_title="Sanger Reads",
+            file_filter="Sanger reads (*.ab1 *.abi *.seq *.fa *.fasta *.txt);;All files (*)",
+            browse_below=True, elide_middle=True)
+        self.reads_path.setFixedWidth(FIELD_W)
+        self.reads_path.set_browse_handler(self._on_add_reads)
+        sl.addLayout(_row("Files", self.reads_path, parent=sec, top=True))
+        self.clear_button = QPushButton("Clear Reads", sec)
+        self.clear_button.setFixedWidth(FIELD_W)
+        sl.addLayout(_row("", self.clear_button, parent=sec))
         self.reads_note = QLabel("None yet.", sec)
         self.reads_note.setWordWrap(True)
         self.reads_note.setIndent(LABEL_W + 2)
@@ -257,6 +272,14 @@ class SangerPage(QWidget):
         br.addWidget(self.save_button)
         br.addWidget(self.check_button)
         sl.addLayout(br)
+        self.fasta_button = QPushButton("Save Reads as FASTA", sec)
+        self.fasta_button.setToolTip(
+            "Write the good part of every read as a FASTA file beside it")
+        self.fasta_button.setEnabled(False)
+        fr = QHBoxLayout()
+        fr.addWidget(self.fasta_button)
+        fr.addStretch(1)
+        sl.addLayout(fr)
         self.saved_note = QLabel("", sec)
         self.saved_note.setStyleSheet("color: palette(placeholder-text);")
         sl.addWidget(self.saved_note)
@@ -264,9 +287,11 @@ class SangerPage(QWidget):
         pl.addStretch(1)
         outer.addWidget(_scroll_panel(panel, self))
 
-        self.expected_button.clicked.connect(self._on_pick_expected)
+        self.expected_path.path_changed.connect(self._on_pick_expected)
+        self.reads_path.path_changed.connect(self._on_read_path)
+        self.clear_button.clicked.connect(self._on_clear_reads)
+        self.fasta_button.clicked.connect(self._on_save_fasta)
         self.record_combo.currentIndexChanged.connect(self._on_record)
-        self.add_button.clicked.connect(self._on_add_reads)
         self.table.itemSelectionChanged.connect(self._on_row)
         self.check_button.clicked.connect(self.recheck)
         self.save_button.clicked.connect(self._on_save)
@@ -307,10 +332,8 @@ class SangerPage(QWidget):
         self.recheck()
 
     def _on_pick_expected(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Expected Sequence", str(self._folder),
-            "Sequences (*.fa *.fasta *.fas *.fna *.txt *.seq);;All files (*)")
-        if not path:
+        path = self.expected_path.path()
+        if path is None or not Path(path).is_file():
             return
         records = _read_fasta(Path(path))
         if not records:
@@ -338,6 +361,64 @@ class SangerPage(QWidget):
             self._folder = Path(paths[0]).parent
             self.add_reads([Path(p) for p in paths])
 
+    def _on_read_path(self) -> None:
+        """A read clicked in Files (or typed): it joins the reads."""
+        path = self.reads_path.path()
+        if path is not None and Path(path).is_file():
+            self._folder = Path(path).parent
+            self.add_reads([Path(path)])
+
+    def _on_clear_reads(self) -> None:
+        self._paths = []
+        self.reads_path.set_path(None, emit=False)
+        self.recheck()
+
+    def _plain_reads(self) -> list:
+        """The reads as they are, when there is no sequence to compare with."""
+        out = []
+        for p in self._paths:
+            try:
+                trace = sg.read_trace(p)
+            except Exception as exc:  # noqa: BLE001 - a bad file is one bad read
+                out.append(sg.ReadCheck(name=Path(p).stem, path=str(p),
+                                        note=f"Could not read this file: {exc}"))
+                continue
+            check = sg.ReadCheck(name=trace.name, path=trace.path, length=len(trace.bases),
+                                 trace=trace)
+            check.trimmed = (sg.mott_trim(trace.quality, cutoff=float(self.cutoff.value()))
+                             if trace.quality else (0, len(trace.bases)))
+            out.append(check)
+        return out
+
+    def _on_save_fasta(self) -> None:
+        """The good part of every read as a FASTA file beside the read."""
+        written = []
+        for check in self._checks:
+            trace = check.trace
+            if trace is None or not trace.bases:
+                continue
+            a, b = check.trimmed
+            bases = trace.bases[a:b] or trace.bases
+            source = Path(check.path) if check.path else self._folder / check.name
+            out = source.with_suffix(".fasta")
+            n = 2
+            while out.exists():
+                out = source.with_name(f"{source.stem}_{n}.fasta")
+                n += 1
+            lines = [bases[i:i + 70] for i in range(0, len(bases), 70)]
+            try:
+                out.write_text(f">{check.name or source.stem}\n" + "\n".join(lines) + "\n")
+            except OSError as exc:
+                self.saved_note.setText(f"Could not write {out.name}: {exc}")
+                return
+            written.append(out)
+        if written:
+            self.saved_note.setText(
+                f"Saved {written[0].name}" if len(written) == 1
+                else f"Saved {len(written)} FASTA files beside the reads")
+        else:
+            self.saved_note.setText("No read with bases to save.")
+
     def add_reads(self, paths) -> None:
         for p in paths:
             if Path(p) not in self._paths:
@@ -347,14 +428,17 @@ class SangerPage(QWidget):
     # ------------------------------------------------------------------ run
 
     def recheck(self) -> None:
-        self._checks = (sg.check_reads(self._expected, self._paths,
-                                       cutoff=float(self.cutoff.value()))
-                        if self._paths and self._expected else [])
+        if self._paths and self._expected:
+            self._checks = sg.check_reads(self._expected, self._paths,
+                                          cutoff=float(self.cutoff.value()))
+        else:
+            self._checks = self._plain_reads() if self._paths else []
+        self.fasta_button.setEnabled(any(c.trace is not None for c in self._checks))
         for check in self._checks:
             for d in check.differences:
                 d.quality = d.quality          # kept as read; the threshold is applied below
         self._refresh()
-        if self.report_check.isChecked() and self._checks:
+        if self.report_check.isChecked() and self._checks and self._expected:
             self._write_report()
 
     def _doubtful(self, d: sg.Difference) -> bool:
@@ -367,12 +451,21 @@ class SangerPage(QWidget):
             + ", ".join(p.stem for p in self._paths[:3])
             + (" …" if len(self._paths) > 3 else "") if self._paths else "None yet.")
         self._fill_table()
-        self.coverage.set_data(n, self._checks)
+        self.coverage.set_data(n, self._checks if self._expected else [])
         self._show_verdict()
 
     def _show_verdict(self) -> None:
+        if not self._expected and self._checks:
+            k = len(self._checks)
+            self.verdict.setText(
+                f"{k} read{'s' if k != 1 else ''}, shown as read. Click a row for its "
+                "chromatogram, press Save Reads as FASTA for the sequence, or choose an "
+                "expected sequence to compare with.")
+            self.verdict.setStyleSheet("")
+            return
         if not self._expected:
-            self.verdict.setText("Choose the sequence this clone should carry.")
+            self.verdict.setText("Click an .ab1 read in Files to look at it. To check a clone, "
+                                 "also choose the sequence it should carry.")
             self.verdict.setStyleSheet("")
             return
         if not self._checks:
@@ -404,16 +497,24 @@ class SangerPage(QWidget):
                      "none" if diff is None else diff.text().split(" (")[0],
                      "" if diff is None else
                      ("no quality" if diff.quality < 0 else f"Q{diff.quality}")]
+            if not self._expected:
+                a, b = check.trimmed
+                trace = check.trace
+                cells = [check.name, "", f"good: {a + 1:,} to {b:,}" if b else "",
+                         "", check.note or f"{check.length:,} bases",
+                         f"Q{trace.mean_quality(a, b):.0f}" if trace is not None
+                         and trace.quality else ""]
             for c, text in enumerate(cells):
                 item = QTableWidgetItem(text)
-                if c == 4:
+                if c == 4 and self._expected:
                     item.setForeground(QColor("#1a7f4b") if diff is None else
                                        QColor("#9CA3AF") if self._doubtful(diff) else
                                        QColor("#B26B00"))
                 self.table.setItem(r, c, item)
         self.table.blockSignals(False)
         rows = sum(self.table.rowHeight(r) for r in range(self.table.rowCount()))
-        self.table.setMaximumHeight(self.table.horizontalHeader().height() + rows + 6)
+        self.table.setMaximumHeight(max(self.table.minimumHeight(),
+                                        self.table.horizontalHeader().height() + rows + 6))
         if self._rows:
             self.table.selectRow(0)
         else:

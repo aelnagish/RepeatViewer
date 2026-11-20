@@ -121,9 +121,16 @@ class CloningPage(QWidget):
         pl.addWidget(_rule(panel))
 
         sec, sl, _ = _section("Insert", panel, "Insert", CLONING_HELP)
-        self.insert_button = QPushButton("Choose", sec)
-        self.insert_button.setFixedWidth(FIELD_W)
-        sl.addLayout(_row("Sequence", self.insert_button, parent=sec))
+        from repeatviewer.widgets.path_browse import PathBrowseRow
+
+        self.insert_path = PathBrowseRow(
+            sec, placeholder="Click a FASTA in Files, or Browse",
+            browse_title="Insert Sequence",
+            file_filter="Sequences (*.fa *.fasta *.fas *.fna *.txt *.seq);;All files (*)",
+            browse_below=True, elide_middle=True)
+        self.insert_path.setFixedWidth(FIELD_W)
+        self.insert_path.set_start_dir(str(self._folder))
+        sl.addLayout(_row("Sequence", self.insert_path, parent=sec, top=True))
         self.record_combo = QComboBox(sec)
         self.record_combo.setFixedWidth(FIELD_W)
         sl.addLayout(_row("Record", self.record_combo, parent=sec))
@@ -199,7 +206,7 @@ class CloningPage(QWidget):
         pl.addStretch(1)
         outer.addWidget(_scroll_panel(panel, self))
 
-        self.insert_button.clicked.connect(self._on_pick_insert)
+        self.insert_path.path_changed.connect(self._on_pick_insert)
         self.record_combo.currentIndexChanged.connect(self._on_record)
         self.vector.currentIndexChanged.connect(self._on_vector)
         for box in (self.method, self.polymerase, self.left, self.right):
@@ -258,10 +265,8 @@ class CloningPage(QWidget):
         self.recompute()
 
     def _on_pick_insert(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Insert Sequence", str(self._folder),
-            "Sequences (*.fa *.fasta *.fas *.fna *.txt *.seq);;All files (*)")
-        if not path:
+        path = self.insert_path.path()
+        if path is None or not Path(path).is_file():
             return
         records = _read_fasta(Path(path))
         if not records:

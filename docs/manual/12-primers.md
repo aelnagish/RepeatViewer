@@ -40,9 +40,9 @@ another one.
 
 **Design**, **PCR** and **Digest** work on one sequence:
 
-- **Sequence** shows the file. Click a FASTA's name in the Files panel to work
-  on it, or press **Browse**. Ticking a file's box does not change it.
-  **Record** chooses the sequence in a file that holds several.
+- Click a FASTA's name in the Files panel to work on it. Ticking a file's box
+  does not change it. For a file that holds several sequences, **Record** in
+  the Position row chooses the one to work on.
 - The **map** shows the sequence. What a section adds is drawn in rows of its
   own above the bases, so no letter is covered: enzyme names, one row for each
   candidate pair, and the primer you are editing. A region you chose is a light

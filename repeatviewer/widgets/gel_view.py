@@ -308,15 +308,14 @@ class GelDocumentPanel(QWidget):
             "QWidget#gelDocument, QWidget#gelBar, QWidget#gelSide,"
             " QScrollArea#gelSideScroll, QScrollArea#gelSideScroll > QWidget"
             " { background: palette(window); }"
-            " QWidget#gelHolder { background: palette(base); }")
+            " QWidget#gelHolder { background: palette(base);"
+            " border: 1px solid palette(mid); border-radius: 8px; }")
         bar = QWidget(self)
         bar.setObjectName("gelBar")
         bl = QHBoxLayout(bar)
         bl.setContentsMargins(12, 8, 12, 8)
         bl.setSpacing(6)
-        self.add_button = QToolButton(bar)
-        self.add_button.setText("Add Lane")
-        self.add_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.add_button = QPushButton("Add Lane", bar)
         add_menu = QMenu(self.add_button)
         add_menu.addAction("Ladder", self._add_ladder)
         add_menu.addAction("PCR Result…", self._add_pcr_result)
@@ -335,9 +334,7 @@ class GelDocumentPanel(QWidget):
         self.compare_button = QPushButton("Compare with Gel Photo", bar)
         bl.addWidget(self.compare_button)
         bl.addStretch(1)
-        self.save_button = QToolButton(bar)
-        self.save_button.setText("Save")
-        self.save_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.save_button = QPushButton("Save", bar)
         save_menu = QMenu(self.save_button)
         save_menu.addAction("Figure as SVG…", lambda: self._export("svg"))
         save_menu.addAction("Figure as PNG (300 dpi)…", lambda: self._export("png"))
@@ -348,6 +345,7 @@ class GelDocumentPanel(QWidget):
         root.addWidget(bar)
 
         split = QSplitter(Qt.Orientation.Horizontal, self)
+        split.setContentsMargins(12, 0, 0, 12)
         holder = QWidget(split)
         holder.setObjectName("gelHolder")
         hl = QVBoxLayout(holder)

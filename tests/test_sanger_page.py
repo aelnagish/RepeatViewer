@@ -105,7 +105,7 @@ def test_empty_page_asks_for_input(qapp, isolated_settings, tmp_path):
     from repeatviewer.views.sanger_page import SangerPage
 
     page = SangerPage(folder=tmp_path)
-    assert "Choose the sequence" in page.verdict.text()
+    assert "Click an .ab1 read" in page.verdict.text()
     assert page.table.rowCount() == 0 and page.coverage._length == 0
     page.set_expected(_insert(200, seed=24), "insert_1")
     assert "Add the .ab1 reads" in page.verdict.text()

@@ -66,7 +66,9 @@ def test_sections_drive_the_panel(qapp, isolated_settings, two_files):
     page.set_section("enzymes")                      # the old name of Digest
     assert page.section() == pw.SECTION_DIGEST and tabs.currentIndex() == pw.PANEL_ENZYMES
     assert page.primers.enzyme_pane.active and not page.primers.pcr_pane.active
-    assert page.bottom.isHidden()
+    # the gel and the fragments of a digest sit under the map
+    assert not page.bottom.isHidden() and page.bottom_stack.currentIndex() == 2
+    assert page.bottom.isAncestorOf(page.primers.enzyme_pane.digest_page.gel)
 
     page.sections.setCurrentIndex(0)                 # a click on Design
     assert tabs.currentIndex() == pw.PANEL_DESIGN and tabs.isHidden()
