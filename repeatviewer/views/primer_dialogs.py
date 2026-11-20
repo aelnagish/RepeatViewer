@@ -642,16 +642,25 @@ class _TabbedToolDialog(QDialog):
 
     def _finish(self, bar: QWidget) -> None:
         self._layout.addSpacing(8)  # same as BLAST button-bar gap
+        self._button_bar = bar
         self._layout.addWidget(bar, 0)
         self._width = self._grid_width()
-        self.resize(self._width, 400)
+        # Compact seed size — prepare_for_show / _fit sets the real height.
+        self.resize(self._width, 200)
 
     def _on_tab(self, index: int) -> None:
         self._stack.setCurrentIndex(index)
+        self._unpin_stack_heights()
         for i in range(self._stack.count()):
             w = self._stack.widget(i)
-            w.setSizePolicy(QSizePolicy.Policy.Preferred,
-                            QSizePolicy.Policy.Maximum if i == index else QSizePolicy.Policy.Ignored)
+            if w is None:
+                continue
+            w.setSizePolicy(
+                QSizePolicy.Policy.Preferred,
+                QSizePolicy.Policy.Maximum
+                if i == index
+                else QSizePolicy.Policy.Ignored,
+            )
         if self.isVisible():
             QTimer.singleShot(0, self._fit)
 
@@ -673,34 +682,97 @@ class _TabbedToolDialog(QDialog):
         return (label_w + 12 + FIELD_W + GRID_GAP + help_w + 2 * 16 + bar
                 + margins.left() + margins.right())
 
+    def _unpin_stack_heights(self) -> None:
+        """Clear prior height pins so newly shown rows can shrink or grow."""
+        self._stack.setMinimumHeight(0)
+        self._stack.setMaximumHeight(16777215)
+        for i in range(self._stack.count()):
+            w = self._stack.widget(i)
+            if w is None:
+                continue
+            w.setMinimumHeight(0)
+            w.setMaximumHeight(16777215)
+            if isinstance(w, QScrollArea):
+                page = w.widget()
+                if page is not None:
+                    page.setMinimumHeight(0)
+                    page.setMaximumHeight(16777215)
+
+    def _page_content_height(self, page: QWidget) -> int:
+        """Tight height of the visible page (ignore stretch from a tall scroll area)."""
+        page.ensurePolished()
+        page.adjustSize()
+        root = page.layout()
+        if root is not None:
+            root.invalidate()
+            root.activate()
+        wanted = page.minimumSizeHint().expandedTo(page.sizeHint()).height()
+        if root is not None:
+            wanted = max(
+                wanted,
+                root.totalMinimumSize().height(),
+                root.totalSizeHint().height(),
+            )
+        return max(1, int(wanted))
+
+    def _dialog_chrome_height(self) -> int:
+        """Tab bar + button bar + margins + gap (everything except the page stack)."""
+        margins = self._layout.contentsMargins()
+        tab_h = max(24, self._tab_bar.sizeHint().height())
+        bar = getattr(self, "_button_bar", None)
+        bar_h = bar.sizeHint().height() if bar is not None else 44
+        return tab_h + 8 + bar_h + margins.top() + margins.bottom()
+
     def _fit(self) -> None:
+        """Resize the window to the active tab's content (no empty band)."""
         self._sync_columns()
         self._width = self._grid_width()
         scroll = self._stack.currentWidget()
         if scroll is None:
             return
         page = scroll.widget() if isinstance(scroll, QScrollArea) else scroll
-        page.adjustSize()
-        wanted = page.sizeHint().height()
-        # Room on this screen for the page: screen height minus the title bar,
-        # tab bar, button bar and margins.
+        if page is None:
+            return
+
+        self._unpin_stack_heights()
+        current = self._stack.currentIndex()
+        for i in range(self._stack.count()):
+            w = self._stack.widget(i)
+            if w is None:
+                continue
+            if i == current:
+                w.setSizePolicy(
+                    QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
+                )
+            else:
+                # Collapse inactive pages so their sizeHint cannot inflate us.
+                w.setFixedHeight(0)
+                w.setSizePolicy(
+                    QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Ignored
+                )
+
+        wanted = self._page_content_height(page)
         screen = self.screen() or QApplication.primaryScreen()
         avail = screen.availableGeometry() if screen is not None else None
+        chrome = self._dialog_chrome_height()
         if avail is not None:
-            chrome = (
-                self._tab_bar.sizeHint().height()
-                + 8  # spacing before button bar
-                + self._layout.contentsMargins().top()
-                + self._layout.contentsMargins().bottom()
-                + 44
-                + 40
-            )
-            room = max(240, avail.height() - chrome)
+            room = max(240, avail.height() - chrome - 40)
         else:
             room = wanted
-        self._stack.setFixedHeight(min(wanted, room))
-        self.adjustSize()
-        self.resize(self._width, self.sizeHint().height())
+        content_h = min(wanted, room)
+        self._stack.setFixedHeight(content_h)
+        if isinstance(scroll, QScrollArea):
+            # Keep the scroll host from growing past the measured page.
+            scroll.setMinimumHeight(0)
+            scroll.setMaximumHeight(content_h)
+
+        height = chrome + content_h
+        self.setMinimumWidth(self._width)
+        self.setMinimumHeight(0)
+        self.setMaximumHeight(height)
+        self.resize(self._width, height)
+        self.setMaximumHeight(16777215)
+
         if avail is not None:
             # Keep the whole window, buttons included, on the screen.
             frame = self.frameGeometry()

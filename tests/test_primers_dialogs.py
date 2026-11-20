@@ -348,3 +348,46 @@ def test_toolbar_ids_renamed_and_pages_scroll(qapp, isolated_settings, data):
     assert isinstance(m._stack.currentWidget(), QScrollArea)
     assert m._save_button.isVisible()
     m.close()
+
+
+def test_primer_dialogs_fit_height_to_content(qapp, isolated_settings, data):
+    """Primer Design / Map Primers: no large empty band under the form."""
+    from PySide6.QtWidgets import QScrollArea
+
+    from repeatviewer.views.dialog_polish import prepare_params_dialog_for_show
+    from repeatviewer.views.primer_dialogs import MapPrimersDialog, PrimerDesignDialog
+
+    for dlg in (
+        PrimerDesignDialog(initial=PrimerOptions(), files=[data.gene]),
+        MapPrimersDialog(initial=PrimerOptions(), files=[data.gene]),
+    ):
+        prepare_params_dialog_for_show(dlg)
+        dlg.show()
+        qapp.processEvents()
+        dlg._fit()
+        qapp.processEvents()
+        scroll = dlg._stack.currentWidget()
+        assert isinstance(scroll, QScrollArea)
+        page = scroll.widget()
+        assert page is not None
+        content_h = dlg._page_content_height(page)
+        # Stack tracks the page; allow a few px for scroll-frame chrome.
+        assert abs(dlg._stack.height() - content_h) <= 8
+        # Dialog height ≈ chrome + content (not a fixed oversized window).
+        expected = dlg._dialog_chrome_height() + dlg._stack.height()
+        assert abs(dlg.height() - expected) <= 12
+        # Expanding Advanced Settings grows the window; collapsing shrinks it.
+        before = dlg.height()
+        dlg._adv_btn.setChecked(True)
+        for _ in range(5):
+            qapp.processEvents()
+        dlg._fit()
+        qapp.processEvents()
+        assert dlg.height() >= before
+        dlg._adv_btn.setChecked(False)
+        for _ in range(5):
+            qapp.processEvents()
+        dlg._fit()
+        qapp.processEvents()
+        assert abs(dlg.height() - before) <= 12
+        dlg.close()
