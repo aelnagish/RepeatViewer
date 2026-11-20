@@ -59,6 +59,8 @@ class CloningPage(QWidget):
         self._result = cl.CloneResult()
         saved = self._load()
 
+        from repeatviewer.widgets.primer_design_pane import _card, _results_surface
+
         outer = QHBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
@@ -86,7 +88,7 @@ class CloningPage(QWidget):
         self.table.horizontalHeader().setDefaultAlignment(
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        lay.addWidget(self.table)
+        lay.addWidget(_card(self.table, middle))
 
         self.notes = QLabel(middle)
         self.notes.setWordWrap(True)
@@ -102,7 +104,8 @@ class CloningPage(QWidget):
 
         self.gel = GelView(middle, compact=True)
         self.gel.setMinimumHeight(220)
-        lay.addWidget(self.gel, 1)
+        lay.addWidget(_card(self.gel, middle), 1)
+        _results_surface(middle)
         outer.addWidget(middle, 1)
 
         panel = QWidget(self)

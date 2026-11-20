@@ -48,7 +48,7 @@ PCR_LABEL_W = LABEL_W
 RUN_THIS = "this"
 RUN_FILES = "files"
 RUN_ON_HELP = (
-    "<b>This one</b>: the open sequence, live, as you change anything.<br>"
+    "<b>Open sequence</b>: the open sequence, live, as you change anything.<br>"
     "<b>Selected files</b>: every FASTA ticked in the Files panel, so one pair can be tested "
     "on many satellite families at once. The products of all of them are listed together, "
     "each with the file it came from."
@@ -111,7 +111,7 @@ class PcrPane(QWidget):
         self.run_group = QButtonGroup(self)
         self.run_group.setExclusive(True)
         buttons = []
-        for i, (key, text) in enumerate(((RUN_THIS, "This one"), (RUN_FILES, "Selected files"))):
+        for i, (key, text) in enumerate(((RUN_THIS, "Open sequence"), (RUN_FILES, "Selected files"))):
             b = QPushButton(text, sec)
             b.setCheckable(True)
             b.setProperty("run", key)
@@ -119,7 +119,7 @@ class PcrPane(QWidget):
             self.run_group.addButton(b, i)
             buttons.append(b)
         buttons[0].setChecked(True)
-        sl.addLayout(_row("Sequence", *buttons, parent=sec, label_w=PCR_LABEL_W))
+        sl.addLayout(_row("Input", *buttons, parent=sec, label_w=PCR_LABEL_W))
         self.run_note = QLabel("", sec)
         self.run_note.setWordWrap(True)
         self.run_note.setIndent(PCR_LABEL_W + GAP)

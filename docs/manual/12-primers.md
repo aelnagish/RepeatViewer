@@ -65,7 +65,7 @@ without a sequence.
 
 The settings are in the panel on the right of the **Design** section.
 
-**Run on**: **This one** designs on the open sequence. The candidates appear in
+**Run on**: **Open sequence** designs on the open sequence. The candidates appear in
 the list under the map and nothing is written until you press **Keep Ticked**
 or **Open Report**. **Selected files** runs the design as a job on every FASTA
 ticked in the Files panel and writes the report files beside them, with the

@@ -147,8 +147,15 @@ class PaintingPage(QWidget):
         self._options = options
         self._start_job = start_job
         self._probes: list = []
-        ps = pt.PaintingSettings.from_dict(
-            dict(getattr(options, "painting", None) or {}) or self._load())
+        saved = dict(getattr(options, "painting", None) or {}) or self._load()
+        ps = pt.PaintingSettings.from_dict(saved)
+        if "source" not in (saved or {}):
+            # Nothing chosen yet: most users bring a BED that Chorus2 already made.
+            import dataclasses
+
+            ps = dataclasses.replace(ps, source=pt.SOURCE_IMPORT)
+
+        from repeatviewer.widgets.primer_design_pane import _card, _results_surface
 
         outer = QHBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -175,14 +182,15 @@ class PaintingPage(QWidget):
         for c, w in ((1, 110), (2, 90), (3, 130)):
             self.table.setColumnWidth(c, w)
         self.table.setMinimumHeight(120)
-        lay.addWidget(self.table)
+        lay.addWidget(_card(self.table, middle))
 
         pic_head = QHBoxLayout()
         pic_head.addWidget(QLabel("<b>Where the probes sit</b>", middle), 1)
         pic_head.addWidget(make_help_button(middle, "Where the probes sit", PICTURE_HELP))
         lay.addLayout(pic_head)
         self.picture = ProbePicture(middle)
-        lay.addWidget(self.picture, 1)
+        lay.addWidget(_card(self.picture, middle), 1)
+        _results_surface(middle)
         outer.addWidget(middle, 1)
 
         panel = QWidget(self)
@@ -198,8 +206,8 @@ class PaintingPage(QWidget):
 
         sec, sl, _ = _section("Probes from", inner, "Probes from", SOURCE_HELP)
         self.source = QComboBox(sec)
-        self.source.addItem("Run Chorus2 here", pt.SOURCE_RUN)
         self.source.addItem("Import a Chorus2 BED", pt.SOURCE_IMPORT)
+        self.source.addItem("Run Chorus2 here", pt.SOURCE_RUN)
         self.source.setFixedWidth(FIELD_W)
         self.source.setCurrentIndex(max(0, self.source.findData(ps.source)))
         sl.addLayout(_row("Source", self.source, parent=sec))
@@ -208,14 +216,14 @@ class PaintingPage(QWidget):
             browse_title="Genome FASTA", file_filter="FASTA (*.fa *.fasta *.fna);;All files (*)",
             browse_below=True, elide_middle=True)
         self.genome.setFixedWidth(FIELD_W)
-        self.genome_row = _row("Genome", self.genome, parent=sec)
+        self.genome_row = _row("Genome", self.genome, parent=sec, top=True)
         sl.addLayout(self.genome_row)
         self.bed = PathBrowseRow(
             sec, initial=ps.import_bed or None, placeholder="Chorus2 BED",
             browse_title="Chorus2 BED", file_filter="BED (*.bed);;All files (*)",
             browse_below=True, elide_middle=True)
         self.bed.setFixedWidth(FIELD_W)
-        self.bed_row = _row("Chorus2 BED", self.bed, parent=sec)
+        self.bed_row = _row("Chorus2 BED", self.bed, parent=sec, top=True)
         sl.addLayout(self.bed_row)
         pl.addWidget(sec)
         pl.addWidget(_rule(inner))

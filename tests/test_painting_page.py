@@ -91,6 +91,7 @@ def test_run_hands_the_settings_to_the_job(qapp, isolated_settings, tmp_path):
 
     started: list[dict] = []
     page = PaintingPage(start_job=started.append)
+    page.source.setCurrentIndex(page.source.findData(pt.SOURCE_RUN))
     page.length.setValue(45)
     page.threads.setValue(8)
     page.run_button.click()

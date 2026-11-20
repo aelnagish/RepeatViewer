@@ -150,6 +150,8 @@ class SangerPage(QWidget):
         self._paths: list[Path] = []
         saved = self._load()
 
+        from repeatviewer.widgets.primer_design_pane import _card, _results_surface
+
         outer = QHBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
@@ -178,14 +180,14 @@ class SangerPage(QWidget):
         for c, w in ((0, 170), (1, 90), (2, 120), (3, 80), (5, 90)):
             self.table.setColumnWidth(c, w)
         self.table.setMinimumHeight(90)
-        lay.addWidget(self.table)
+        lay.addWidget(_card(self.table, middle))
 
         cov_head = QHBoxLayout()
         cov_head.addWidget(QLabel("<b>Coverage of the expected sequence</b>", middle), 1)
         cov_head.addWidget(make_help_button(middle, "Coverage", COVERAGE_HELP))
         lay.addLayout(cov_head)
         self.coverage = CoverageBar(middle)
-        lay.addWidget(self.coverage)
+        lay.addWidget(_card(self.coverage, middle))
 
         trace_head = QHBoxLayout()
         self.trace_title = QLabel("<b>Chromatogram</b>", middle)
@@ -193,7 +195,8 @@ class SangerPage(QWidget):
         trace_head.addWidget(make_help_button(middle, "Chromatogram", TRACE_HELP))
         lay.addLayout(trace_head)
         self.trace = TraceView(middle)
-        lay.addWidget(self.trace, 1)
+        lay.addWidget(_card(self.trace, middle), 1)
+        _results_surface(middle)
         outer.addWidget(middle, 1)
 
         panel = QWidget(self)

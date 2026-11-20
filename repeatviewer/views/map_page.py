@@ -207,6 +207,8 @@ class MapPage(QWidget):
         base = dict(getattr(options, "map", None) or {})
         base.update(saved)
 
+        from repeatviewer.widgets.primer_design_pane import _card, _results_surface
+
         outer = QHBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
@@ -233,14 +235,15 @@ class MapPage(QWidget):
         for c, w in ((1, 90), (2, 90), (3, 70), (4, 150), (5, 110)):
             self.table.setColumnWidth(c, w)
         self.table.setMinimumHeight(120)
-        lay.addWidget(self.table)
+        lay.addWidget(_card(self.table, middle))
 
         pic_head = QHBoxLayout()
         pic_head.addWidget(QLabel("<b>Where they bind</b>", middle), 1)
         pic_head.addWidget(make_help_button(middle, "Where they bind", PICTURE_HELP))
         lay.addLayout(pic_head)
         self.picture = BindingPicture(middle)
-        lay.addWidget(self.picture, 1)
+        lay.addWidget(_card(self.picture, middle), 1)
+        _results_surface(middle)
         outer.addWidget(middle, 1)
 
         panel = QWidget(self)
