@@ -188,6 +188,13 @@ class PrimersWorkspacePage(QWidget):
         self.sections.setObjectName("PrimersWorkspaceSections")
         self.sections.setExpanding(False)
         self.sections.setDrawBase(False)
+        # The first letter of the first section, the start of the blue line
+        # under the chosen one and the left edge of the boxes below share one
+        # vertical line, 12 px in. The line runs under the word, with a little
+        # room on the right for the bolder letters of the chosen section.
+        self.sections.setStyleSheet(
+            "QTabBar#PrimersWorkspaceSections::tab"
+            " { padding: 6px 6px 6px 0px; margin: 0px 6px 0px 12px; }")
         for key, label in SECTIONS:
             index = self.sections.addTab(label)
             self.sections.setTabData(index, key)

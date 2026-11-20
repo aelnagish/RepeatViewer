@@ -68,7 +68,7 @@ class CloningPage(QWidget):
 
         middle = QWidget(self)
         lay = QVBoxLayout(middle)
-        lay.setContentsMargins(14, 12, 14, 12)
+        lay.setContentsMargins(12, 12, 12, 12)
         lay.setSpacing(10)
         self.verdict = QLabel(middle)
         self.verdict.setWordWrap(True)
