@@ -341,6 +341,24 @@ def _is_dark(widget: QWidget) -> bool:
     return widget.palette().color(QPalette.ColorRole.Window).lightness() < 128
 
 
+def _group_predicted_boundaries_by_edge(
+    guides: list[tuple[int, QColor, bool]],
+) -> list[tuple[int, list[tuple[QColor, bool]]]]:
+    """Group guides by column edge (dashed methods first, solid last)."""
+    by_edge: dict[int, list[tuple[QColor, bool]]] = {}
+    order: list[int] = []
+    for edge, color, solid in guides:
+        key = int(edge)
+        if key not in by_edge:
+            by_edge[key] = []
+            order.append(key)
+        by_edge[key].append((color, bool(solid)))
+    return [
+        (edge, sorted(by_edge[edge], key=lambda g: bool(g[1])))
+        for edge in order
+    ]
+
+
 def _wheel_delta_y(event: QWheelEvent) -> int:
     """Vertical pixels for a wheel/trackpad event (do not steal horizontal swipes)."""
     pixel = event.pixelDelta()
@@ -4425,7 +4443,9 @@ class _BarsCanvas(QWidget):
     ) -> None:
         """Full-height guides at predicted boundary column edges.
 
-        Method guides are dashed; the final boundary is solid and drawn last.
+        One method → dashed (or solid) line in that colour. Several methods on
+        the same column → one shared vertical line that alternates colours
+        along its length (e.g. LTR, then MSA identity, then Genome Cov).
         """
         if not self._msa_mode or not self._predicted_boundaries:
             return
@@ -4435,21 +4455,43 @@ class _BarsCanvas(QWidget):
         clip_left = float(clip.left()) - 1.0
         clip_right = float(clip.right()) + 1.0
         letters = self._msa_shows_letters()
-        for edge, color, solid in sorted(
-            self._predicted_boundaries, key=lambda g: bool(g[2])
+        # ~2 cm colour run on a typical display (≈75–96 px/inch).
+        alt_seg_px = 72.0
+        for edge, items in _group_predicted_boundaries_by_edge(
+            self._predicted_boundaries
         ):
             x = float(self._bar_pad) + float(edge) * ppb
             if not (clip_left <= x <= clip_right):
                 continue
-            width = (3.0 if letters else 2.0) + (1.0 if solid else 0.0)
-            pen = QPen(
-                color,
-                width,
-                Qt.PenStyle.SolidLine if solid else Qt.PenStyle.DashLine,
-            )
-            pen.setCosmetic(True)
-            painter.setPen(pen)
-            painter.drawLine(QPointF(x, y0), QPointF(x, y1))
+            n = len(items)
+            any_solid = any(solid for _color, solid in items)
+            base_width = (3.0 if letters else 2.0) + (1.0 if any_solid else 0.0)
+            if n <= 1:
+                color, solid = items[0]
+                pen = QPen(
+                    color,
+                    base_width,
+                    Qt.PenStyle.SolidLine if solid else Qt.PenStyle.DashLine,
+                )
+                pen.setCosmetic(True)
+                painter.setPen(pen)
+                painter.drawLine(QPointF(x, y0), QPointF(x, y1))
+                continue
+            # Same column: cycle method colours down the line; 2× thicker so
+            # overlapping methods read clearly as one shared boundary.
+            width = base_width * 2.0
+            y = y0
+            index = 0
+            while y < y1 - 0.5:
+                color, _solid = items[index % n]
+                y_end = min(y1, y + alt_seg_px)
+                pen = QPen(color, width, Qt.PenStyle.SolidLine)
+                pen.setCosmetic(True)
+                pen.setCapStyle(Qt.PenCapStyle.FlatCap)
+                painter.setPen(pen)
+                painter.drawLine(QPointF(x, y), QPointF(x, y_end))
+                y = y_end
+                index += 1
         painter.setPen(Qt.PenStyle.NoPen)
 
     def _paint_msa_rows_pixel_sample(
@@ -5291,6 +5333,8 @@ class _ScaleRuler(QWidget):
         self._region_sel: tuple[int, int] | None = None
         # Color vs standard: 0-based inclusive (first, last) nucleotide columns.
         self._standard_boundary_cols: tuple[int, int] | None = None
+        # Boundary prediction guides: (column edge, color, solid) — same as MSA bars.
+        self._predicted_boundaries: list[tuple[int, QColor, bool]] = []
         self._drag_origin_x: float | None = None
         self._drag_current_x: float | None = None
         self._rubber_active = False
@@ -5370,6 +5414,16 @@ class _ScaleRuler(QWidget):
         if new == self._standard_boundary_cols:
             return
         self._standard_boundary_cols = new
+        self.update()
+
+    def set_predicted_boundaries(
+        self, guides: list[tuple[int, QColor, bool]] | None
+    ) -> None:
+        """Mirror Boundary prediction guides through the scale ruler."""
+        new = list(guides or [])
+        if new == self._predicted_boundaries:
+            return
+        self._predicted_boundaries = new
         self.update()
 
     def _x_to_bp(self, x: float) -> float:
@@ -5696,6 +5750,45 @@ class _ScaleRuler(QWidget):
                 painter.drawLine(QPointF(x0, 0.0), QPointF(x0, h))
             if -2.0 <= x1 <= float(width) + 2.0 and abs(x1 - x0) > 0.5:
                 painter.drawLine(QPointF(x1, 0.0), QPointF(x1, h))
+            painter.setPen(Qt.PenStyle.NoPen)
+        # Boundary prediction: same full-height guides as on the MSA tracks.
+        if self._predicted_boundaries:
+            h = float(self.height())
+            letters = show_every_base
+            alt_seg_px = max(8.0, h / 3.0)
+            for edge_col, items in _group_predicted_boundaries_by_edge(
+                self._predicted_boundaries
+            ):
+                x = origin + float(edge_col) * ppb - scroll
+                if not (-2.0 <= x <= float(width) + 2.0):
+                    continue
+                n = len(items)
+                any_solid = any(solid for _color, solid in items)
+                base_width = (3.0 if letters else 2.0) + (1.0 if any_solid else 0.0)
+                if n <= 1:
+                    color, solid = items[0]
+                    pen = QPen(
+                        color,
+                        base_width,
+                        Qt.PenStyle.SolidLine if solid else Qt.PenStyle.DashLine,
+                    )
+                    pen.setCosmetic(True)
+                    painter.setPen(pen)
+                    painter.drawLine(QPointF(x, 0.0), QPointF(x, h))
+                    continue
+                width_pen = base_width * 2.0
+                y = 0.0
+                index = 0
+                while y < h - 0.5:
+                    color, _solid = items[index % n]
+                    y_end = min(h, y + alt_seg_px)
+                    pen = QPen(color, width_pen, Qt.PenStyle.SolidLine)
+                    pen.setCosmetic(True)
+                    pen.setCapStyle(Qt.PenCapStyle.FlatCap)
+                    painter.setPen(pen)
+                    painter.drawLine(QPointF(x, y), QPointF(x, y_end))
+                    y = y_end
+                    index += 1
             painter.setPen(Qt.PenStyle.NoPen)
         painter.end()
 
@@ -6514,6 +6607,9 @@ class MultiSequenceOverviewPanel(QWidget):
     def _sync_mode_specific_controls(self) -> None:
         msa = self.is_msa_mode()
         self._rail.set_msa_display_mode(msa)
+        # TSD checkbox visibility follows MSA; keep "All" in sync.
+        if getattr(self, "_auto_ann_checks", None):
+            self._sync_auto_annotation_all_check()
         self._rail.set_nucleotide_color_context("msa" if msa else "multi")
         self._rail.sync_color_scheme_combos()
         settings = self._overview_display_settings()
@@ -6680,16 +6776,9 @@ class MultiSequenceOverviewPanel(QWidget):
                 )
             )
             sort_mode = str(s.value("sequence_sort_mode", "original") or "original")
-            show_std_bounds_raw = s.value("show_standard_boundaries", True)
-            if isinstance(show_std_bounds_raw, str):
-                show_std_bounds = show_std_bounds_raw.strip().lower() in {
-                    "1",
-                    "true",
-                    "yes",
-                    "on",
-                }
-            else:
-                show_std_bounds = bool(show_std_bounds_raw)
+            show_std_bounds = s.value(
+                "show_standard_boundaries", True, type=bool
+            )
         finally:
             s.endGroup()
         track_h = max(1, min(10, track_h))
@@ -6779,6 +6868,8 @@ class MultiSequenceOverviewPanel(QWidget):
     def _on_show_standard_boundaries_changed(self, enabled: bool) -> None:
         self._bars.set_show_msa_standard_boundaries(bool(enabled))
         self._sync_scale_standard_boundaries()
+        # Remember across new MSA opens (same as other Display options).
+        self._save_overview_display_settings()
 
     def zoom_to_reference_boundary(self, side: str) -> bool:
         """Zoom to nucleotide level centered on the left or right reference edge.
@@ -7335,7 +7426,9 @@ class MultiSequenceOverviewPanel(QWidget):
 
     def _selected_auto_annotation_modes(self) -> list[AutoAnnotationMode]:
         return [
-            mode for mode, check in self._auto_ann_checks.items() if check.isChecked()
+            mode
+            for mode, check in self._auto_ann_checks.items()
+            if check.isChecked() and not check.isHidden()
         ]
 
     def _selected_similarity_databases(self) -> list[SimilarityDatabaseRun]:
@@ -7373,12 +7466,17 @@ class MultiSequenceOverviewPanel(QWidget):
         from repeatviewer.widgets.sequence_map_viewer import AutoAnnotationSettingsDialog
 
         self._auto_ann_settings = load_auto_annotation_settings()
-        dialog = AutoAnnotationSettingsDialog(self._auto_ann_settings, parent=self)
+        dialog = AutoAnnotationSettingsDialog(
+            self._auto_ann_settings,
+            parent=self,
+            show_tsd=self.is_msa_mode(),
+        )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         self._auto_ann_settings = dialog.settings()
         save_auto_annotation_settings(self._auto_ann_settings)
-        save_tsd_search_options(dialog.tsd_options())
+        if dialog._tsd_panel.isVisible():
+            save_tsd_search_options(dialog.tsd_options())
         self.statusMessage.emit("Auto annotation settings saved.")
 
     def _open_similarity_annotation_settings(self) -> None:
@@ -9666,6 +9764,7 @@ class MultiSequenceOverviewPanel(QWidget):
         self._boundary_guides = {}
         self._boundary_result = None
         self._rail.clear_boundary_results()
+        self._sync_boundary_guides()
 
     def _sync_boundary_guides(self, _keys: object = None) -> None:
         """Draw guides for the ticked Boundary prediction rows only."""
@@ -9677,6 +9776,9 @@ class MultiSequenceOverviewPanel(QWidget):
             for guide in items
         ]
         self._bars.set_predicted_boundaries(guides)
+        scale = getattr(self, "_scale", None)
+        if scale is not None:
+            scale.set_predicted_boundaries(guides)
 
     def _restore_boundaries_from_json(self) -> None:
         """Load ``*.boundaries_RV.json`` guides when MSA width still matches."""

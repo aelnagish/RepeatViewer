@@ -18,7 +18,6 @@ from PySide6.QtWidgets import (
 from repeatviewer.widgets.sequence_annotation_rail import (
     _RAIL_TAB_WIDTH,
     _RotatedTabButton,
-    _h_divider,
     _page_title_with_rule,
 )
 
@@ -114,10 +113,42 @@ class TreeDisplayRail(QWidget):
         page.setFixedWidth(self._module_width)
         self._stack.addWidget(page)
         if find_page is not None:
-            find_page.setParent(self._stack)
+            # Same sticky title + scroll as Display (and Annotation Find).
+            find_shell = QWidget(self._stack)
+            find_shell.setObjectName("TreeFindPage")
+            _fill_window_surface(find_shell)
+            find_shell.setFixedWidth(self._module_width)
+            find_layout = QVBoxLayout(find_shell)
+            find_layout.setContentsMargins(0, 0, 0, 0)
+            find_layout.setSpacing(0)
+            find_title_host = QWidget(find_shell)
+            find_title_layout = QVBoxLayout(find_title_host)
+            find_title_layout.setContentsMargins(10, 10, 10, 0)
+            find_title_layout.setSpacing(0)
+            find_title, _find_rule = _page_title_with_rule("Find", find_title_host)
+            find_title_layout.addWidget(find_title)
+            find_layout.addWidget(find_title_host, 0)
+            find_page.setParent(find_shell)
             _fill_window_surface(find_page)
-            find_page.setFixedWidth(self._module_width)
-            self._stack.addWidget(find_page)
+            find_scroll = QScrollArea(find_shell)
+            find_scroll.setObjectName("TreeFindPanel")
+            find_scroll.setWidget(find_page)
+            find_scroll.setWidgetResizable(True)
+            find_scroll.setFrameShape(QFrame.Shape.NoFrame)
+            find_scroll.setHorizontalScrollBarPolicy(
+                Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+            )
+            find_scroll.setVerticalScrollBarPolicy(
+                Qt.ScrollBarPolicy.ScrollBarAsNeeded
+            )
+            _fill_window_surface(find_scroll)
+            _fill_window_surface(find_scroll.viewport())
+            find_scroll.setStyleSheet(
+                "QScrollArea#TreeFindPanel { background: palette(window); "
+                "border: none; }"
+            )
+            find_layout.addWidget(find_scroll, 1)
+            self._stack.addWidget(find_shell)
 
         # Divider between module column and vertical Display tab.
         self._tab_divider = QFrame(self)

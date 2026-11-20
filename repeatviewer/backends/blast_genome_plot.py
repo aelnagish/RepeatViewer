@@ -166,7 +166,8 @@ HOVER_TRACK_POINTS_PER_CHROM = 36
 _GENOME_META_CACHE: dict[str, tuple[float, list[str], dict[str, int]]] = {}
 
 PLOTLY_HTML_CONFIG: dict[str, Any] = {
-    "scrollZoom": True,
+    # Plain wheel/trackpad scrolls the page. Shift+scroll zooms X (custom handler).
+    "scrollZoom": False,
     "displayModeBar": True,
     "displaylogo": False,
     # responsive reflow can undo restyle/redraw bar-height updates in Qt WebEngine.
@@ -1909,7 +1910,8 @@ def _plotly_interactive_controls_html(
     }}
 
     function applyXAxisZoomLayout(layoutUpdate){{
-      if(panel.querySelector('#te-sf-xzoom')){{
+      // Shift+wheel sets _teXRangeZoom itself; do not recompute from the slider center.
+      if(panel.querySelector('#te-sf-xzoom') && !gd._teSkipSliderXRange){{
         updateXRangeFromSlider();
       }}
       if(!gd._teXRange0){{ return; }}
@@ -3544,14 +3546,109 @@ def _plotly_interactive_controls_html(
       schedulePrefsSave();
     }});
     const xZoomEl = panel.querySelector('#te-sf-xzoom');
+    function applyXZoomRelayout(){{
+      if(!panel.querySelector('#te-sf-xzoom')){{ return Promise.resolve(); }}
+      const layoutUpdate = {{}};
+      applyXAxisZoomLayout(layoutUpdate);
+      if(!Object.keys(layoutUpdate).length){{ return Promise.resolve(); }}
+      return safeRelayout(layoutUpdate);
+    }}
+    function dataXFromClientX(clientX){{
+      const full = gd._fullLayout;
+      const xa = full && full.xaxis;
+      if(!xa){{ return null; }}
+      const rect = gd.getBoundingClientRect();
+      const px = clientX - rect.left;
+      // Prefer Plotly's mapper; fall back to linear map from the visible range.
+      if(typeof xa.p2d === 'function'){{
+        try {{
+          const x = xa.p2d(px);
+          if(Number.isFinite(x)){{ return x; }}
+        }} catch (_err) {{}}
+      }}
+      const len = Number(xa._length);
+      const off = Number(xa._offset);
+      const range = (gd._teXRangeZoom && gd._teXRangeZoom.length >= 2)
+        ? gd._teXRangeZoom
+        : (gd.layout && gd.layout.xaxis && gd.layout.xaxis.range);
+      if(
+        Number.isFinite(len) && len > 0
+        && Number.isFinite(off)
+        && Array.isArray(range) && range.length >= 2
+      ){{
+        const t = Math.max(0, Math.min(1, (px - off) / len));
+        return Number(range[0]) + t * (Number(range[1]) - Number(range[0]));
+      }}
+      return null;
+    }}
+    function applyShiftWheelXZoom(e){{
+      const el = panel.querySelector('#te-sf-xzoom');
+      if(!el || !gd._teXRange0 || gd._teXRange0.length < 2){{ return; }}
+      // macOS often remaps Shift+vertical scroll to deltaX (mouse and trackpad).
+      const dy = Number(e.deltaY) || 0;
+      const dx = Number(e.deltaX) || 0;
+      const delta = Math.abs(dy) >= Math.abs(dx) ? dy : dx;
+      if(!delta){{ return; }}
+      const full0 = Number(gd._teXRange0[0]);
+      const full1 = Number(gd._teXRange0[1]);
+      const fullSpan = full1 - full0;
+      if(!Number.isFinite(fullSpan) || fullSpan <= 0){{ return; }}
+      const cur = (gd._teXRangeZoom && gd._teXRangeZoom.length >= 2)
+        ? gd._teXRangeZoom
+        : gd._teXRange0;
+      const cur0 = Number(cur[0]);
+      const cur1 = Number(cur[1]);
+      const curSpan = cur1 - cur0;
+      if(!Number.isFinite(curSpan) || curSpan <= 0){{ return; }}
+      // Scroll up / fingers up → zoom in on the region under the cursor.
+      const steps = -delta / 100;
+      const factor = Math.pow(1.15, steps);
+      const zoom = Math.min(
+        XZOOM_MAX,
+        Math.max({PLOT_XZOOM_MIN}, (fullSpan / curSpan) * factor)
+      );
+      const newSpan = fullSpan / zoom;
+      const anchor = dataXFromClientX(e.clientX);
+      const anchorX = Number.isFinite(anchor) ? anchor : (cur0 + cur1) / 2;
+      // Keep the data point under the cursor fixed while the window shrinks/grows.
+      const frac = Math.max(0, Math.min(1, (anchorX - cur0) / curSpan));
+      let r0 = anchorX - frac * newSpan;
+      let r1 = r0 + newSpan;
+      if(r0 < full0){{
+        r0 = full0;
+        r1 = Math.min(full1, r0 + newSpan);
+      }}
+      if(r1 > full1){{
+        r1 = full1;
+        r0 = Math.max(full0, r1 - newSpan);
+      }}
+      if(GENOME_MODE && gd._teScaleMeta){{
+        const snapped = snapDisplayRangeToBins(r0, r1, gd._teScaleMeta);
+        r0 = snapped[0];
+        r1 = snapped[1];
+      }} else if(!GENOME_MODE && gd._teDivergenceMeta){{
+        const snapped = snapDivergenceRange(r0, r1, gd._teDivergenceMeta);
+        r0 = snapped[0];
+        r1 = snapped[1];
+      }}
+      gd._teXCenter = (r0 + r1) / 2;
+      gd._teXRangeZoom = (zoom <= 1.001) ? null : [r0, r1];
+      el.value = String(zoom);
+      const valEl = panel.querySelector('#te-sf-xzoom-val');
+      if(valEl){{ valEl.textContent = zoom.toFixed(1) + 'x'; }}
+      const layoutUpdate = {{}};
+      gd._teSkipSliderXRange = true;
+      try {{
+        applyXAxisZoomLayout(layoutUpdate);
+      }} finally {{
+        gd._teSkipSliderXRange = false;
+      }}
+      if(!Object.keys(layoutUpdate).length){{ return; }}
+      safeRelayout(layoutUpdate);
+      schedulePrefsSave();
+    }}
     if(xZoomEl){{
       xZoomEl.max = String(XZOOM_MAX);
-      function applyXZoomRelayout(){{
-        const layoutUpdate = {{}};
-        applyXAxisZoomLayout(layoutUpdate);
-        if(!Object.keys(layoutUpdate).length){{ return Promise.resolve(); }}
-        return safeRelayout(layoutUpdate);
-      }}
       xZoomEl.addEventListener('input', (e) => {{
         const v = Number(e.target.value || 1);
         const valEl = panel.querySelector('#te-sf-xzoom-val');
@@ -3564,6 +3661,35 @@ def _plotly_interactive_controls_html(
         schedulePrefsSave();
       }});
     }}
+    // Track Shift via key events: Qt WebEngine / macOS often deliver Shift+scroll
+    // as a horizontal wheel without e.shiftKey set on the wheel event.
+    let teShiftDown = false;
+    window.addEventListener('keydown', (e) => {{
+      if(e.key === 'Shift'){{ teShiftDown = true; }}
+    }}, true);
+    window.addEventListener('keyup', (e) => {{
+      if(e.key === 'Shift'){{ teShiftDown = false; }}
+    }}, true);
+    window.addEventListener('blur', () => {{ teShiftDown = false; }});
+    function teWheelWantsXZoom(e){{
+      return !!(e.shiftKey || teShiftDown
+        || (typeof e.getModifierState === 'function' && e.getModifierState('Shift')));
+    }}
+    // Shift+scroll zooms the X region under the cursor; plain scroll moves the page.
+    function onTePlotWheel(e){{
+      if(!teWheelWantsXZoom(e)){{ return; }}
+      if(!panel.querySelector('#te-sf-xzoom')){{ return; }}
+      e.preventDefault();
+      e.stopPropagation();
+      applyShiftWheelXZoom(e);
+    }}
+    gd.addEventListener('wheel', onTePlotWheel, {{passive: false, capture: true}});
+    // Also on document so hover over Plotly's drag overlay still zooms.
+    document.addEventListener('wheel', (e) => {{
+      if(!teWheelWantsXZoom(e)){{ return; }}
+      if(!gd.contains(e.target) && e.target !== gd){{ return; }}
+      onTePlotWheel(e);
+    }}, {{passive: false, capture: true}});
     if(GENOME_MODE){{
       const rowEl = panel.querySelector('#te-sf-rowsp');
       if(rowEl){{

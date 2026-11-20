@@ -42,6 +42,7 @@ from PySide6.QtGui import (
     QMouseEvent,
     QPainter,
     QPalette,
+    QPen,
     QShortcut,
     QWheelEvent,
 )
@@ -1759,6 +1760,8 @@ class FolderTreeWidget(QTreeWidget):
     paste_to_folder_requested = Signal(Path)
     add_folder_requested = Signal()
     create_folder_requested = Signal(object)  # Path | None
+    # Top-level workspace roots were reordered (drag or Move up/down).
+    root_order_changed = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1766,9 +1769,15 @@ class FolderTreeWidget(QTreeWidget):
         # Cmd/Ctrl+click and Shift+click select multiple folders (delete, color, …).
         self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectItems)
-        self.setDragDropMode(QAbstractItemView.DragDropMode.DropOnly)
+        # DragDrop: reorder main (top-level) folders; still accept external drops.
+        # Prefer Copy for internal reorder so Qt does not delete source rows after
+        # drop (Move + custom dropEvent made roots vanish).
+        self.setDragDropMode(QAbstractItemView.DragDropMode.DragDrop)
+        self.setDefaultDropAction(Qt.DropAction.CopyAction)
+        self.setDragDropOverwriteMode(False)
+        self.setDragEnabled(True)
         self.setAcceptDrops(True)
-        self.setDropIndicatorShown(True)
+        self.setDropIndicatorShown(False)  # custom blue insertion line
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
@@ -1801,12 +1810,16 @@ class FolderTreeWidget(QTreeWidget):
         self._user_selecting = False
         self._active_folder_key: str | None = None
         self._drop_target_item: QTreeWidgetItem | None = None
+        # Blue insertion line while reordering top-level roots (viewport Y).
+        self._drop_line_y: int | None = None
         # Track presses so chevron toggle does not fight Qt's double-click expand.
         self._last_press_ms = 0.0
         self._last_press_item: QTreeWidgetItem | None = None
         self._last_press_pos = QPoint()
         # True when the first press of a double-click already toggled the branch.
         self._branch_toggled_on_press = False
+        # Files-panel folder to restore after a top-level drag reorder.
+        self._reorder_preserve_active_key: str | None = None
 
     def drop_target_item(self) -> QTreeWidgetItem | None:
         """Folder row currently under an in-progress file drop, if any."""
@@ -1826,6 +1839,17 @@ class FolderTreeWidget(QTreeWidget):
             rect = self.visualItemRect(row)
             if rect.isValid():
                 viewport.update(rect.adjusted(-2, -2, 2, 2))
+
+    def _set_drop_line_y(self, y: int | None) -> None:
+        if self._drop_line_y == y:
+            return
+        self._drop_line_y = y
+        viewport = self.viewport()
+        if viewport is not None:
+            viewport.update()
+
+    def _clear_drop_line(self) -> None:
+        self._set_drop_line_y(None)
 
     def _folder_item_at(self, pos) -> QTreeWidgetItem | None:
         item = self.itemAt(pos)
@@ -2098,6 +2122,21 @@ class FolderTreeWidget(QTreeWidget):
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         clicked_folder: Path | None = None
+        # Right-click only opens the context menu — do not switch the Files
+        # panel / active folder highlight (needed so Move up/down keeps the
+        # folder the user was browsing, e.g. data).
+        if event.button() == Qt.MouseButton.RightButton:
+            self._suppress_current_changed = True
+            self._user_selecting = True
+            try:
+                super().mousePressEvent(event)
+            finally:
+                self._user_selecting = False
+                QTimer.singleShot(
+                    0,
+                    lambda: setattr(self, "_suppress_current_changed", False),
+                )
+            return
         if event.button() == Qt.MouseButton.LeftButton:
             pos = event.position().toPoint()
             item = self.itemAt(pos)
@@ -2117,6 +2156,10 @@ class FolderTreeWidget(QTreeWidget):
             self._last_press_ms = time.monotonic() * 1000.0
             self._last_press_item = item
             self._last_press_pos = QPoint(pos)
+            # Capture before Qt changes current — root drag should not steal
+            # the Files-panel folder (e.g. keep data while reordering another).
+            if item is not None and item.parent() is None:
+                self._reorder_preserve_active_key = self._active_folder_key
         self._user_selecting = True
         try:
             super().mousePressEvent(event)
@@ -2217,6 +2260,28 @@ class FolderTreeWidget(QTreeWidget):
                     "Copy Path",
                     lambda fs=list(folders): self._copy_folder_paths_to_clipboard(fs),
                 )
+                reveal_label = (
+                    "Reveal in Finder"
+                    if platform.system() == "Darwin"
+                    else "Show in File Manager"
+                )
+                menu.addAction(
+                    reveal_label,
+                    lambda f=folder: reveal_in_file_manager(f),
+                )
+                tree_item = folder_items[0][1]
+                if self._is_top_level_item(tree_item):
+                    idx = self.indexOfTopLevelItem(tree_item)
+                    move_up = menu.addAction(
+                        "Move up",
+                        lambda: self._move_top_level_item(tree_item, -1),
+                    )
+                    move_up.setEnabled(idx > 0)
+                    move_down = menu.addAction(
+                        "Move down",
+                        lambda: self._move_top_level_item(tree_item, 1),
+                    )
+                    move_down.setEnabled(0 <= idx < self.topLevelItemCount() - 1)
                 window = self.window()
                 if hasattr(window, "_clipboard_can_paste") and window._clipboard_can_paste():
                     menu.addAction(
@@ -2227,6 +2292,15 @@ class FolderTreeWidget(QTreeWidget):
                 menu.addAction(
                     f"Copy {len(folders)} Paths",
                     lambda fs=list(folders): self._copy_folder_paths_to_clipboard(fs),
+                )
+                reveal_label = (
+                    "Reveal in Finder"
+                    if platform.system() == "Darwin"
+                    else "Show in File Manager"
+                )
+                menu.addAction(
+                    reveal_label,
+                    lambda fs=list(folders): reveal_in_file_manager(fs[0]),
                 )
             if len(folders) == 1:
                 menu.addAction(
@@ -2337,13 +2411,217 @@ class FolderTreeWidget(QTreeWidget):
             set_folder_color(folder, None)
             apply_folder_item_color(item, folder)
 
+    def _finish_top_level_reorder(self) -> None:
+        """After root reorder: clear drag selection, keep Files-panel folder active.
+
+        ``takeTopLevelItem`` would otherwise change the current row and fire
+        ``folder_selected`` for the moved root (e.g. RepeatMasker), stealing the
+        Files highlight from the folder the user was browsing (e.g. data).
+        """
+        active_key = self._active_folder_key
+        self._suppress_current_changed = True
+        try:
+            self.clearSelection()
+            if active_key:
+                item = self.find_item_for_folder(Path(active_key))
+                if item is not None:
+                    index = self.indexFromItem(item)
+                    if index.isValid():
+                        self.selectionModel().setCurrentIndex(
+                            index,
+                            QItemSelectionModel.SelectionFlag.Current,
+                        )
+                        if item.isSelected():
+                            item.setSelected(False)
+            self.viewport().update()
+        finally:
+            QTimer.singleShot(
+                0,
+                lambda: setattr(self, "_suppress_current_changed", False),
+            )
+
+    def _move_top_level_item(self, item: QTreeWidgetItem, delta: int) -> None:
+        """Move a main (workspace root) folder up (−1) or down (+1)."""
+        if item.parent() is not None:
+            return
+        index = self.indexOfTopLevelItem(item)
+        if index < 0:
+            return
+        target = index + int(delta)
+        if target < 0 or target >= self.topLevelItemCount():
+            return
+        self._suppress_current_changed = True
+        try:
+            taken = self.takeTopLevelItem(index)
+            if taken is None:
+                return
+            self.insertTopLevelItem(target, taken)
+        finally:
+            # _finish_top_level_reorder keeps suppress until the next tick.
+            pass
+        self._finish_top_level_reorder()
+        self.root_order_changed.emit()
+
+    def _selected_top_level_items(self) -> list[QTreeWidgetItem]:
+        items = [item for item in self.selectedItems() if item.parent() is None]
+        items.sort(key=self.indexOfTopLevelItem)
+        return items
+
+    def _subtree_bottom(self, item: QTreeWidgetItem) -> int:
+        """Bottom edge of ``item`` including expanded descendants (viewport Y)."""
+        rect = self.visualItemRect(item)
+        bottom = rect.bottom() if rect.isValid() else 0
+        if not item.isExpanded():
+            return bottom
+        for index in range(item.childCount()):
+            child = item.child(index)
+            if child is None or self._is_lazy_placeholder(child) or child.isHidden():
+                continue
+            bottom = max(bottom, self._subtree_bottom(child))
+        return bottom
+
+    def _top_level_insert_index_for_drop(self, pos) -> int:
+        """Index among top-level roots for an internal reorder drop.
+
+        Only the outermost layer is a drop target: each root owns a vertical
+        block from its row through its expanded children up to the next root.
+        """
+        y = pos.y() if hasattr(pos, "y") else int(pos)
+        n = self.topLevelItemCount()
+        if n == 0:
+            return 0
+        for index in range(n):
+            item = self.topLevelItem(index)
+            if item is None:
+                continue
+            top = self.visualItemRect(item).top()
+            if index + 1 < n:
+                nxt = self.topLevelItem(index + 1)
+                bottom = (
+                    self.visualItemRect(nxt).top()
+                    if nxt is not None
+                    else self._subtree_bottom(item)
+                )
+            else:
+                # Last root only — do not stretch to the viewport bottom or the
+                # lower half (drop-after) never wins for a short last row.
+                bottom = self._subtree_bottom(item)
+            if y < (top + bottom) / 2:
+                return index
+        return n
+
+    def _insertion_y_for_top_level_drop(self, pos) -> int:
+        """Viewport Y of the blue insertion line for a top-level reorder."""
+        insert_at = self._top_level_insert_index_for_drop(pos)
+        n = self.topLevelItemCount()
+        if n == 0:
+            return 2
+        if insert_at <= 0:
+            first = self.topLevelItem(0)
+            rect = self.visualItemRect(first) if first is not None else QRect()
+            return rect.top() if rect.isValid() else 2
+        if insert_at >= n:
+            last = self.topLevelItem(n - 1)
+            return self._subtree_bottom(last) if last is not None else 2
+        target = self.topLevelItem(insert_at)
+        rect = self.visualItemRect(target) if target is not None else QRect()
+        return rect.top() if rect.isValid() else 2
+
+    def _reorder_top_level_drop(self, event) -> bool:
+        moving = self._selected_top_level_items()
+        if not moving:
+            return False
+        insert_at = self._top_level_insert_index_for_drop(event.position().toPoint())
+        # Pull from the bottom so earlier indices stay valid.
+        taken: list[QTreeWidgetItem] = []
+        self._suppress_current_changed = True
+        try:
+            for item in reversed(moving):
+                index = self.indexOfTopLevelItem(item)
+                if index < 0:
+                    continue
+                if index < insert_at:
+                    insert_at -= 1
+                removed = self.takeTopLevelItem(index)
+                if removed is not None:
+                    taken.append(removed)
+            taken.reverse()
+            if not taken:
+                return False
+            for offset, item in enumerate(taken):
+                self.insertTopLevelItem(insert_at + offset, item)
+        finally:
+            pass
+        # Restore Files-panel folder captured on press; do not select moved roots.
+        if self._reorder_preserve_active_key:
+            self._active_folder_key = self._reorder_preserve_active_key
+        self._finish_top_level_reorder()
+        self.root_order_changed.emit()
+        return True
+
+    def startDrag(self, supportedActions) -> None:  # noqa: N802
+        # Only outermost (top-level) workspace folders can be reordered.
+        moving = self._selected_top_level_items()
+        if not moving:
+            return
+        indexes = [self.indexFromItem(item) for item in moving]
+        indexes = [index for index in indexes if index.isValid()]
+        if not indexes:
+            return
+        mime = self.model().mimeData(indexes)
+        if mime is None:
+            return
+        drag = QDrag(self)
+        drag.setMimeData(mime)
+        first = moving[0]
+        rect = self.visualItemRect(first)
+        if rect.isValid():
+            drag.setPixmap(self.viewport().grab(rect))
+            drag.setHotSpot(rect.center() - rect.topLeft())
+        # Copy preferred: Qt must not delete the dragged roots after drop.
+        drag.exec(
+            Qt.DropAction.CopyAction | Qt.DropAction.MoveAction,
+            Qt.DropAction.CopyAction,
+        )
+        # Drop path already restored; on cancel still put Files highlight back.
+        if self._reorder_preserve_active_key:
+            self._active_folder_key = self._reorder_preserve_active_key
+            self._finish_top_level_reorder()
+        self._reorder_preserve_active_key = None
+        self._clear_drop_line()
+
     def dragEnterEvent(self, event):  # noqa: N802 (Qt API)
+        if event.source() is self:
+            if self._selected_top_level_items():
+                pos = event.position().toPoint()
+                self._set_drop_target_item(None)
+                self._set_drop_line_y(self._insertion_y_for_top_level_drop(pos))
+                event.setDropAction(Qt.DropAction.CopyAction)
+                event.accept()
+                return
+            self._clear_drop_line()
+            event.ignore()
+            return
+        self._clear_drop_line()
         if event.mimeData().hasUrls():
             event.acceptProposedAction()
             return
         event.ignore()
 
     def dragMoveEvent(self, event):  # noqa: N802 (Qt API)
+        if event.source() is self:
+            self._set_drop_target_item(None)
+            if self._selected_top_level_items():
+                pos = event.position().toPoint()
+                self._set_drop_line_y(self._insertion_y_for_top_level_drop(pos))
+                event.setDropAction(Qt.DropAction.CopyAction)
+                event.accept()
+                return
+            self._clear_drop_line()
+            event.ignore()
+            return
+
+        self._clear_drop_line()
         paths = self._mime_local_paths(event.mimeData())
         if not paths:
             self._set_drop_target_item(None)
@@ -2377,11 +2655,24 @@ class FolderTreeWidget(QTreeWidget):
 
     def dragLeaveEvent(self, event):  # noqa: N802 (Qt API)
         self._set_drop_target_item(None)
+        self._clear_drop_line()
         super().dragLeaveEvent(event)
 
     def dropEvent(self, event):  # noqa: N802 (Qt API)
+        if event.source() is self:
+            self._set_drop_target_item(None)
+            self._clear_drop_line()
+            if self._reorder_top_level_drop(event):
+                # CopyAction so Qt does not remove the reinserted roots.
+                event.setDropAction(Qt.DropAction.CopyAction)
+                event.accept()
+                return
+            event.ignore()
+            return
+
         paths = self._mime_local_paths(event.mimeData())
         self._set_drop_target_item(None)
+        self._clear_drop_line()
         if not paths:
             event.ignore()
             return
@@ -2405,6 +2696,27 @@ class FolderTreeWidget(QTreeWidget):
             self.files_dropped_to_folder.emit(target_dir, file_paths)
             event.setDropAction(Qt.DropAction.CopyAction)
         event.acceptProposedAction()
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        super().paintEvent(event)
+        if self._drop_line_y is None:
+            return
+        viewport = self.viewport()
+        if viewport is None:
+            return
+        painter = QPainter(viewport)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        y = self._drop_line_y
+        left = 4
+        right = max(left + 8, viewport.width() - 4)
+        pen = QPen(QColor("#0a84ff"), 2)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+        painter.drawLine(left + 4, y, right - 4, y)
+        painter.setBrush(QColor("#0a84ff"))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawEllipse(left, y - 3, 6, 6)
+        painter.drawEllipse(right - 6, y - 3, 6, 6)
 
 
 @dataclass
@@ -2768,6 +3080,7 @@ class MainWindow(
         self._folder_tree.delete_folders_requested.connect(self._delete_folders)
         self._folder_tree.duplicate_folders_requested.connect(self._duplicate_selected_folders)
         self._folder_tree.clear_root_folders_requested.connect(self._clear_root_folders)
+        self._folder_tree.root_order_changed.connect(self._schedule_persist_workspace)
         self._folder_tree.paste_to_folder_requested.connect(self._paste_files_to_folder)
         self._folder_tree.add_folder_requested.connect(self._pick_and_add_folder)
         self._folder_tree.create_folder_requested.connect(self._create_folder)
@@ -5383,8 +5696,8 @@ class MainWindow(
         rvmap = Path(result["rvmap"])
         created = [Path(p) for p in result["files"] if Path(p).is_file()]
         if self._current_folder:
-            # Aligner file (.paf / .sam / .bam) and contig document (.rvmap) sit
-            # next to the input. Report / tables / FASTA live in <stem>_details.
+            # Aligner file (.paf / .sam / .bam), .rvmap, and optional FASTA/TSV
+            # sit next to the input. Temporary <stem>_details is removed after the run.
             self._refresh_subfolders_under(self._current_folder)
             self._populate_file_list(
                 self._current_folder,
@@ -8587,6 +8900,14 @@ class MainWindow(
         counts = self._folder_panel_counts(folder)
         root = QTreeWidgetItem([self._folder_tree_label(folder, counts=counts)])
         root.setData(0, ROLE_PATH, str(folder))
+        # Main folders can be dragged to change their order in the list.
+        root.setFlags(
+            root.flags()
+            | Qt.ItemFlag.ItemIsDragEnabled
+            | Qt.ItemFlag.ItemIsDropEnabled
+            | Qt.ItemFlag.ItemIsEnabled
+            | Qt.ItemFlag.ItemIsSelectable
+        )
         n_dirs, n_files = counts
         root.setToolTip(0, f"{folder}\n{n_dirs} folders · {n_files} files")
         apply_folder_item_color(root, folder)
@@ -8858,6 +9179,8 @@ class MainWindow(
             counts = self._folder_panel_counts(child)
             item = QTreeWidgetItem([self._folder_tree_label(child, counts=counts)])
             item.setData(0, ROLE_PATH, str(child))
+            # Nested folders are not reordered via drag (only main roots are).
+            item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsDragEnabled)
             n_dirs, n_files = counts
             item.setToolTip(0, f"{child}\n{n_dirs} folders · {n_files} files")
             apply_folder_item_color(item, child)

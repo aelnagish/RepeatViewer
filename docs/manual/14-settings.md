@@ -43,8 +43,8 @@ The path of the settings folder is shown at the bottom of the window.
 - **Add buttons…** adds any tool from the File, Sequence and Tools menus (for
   example Mapping, Tree, Primers and Probes, NCBI Download, HMMER, AliView) or a
   separator; **Remove** takes the selected button off.
-- **Reset to default** restores BLAST, Align, Dotplot, TE-Aid, MSA Clean, MSA
-  Extend, Consensus and Visualization.
+- **Reset to default** restores BLAST, Align, Dotplot, TE-Aid, Mapping, Tree,
+  Primers and Probes and Visualization.
 
 When the window is too narrow for all buttons, the rest move into a menu behind the
 arrow at the right end of the toolbar.

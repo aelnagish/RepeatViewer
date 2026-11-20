@@ -3,6 +3,11 @@
 RepeatViewer is a cross-platform desktop application for **inspecting, annotating, curating, and visualizing** 
 repetitive DNAs, especially transposable elements (TEs). It works on Linux, macOS, and Windows.
 
+
+RepeatViewer is developed by Jiangzhao Qian and [Abdullah EI-nagish](https://github.com/aelnagish)
+
+
+
 <p align="center">
   <a href="https://aelnagish.github.io/RepeatViewer/"><b>Website</b></a> ·
   <a href="#installation"><b>Install</b></a> ·
@@ -265,9 +270,6 @@ RepeatViewer/
 generate libraries with [TEtrimmer](https://github.com/qjiangzhao/TEtrimmer), then inspect and refine them in
 RepeatViewer.
 
-## Citation
+**Authors:** 
+Jiangzhao Qian, Abdullah El-nagish, Shlok Szatkowski, Sophie Maiwald, Nusrat Sultana, Daniel Costard, Anna Rudzinski, Nicola Schmidt, Tony Heitkam 
 
-If RepeatViewer contributes to your work, please cite this application (manuscript in preparation) and, when applicable, [TEtrimmer](https://github.com/qjiangzhao/TEtrimmer) (*Nature Communications*, 2025).
-
-**Authors:** Jiangzhao Qian, Abdullah El-nagish, Shlok Szatkowski, Tony Heitkam  
-Chair of Molecular Botany, Institute for Biology I, RWTH Aachen University

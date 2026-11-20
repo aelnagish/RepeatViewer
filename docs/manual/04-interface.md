@@ -103,7 +103,7 @@ HTML reports have a zoom box and **Open in browser** in the title bar.
 ## Toolbar
 
 The tools you use most, as buttons. The default set is BLAST, Align, Dotplot,
-TE-Aid, MSA Clean, MSA Extend, Consensus and Visualization. Choose which
+TE-Aid, Mapping, Tree, Primers and Probes and Visualization. Choose which
 buttons appear, and in which order, in **File → Setting → Toolbar**.
 
 Most buttons do two things:

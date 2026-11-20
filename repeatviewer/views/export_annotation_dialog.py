@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtWidgets import (
-    QComboBox,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
@@ -30,6 +29,8 @@ from repeatviewer.backends.sequence_features import (
     resolve_sidecar_path,
     suggest_unique_export_ids,
 )
+from repeatviewer.widgets.combo_boxes import NoWheelComboBox as QComboBox
+from repeatviewer.widgets.combo_boxes import size_export_format_combo
 from repeatviewer.widgets.file_conflict import confirm_existing_file_path
 from repeatviewer.widgets.path_browse import PathBrowseRow
 
@@ -207,6 +208,7 @@ class ExportAnnotationDialog(QDialog):
         self._type.addItem("GFF3", "gff3")
         self._type.addItem("GTF", "gtf")
         self._type.addItem("BED", "bed")
+        size_export_format_combo(self._type)
 
         self._file_row = PathBrowseRow(
             self,

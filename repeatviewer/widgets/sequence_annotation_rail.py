@@ -41,15 +41,18 @@ from repeatviewer.backends.annotation_colors import (
 )
 from repeatviewer.backends.sequence_features import (
     ALWAYS_ANNOTATION_VISIBILITY_KINDS,
+    FEATURE_TYPE_COLORS,
     SequenceFeature,
     annotation_visibility_label,
     collect_annotation_visibility_keys,
 )
 
 # Boundary prediction rows: (key, label, guide color).
+# LTR / TIR match the default feature-annotation colours so MSA boundary lines
+# match the Feature detection / annotation legend.
 BOUNDARY_ROWS: tuple[tuple[str, str, str], ...] = (
-    ("ltr", "LTR", "#ff7f0e"),
-    ("tir", "TIR", "#8c564b"),
+    ("ltr", "LTR", FEATURE_TYPE_COLORS["LTR"]),
+    ("tir", "TIR", FEATURE_TYPE_COLORS["TIR"]),
     ("msa_identity", "MSA identity", "#1f77b4"),
     ("coverage", "Genome Cov", "#2ca02c"),
     ("poly_a", "PolyA", "#9467bd"),
@@ -558,6 +561,11 @@ class _FlowLayout(QLayout):
         line_height = 0
         space = self.spacing()
         for item in self._items:
+            widget = item.widget()
+            # Hidden chips (e.g. TSD when not MSA) must not reserve space —
+            # otherwise the next wrap row (PBS) starts indented.
+            if widget is not None and widget.isHidden():
+                continue
             hint = item.sizeHint()
             next_x = x + hint.width() + space
             if line_height and next_x - space > effective.right() + 1:
@@ -1008,6 +1016,53 @@ class SequenceAnnotationRail(QWidget):
         scroll.viewport().setMinimumWidth(0)
         return scroll
 
+    def _shell_with_sticky_title(
+        self,
+        title: str,
+        body: QWidget,
+        *,
+        store_rule_as: str | None = None,
+    ) -> QWidget:
+        """Pin ``title`` above a scrollable body (Annotations header pattern).
+
+        Display / Find / Others / Primers used to put the page title inside the
+        scroll area, so it disappeared when scrolling. Keep it fixed like the
+        Annotations tab.
+        """
+        shell = QWidget()
+        shell.setMinimumWidth(0)
+        shell.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding
+        )
+        self._fill_rail_surface(shell)
+        shell_layout = QVBoxLayout(shell)
+        shell_layout.setContentsMargins(0, 0, 0, 0)
+        shell_layout.setSpacing(0)
+
+        title_host = QWidget(shell)
+        title_host.setMinimumWidth(0)
+        self._clear_rail_surface(title_host)
+        title_layout = QVBoxLayout(title_host)
+        title_layout.setContentsMargins(10, 10, 10, 0)
+        title_layout.setSpacing(0)
+        title_widget, rule = _page_title_with_rule(title, title_host)
+        if store_rule_as:
+            setattr(self, store_rule_as, rule)
+        title_layout.addWidget(title_widget)
+        shell_layout.addWidget(title_host, 0)
+        shell.sticky_title = title_host
+
+        scroll = self._wrap_scroll(body)
+        # Transparent scroll so shell Window fill matches Annotations.
+        self._clear_rail_surface(scroll)
+        self._clear_rail_surface(scroll.viewport())
+        self._clear_rail_surface(body)
+        scroll.setStyleSheet(
+            "QScrollArea { background: transparent; border: none; }"
+        )
+        shell_layout.addWidget(scroll, 1)
+        return shell
+
     def _full_width_button(self, text: str, page: QWidget) -> QPushButton:
         btn = QPushButton(text, page)
         btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -1022,8 +1077,6 @@ class SequenceAnnotationRail(QWidget):
         # Same compact spacing as the tree Display rail.
         layout.setContentsMargins(10, 6, 10, 6)
         layout.setSpacing(6)
-        display_title, self._tracks_divider = _page_title_with_rule("Display", page)
-        layout.addWidget(display_title)
 
         # Keep sequence switcher widgets for multi-record wiring, but do not show
         # them on the Display panel (overview / Find cover that job).
@@ -1612,22 +1665,23 @@ class SequenceAnnotationRail(QWidget):
         layout.addWidget(self.status_label)
         layout.addStretch(1)
         self.sync_color_scheme_combos()
-        return self._wrap_scroll(page)
+        return self._shell_with_sticky_title(
+            "Display", page, store_rule_as="_tracks_divider"
+        )
 
     def _build_primers_page(self) -> QWidget:
         from repeatviewer.widgets.primers_panel import PrimersPanel
 
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setContentsMargins(10, 6, 10, 6)
         layout.setSpacing(8)
-        title, _rule = _page_title_with_rule("Primers", page)
-        layout.addWidget(title)
-        # The Primers and Probes workspace names its sections itself and hides this.
-        self.primers_page_title = title
         self.primers_panel = PrimersPanel(page, width=self._module_width)
         layout.addWidget(self.primers_panel, 1)
-        return self._wrap_scroll(page)
+        shell = self._shell_with_sticky_title("Primers", page)
+        # The Primers and Probes workspace names its sections itself and hides this.
+        self.primers_page_title = shell.sticky_title
+        return shell
 
     def show_primers_tab(self) -> None:
         self.set_current_tab(PRIMERS_TAB_INDEX)
@@ -1635,12 +1689,10 @@ class SequenceAnnotationRail(QWidget):
     def _build_others_page(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setContentsMargins(10, 6, 10, 6)
         layout.setSpacing(8)
-        others_title, _others_rule = _page_title_with_rule("Others", page)
-        layout.addWidget(others_title)
         layout.addStretch(1)
-        return self._wrap_scroll(page)
+        return self._shell_with_sticky_title("Others", page)
 
     def _two_column_buttons(
         self, buttons: list[QPushButton], page: QWidget
@@ -1845,6 +1897,9 @@ class SequenceAnnotationRail(QWidget):
                     "Target site duplications near putative TE boundaries "
                     "(MSA only; set boundaries under Setting)."
                 )
+                # Hidden until set_msa_display_mode(True); single-seq / multi
+                # unaligned overviews must not offer TSD.
+                check.hide()
             elif label == "PBS":
                 check.setToolTip(
                     "Primer binding site inside the 5′ LTR (Neumann 2019 "
@@ -2094,10 +2149,8 @@ class SequenceAnnotationRail(QWidget):
     def _build_find_page(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setContentsMargins(10, 6, 10, 6)
         layout.setSpacing(8)
-        find_title, _find_rule = _page_title_with_rule("Find", page)
-        layout.addWidget(find_title)
 
         self.find_query = QLineEdit(page)
         self.find_query.setPlaceholderText("Sequence or name…")
@@ -2194,7 +2247,7 @@ class SequenceAnnotationRail(QWidget):
         self.find_status.hide()
         layout.addStretch(1)
         self.sync_find_option_enabled()
-        return self._wrap_scroll(page)
+        return self._shell_with_sticky_title("Find", page)
 
     def find_request(self):
         """Build a FindRequest from the Find tab controls."""
@@ -2987,10 +3040,26 @@ class SequenceAnnotationRail(QWidget):
     def _emit_boundary_guides_changed(self, _checked: bool = False) -> None:
         self.boundaryGuidesChanged.emit(self.boundary_guide_keys())
 
+    def _sync_feature_detect_tsd_visible(self) -> None:
+        """Show Feature detection → TSD only for MSA files."""
+        check = (getattr(self, "auto_ann_checks", None) or {}).get("TSD")
+        if check is None:
+            return
+        show = bool(getattr(self, "_msa_display_mode", False))
+        check.setVisible(show)
+        if not show and check.isChecked():
+            check.setChecked(False)
+        # Relayout the chip row so PBS stays left-aligned when TSD is hidden.
+        host = check.parentWidget()
+        if host is not None and host.layout() is not None:
+            host.layout().invalidate()
+            host.updateGeometry()
+
     def set_msa_display_mode(self, enabled: bool) -> None:
         """Toggle controls that apply only to aligned residue columns."""
         self._msa_display_mode = bool(enabled)
         visible = bool(getattr(self, "_overview_mode", False)) and self._msa_display_mode
+        self._sync_feature_detect_tsd_visible()
         self.msa_coloring_label.setVisible(visible)
         self.msa_coloring_header.setVisible(visible)
         self.msa_coloring_mode_host.setVisible(visible)

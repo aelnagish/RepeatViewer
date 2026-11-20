@@ -727,6 +727,103 @@ def test_msa_standard_extent_for_boundary_guides(
     panel.close()
 
 
+def test_coincident_boundary_guides_group_by_edge() -> None:
+    """Methods that share a column stay one line (colours alternate along it)."""
+    from PySide6.QtGui import QColor
+
+    from repeatviewer.widgets.multi_sequence_overview import (
+        _group_predicted_boundaries_by_edge,
+    )
+
+    orange = QColor("#c0392b")
+    blue = QColor("#1f77b4")
+    green = QColor("#2ca02c")
+    guides = [
+        (6477, orange, False),
+        (25836, orange, False),
+        (6477, blue, False),
+        (25836, blue, False),
+        (5226, green, False),
+        (25836, green, False),
+    ]
+    grouped = dict(_group_predicted_boundaries_by_edge(guides))
+    assert len(grouped[5226]) == 1
+    assert len(grouped[6477]) == 2
+    assert len(grouped[25836]) == 3
+    assert {c.name() for c, _s in grouped[25836]} == {
+        orange.name(),
+        blue.name(),
+        green.name(),
+    }
+
+
+def test_predicted_boundary_guides_mirror_onto_scale(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    """Boundary prediction guides extend through the scale like reference bounds."""
+    from PySide6.QtGui import QColor
+
+    path = tmp_path / "bounds.fa"
+    path.write_text(">a\nACGTACGTAC\n>b\nACGTACGTAC\n")
+    panel = MultiSequenceOverviewPanel(path)
+    panel.load_path(path, msa_mode=True)
+    red = QColor("#c0392b")
+    purple = QColor("#7b2cbf")
+    panel._boundary_guides = {
+        "ltr": [(2, red, False), (8, red, False)],
+        "tir": [(2, purple, False), (8, purple, False)],
+    }
+    for key in ("ltr", "tir"):
+        check, _label = panel._rail.boundary_row_widgets[key]
+        check.blockSignals(True)
+        check.setEnabled(True)
+        check.setChecked(True)
+        check.blockSignals(False)
+    panel._sync_boundary_guides()
+    scale_guides = panel._scale._predicted_boundaries
+    assert len(scale_guides) == 4
+    assert {(edge, c.name()) for edge, c, _s in scale_guides} == {
+        (2, red.name()),
+        (8, red.name()),
+        (2, purple.name()),
+        (8, purple.name()),
+    }
+    panel._clear_boundary_results()
+    assert panel._scale._predicted_boundaries == []
+    panel.close()
+
+
+def test_show_reference_boundaries_persists_across_new_msa(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    """Unchecking Show reference boundaries must stay off on the next MSA."""
+    from PySide6.QtCore import QSettings
+
+    a = tmp_path / "a.fa"
+    b = tmp_path / "b.fa"
+    a.write_text(">x\nACGT\n>y\nACGT\n")
+    b.write_text(">p\nTTTT\n>q\nTTTT\n")
+    first = MultiSequenceOverviewPanel(a)
+    first.load_path(a, msa_mode=True)
+    first._rail.show_standard_boundaries.setChecked(False)
+    first._save_overview_display_settings()
+    first.close()
+
+    s = QSettings("RepeatViewer", "RepeatViewer")
+    s.beginGroup("annotation_overview_display")
+    assert s.value("show_standard_boundaries", True, type=bool) is False
+    s.endGroup()
+
+    second = MultiSequenceOverviewPanel(b)
+    second.load_path(b, msa_mode=True)
+    assert second._rail.show_standard_boundaries.isChecked() is False
+    assert second._bars.show_msa_standard_boundaries() is False
+    # Restore default for other tests in this process.
+    second._rail.show_standard_boundaries.setChecked(True)
+    second._save_overview_display_settings()
+    second.close()
+
+
 def test_msa_copy_sequence_without_gap_strips_dashes(
     qapp: QApplication, tmp_path: Path, monkeypatch
 ) -> None:
