@@ -200,12 +200,6 @@ class PrimersWorkspacePage(QWidget):
         self._seq_layout.setContentsMargins(0, 0, 0, 0)
         self._seq_layout.setSpacing(0)
         self.body.addWidget(self.seq_page)
-        # The sequence, the map and the lists are input and results: white.
-        # The settings on the right keep the window colour.
-        from repeatviewer.widgets.primer_design_pane import _results_surface
-
-        _results_surface(self.seq_page)
-
         row = QHBoxLayout()
         row.setContentsMargins(12, 6, 12, 6)
         row.setSpacing(8)
@@ -484,8 +478,12 @@ class PrimersWorkspacePage(QWidget):
         self.list.context_menu_for_primer = primers._on_context_menu
         self.list.setMinimumHeight(96)
 
+        # Toolbar rows (sections, Sequence, Position) and the settings keep
+        # the window colour; the map and the lists under it are white.
+        from repeatviewer.widgets.primer_design_pane import _results_surface
+
         self.bottom = QWidget(self)
-        self.bottom.setAutoFillBackground(True)
+        _results_surface(self.bottom)
         outer = QVBoxLayout(self.bottom)
         outer.setContentsMargins(12, 6, 12, 8)
         outer.setSpacing(0)
@@ -584,7 +582,7 @@ class PrimersWorkspacePage(QWidget):
         from repeatviewer.widgets.help_button import make_help_button
 
         design = self.primers.design_pane
-        page = self.primers.pages.widget(PANEL_PRIMER)
+        page = self.primers.primer_page
         header = QWidget(page)
         lay = QVBoxLayout(header)
         lay.setContentsMargins(0, 0, 0, 6)

@@ -24,7 +24,9 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLayout,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QSpinBox,
     QTableWidget,
@@ -230,7 +232,24 @@ def _card(widget: QWidget, parent: QWidget) -> QFrame:
     lay.setContentsMargins(4, 4, 4, 4)
     lay.setSpacing(0)
     lay.addWidget(widget)
+    # A table kept as short as its rows keeps its box that short too.
+    lay.setSizeConstraint(QLayout.SizeConstraint.SetMinAndMaxSize)
     return frame
+
+
+def _scroll_panel(panel: QWidget, parent: QWidget) -> QScrollArea:
+    """The settings panel of a page: it scrolls in a short window, so its
+    fields are never squeezed."""
+    width = panel.maximumWidth()
+    panel.setMinimumWidth(0)
+    panel.setMaximumWidth(16777215)
+    area = QScrollArea(parent)
+    area.setWidget(panel)
+    area.setWidgetResizable(True)
+    area.setFrameShape(QScrollArea.Shape.NoFrame)
+    area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+    area.setFixedWidth(width)
+    return area
 
 
 def _choice_combo(group: QButtonGroup, prop: str, parent: QWidget) -> QComboBox:

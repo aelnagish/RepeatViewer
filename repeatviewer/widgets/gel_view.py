@@ -302,11 +302,13 @@ class GelDocumentPanel(QWidget):
         root.setSpacing(0)
         self.setObjectName("gelDocument")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        # One background for the toolbar, the gel area and the side panel.
+        # As in the other sections: the gel (the result) on white, the toolbar
+        # and the settings beside it in the window colour.
         self.setStyleSheet(
-            "QWidget#gelDocument, QWidget#gelBar, QWidget#gelHolder, QWidget#gelSide,"
+            "QWidget#gelDocument, QWidget#gelBar, QWidget#gelSide,"
             " QScrollArea#gelSideScroll, QScrollArea#gelSideScroll > QWidget"
-            " { background: palette(base); }")
+            " { background: palette(window); }"
+            " QWidget#gelHolder { background: palette(base); }")
         bar = QWidget(self)
         bar.setObjectName("gelBar")
         bl = QHBoxLayout(bar)
@@ -330,7 +332,7 @@ class GelDocumentPanel(QWidget):
         for b in (self.dup_button, self.remove_button, self.left_button, self.right_button):
             bl.addWidget(b)
         bl.addSpacing(10)
-        self.compare_button = QPushButton("Compare with Gel Photo…", bar)
+        self.compare_button = QPushButton("Compare with Gel Photo", bar)
         bl.addWidget(self.compare_button)
         bl.addStretch(1)
         self.save_button = QToolButton(bar)

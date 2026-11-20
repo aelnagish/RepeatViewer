@@ -207,7 +207,8 @@ class MapPage(QWidget):
         base = dict(getattr(options, "map", None) or {})
         base.update(saved)
 
-        from repeatviewer.widgets.primer_design_pane import _card, _results_surface
+        from repeatviewer.widgets.primer_design_pane import (
+            _card, _results_surface, _scroll_panel)
 
         outer = QHBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -402,7 +403,7 @@ class MapPage(QWidget):
         sl.addWidget(self.saved_note)
         pl.addWidget(sec)
         pl.addStretch(1)
-        outer.addWidget(panel)
+        outer.addWidget(_scroll_panel(panel, self))
 
         self.map_button.clicked.connect(self.run_map)
         self.save_button.clicked.connect(self._on_save)

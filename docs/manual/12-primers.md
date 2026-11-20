@@ -290,7 +290,7 @@ changes.
 Hover a band to see what it is, click to select it, double-click to open the
 products file.
 
-**Compare with Gel Photo…** puts a picture of your real gel (PNG, JPG or TIFF)
+**Compare with Gel Photo** puts a picture of your real gel (PNG, JPG or TIFF)
 next to the in-silico one. Lanes and bands are found for you. Choose which
 photo lane holds the ladder (its bands give the size scale) and which gel lane
 each photo lane should match. Every band is then named: **matched** (within

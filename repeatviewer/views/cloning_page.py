@@ -59,7 +59,8 @@ class CloningPage(QWidget):
         self._result = cl.CloneResult()
         saved = self._load()
 
-        from repeatviewer.widgets.primer_design_pane import _card, _results_surface
+        from repeatviewer.widgets.primer_design_pane import (
+            _card, _results_surface, _scroll_panel)
 
         outer = QHBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -120,7 +121,7 @@ class CloningPage(QWidget):
         pl.addWidget(_rule(panel))
 
         sec, sl, _ = _section("Insert", panel, "Insert", CLONING_HELP)
-        self.insert_button = QPushButton("Choose…", sec)
+        self.insert_button = QPushButton("Choose", sec)
         self.insert_button.setFixedWidth(FIELD_W)
         sl.addLayout(_row("Sequence", self.insert_button, parent=sec))
         self.record_combo = QComboBox(sec)
@@ -178,7 +179,7 @@ class CloningPage(QWidget):
         self.empty_product.setGroupSeparatorShown(True)
         self.empty_product.setValue(int(saved.get("empty_product", 0)))
         self.empty_product.setFixedWidth(FIELD_W)
-        sl.addLayout(_row("Empty product", self.empty_product, parent=sec))
+        sl.addLayout(_row("Empty PCR", self.empty_product, parent=sec))
         pl.addWidget(sec)
         pl.addWidget(_rule(panel))
 
@@ -196,7 +197,7 @@ class CloningPage(QWidget):
         sl.addWidget(self.saved_note)
         pl.addWidget(sec)
         pl.addStretch(1)
-        outer.addWidget(panel)
+        outer.addWidget(_scroll_panel(panel, self))
 
         self.insert_button.clicked.connect(self._on_pick_insert)
         self.record_combo.currentIndexChanged.connect(self._on_record)

@@ -197,16 +197,19 @@ class PrimersPanel(QWidget):
         outer.addWidget(self.pages, 1)
         self.design_pane = DesignPane(self.pages)
         self.pages.addWidget(_scrolled(self.design_pane, self.pages))
+        # Every page scrolls by itself, so the rail around the panel never
+        # needs a second scroll bar.
         primer_page = QWidget(self.pages)
-        self.pages.addWidget(primer_page)
+        self.primer_page = primer_page
+        self.pages.addWidget(_scrolled(primer_page, self.pages))
         from repeatviewer.widgets.primer_pcr_pane import PcrPane
 
         self.pcr_pane = PcrPane(self, self.pages)
-        self.pages.addWidget(self.pcr_pane)
+        self.pages.addWidget(_scrolled(self.pcr_pane, self.pages))
         from repeatviewer.widgets.primer_enzyme_pane import EnzymePane
 
         self.enzyme_pane = EnzymePane(self, self.pages)
-        self.pages.addWidget(self.enzyme_pane)
+        self.pages.addWidget(_scrolled(self.enzyme_pane, self.pages))
         self.tabs.currentChanged.connect(self._on_workbench_tab)
         self.design_pane.keepRequested.connect(self._on_keep_designed)
         self.design_pane.jobRequested.connect(self._on_design_job)

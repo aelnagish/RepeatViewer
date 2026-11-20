@@ -150,7 +150,8 @@ class SangerPage(QWidget):
         self._paths: list[Path] = []
         saved = self._load()
 
-        from repeatviewer.widgets.primer_design_pane import _card, _results_surface
+        from repeatviewer.widgets.primer_design_pane import (
+            _card, _results_surface, _scroll_panel)
 
         outer = QHBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -212,7 +213,7 @@ class SangerPage(QWidget):
         pl.addWidget(_rule(panel))
 
         sec, sl, _ = _section("Expected", panel, "Expected", SANGER_HELP)
-        self.expected_button = QPushButton("Choose…", sec)
+        self.expected_button = QPushButton("Choose", sec)
         self.expected_button.setFixedWidth(FIELD_W)
         sl.addLayout(_row("Sequence", self.expected_button, parent=sec))
         self.record_combo = QComboBox(sec)
@@ -222,7 +223,7 @@ class SangerPage(QWidget):
         pl.addWidget(_rule(panel))
 
         sec, sl, _ = _section("Reads", panel, "Reads", SANGER_HELP)
-        self.add_button = QPushButton("Add Reads…", sec)
+        self.add_button = QPushButton("Add Reads", sec)
         self.add_button.setFixedWidth(FIELD_W)
         sl.addLayout(_row("Files", self.add_button, parent=sec))
         self.reads_note = QLabel("None yet.", sec)
@@ -261,7 +262,7 @@ class SangerPage(QWidget):
         sl.addWidget(self.saved_note)
         pl.addWidget(sec)
         pl.addStretch(1)
-        outer.addWidget(panel)
+        outer.addWidget(_scroll_panel(panel, self))
 
         self.expected_button.clicked.connect(self._on_pick_expected)
         self.record_combo.currentIndexChanged.connect(self._on_record)
