@@ -575,6 +575,12 @@ class PrimersWorkspacePage(QWidget):
         dl.addWidget(_card(digest.gel, digest_results), 3)
         dl.addWidget(_card(digest.table, digest_results), 2)
         self.bottom_stack.addWidget(digest_results)
+        # The gel left its section of the panel: that section keeps only the
+        # height of its two rows, and the free room goes to the end.
+        gel_section = digest.agarose.parentWidget()
+        if digest.layout() is not None and gel_section is not None:
+            digest.layout().setStretchFactor(gel_section, 0)
+            digest.layout().addStretch(1)
         if products_section is not None and products_section is not primers.pcr_pane:
             products_section.hide()
 
@@ -591,7 +597,13 @@ class PrimersWorkspacePage(QWidget):
         self.splitter = QSplitter(Qt.Orientation.Vertical, self.panel)
         self.splitter.setChildrenCollapsible(False)
         layout.insertWidget(max(0, index), self.splitter, 1)
-        self.splitter.addWidget(self.panel._map)
+        # The map in a box as wide as the boxes under it.
+        self.map_box = QWidget(self.splitter)
+        mb = QVBoxLayout(self.map_box)
+        mb.setContentsMargins(12, 6, 12, 2)
+        mb.setSpacing(0)
+        mb.addWidget(_card(self.panel._map, self.map_box))
+        self.splitter.addWidget(self.map_box)
         self.splitter.addWidget(self.bottom)
         self.splitter.setStretchFactor(0, 1)
         self.splitter.setStretchFactor(1, 0)

@@ -256,6 +256,13 @@ class SangerPage(QWidget):
         self.good_q = _spin(0, 60, int(saved.get("good_quality", sg.GOOD_QUALITY)), parent=sec)
         sl.addLayout(_row("Real from Q", self.good_q, parent=sec))
         pl.addWidget(sec)
+        # as wide as the form: the label and the field column together
+        self.fasta_button = QPushButton("Save Reads as FASTA", panel)
+        self.fasta_button.setToolTip(
+            "Write the good part of every read as a FASTA file beside it")
+        self.fasta_button.setFixedWidth(LABEL_W + 2 + FIELD_W)
+        self.fasta_button.setEnabled(False)
+        pl.addWidget(self.fasta_button)
         pl.addWidget(_rule(panel))
 
         sec, sl, _ = _section("Options", panel, "Options", SANGER_HELP)
@@ -272,14 +279,6 @@ class SangerPage(QWidget):
         br.addWidget(self.save_button)
         br.addWidget(self.check_button)
         sl.addLayout(br)
-        self.fasta_button = QPushButton("Save Reads as FASTA", sec)
-        self.fasta_button.setToolTip(
-            "Write the good part of every read as a FASTA file beside it")
-        self.fasta_button.setEnabled(False)
-        fr = QHBoxLayout()
-        fr.addWidget(self.fasta_button)
-        fr.addStretch(1)
-        sl.addLayout(fr)
         self.saved_note = QLabel("", sec)
         self.saved_note.setStyleSheet("color: palette(placeholder-text);")
         sl.addWidget(self.saved_note)

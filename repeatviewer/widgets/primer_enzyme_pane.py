@@ -4,7 +4,7 @@ Pick an enzyme set and how often an enzyme may cut; ticked enzymes are drawn on
 the bases (a line at each cut). With a Bismark .cov or modkit bedMethyl file,
 sites methylated in a context that blocks the enzyme are drawn "probably not
 cut" (red, dashed). Hover a site for the position, the reads and the reason.
-Digest Ticked opens the Digest page (tandem-array ladders, methylation, partial cutting).
+Digest opens the Digest page (tandem-array ladders, methylation, partial cutting).
 
 Developer: Abdullah Yusuf
 """
@@ -60,7 +60,7 @@ METH_HELP = (
 LIST_HELP = (
     "<b>Cuts</b>: sites on this sequence. <b>In your data</b>: sites probably not cut "
     "because of methylation in your file.<br>Click an enzyme to go to its first site. "
-    "<b>Digest Ticked</b> shows the ticked enzymes as a gel: monomer ladders, sites lost "
+    "<b>Digest</b> shows the ticked enzymes as a gel: monomer ladders, sites lost "
     "in some copies, methylated sites from your data and partial cutting."
 )
 PAIR_NOTE = ("HpaII and MspI both cut CCGG; only HpaII is blocked by methylated CG, so the "
@@ -156,14 +156,21 @@ class EnzymePane(QWidget):
             self.table.setColumnWidth(c, w)
         self.table.setMinimumHeight(180)
         self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        sl.addWidget(self.table, 1)
+        from repeatviewer.widgets.primer_design_pane import _card
+
+        sl.addWidget(_card(self.table, sec), 1)
         self.pair_note = QLabel(PAIR_NOTE, sec)
         self.pair_note.setWordWrap(True)
         self.pair_note.setEnabled(False)
         sl.addWidget(self.pair_note)
-        self.digest_button = QPushButton("Digest Ticked", sec)
+        self.select_all_button = QPushButton("Select All", sec)
+        self.select_all_button.setToolTip(
+            "Tick every enzyme in the list; press again to untick them all")
+        self.digest_button = QPushButton("Digest", sec)
+        self.digest_button.setToolTip("Digest with the ticked enzymes")
         br = QHBoxLayout()
         br.addStretch(1)
+        br.addWidget(self.select_all_button)
         br.addWidget(self.digest_button)
         sl.addLayout(br)
         lay.addWidget(sec, 1)
@@ -177,6 +184,7 @@ class EnzymePane(QWidget):
         self.table.itemChanged.connect(self._on_item_changed)
         self.table.itemSelectionChanged.connect(self._on_row_selected)
         self.digest_button.clicked.connect(self._on_digest)
+        self.select_all_button.clicked.connect(self._on_select_all)
         self._set_note("", None)
         self.pair_note.hide()
         self.digest_button.setEnabled(False)
@@ -428,6 +436,18 @@ class EnzymePane(QWidget):
 
     def show_map_page(self) -> None:
         self.stack.setCurrentWidget(self.map_page)
+
+    def _on_select_all(self) -> None:
+        """Tick every enzyme in the list, or untick them all when all are ticked."""
+        items = [self.table.item(r, 0) for r in range(self.table.rowCount())]
+        items = [i for i in items if i is not None
+                 and i.flags() & Qt.ItemFlag.ItemIsUserCheckable]
+        if not items:
+            return
+        every = all(i.checkState() == Qt.CheckState.Checked for i in items)
+        state = Qt.CheckState.Unchecked if every else Qt.CheckState.Checked
+        for item in items:
+            item.setCheckState(state)
 
     def _on_digest(self) -> None:
         if not self.ticked_rows():

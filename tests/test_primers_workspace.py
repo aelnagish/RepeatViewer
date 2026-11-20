@@ -372,7 +372,8 @@ def test_the_list_under_the_map_shows_the_primers(qapp, isolated_settings, tmp_p
         assert page.bottom.isAncestorOf(button)
     assert primers.add_button.text() == "Add Primer"
     assert primers.database_button.text() == "From Database"
-    assert page.splitter.indexOf(page.panel._map) == 0 and page.splitter.indexOf(page.bottom) == 1
+    assert page.splitter.indexOf(page.map_box) == 0 and page.splitter.indexOf(page.bottom) == 1
+    assert page.map_box.isAncestorOf(page.panel._map)
     assert page.list.rowCount() == 0
 
     primers.add_primers([Primer("F", "CCTGCTAGTCGTAGACCTTGAA"),

@@ -141,6 +141,8 @@ class PcrPane(QWidget):
         # saved ones onto it.
         self.database_button = QPushButton("From Database", sec)
         self.database_button.setFixedWidth(FIELD_W)
+        # its text starts where the text of the menus above starts
+        self.database_button.setStyleSheet("QPushButton { text-align: left; }")
         self.database_button.setToolTip(
             "Put saved primers on this sequence, so they can be chosen above")
         self.database_button.clicked.connect(lambda: self._panel.database_button.click())
@@ -206,11 +208,17 @@ class PcrPane(QWidget):
         self.bench_button = QPushButton("Bench Card", sec)
         self.gel_button = QPushButton("Open in a Gel", sec)
         self.save_button = QPushButton("Save Products", sec)
+        # Two to a row, equal in width: three in one row do not fit the panel.
         br = QHBoxLayout()
-        br.addStretch(1)
-        for b in (self.bench_button, self.gel_button, self.save_button):
-            br.addWidget(b)
+        br.setSpacing(6)
+        br.addWidget(self.bench_button, 1)
+        br.addWidget(self.gel_button, 1)
         sl.addLayout(br)
+        br2 = QHBoxLayout()
+        br2.setSpacing(6)
+        br2.addWidget(self.save_button, 1)
+        br2.addStretch(1)
+        sl.addLayout(br2)
         lay.addWidget(sec)
         lay.addStretch(1)
 
