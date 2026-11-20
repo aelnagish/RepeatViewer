@@ -197,8 +197,8 @@ class PaintingPage(QWidget):
         panel = QWidget(self)
         inner = QWidget(panel)
         pl = QVBoxLayout(inner)
-        pl.setContentsMargins(10, 12, 22, 12)
-        pl.setSpacing(10)
+        pl.setContentsMargins(10, 8, 22, 8)
+        pl.setSpacing(6)
         title = QHBoxLayout()
         title.addWidget(QLabel("<b>Chromosome Painting</b>", inner), 1)
         title.addWidget(make_help_button(inner, "Chromosome painting", SOURCE_HELP))
@@ -217,6 +217,7 @@ class PaintingPage(QWidget):
             browse_title="Genome FASTA", file_filter="FASTA (*.fa *.fasta *.fna);;All files (*)",
             browse_below=True, elide_middle=True)
         self.genome.setFixedWidth(FIELD_W)
+        self.genome._browse_btn.setFixedWidth(FIELD_W)
         self.genome_row = _row("Genome", self.genome, parent=sec, top=True)
         sl.addLayout(self.genome_row)
         self.bed = PathBrowseRow(
@@ -224,6 +225,7 @@ class PaintingPage(QWidget):
             browse_title="Chorus2 BED", file_filter="BED (*.bed);;All files (*)",
             browse_below=True, elide_middle=True)
         self.bed.setFixedWidth(FIELD_W)
+        self.bed._browse_btn.setFixedWidth(FIELD_W)
         self.bed_row = _row("Chorus2 BED", self.bed, parent=sec, top=True)
         sl.addLayout(self.bed_row)
         pl.addWidget(sec)
@@ -317,12 +319,9 @@ class PaintingPage(QWidget):
         self.save_button = QPushButton("Save", sec)
         self.run_button = QPushButton("Run", sec)
         self.run_button.setDefault(True)
-        br = QHBoxLayout()
-        br.addWidget(self.defaults_button)
-        br.addStretch(1)
-        br.addWidget(self.save_button)
-        br.addWidget(self.run_button)
-        sl.addLayout(br)
+        from repeatviewer.widgets.primer_design_pane import _action_row
+
+        sl.addWidget(_action_row(sec, self.defaults_button, self.save_button, self.run_button))
         self.saved_note = QLabel("", sec)
         self.saved_note.setWordWrap(True)
         self.saved_note.setStyleSheet("color: palette(placeholder-text);")

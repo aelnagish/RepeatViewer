@@ -255,6 +255,21 @@ def _card(widget: QWidget, parent: QWidget) -> QFrame:
     return frame
 
 
+def _action_row(parent: QWidget, left: QWidget, *right: QWidget) -> QWidget:
+    """The buttons at the end of a panel: ``left`` starts where the labels
+    start, ``right`` end where the fields end."""
+    box = QWidget(parent)
+    box.setFixedWidth(LABEL_W + GAP + FIELD_W)
+    row = QHBoxLayout(box)
+    row.setContentsMargins(0, 0, 0, 0)
+    row.setSpacing(6)
+    row.addWidget(left)
+    row.addStretch(1)
+    for button in right:
+        row.addWidget(button)
+    return box
+
+
 def _scroll_panel(panel: QWidget, parent: QWidget) -> QScrollArea:
     """The settings panel of a page: it scrolls in a short window, so its
     fields are never squeezed."""
