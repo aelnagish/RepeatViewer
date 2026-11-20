@@ -3,7 +3,7 @@
 One window for everything the lab knows about a primer: sequence and Tm, what
 it amplifies and in which organism, where the tube is (box, freezer, room),
 whether it is in stock and whether it worked, who ordered it and when, and the
-history of every change (History…).
+history of every change (History).
 
 The database can be a folder on this computer or a shared folder (Sciebo):
 see :mod:`repeatviewer.backends.primers.inventory`.
@@ -16,7 +16,7 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QSettings, Qt, QTimer, Signal
+from PySide6.QtCore import QPoint, QSettings, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -32,13 +32,11 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QListWidget,
-    QListWidgetItem,
     QMenu,
     QMessageBox,
     QTextBrowser,
     QPushButton,
-    QScrollArea,
-    QSplitter,
+    QSizePolicy,
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
@@ -89,11 +87,35 @@ _FORM: tuple[tuple[str, str, str], ...] = (
     ("tested", "Tested:", "tested"), ("anneal_temp", "Annealing °C:", "line"),
     ("tm_supplier", "Tm (supplier):", "line"), ("concentration", "Concentration:", "line"),
     ("ordered_by", "Ordered by:", "people"), ("ordered_on", "Ordered on:", "line"),
-    ("aliases", "Other names:", "line"), ("dissolved", "", "check"),
-    ("note", "Note:", "line"),
+    ("dissolved", "", "check"), ("note", "Note:", "line"),
 )
-_MULTI_SKIP = ("name", "sequence", "aliases")
-_FORM_FIELD_W = 300   # every form field the same width (two columns)
+_MULTI_SKIP = ("name", "sequence")
+# Every field (text or drop-down) is one size: as wide as fits five to a row,
+# between these two widths.
+_FORM_FIELD_MIN_W = 90
+_FORM_FIELD_MAX_W = 220
+# Where each field sits: rows of (field, cells it spans); five cells to a row.
+# Identity and sequence first, then what it is for, where the tube is, and
+# the order with the note.
+_FORM_COLS = 5
+_FORM_LAYOUT: tuple[tuple[tuple[str, int], ...], ...] = (
+    (("name", 1), ("kind", 1), ("pair", 1), ("sequence", 2)),
+    (("organism", 1), ("target", 1), ("status", 1), ("tested", 1), ("tm_supplier", 1)),
+    (("box", 1), ("freezer", 1), ("room", 1), ("concentration", 1), ("anneal_temp", 1)),
+    (("ordered_by", 1), ("ordered_on", 1), ("dissolved", 1), ("note", 2)),
+)
+
+
+class _FormHost(QWidget):
+    """The form's grid; tells the window its width so the fields can be fitted."""
+
+    def __init__(self, parent: QWidget, on_width) -> None:
+        super().__init__(parent)
+        self._on_width = on_width
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._on_width(self.width())
 
 
 def _one_decimal(value) -> str:
@@ -198,7 +220,16 @@ class PrimerDatabaseDialog(QDialog):
         self._db: PrimerDatabase = self._open(path)
 
         # ---- top: filters and where the database is
+        # The window colour everywhere (also inside a tab); only the fields are white.
+        self.setAutoFillBackground(True)
+        self.setStyleSheet(
+            "QWidget#PrimerDatabaseForm > QLineEdit, QLineEdit#PrimerDatabaseFilter {"
+            " border: 1px solid palette(mid); border-radius: 6px; padding: 1px 6px;"
+            " background: palette(base); }"
+            "QWidget#PrimerDatabaseForm > QLineEdit:focus, QLineEdit#PrimerDatabaseFilter:focus {"
+            " border-color: palette(highlight); }")
         self._filter = QLineEdit(self)
+        self._filter.setObjectName("PrimerDatabaseFilter")
         self._filter.setPlaceholderText("Filter: name, sequence, target, box, note, who …")
         self._filter.setClearButtonEnabled(True)
         self._filter.textChanged.connect(self._fill)
@@ -266,44 +297,51 @@ class PrimerDatabaseDialog(QDialog):
         hh.setSortIndicator(0, Qt.SortOrder.AscendingOrder)
         self._table.itemSelectionChanged.connect(self._on_selection)
 
-        # ---- form: two columns of equal, compact fields; labels right-aligned in one width
-        self._form_host = QWidget(self)
+        # ---- form: one grid, five cells to a row, every field the same size
+        self._form_host = _FormHost(self, self._fit_fields)
+        self._form_host.setObjectName("PrimerDatabaseForm")
         grid = QGridLayout(self._form_host)
         grid.setContentsMargins(0, 0, 0, 0)
-        grid.setHorizontalSpacing(10)
+        grid.setHorizontalSpacing(8)
         grid.setVerticalSpacing(6)
+        self._form_grid = grid
         self._fields: dict[str, QWidget] = {}
+        self._field_spans: dict[str, int] = {}
+        self._field_w = 0
         labels: list[QLabel] = []
-        wide_fields: list[QWidget] = []
-        row = col = 0
-        for key, label, kind in _FORM:
-            w = self._make_field(key, kind)
-            self._fields[key] = w
-            wide = kind == "seq" or key in ("note", "aliases")
-            if wide and col == 1:
-                row, col = row + 1, 0
-            lab = QLabel(label, self._form_host)
-            lab.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            labels.append(lab)
-            grid.addWidget(lab, row, col * 2)
-            align = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
-            grid.addWidget(w, row, col * 2 + 1, 1, 3 if wide else 1, align)
-            if wide:
-                wide_fields.append(w)
-                row, col = row + 1, 0
-            else:
-                w.setFixedWidth(_FORM_FIELD_W)
-                col += 1
-                if col == 2:
-                    row, col = row + 1, 0
-        label_w = max(lab.sizeHint().width() for lab in labels)
+        spec = {key: (label, kind) for key, label, kind in _FORM}
+        for row, cells in enumerate(_FORM_LAYOUT):
+            col = 0
+            for key, span in cells:
+                label, kind = spec[key]
+                w = self._make_field(key, kind)
+                w.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+                self._fields[key] = w
+                self._field_spans[key] = span
+                if label:
+                    lab = QLabel(label, self._form_host)
+                    lab.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                    labels.append(lab)
+                    grid.addWidget(lab, row, col * 2)
+                grid.addWidget(w, row, col * 2 + 1, 1, span * 2 - 1,
+                               Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+                col += span
+        self._label_w = max(lab.sizeHint().width() for lab in labels)
         for lab in labels:
-            lab.setFixedWidth(label_w)
-        for w in wide_fields:
-            w.setFixedWidth(2 * _FORM_FIELD_W + label_w + 2 * grid.horizontalSpacing())
-        grid.setColumnStretch(4, 1)
+            lab.setFixedWidth(self._label_w)
+        for c in range(_FORM_COLS):
+            grid.setColumnMinimumWidth(c * 2, self._label_w)
+        grid.setColumnStretch(_FORM_COLS * 2, 1)      # spare width stays on the right
+        # Text fields are as high as the drop-down menus.
+        boxes = [w for w in self._fields.values() if not isinstance(w, QCheckBox)]
+        field_h = max(w.sizeHint().height() for w in boxes)
+        for w in boxes:
+            w.setFixedHeight(field_h)
+        self._fit_fields(self._fitted_width())
+        # Only as high as its rows; the width follows the window.
+        self._form_host.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         self._form_title = QLabel(self)
-        self._history_btn = QPushButton("History…", self)
+        self._history_btn = QPushButton("History", self)
         self._history_btn.setToolTip("Every change to this primer: who, when, what")
         self._history_btn.clicked.connect(self._show_history)
         self._save_btn = QPushButton("Save Changes", self)
@@ -316,31 +354,24 @@ class PrimerDatabaseDialog(QDialog):
         fb.addWidget(self._history_btn)
         fb.addWidget(self._revert_btn)
         fb.addWidget(self._save_btn)
-        scroll = QScrollArea(self)
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
-        scroll.setWidget(self._form_host)
+        # The form takes its own height only; the table gets the rest.
         bottom = QWidget(self)
+        bottom.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         ll = QVBoxLayout(bottom)
         ll.setContentsMargins(0, 0, 0, 0)
+        ll.setSpacing(6)
         ll.addLayout(fb)
-        ll.addWidget(scroll, 1)
-        split = QSplitter(Qt.Orientation.Vertical, self)
-        split.addWidget(self._table)
-        split.addWidget(bottom)
-        split.setStretchFactor(0, 3)
-        split.setStretchFactor(1, 2)
-        self._split_main = split
+        ll.addWidget(self._form_host)
 
         # ---- buttons
-        add = QPushButton("Add…", self)
+        add = QPushButton("Add", self)
         add.setToolTip("Paste primers: name<TAB>sequence lines, FASTA, or bare sequences")
         add.clicked.connect(self._add)
-        imp = QPushButton("Import…", self)
+        imp = QPushButton("Import", self)
         imp.setToolTip("The lab sheet (CSV, TSV or Excel .xlsx, e.g. downloaded from Google "
                        "Sheets) or a primers FASTA")
         imp.clicked.connect(self._import)
-        exp = QPushButton("Export…", self)
+        exp = QPushButton("Export", self)
         exp.setToolTip("Table with every field (.tsv), FASTA, or an order sheet")
         exp.clicked.connect(self._export)
         self._delete = QPushButton("Delete", self)
@@ -354,7 +385,7 @@ class PrimerDatabaseDialog(QDialog):
                           "targets. Add, rename (on every primer), merge, remove.")
         people.clicked.connect(self._open_people)
         self._people_btn = people
-        check = QPushButton("Check a Sequence…", self)
+        check = QPushButton("Check a Sequence", self)
         check.setToolTip("Test every saved primer against a new sequence: which pairs "
                          "already give a product, where the tubes are")
         check.setToolTip("Test primers against a sequence (a FASTA you choose next): the "
@@ -378,7 +409,8 @@ class PrimerDatabaseDialog(QDialog):
         lay.setSpacing(8)
         lay.addLayout(top)
         lay.addWidget(self._missing)
-        lay.addWidget(split, 1)
+        lay.addWidget(self._table, 1)
+        lay.addWidget(bottom)
         lay.addLayout(bar)
 
         self._poll = QTimer(self)
@@ -391,7 +423,7 @@ class PrimerDatabaseDialog(QDialog):
         self._refill_choices()
         self._fill()
         self._on_selection()
-        self.resize(self._fitted_width(), 720)
+        self.resize(self._fitted_width() + 32, 720)
         self._restore_layout()
 
     # ------------------------------------------------------------ window layout
@@ -399,11 +431,22 @@ class PrimerDatabaseDialog(QDialog):
     _LAYOUT_GROUP = "primers/database_window"
 
     def _fitted_width(self) -> int:
-        """Window width that fits the form exactly (no empty band on the right)."""
-        bar = self.style().pixelMetric(self.style().PixelMetric.PM_ScrollBarExtent)
-        margins = self.layout().contentsMargins()
-        return (self._form_host.sizeHint().width() + bar + 8
-                + margins.left() + margins.right())
+        """Width of the form with its fields at full size."""
+        gap = self._form_grid.horizontalSpacing()
+        return (_FORM_COLS * (self._label_w + _FORM_FIELD_MAX_W)
+                + (_FORM_COLS * 2 - 1) * gap)
+
+    def _fit_fields(self, width: int) -> None:
+        """Give every field the same width: what fits five to a row."""
+        gap = self._form_grid.horizontalSpacing()
+        w = (width - _FORM_COLS * self._label_w - (_FORM_COLS * 2 - 1) * gap) // _FORM_COLS
+        w = max(_FORM_FIELD_MIN_W, min(_FORM_FIELD_MAX_W, w))
+        if w == self._field_w:
+            return
+        self._field_w = w
+        for key, field in self._fields.items():
+            span = self._field_spans[key]
+            field.setFixedWidth(span * w + (span - 1) * (self._label_w + 2 * gap))
 
     def _restore_layout(self) -> None:
         """Size, position, splitters and column widths as the user left them."""
@@ -414,9 +457,6 @@ class PrimerDatabaseDialog(QDialog):
             geo = st.value("geometry_v2")
             if geo:
                 self.restoreGeometry(geo)
-            v = st.value("split_main")
-            if v:
-                self._split_main.restoreState(v)
             header = st.value("columns")
             if header and self._table.horizontalHeader().restoreState(header):
                 self._columns_restored = self._table.columnCount() == len(_COLUMNS)
@@ -429,7 +469,6 @@ class PrimerDatabaseDialog(QDialog):
         st = QSettings()
         st.beginGroup(self._LAYOUT_GROUP)
         st.setValue("geometry_v2", self.saveGeometry())
-        st.setValue("split_main", self._split_main.saveState())
         st.setValue("columns", self._table.horizontalHeader().saveState())
         st.endGroup()
         st.sync()
@@ -810,7 +849,7 @@ class PrimerDatabaseDialog(QDialog):
 
     def _make_field(self, key: str, kind: str) -> QWidget:
         if kind == "check":
-            w = QCheckBox("Dissolved (water added to the tube)", self)
+            w = QCheckBox("Dissolved (water added)", self)
             w.setTristate(False)
             w.toggled.connect(self._form_touched)
             return w
@@ -1100,7 +1139,7 @@ class PrimerDatabaseDialog(QDialog):
         text = "\n".join(f"{d.kind}: {d.a} and {d.b}" for d in dups)
         box = QMessageBox(QMessageBox.Icon.Information, "Find Duplicates",
                           f"{len(dups)} found. Select them in the table to compare; keep one "
-                          "and note the other name under Other names.", parent=self)
+                          "and write the other name in its Note.", parent=self)
         box.setDetailedText(text)
         box.exec()
         names = {d.a for d in dups} | {d.b for d in dups}
@@ -1568,27 +1607,19 @@ class AddPrimersDialog(QDialog):
 # --------------------------------------------------------------------------
 
 
-class PeopleField(QWidget):
-    """``Ordered by``: one or more lab members, chosen from the list of people."""
+class PeopleField(QComboBox):
+    """``Ordered by``: one or more lab members, ticked in a drop-down menu."""
 
     changed = Signal()
     peopleAdded = Signal()
+    _NOBODY = "Nobody chosen"
 
     def __init__(self, parent: QWidget, *, before_add=None) -> None:
         super().__init__(parent)
         self._db: inv.PrimerInventory | None = None
         self._ids: list[str] = []
         self._before_add = before_add
-        lay = QHBoxLayout(self)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(4)
-        self._text = QLineEdit(self)
-        self._text.setReadOnly(True)
-        self._text.setPlaceholderText("Nobody chosen")
-        self._btn = QPushButton("Choose…", self)
-        self._btn.clicked.connect(self._choose)
-        lay.addWidget(self._text, 1)
-        lay.addWidget(self._btn)
+        self.addItem(self._NOBODY)
 
     def set_database(self, db: inv.PrimerInventory | None) -> None:
         self._db = db
@@ -1603,87 +1634,40 @@ class PeopleField(QWidget):
 
     def _show(self) -> None:
         names = self._db.names_of(self._ids) if self._db is not None else list(self._ids)
-        self._text.setText(", ".join(names))
-        self._text.setCursorPosition(0)
+        text = ", ".join(names)
+        self.setItemText(0, text or self._NOBODY)
+        self.setToolTip(text)
 
-    def _choose(self) -> None:
+    def showPopup(self) -> None:  # noqa: N802
+        """The list of people with ticks, instead of the one-line list."""
         if self._db is None:
             return
-        dlg = PeoplePicker(self._db, self._ids, self, before_add=self._before_add)
-        if dlg.exec() != int(QDialog.DialogCode.Accepted):
-            if dlg.added:
-                self.peopleAdded.emit()
-            return
-        if dlg.added:
-            self.peopleAdded.emit()
-        ids = dlg.chosen()
-        if ids != self._ids:
-            self._ids = ids
-            self._show()
-            self.changed.emit()
-
-
-class PeoplePicker(QDialog):
-    """Tick the people who ordered the primer; add someone new."""
-
-    def __init__(self, db: inv.PrimerInventory, chosen: list[str], parent: QWidget,
-                 *, before_add=None) -> None:
-        super().__init__(parent)
-        self.setWindowTitle("Ordered by")
-        self.resize(320, 420)
-        self._db = db
-        self._before_add = before_add
-        self.added = False
-        self._chosen = list(chosen)
-        self._filter = QLineEdit(self)
-        self._filter.setPlaceholderText("Filter")
-        self._filter.setClearButtonEnabled(True)
-        self._filter.textChanged.connect(self._fill)
-        self._list = QListWidget(self)
-        self._list.itemChanged.connect(self._ticked)
-        add = QPushButton("Add Person…", self)
-        add.clicked.connect(self._add)
-        cancel = QPushButton("Cancel", self)
-        save = QPushButton("Save", self)
-        save.setDefault(True)
-        cancel.clicked.connect(self.reject)
-        save.clicked.connect(self.accept)
-        bar = QHBoxLayout()
-        bar.addWidget(add)
-        bar.addStretch(1)
-        bar.addWidget(cancel)
-        bar.addWidget(save)
-        lay = QVBoxLayout(self)
-        lay.addWidget(self._filter)
-        lay.addWidget(self._list, 1)
-        lay.addLayout(bar)
-        self._fill()
-
-    def _fill(self, *_a) -> None:
-        text = self._filter.text().strip().lower()
-        self._list.blockSignals(True)
-        self._list.clear()
+        menu = QMenu(self)
+        menu.setMinimumWidth(self.width())
         for person in self._db.people():
-            if not person.active and person.pid not in self._chosen:
+            if not person.active and person.pid not in self._ids:
                 continue
-            if text and text not in person.name.lower():
-                continue
-            item = QListWidgetItem(person.label + (f"  ·  {person.role}" if person.role else ""))
-            item.setData(Qt.ItemDataRole.UserRole, person.pid)
-            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            item.setCheckState(Qt.CheckState.Checked if person.pid in self._chosen
-                               else Qt.CheckState.Unchecked)
-            self._list.addItem(item)
-        self._list.blockSignals(False)
+            act = menu.addAction(person.label)
+            act.setCheckable(True)
+            act.setChecked(person.pid in self._ids)
+            act.setData(person.pid)
+        menu.addSeparator()
+        add = menu.addAction("Add New Person…")
+        picked = menu.exec(self.mapToGlobal(QPoint(0, self.height())))
+        if picked is None:
+            return
+        if picked is add:
+            self._add_person()
+            return
+        pid = picked.data()
+        if pid in self._ids:
+            self._ids.remove(pid)
+        else:
+            self._ids.append(pid)
+        self._show()
+        self.changed.emit()
 
-    def _ticked(self, item: QListWidgetItem) -> None:
-        pid = item.data(Qt.ItemDataRole.UserRole)
-        if item.checkState() == Qt.CheckState.Checked and pid not in self._chosen:
-            self._chosen.append(pid)
-        elif item.checkState() != Qt.CheckState.Checked and pid in self._chosen:
-            self._chosen.remove(pid)
-
-    def _add(self) -> None:
+    def _add_person(self) -> None:
         if self._before_add is not None and not self._before_add():
             return
         name, ok = QInputDialog.getText(self, "Add Person", "Name of the new lab member:")
@@ -1697,14 +1681,11 @@ class PeoplePicker(QDialog):
                 QMessageBox.warning(self, "Add Person", str(exc))
                 return
             pid = existing.pid
-        self.added = True
-        if pid not in self._chosen:
-            self._chosen.append(pid)
-        self._filter.clear()
-        self._fill()
-
-    def chosen(self) -> list[str]:
-        return list(self._chosen)
+        if pid not in self._ids:
+            self._ids.append(pid)
+        self.peopleAdded.emit()
+        self._show()
+        self.changed.emit()
 
 
 def _lab_card(parent: QWidget, name: str = "LabCard") -> QFrame:

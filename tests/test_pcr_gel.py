@@ -54,17 +54,10 @@ def test_ladder_pcr_and_outputs(template):
     assert again["base"].endswith("_2")
 
 
-def test_bisulfite_lanes(template):
-    seq = _rnd(3000, 9)
-    meth = pcr.bisulfite_convert(seq, methylated=True)
-    assert pcr.bisulfite_convert("ACGTCAGTCTT", methylated=False) == "ATGTTAGTTTT"
-    assert pcr.bisulfite_convert("ACGTCAGTCTT", methylated=True) == "ACGTCAGTTTT"
-    template.write_text(">r\n" + seq + "\n")
-    res = pcr.run_pcr([template], [Primer("M_F", meth[500:524]),
-                                   Primer("M_R", th.reverse_complement(meth[700:722]))],
-                      pcr.PcrSettings(mode=pcr.MODE_BISULFITE, max_mismatches=1))
-    assert res.lanes == ["methylated", "unmethylated"]
-    assert [p for p in res.lane_products("methylated") if p.kind == "expected"]
+def test_removed_modes_open_as_standard():
+    for old in ("bisulfite", "presence"):
+        assert pcr.PcrSettings(mode=old).mode == pcr.MODE_STANDARD
+        assert old not in pcr.MODES
 
 
 def test_gel_document(tmp_path, template):
@@ -130,15 +123,12 @@ def test_windows_build(tmp_path, template):
     app = QApplication.instance() or QApplication([])
     from repeatviewer.views.bench_card_dialog import BenchCardDialog
     from repeatviewer.views.gel_photo_dialog import GelPhotoDialog
-    from repeatviewer.views.pcr_dialog import PcrWindow
     from repeatviewer.views.primer_genome_dialog import PrimerGenomeDialog
     from repeatviewer.widgets.gel_view import GelDocumentPanel
 
     res = pcr.run_pcr([template], [F, R], pcr.PcrSettings(mode=pcr.MODE_LADDER))
     out = pcr.write_outputs(res)
-    win = PcrWindow(pcr.PcrSettings(), templates=[template], primers=[F, R])
-    win.show_result(res, out)
-    assert win.table.rowCount() >= 6
+    assert out.get("files")
     doc = gd.gel_from_pcr(res)
     path = doc.save(tmp_path / "g.rvgel")
     panel = GelDocumentPanel()

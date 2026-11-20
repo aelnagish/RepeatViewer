@@ -134,7 +134,7 @@ _POLISH_MODULE_PREFIXES = (
     "repeatviewer.views.tree_dialog",
     "repeatviewer.views.map_reference_dialog",
     "repeatviewer.views.samtools_dialog",
-    "repeatviewer.views.primer_dialogs",
+    "repeatviewer.views.primer_database_dialog",
     "repeatviewer.views.ncbi_download_dialog",
 )
 

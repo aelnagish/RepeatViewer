@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
 )
 
 from repeatviewer.backends.primers import on_sequence as osq
+from repeatviewer.backends.primers import tails as rtail
 from repeatviewer.backends.primers import thermo as th
 from repeatviewer.backends.primers.oligos import Primer
 from repeatviewer.widgets.help_button import make_help_button
@@ -69,8 +70,12 @@ EDIT_HELP = (
     "hairpins is a warning."
 )
 
-PAD_CHOICES = (("2 bases (AT)", "AT"), ("3 bases (ATA)", "ATA"),
-               ("4 bases (ATAT)", "ATAT"), ("6 bases (ATAATA)", "ATAATA"), ("None", ""))
+# "Chosen for me" asks tails.pick_padding for 6 bases that are not a palindrome
+# and make no second site next to the enzyme's own (NEB's rule of thumb).
+PAD_AUTO = "__auto__"
+PAD_CHOICES = (("6 bases, chosen for me", PAD_AUTO), ("2 bases (AT)", "AT"),
+               ("3 bases (ATA)", "ATA"), ("4 bases (ATAT)", "ATAT"),
+               ("6 bases (ATAATA)", "ATAATA"), ("None", ""))
 
 
 def _hrule(parent: QWidget) -> QFrame:
@@ -274,7 +279,7 @@ class EditPrimerDialog(QDialog):
         er = QHBoxLayout()
         er.addWidget(QLabel("Enzyme", rs))
         self.enzyme_combo = QComboBox(rs)
-        for e in osq.COMMON_ENZYMES:
+        for e in rtail.TAIL_ENZYMES:
             try:
                 self.enzyme_combo.addItem(osq.enzyme_label(e), e)
             except Exception:  # noqa: BLE001 - Biopython missing
@@ -605,9 +610,12 @@ class EditPrimerDialog(QDialog):
     def _chosen_tail(self) -> str:
         kind = self._tail_group.checkedId()
         if kind == 0:
-            enz = self.enzyme_combo.currentData()
+            enz = str(self.enzyme_combo.currentData())
+            pad = self.pad_combo.currentData()
             try:
-                return osq.restriction_tail(str(enz), str(self.pad_combo.currentData() or ""))
+                if pad == PAD_AUTO:
+                    return rtail.tail_for(enz, None, th.binding_part(self._clean() or ""))
+                return osq.restriction_tail(enz, str(pad or ""))
             except Exception:  # noqa: BLE001
                 return ""
         if kind == 1:
@@ -627,23 +635,30 @@ class EditPrimerDialog(QDialog):
         self.tail_preview.setText(
             f'<span style="color:{FORWARD_COLOR}">{html.escape(tail.upper())}</span>'
             f'<span style="color:gray">|</span>{html.escape(shown)}')
-        note = ""
-        if self._tail_group.checkedId() == 0 and self._template:
-            enz = str(self.enzyme_combo.currentData())
-            try:
-                cuts = osq.enzyme_cuts(enz, self._template)
-                free = osq.enzymes_not_cutting(self._template)
-            except Exception:  # noqa: BLE001
-                cuts, free = [], []
-            if cuts:
-                where = ", ".join(f"{c:,}" for c in cuts[:4])
-                note = (f'<span style="color:{CHECK_COLOR}">{html.escape(enz)} also cuts the open '
-                        f"sequence at {where}: the product may be cut too.</span>")
-            else:
-                note = f'<span style="color:{OK_COLOR}">{html.escape(enz)} does not cut the open sequence.</span>'
-            if free:
-                note += "<br>Not cutting here: " + ", ".join(free[:8])
-        self.tail_note.setText(note)
+        self.tail_note.setText(self._tail_note(tail, bind))
+
+    def _tail_note(self, tail: str, bind: str) -> str:
+        """What is wrong with this tail, in plain words (green when nothing is)."""
+        if self._tail_group.checkedId() != 0:
+            return ""
+        enz = str(self.enzyme_combo.currentData())
+        try:
+            warnings = rtail.tail_warnings(tail.lower() + (bind or "N"), insert=self._template,
+                                        insert_name="open sequence")
+            free = rtail.free_enzymes(self._template) if self._template else []
+        except Exception:  # noqa: BLE001 - advice only
+            warnings, free = [], []
+        if warnings:
+            note = "<br>".join(f'<span style="color:{CHECK_COLOR}">{html.escape(w)}.</span>'
+                               for w in warnings)
+        elif self._template:
+            note = (f'<span style="color:{OK_COLOR}">{html.escape(enz)} does not cut the open '
+                    "sequence, and the tail has 6 bases before the site.</span>")
+        else:
+            note = ""
+        if free and any("also cuts" in w for w in warnings):
+            note += "<br>Not cutting here: " + ", ".join(free)
+        return note
 
     def _on_apply_tail(self) -> None:
         seq = self._clean()
@@ -803,21 +818,28 @@ class PickPrimersDialog(QDialog):
 
 
 class DesignedPairsDialog(QDialog):
-    """After Primer Design: tick the pairs to put on the sequence (Cancel / Add to Sequence)."""
+    """After Primer Design: tick the pairs (or FISH probes) to put on the sequence
+    (Cancel / Add to Sequence)."""
 
     def __init__(self, pairs: list[dict], inputs: list[Path], *,
                  parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Designed Primers")
         self.setMinimumSize(900, 460)
-        self._pairs = [p for p in pairs if p.get("forward") or p.get("reverse")]
+        self._pairs = [p for p in pairs if p.get("forward") or p.get("reverse") or p.get("probe")]
         self._inputs = [Path(p) for p in inputs]
+        # FISH oligo runs give single probes, not pairs
+        probes = bool(self._pairs) and all(
+            not (p.get("forward") or p.get("reverse")) for p in self._pairs)
+        what = "probe(s)" if probes else "pair(s)"
+        if probes:
+            self.setWindowTitle("Designed Probes")
         lay = QVBoxLayout(self)
         lay.setContentsMargins(16, 14, 16, 12)
         lay.setSpacing(10)
         head = QHBoxLayout()
-        title = QLabel(f"<b>{len(self._pairs)} pair(s) designed.</b> Tick the ones to add to the "
-                       "sequence as primers (arrows on the sequence, Primers tab).", self)
+        title = QLabel(f"<b>{len(self._pairs)} {what} designed.</b> Tick the ones to add to the "
+                       "sequence (arrows on the sequence, Primers tab).", self)
         title.setWordWrap(True)
         head.addWidget(title, 1)
         head.addWidget(make_help_button(
@@ -827,7 +849,8 @@ class DesignedPairsDialog(QDialog):
             "bind. The best pair of each sequence is ticked.<br>Nothing is written to the "
             "file until you press <b>Add to Sequence</b>."))
         lay.addLayout(head)
-        cols = ["", "Pair", "Sequence", "Product", "Forward", "Reverse", "Tm F / R"]
+        cols = (["", "Probe", "Sequence", "Position", "Probe 5′→3′", "Length", "Tm"] if probes
+                else ["", "Pair", "Sequence", "Product", "Forward", "Reverse", "Tm F / R"])
         self.table = QTableWidget(len(self._pairs), len(cols), self)
         self.table.setHorizontalHeaderLabels(cols)
         self.table.verticalHeader().hide()
@@ -839,7 +862,8 @@ class DesignedPairsDialog(QDialog):
         h.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         h.setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         h.setStretchLastSection(True)
-        for c, w in enumerate((28, 120, 120, 70, 220, 220)):
+        for c, w in enumerate((28, 160, 120, 100, 380, 60) if probes
+                              else (28, 120, 120, 70, 220, 220)):
             self.table.setColumnWidth(c, w)
         seen_templates: set[str] = set()
         for r, p in enumerate(self._pairs):
@@ -853,12 +877,20 @@ class DesignedPairsDialog(QDialog):
             self.table.setItem(r, 0, tick)
             f = p.get("forward") or {}
             rv = p.get("reverse") or {}
-            vals = [p.get("name", ""), tpl, f"{p.get('product_size', '')} bp",
-                    f.get("sequence", ""), rv.get("sequence", ""),
-                    f"{f.get('tm', 0):.1f} / {rv.get('tm', 0):.1f}" if f and rv else ""]
+            pr = p.get("probe") or {}
+            if probes:
+                vals = [p.get("name", ""), tpl, f"{pr.get('start', '')}–{pr.get('end', '')}",
+                        pr.get("sequence", ""), f"{pr.get('length', '')} nt",
+                        f"{pr.get('tm', 0):.1f} °C"]
+                mono_cols = (4,)
+            else:
+                vals = [p.get("name", ""), tpl, f"{p.get('product_size', '')} bp",
+                        f.get("sequence", ""), rv.get("sequence", ""),
+                        f"{f.get('tm', 0):.1f} / {rv.get('tm', 0):.1f}" if f and rv else ""]
+                mono_cols = (4, 5)
             for c, v in enumerate(vals, start=1):
                 item = QTableWidgetItem(str(v))
-                if c in (4, 5):
+                if c in mono_cols:
                     item.setFont(mono_font(-1))
                 self.table.setItem(r, c, item)
         lay.addWidget(self.table, 1)
@@ -895,8 +927,10 @@ class DesignedPairsDialog(QDialog):
         changed: list[Path] = []
         for p in self.ticked_pairs():
             tpl = str(p.get("template", ""))
+            # a consensus / representative template is not a record id: the design
+            # always runs on the first selected file
             path = ids.get(tpl) or ids.get(tpl.split()[0] if tpl else "") or (
-                self._inputs[0] if len(self._inputs) == 1 else None)
+                self._inputs[0] if self._inputs else None)
             if path is None:
                 continue
             osq.add_primers_to_fasta(path, osq.primers_of_pair(p),

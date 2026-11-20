@@ -6,11 +6,6 @@ Kinds of PCR:
   primer combinations, as in a real tube), with the mismatches per primer.
 * **Satellite ladder**: the same products grouped by size; when the primers
   sit in a tandem repeat, sizes step by the monomer and are labelled 1×, 2×, …
-* **Bisulfite / MSP**: the templates are converted in silico, once as
-  methylated and once as unmethylated DNA (plant: C kept in CG and CHG when
-  methylated; animal: CG only), on both strands.
-* **TE present / absent**: one lane per template (accession); the expected
-  bands per accession tell whether the insertion is there.
 
 Each product carries the primers' 5' tails (copied in from cycle 3 on) and a
 relative yield used by the gel: fewer mismatches, an exact 3' end and a
@@ -37,14 +32,10 @@ CancelFn = Callable[[], bool] | None
 
 MODE_STANDARD = "standard"
 MODE_LADDER = "ladder"
-MODE_BISULFITE = "bisulfite"
-MODE_PRESENCE = "presence"
-MODES = (MODE_STANDARD, MODE_LADDER, MODE_BISULFITE, MODE_PRESENCE)
+MODES = (MODE_STANDARD, MODE_LADDER)
 MODE_LABELS = {
     MODE_STANDARD: "Standard",
     MODE_LADDER: "Satellite ladder",
-    MODE_BISULFITE: "Bisulfite / MSP",
-    MODE_PRESENCE: "TE present / absent",
 }
 
 POLYMERASES = {
@@ -70,11 +61,10 @@ class PcrSettings:
     polymerase: str = "Taq"
     annealing_c: float = 58.0
     cycles: int = 30
-    methylation: str = "plant"      # plant (CG + CHG) / animal (CG)
     dimers: bool = True
 
     def __post_init__(self) -> None:
-        if self.mode not in MODES:
+        if self.mode not in MODES:   # also the removed "bisulfite" and "presence" modes
             self.mode = MODE_STANDARD
         if self.polymerase not in POLYMERASES:
             self.polymerase = "Taq"
@@ -160,33 +150,6 @@ class PcrResult:
 
     def lane_products(self, lane: str) -> list[PcrProduct]:
         return [p for p in self.products if p.lane == lane]
-
-
-# --------------------------------------------------------------------------
-# Bisulfite conversion
-# --------------------------------------------------------------------------
-
-
-def bisulfite_convert(seq: str, *, methylated: bool, context: str = "plant") -> str:
-    """Top strand after bisulfite treatment.
-
-    Unmethylated C → T. ``methylated``: C in CG (and CHG for plants) stay C,
-    every other C becomes T (CHH is assumed unmethylated).
-    """
-    s = seq.upper()
-    out = list(s)
-    n = len(s)
-    for i, ch in enumerate(s):
-        if ch != "C":
-            continue
-        if methylated:
-            nxt = s[i + 1] if i + 1 < n else ""
-            if nxt == "G":
-                continue
-            if context == "plant" and i + 2 < n and s[i + 2] == "G" and nxt in "ACT":
-                continue
-        out[i] = "T"
-    return "".join(out)
 
 
 # --------------------------------------------------------------------------
@@ -364,25 +327,12 @@ def run_pcr(templates: list[Path], primers: list[Primer], settings: PcrSettings,
         large = tpl.stat().st_size > bd.EXHAUSTIVE_MAX_BP
         keep = True
 
-        if s.mode == MODE_BISULFITE:
-            variants = (("methylated", True), ("unmethylated", False))
-        else:
-            variants = ((base, None),)
-        for label, methylated in variants:
-            lane = label if len(templates) == 1 or methylated is None else f"{base} {label}"
+        for lane in (base,):
             result.lanes.append(lane)
             lane_template[lane] = str(tpl)
 
-            def records(_methylated=methylated):
-                for rid, seq in bd.iter_fasta(tpl):
-                    if _methylated is None:
-                        yield rid, seq
-                    else:
-                        yield f"{rid}(top)", bisulfite_convert(seq, methylated=_methylated,
-                                                               context=s.methylation)
-                        yield f"{rid}(bottom)", bisulfite_convert(
-                            th.reverse_complement(seq.upper()), methylated=_methylated,
-                            context=s.methylation)
+            def records():
+                yield from bd.iter_fasta(tpl)
 
             found: list[PcrProduct] = []
 

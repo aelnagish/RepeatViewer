@@ -92,7 +92,9 @@ def browser_folder_spacer_icon(widget: QWidget | None = None) -> QIcon:
 
 def browser_file_icon(widget: QWidget | None, path: Path) -> QIcon:
     suffix = path.suffix.lower()
-    if suffix in _FASTA_SUFFIXES or path.name.lower().endswith(".fa.gz"):
+    from repeatviewer.backends.large_fasta import is_fasta_name
+
+    if suffix in _FASTA_SUFFIXES or is_fasta_name(path):
         name = "sequence"
     elif suffix in _IMAGE_SUFFIXES:
         name = "image"
