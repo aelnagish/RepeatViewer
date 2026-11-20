@@ -3259,8 +3259,13 @@ class PreviewTabWidget(QTabWidget):
         self._sync_header_from_current_page()
 
     def _sync_tab_bar_visible(self) -> None:
-        """Show filename tabs only when more than one file is open."""
-        multi = self.count() > 1
+        """Show the tabs when more than one file is open, or a tool tab is.
+
+        A tool tab (Primers and Probes) is no file: without its tab and its
+        close button there would be no way back to the normal preview.
+        """
+        multi = self.count() > 1 or any(
+            not isinstance(self.widget(i), FilePreviewPage) for i in range(self.count()))
         if self._title_tab_bar is not None:
             self.tabBar().hide()
             self.setTabsClosable(multi)
