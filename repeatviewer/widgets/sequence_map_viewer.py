@@ -1312,6 +1312,14 @@ class ViewportRulerWidget(QWidget):
         self._viewport_w = max(1, int(viewport_w))
         self.update()
 
+    def set_scroll_px(self, scroll_px: float) -> None:
+        """Pan with the sequence without rebuilding scale geometry."""
+        new = max(0.0, float(scroll_px))
+        if abs(new - self._scroll_px) < 1e-9:
+            return
+        self._scroll_px = new
+        self.update()
+
     def set_region_selection(self, start: int | None, end: int | None = None) -> None:
         """Mirror the map selection band onto the scale."""
         if start is None:
@@ -2226,6 +2234,14 @@ class AnnotationTrackWidget(QWidget):
                 track_w, max(_ANNOT_MIN_VIEWPORT_HEIGHT, bar_h + 2 * _ANNOT_TRACK_VPAD)
             )
         self.show()
+        self.update()
+
+    def set_scroll_px(self, scroll_px: float) -> None:
+        """Pan with the sequence track; keep feature layout as-is."""
+        new = max(0.0, float(scroll_px))
+        if abs(new - self._scroll_px) < 1e-9:
+            return
+        self._scroll_px = new
         self.update()
 
     def has_content(self) -> bool:
@@ -5600,7 +5616,15 @@ class SequenceMapWidget(QWidget):
         if self._hbar.isVisible() != need_bar:
             self._hbar.setVisible(need_bar)
         self._hbar.blockSignals(False)
-        self._canvas.set_scroll_px(float(self._hbar.value()))
+        # Signals blocked above — sync sequence + annotations in one step.
+        self._apply_horizontal_scroll_px(float(self._hbar.value()))
+
+    def _apply_horizontal_scroll_px(self, scroll_px: float) -> None:
+        """Keep sequence, ruler, and annotation tracks on the same scroll offset."""
+        scroll = max(0.0, float(scroll_px))
+        self._canvas.set_scroll_px(scroll)
+        self._ruler.set_scroll_px(scroll)
+        self._annot_track.set_scroll_px(scroll)
 
     def _nudge_horizontal_scroll(self, delta_x: int) -> bool:
         """Apply a horizontal pan; True when the scrollbar moved."""
@@ -5843,7 +5867,9 @@ class SequenceMapWidget(QWidget):
         self._apply_position_spins_to_selection()
 
     def _on_horizontal_scroll(self, value: int) -> None:
-        self._canvas.set_scroll_px(float(value))
+        # Update sequence + annotations immediately. A deferred timer alone
+        # resets while the scrollbar moves, so annotations used to lag.
+        self._apply_horizontal_scroll_px(float(value))
         self._overview_sync_timer.start()
 
     def _range_center_viewport_x(self, start: int, end: int) -> float:
