@@ -3423,6 +3423,8 @@ class PreviewTabWidget(QTabWidget):
         # found again, or opening a file by path lands on the wrong tab.
         self._rebuild_path_index()
         self.setCurrentIndex(index)
+        # a tool tab shows its tab and close button even when it is alone
+        self._sync_tab_bar_visible()
         return index
 
     def _add_preview_page(self, page: FilePreviewPage, *, name: str) -> int:
