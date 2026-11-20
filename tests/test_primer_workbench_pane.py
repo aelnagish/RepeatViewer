@@ -430,7 +430,7 @@ def test_probe_mode_shows_the_fish_rows_and_designs_probes(qapp, isolated_settin
     assert pane.cross_section.isVisibleTo(pane) and pane.hyb_section.isVisibleTo(pane)
     assert pane.wash_section.isVisibleTo(pane)
     assert pane.num_label.text() == "Probes"
-    shown = {str(b.property("use")) for b in pane.use_group.buttons() if b.isVisibleTo(pane)}
+    shown = {str(pane.use_combo.itemData(i)) for i in range(pane.use_combo.count())}
     assert shown == set(wb.PROBE_USES)          # no Amplify for a probe
 
     # the lab protocol is the default, and it reaches the settings

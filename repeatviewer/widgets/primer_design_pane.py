@@ -136,23 +136,25 @@ def _section(title: str, parent: QWidget, help_title: str, help_text: str):
 
 
 def _row(label: str, *widgets, parent: QWidget, joins=(), label_w: int = LABEL_W,
-         unit: str = "") -> QHBoxLayout:
+         unit: str = "", cells: bool = False) -> QHBoxLayout:
     """One grid row: the label column, then widgets filling the field column.
 
     ``joins`` are the small words between the boxes ("opt", "max", "to"); their
     width follows the number of boxes, so every row ends at the same place.
     ``unit`` is a trailing word ("°C", "reads") in a join-sized column.
+    ``cells`` puts two boxes in the min and max columns of a three-box row,
+    with the join word in the middle column.
     """
     row = QHBoxLayout()
     row.setContentsMargins(0, 0, 0, 0)
     row.setSpacing(GAP)
     lab = QLabel(label, parent)
     lab.setFixedWidth(label_w)
-    lab.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+    lab.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
     row.addWidget(lab)
-    if len(widgets) >= 3:
+    if len(widgets) >= 3 or cells:
         row.setSpacing(GAP3)
-    join_w = JOIN2_W
+    join_w = BOX3_W if cells else JOIN2_W
     for i, w in enumerate(widgets):
         if i and i - 1 < len(joins) and joins[i - 1]:
             j = QLabel(joins[i - 1], parent)
@@ -191,14 +193,43 @@ def _spin3(lo: float, hi: float, value: float, *, decimals: int = 0, parent: QWi
 
 
 def _row_widget(label: str, *widgets, parent: QWidget, joins=(), label_w: int = LABEL_W,
-                unit: str = "") -> QWidget:
+                unit: str = "", cells: bool = False) -> QWidget:
     """A grid row inside a widget, so the whole row can be shown or hidden."""
     box = QWidget(parent)
     lay = QVBoxLayout(box)
     lay.setContentsMargins(0, 0, 0, 0)
     lay.setSpacing(0)
-    lay.addLayout(_row(label, *widgets, parent=box, joins=joins, label_w=label_w, unit=unit))
+    lay.addLayout(_row(label, *widgets, parent=box, joins=joins, label_w=label_w, unit=unit,
+                       cells=cells))
     return box
+
+
+def _choice_combo(group: QButtonGroup, prop: str, parent: QWidget) -> QComboBox:
+    """A drop-down menu for the choices of ``group``, as wide as every other field.
+
+    The buttons of the group stay the state (and are never shown): picking an
+    item clicks its button, and a button checked by the code moves the menu.
+    """
+    combo = QComboBox(parent)
+    combo.setFixedWidth(FIELD_W)
+    for b in group.buttons():
+        combo.addItem(b.text(), b.property(prop))
+
+    def pick(index: int) -> None:
+        key = combo.itemData(index)
+        for b in group.buttons():
+            if b.property(prop) == key and not b.isChecked():
+                b.click()
+
+    def follow(button, checked: bool) -> None:
+        if checked:
+            i = combo.findData(button.property(prop))
+            if i >= 0:
+                combo.setCurrentIndex(i)
+
+    combo.activated.connect(pick)
+    group.buttonToggled.connect(follow)
+    return combo
 
 
 def _triple_header(parent: QWidget, label_w: int = LABEL_W) -> QHBoxLayout:
@@ -248,15 +279,17 @@ class DesignPane(QWidget):
         self.run_group = QButtonGroup(self)
         self.run_group.setExclusive(True)
         run_row = []
+        holder = QWidget(sec)       # the state behind the drop-down menu
+        holder.hide()
         for i, (key, text) in enumerate(((RUN_THIS, "This one"), (RUN_FILES, "Selected files"))):
-            b = QPushButton(text, sec)
+            b = QPushButton(text, holder)
             b.setCheckable(True)
             b.setProperty("run", key)
-            b.setFixedWidth((FIELD_W - GAP) // 2)
             self.run_group.addButton(b, i)
             run_row.append(b)
         run_row[0].setChecked(True)
-        sl.addLayout(_row("Sequence", *run_row, parent=sec))
+        self.run_combo = _choice_combo(self.run_group, "run", sec)
+        sl.addLayout(_row("Sequence", self.run_combo, parent=sec))
         self.run_note = QLabel("", sec)
         self.run_note.setWordWrap(True)
         self.run_note.setIndent(LABEL_W + GAP)
@@ -276,17 +309,17 @@ class DesignPane(QWidget):
         self.use_group = QButtonGroup(self)
         self.use_group.setExclusive(True)
         use_row = []
+        holder = QWidget(sec)       # the state behind the drop-down menu
+        holder.hide()
         for i, use in enumerate(wb.USES):
-            b = QPushButton(wb.USE_LABELS[use], sec)
+            b = QPushButton(wb.USE_LABELS[use], holder)
             b.setCheckable(True)
             b.setProperty("use", use)
-            b.setMinimumWidth(0)
-            b.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-            b.setFixedWidth((FIELD_W - 2 * GAP) // 3)
             self.use_group.addButton(b, i)
             use_row.append(b)
         use_row[0].setChecked(True)
-        sl.addLayout(_row("Use it to", *use_row, parent=sec))
+        self.use_combo = _choice_combo(self.use_group, "use", sec)
+        sl.addLayout(_row("Use it to", self.use_combo, parent=sec))
         self.region_note = QLabel("Drag on the map, or type the range.", sec)
         self.region_note.setWordWrap(True)
         self.region_note.setStyleSheet("color: palette(placeholder-text);")
@@ -337,24 +370,25 @@ class DesignPane(QWidget):
         self.tm_opt = _spin3(20, 95, s.tm_opt, decimals=1, parent=sec)
         self.tm_max = _spin3(20, 95, s.tm_max, decimals=1, parent=sec)
         sl.addLayout(_row("Tm (°C)", self.tm_min, self.tm_opt, self.tm_max, parent=sec))
-        self.prod_min = _spin(10, 100_000, s.product_min, parent=sec)
-        self.prod_max = _spin(10, 100_000, s.product_max, parent=sec)
+        self.prod_min = _spin3(10, 100_000, s.product_min, parent=sec)
+        self.prod_max = _spin3(10, 100_000, s.product_max, parent=sec)
         self.product_row = _row_widget("Product", self.prod_min, self.prod_max, parent=sec,
-                                       joins=("to",))
+                                       joins=("to",), cells=True)
         sl.addWidget(self.product_row)
-        self.gc_min = _spin(0, 100, s.gc_min, decimals=1, parent=sec)
-        self.gc_max = _spin(0, 100, s.gc_max, decimals=1, parent=sec)
-        sl.addLayout(_row("GC (%)", self.gc_min, self.gc_max, parent=sec, joins=("to",)))
-        self.tm_diff = _spin(0, 20, s.max_tm_diff, decimals=1, parent=sec)
+        self.gc_min = _spin3(0, 100, s.gc_min, decimals=1, parent=sec)
+        self.gc_max = _spin3(0, 100, s.gc_max, decimals=1, parent=sec)
+        sl.addLayout(_row("GC (%)", self.gc_min, self.gc_max, parent=sec, joins=("to",),
+                          cells=True))
+        self.tm_diff = _spin3(0, 20, s.max_tm_diff, decimals=1, parent=sec)
         self.tm_diff_row = _row_widget("Max Tm diff", self.tm_diff, parent=sec)
         sl.addWidget(self.tm_diff_row)
-        self.num_return = _spin(1, 100, s.num_return, parent=sec)
+        self.num_return = _spin3(1, 100, s.num_return, parent=sec)
         self.num_label = QLabel("Pairs", sec)
         self.num_label.setFixedWidth(LABEL_W)
-        self.num_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.num_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         nr = QHBoxLayout()
         nr.setContentsMargins(0, 0, 0, 0)
-        nr.setSpacing(GAP)
+        nr.setSpacing(GAP3)
         nr.addWidget(self.num_label)
         nr.addWidget(self.num_return)
         nr.addStretch(1)
@@ -731,7 +765,13 @@ class DesignPane(QWidget):
                 for other in self.use_group.buttons():
                     if other.property("use") == wb.USE_INSIDE:
                         other.setChecked(True)
-            b.setFixedWidth((FIELD_W - (len(uses) - 1) * GAP) // len(uses))
+        self.use_combo.clear()
+        for b in self.use_group.buttons():
+            if str(b.property("use")) in uses:
+                self.use_combo.addItem(b.text(), b.property("use"))
+        checked = self.use_group.checkedButton()
+        if checked is not None:
+            self.use_combo.setCurrentIndex(max(0, self.use_combo.findData(checked.property("use"))))
         self.keep_button.setText("Keep Ticked")
         self._update_advice()
 

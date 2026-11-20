@@ -586,6 +586,34 @@ class PrimersWorkspacePage(QWidget):
         page.layout().insertWidget(0, header)
         self.settings_header = header
 
+        # The settings page starts the same way: the title, then Restore
+        # Defaults and Design on top, where they are without scrolling.
+        from repeatviewer.widgets.primer_design_pane import _rule
+
+        dh = QWidget(design)
+        dl = QVBoxLayout(dh)
+        dl.setContentsMargins(0, 0, 0, 0)
+        dl.setSpacing(6)
+        dtop = QHBoxLayout()
+        dtop.setContentsMargins(0, 0, 0, 0)
+        dtop.addWidget(QLabel("<b>Design Settings</b>", dh), 1)
+        self.hide_settings_button = QPushButton("Hide", dh)
+        self.hide_settings_button.setToolTip("Back to the selected primer")
+        dtop.addWidget(self.hide_settings_button)
+        dtop.addWidget(make_help_button(dh, "Design Settings", SETTINGS_HEADER_HELP))
+        dl.addLayout(dtop)
+        drow = QHBoxLayout()
+        drow.setContentsMargins(0, 0, 0, 0)
+        drow.addStretch(1)
+        drow.addWidget(design.defaults_button)
+        drow.addWidget(design.design_button)
+        dl.addLayout(drow)
+        design.layout().insertWidget(0, dh)
+        design.layout().insertWidget(1, _rule(design))
+        self.design_header = dh
+        self.hide_settings_button.clicked.connect(
+            lambda: self._show_design_page(PANEL_PRIMER))
+
         self.show_settings_button.clicked.connect(
             lambda: self._show_design_page(PANEL_DESIGN))
         self.header_defaults_button.clicked.connect(design.defaults_button.click)
@@ -612,6 +640,7 @@ class PrimersWorkspacePage(QWidget):
 
     def _sync_settings_summary(self, *_args) -> None:
         self.settings_summary.setText(self.settings_summary_text())
+        self.hide_settings_button.setEnabled(bool(self.primers._selected))
 
     # ------------------------------------------ path fields filled from Files
 

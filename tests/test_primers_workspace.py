@@ -396,6 +396,14 @@ def test_the_list_under_the_map_shows_the_primers(qapp, isolated_settings, tmp_p
     assert "Standard PCR" in page.settings_summary.text() and "Tm" in page.settings_summary.text()
     page.show_settings_button.click()
     assert primers.tabs.currentIndex() == pw.PANEL_DESIGN
+    # the settings page starts with the same header, Design on top
+    design = primers.design_pane
+    assert design.layout().indexOf(page.design_header) == 0
+    assert page.design_header.isAncestorOf(design.design_button)
+    assert page.hide_settings_button.isEnabled()
+    page.hide_settings_button.click()
+    assert primers.tabs.currentIndex() == pw.PANEL_PRIMER
+    page.show_settings_button.click()
     page.list.cellClicked.emit(page.list.row_of(wl.KIND_PRIMER, 1), wl.COL_NAME)   # same row again
     assert primers.tabs.currentIndex() == pw.PANEL_PRIMER
 
