@@ -727,6 +727,25 @@ def test_msa_standard_extent_for_boundary_guides(
     panel.close()
 
 
+def test_alternating_boundary_segments_stable_across_scroll() -> None:
+    """Overlapped guide colours are keyed to content Y, not the clip top."""
+    from repeatviewer.widgets.multi_sequence_overview import (
+        _alternating_boundary_segments,
+    )
+
+    seg = 72.0
+    full = _alternating_boundary_segments(0.0, 400.0, alt_seg_px=seg, n_colors=2)
+    scrolled = _alternating_boundary_segments(80.0, 280.0, alt_seg_px=seg, n_colors=2)
+    # Scrolling the clip must not rephase: y=100 stays the same colour.
+    idx_full = next(c for a, b, c in full if a <= 100.0 < b)
+    idx_scrolled = next(c for a, b, c in scrolled if a <= 100.0 < b)
+    assert idx_full == idx_scrolled == int(100.0 // seg) % 2
+    # y=150 is in the next band → other colour.
+    idx_150 = next(c for a, b, c in full if a <= 150.0 < b)
+    assert idx_150 == int(150.0 // seg) % 2
+    assert idx_150 != idx_full
+
+
 def test_coincident_boundary_guides_group_by_edge() -> None:
     """Methods that share a column stay one line (colours alternate along it)."""
     from PySide6.QtGui import QColor
