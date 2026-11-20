@@ -13,6 +13,7 @@ import json
 import threading
 
 from PySide6.QtCore import QObject, QSettings, Qt, Signal
+from PySide6.QtGui import QPalette
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
@@ -68,7 +69,7 @@ REGION_HELP = (
     "and offers the settings that fit. Nothing is blocked."
 )
 RUN_ON_HELP = (
-    "<b>This one</b>: the open sequence. The design runs here, the candidates appear in the "
+    "<b>Open sequence</b>: the open sequence. The design runs here, the candidates appear in the "
     "list under the map and nothing is written until you press Keep Ticked or Open Report.<br>"
     "<b>Selected files</b>: every FASTA ticked in the Files panel. That is the long run: "
     "the progress bar, the report files beside the inputs, and the usual file colours. "
@@ -136,7 +137,7 @@ def _section(title: str, parent: QWidget, help_title: str, help_text: str):
 
 
 def _row(label: str, *widgets, parent: QWidget, joins=(), label_w: int = LABEL_W,
-         unit: str = "", cells: bool = False) -> QHBoxLayout:
+         unit: str = "", cells: bool = False, top: bool = False) -> QHBoxLayout:
     """One grid row: the label column, then widgets filling the field column.
 
     ``joins`` are the small words between the boxes ("opt", "max", "to"); their
@@ -151,7 +152,13 @@ def _row(label: str, *widgets, parent: QWidget, joins=(), label_w: int = LABEL_W
     lab = QLabel(label, parent)
     lab.setFixedWidth(label_w)
     lab.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-    row.addWidget(lab)
+    if top:
+        # A field with Browse under it: the label sits beside the field, not
+        # half way down between the field and the button.
+        lab.setContentsMargins(0, 3, 0, 0)
+        row.addWidget(lab, 0, Qt.AlignmentFlag.AlignTop)
+    else:
+        row.addWidget(lab)
     if len(widgets) >= 3 or cells:
         row.setSpacing(GAP3)
     join_w = BOX3_W if cells else JOIN2_W
@@ -202,6 +209,28 @@ def _row_widget(label: str, *widgets, parent: QWidget, joins=(), label_w: int = 
     lay.addLayout(_row(label, *widgets, parent=box, joins=joins, label_w=label_w, unit=unit,
                        cells=cells))
     return box
+
+
+def _results_surface(widget: QWidget) -> None:
+    """Input and results sit on white; settings keep the window colour."""
+    widget.setAutoFillBackground(True)
+    pal = widget.palette()
+    pal.setColor(QPalette.ColorRole.Window, pal.color(QPalette.ColorRole.Base))
+    widget.setPalette(pal)
+
+
+def _card(widget: QWidget, parent: QWidget) -> QFrame:
+    """``widget`` in a white box with a thin border and round corners."""
+    frame = QFrame(parent)
+    frame.setObjectName("rvCard")
+    frame.setStyleSheet(
+        "QFrame#rvCard { background: palette(base); border: 1px solid palette(mid);"
+        " border-radius: 8px; }")
+    lay = QVBoxLayout(frame)
+    lay.setContentsMargins(4, 4, 4, 4)
+    lay.setSpacing(0)
+    lay.addWidget(widget)
+    return frame
 
 
 def _choice_combo(group: QButtonGroup, prop: str, parent: QWidget) -> QComboBox:
@@ -281,7 +310,7 @@ class DesignPane(QWidget):
         run_row = []
         holder = QWidget(sec)       # the state behind the drop-down menu
         holder.hide()
-        for i, (key, text) in enumerate(((RUN_THIS, "This one"), (RUN_FILES, "Selected files"))):
+        for i, (key, text) in enumerate(((RUN_THIS, "Open sequence"), (RUN_FILES, "Selected files"))):
             b = QPushButton(text, holder)
             b.setCheckable(True)
             b.setProperty("run", key)
@@ -289,7 +318,7 @@ class DesignPane(QWidget):
             run_row.append(b)
         run_row[0].setChecked(True)
         self.run_combo = _choice_combo(self.run_group, "run", sec)
-        sl.addLayout(_row("Sequence", self.run_combo, parent=sec))
+        sl.addLayout(_row("Input", self.run_combo, parent=sec))
         self.run_note = QLabel("", sec)
         self.run_note.setWordWrap(True)
         self.run_note.setIndent(LABEL_W + GAP)
@@ -461,7 +490,7 @@ class DesignPane(QWidget):
             file_filter="FASTA (*.fa *.fasta *.fas *.fna);;All files (*)",
             browse_below=True, elide_middle=True)
         self.avoid_path.setFixedWidth(FIELD_W)
-        sl.addLayout(_row("Avoid file", self.avoid_path, parent=sec))
+        sl.addLayout(_row("Avoid file", self.avoid_path, parent=sec, top=True))
         self.avoid_others = QCheckBox("Avoid the other selected files", sec)
         self.avoid_others.setChecked(bool(s.fish_avoid_other_inputs))
         self.skip_unsuitable = QCheckBox("Leave out low-complexity", sec)

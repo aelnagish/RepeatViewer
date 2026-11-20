@@ -200,6 +200,11 @@ class PrimersWorkspacePage(QWidget):
         self._seq_layout.setContentsMargins(0, 0, 0, 0)
         self._seq_layout.setSpacing(0)
         self.body.addWidget(self.seq_page)
+        # The sequence, the map and the lists are input and results: white.
+        # The settings on the right keep the window colour.
+        from repeatviewer.widgets.primer_design_pane import _results_surface
+
+        _results_surface(self.seq_page)
 
         row = QHBoxLayout()
         row.setContentsMargins(12, 6, 12, 6)
@@ -257,7 +262,25 @@ class PrimersWorkspacePage(QWidget):
         self.panel.sequenceExtracted.connect(self.sequenceExtracted.emit)
         self.panel.activeSequenceChanged.connect(self._on_panel_record_changed)
         self.primers = self.panel.primers_panel()
+        self._plain_settings_side()
         self._build_list_area()
+
+    def _plain_settings_side(self) -> None:
+        """No line between the map and the settings: the two colours say it."""
+        from PySide6.QtGui import QPalette
+        from PySide6.QtWidgets import QFrame
+
+        rail = self.panel._rail
+        pal = rail.palette()
+        pal.setColor(QPalette.ColorRole.Window, self.palette().color(QPalette.ColorRole.Window))
+        rail.setPalette(pal)
+        rail.setAutoFillBackground(True)
+        lines = [getattr(rail, "_divider", None),
+                 self.panel.findChild(QFrame, "annotationMapRailDivider")]
+        for line in lines:
+            if line is not None:
+                line.setFixedWidth(0)
+                line.hide()
         self._build_settings_header()
         self.primers.tabs.currentChanged.connect(self._on_panel_page_changed)
 
@@ -473,7 +496,9 @@ class PrimersWorkspacePage(QWidget):
         lay = QVBoxLayout(page)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(6)
-        lay.addWidget(self.list, 1)
+        from repeatviewer.widgets.primer_design_pane import _card
+
+        lay.addWidget(_card(self.list, page), 1)
         bar = QHBoxLayout()
         bar.setContentsMargins(0, 0, 0, 0)
         bar.setSpacing(8)
@@ -497,7 +522,7 @@ class PrimersWorkspacePage(QWidget):
         products_section = primers.pcr_pane.table.parentWidget()
         primers.pcr_pane.table.setMinimumHeight(96)
         pl.addWidget(primers.pcr_pane.products_title)
-        pl.addWidget(primers.pcr_pane.table, 1)
+        pl.addWidget(_card(primers.pcr_pane.table, products), 1)
         self.bottom_stack.addWidget(products)
         if products_section is not None and products_section is not primers.pcr_pane:
             products_section.hide()

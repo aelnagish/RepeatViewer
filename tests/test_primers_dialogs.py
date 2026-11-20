@@ -330,12 +330,12 @@ def test_design_opens_the_workspace_behind_a_tool_tab(qapp, tmp_path):
     QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
 
 
-def test_toolbar_popup_lists_what_is_inside_design_and_map(qapp):
-    """The toolbar popup is a flat list: a submenu must show its items, not a dead row."""
+def test_toolbar_popup_opens_design_and_map_as_submenus(qapp):
+    """Design and Map are rows with an arrow that open their items beside them."""
     pytest.importorskip("PySide6.QtPdf")   # the main window needs it
-    from PySide6.QtWidgets import QLabel, QMenu, QPushButton
+    from PySide6.QtWidgets import QMenu, QPushButton
 
-    from repeatviewer.main_window import _ToolbarPopup
+    from repeatviewer.main_window import _SubmenuRow, _ToolbarPopup
 
     fired: list[str] = []
     menu = QMenu()
@@ -347,9 +347,14 @@ def test_toolbar_popup_lists_what_is_inside_design_and_map(qapp):
     menu.addAction("Database", lambda: fired.append("database"))
 
     popup = _ToolbarPopup(list(menu.actions()))
-    rows = [w for w in popup._panel.children() if isinstance(w, (QLabel, QPushButton))]
-    assert [(type(w).__name__, w.text()) for w in rows] == [
-        ("QLabel", "Design"), ("QPushButton", "Primers"), ("QPushButton", "Repetitive Probes"),
-        ("QLabel", "Map"), ("QPushButton", "Primers"), ("QPushButton", "Database")]
-    rows[4].click()                              # Map > Primers
+    rows = [w for w in popup._panel.children() if isinstance(w, QPushButton)]
+    assert [(isinstance(w, _SubmenuRow), w.text()) for w in rows] == [
+        (True, "Design"), (True, "Map"), (False, "Database")]
+    rows[1].click()                              # Map opens beside it
+    child = popup._child
+    assert child is not None and child._parent_popup is popup
+    assert rows[1].property("subOpen")
+    items = [w for w in child._panel.children() if isinstance(w, QPushButton)]
+    assert [w.text() for w in items] == ["Primers"]
+    items[0].click()                             # Map > Primers
     assert fired == ["map primers"]
