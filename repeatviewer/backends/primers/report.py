@@ -19,6 +19,24 @@ CITES = (
     "nearest-neighbor thermodynamics. PNAS 95:1460–1465.",
 )
 
+FISH_CITES = (
+    "Owczarzy R. et al. (2004) Effects of sodium ions on DNA duplex oligomers: improved "
+    "predictions of melting temperatures. Biochemistry 43:3537–3554.",
+    "Hutton J.R. (1977) Renaturation kinetics and thermal stability of DNA in aqueous "
+    "solutions of formamide and urea. Nucleic Acids Res 4:3537–3555.",
+    "Morgulis A. et al. (2006) A fast and symmetric DUST implementation to mask "
+    "low-complexity DNA sequences. J Comput Biol 13:1028–1040.",
+)
+
+#: Bench rules from the probe design protocol (TAREAN / TideCluster training, 2023).
+PROBE_RULES = (
+    "Never use a PCR product amplified from genomic DNA as a hybridisation probe, even "
+    "when it gives a single band of the expected size: clone and sequence it first.",
+    "If the cloned sequence contains short simple repeats, keep them out of the probe.",
+    "Check the probe against the other repeats (other satellite families, abundant "
+    "TEs) so a signal is not misread.",
+)
+
 CSS = """
 :root{--fg:#1d1d1b;--muted:#6b6b67;--line:#e4e4e0;--soft:#f6f6f4}
 body{font-family:-apple-system,"Segoe UI",Helvetica,Arial,sans-serif;margin:0;color:var(--fg);background:#fff;font-size:13px}
@@ -288,6 +306,21 @@ def methods_text(d: dict) -> str:
             + (f" of {s.get('product_min')}–{s.get('product_max')} bp" if s.get("use_product_range") else "")
             + f". Tm was calculated with Primer3 ({d.get('thermo', '')})."
         )
+    if d.get("mode") == "fish":
+        skipped = ("Low-complexity regions (DUST, level 30), simple repeats and inverted "
+                   "repeats (stems of 12 nt or more) were left out. "
+                   if d.get("unsuitable") is not None else "")
+        return (
+            f"Oligonucleotide probes of {s.get('size_min')}–{s.get('size_max')} nt were "
+            "designed in RepeatViewer on the consensus monomer, keeping oligos found in at "
+            f"least {round(float(s.get('min_coverage', 0)) * 100)} % of the copies with up to "
+            f"{s.get('coverage_mismatches')} mismatches. {skipped}"
+            f"Tm was calculated for the hybridisation conditions ({d.get('thermo', '')}) with "
+            "the SantaLucia (1998) nearest-neighbour parameters and the Owczarzy et al. (2004) "
+            "sodium correction (Primer3), lowered by 0.60 °C per % formamide (Hutton 1977); "
+            f"probes with a Tm of {s.get('tm_min')}–{s.get('tm_max')} °C that stay above the "
+            "stringent wash temperature were kept."
+        )
     text = (f"Primers were designed with {d.get('engine', 'Primer3')} in RepeatViewer "
             f"({d.get('mode_label', '')}): {s.get('size_min')}–{s.get('size_max')} nt, Tm "
             f"{s.get('tm_min')}–{s.get('tm_max')} °C (optimum {s.get('tm_opt')} °C), GC "
@@ -318,7 +351,25 @@ def write_report(path: Path, d: dict) -> Path:
                     "</div></div>")
     explain = "".join(f"<li>{e(x)}</li>" for x in d.get("explain", []))
     files = "".join(f"<li>{e(name)}</li>" for name in (d.get("files") or {}))
-    cites = "".join(f"<li>{e(c)}</li>" for c in CITES)
+    fish = d.get("mode") == "fish"
+    cites = "".join(f"<li>{e(c)}</li>" for c in CITES + (FISH_CITES if fish else ()))
+    left_out = ""
+    if fish and (d.get("unsuitable") or d.get("avoided_files")):
+        regs = d.get("unsuitable") or []
+        items = "".join(f"<li>{r['start'] + 1}–{r['end']}: {e(r['kind'])}"
+                        + (f" {e(r.get('note', ''))}" if r.get("note") else "") + "</li>"
+                        for r in regs[:40])
+        more = f"<p class=note>{len(regs) - 40} more not shown.</p>" if len(regs) > 40 else ""
+        avoided = ", ".join(Path(p).name for p in d.get("avoided_files", []))
+        left_out = ("<h2>Left out of the probe search</h2>"
+                    + (f"<p class=note>Positions on the monomer.</p><ul>{items}</ul>{more}"
+                       if regs else "")
+                    + (f"<p class=note>Probes were also checked against {e(avoided)} "
+                       "(the other selected files).</p>" if avoided else ""))
+    rules = ""
+    if d.get("kind") != "map" and d.get("mode") in ("fish", "ladder", "pcr"):
+        rules = ("<h2>Before you use a probe</h2><ul>"
+                 + "".join(f"<li>{e(r)}</li>" for r in PROBE_RULES) + "</ul>")
     html = f"""<!doctype html><html><head><meta charset="utf-8"><title>{e(title)}</title>
 <style>{CSS}</style></head><body><main>
 <h1>{e(title)}</h1><p class="sub">{e(d.get('created', ''))}</p>
@@ -326,7 +377,9 @@ def write_report(path: Path, d: dict) -> Path:
 <div class="tiles">{''.join(tiles)}</div>
 <h2>Run</h2><table class="details">{detail_html}</table>
 {body}
+{left_out}
 {gel_html}
+{rules}
 {f'<h2>Why</h2><p class=note>What Primer3 rejected, per template.</p><ul>{explain}</ul>' if explain else ''}
 <h2>Methods text</h2><div class="methods">{e(methods_text(d))}</div>
 <div class="two"><div><h2>Cite</h2><ul>{cites}</ul></div><div><h2>Files written</h2><ul>{files}</ul></div></div>

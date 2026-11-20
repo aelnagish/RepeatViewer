@@ -320,7 +320,7 @@ def to_svg(doc: GelDoc, *, lane_w: int = 56, gap: int = 20, height: int = 600) -
 
 
 def lanes_from_pcr(result, *, min_yield: float = 0.01, max_bands: int = 60) -> list[GelLane]:
-    """One lane per PCR lane (template / methylation state)."""
+    """One lane per PCR lane (template)."""
     lanes = []
     for lane in result.lanes:
         bands = []

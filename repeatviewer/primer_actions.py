@@ -1,4 +1,4 @@
-"""Tools > Primers in the main window (Design Primers, Map Primers, Primer Database).
+"""Tools > Primers and Probes in the main window (Design, Map, Database, painting).
 
 Kept out of ``main_window.py``: :class:`PrimerActionsMixin` is mixed into
 ``MainWindow`` and only uses the window's shared job / dialog helpers
@@ -18,10 +18,8 @@ from PySide6.QtWidgets import QMenu, QMessageBox
 
 from repeatviewer.backends.job_cancel import CANCELLED_MESSAGE
 from repeatviewer.job_options import (
-    PRIMER_DIALOG_TAB_PRIMERS,
     PrimerOptions,
     load_primer_options,
-    persistable_dialog_tab,
     save_primer_options,
 )
 
@@ -47,7 +45,17 @@ _PHASES = (
 PRIMER_JOB_STEPS = 4
 
 # Tools > Primers and Probes: three items; the design type is the Mode inside Design.
-PRIMER_MENU_ITEMS: tuple[str, ...] = ("Design", "Map", "Database")
+# Tools > Primers and Probes. Design and Map open submenus; everything else is
+# one item. Nothing here opens a tool window of its own: an item shows the work
+# in the main window and selects the page it belongs to.
+PRIMER_MENU_ITEMS: tuple[str, ...] = (
+    "Design", "Map", "Database", "In-silico PCR", "Restriction Digest", "Gel",
+    "Sanger Check", "Cloning",
+)
+DESIGN_SUBMENU_ITEMS: tuple[str, ...] = (
+    "Primers", "Repetitive Probes", "Chromosome Painting Probes",
+)
+MAP_SUBMENU_ITEMS: tuple[str, ...] = ("Primers", "Repetitive Probes")
 PRIMER_MANUAL = Path(__file__).resolve().parent / "assets" / "manuals" / "primers_and_probes.html"
 
 
@@ -185,17 +193,304 @@ class PrimerActionsMixin:
     # ------------------------------------------------------------- menu
 
     def _populate_primers_menu(self, menu: QMenu) -> None:
-        design, map_, database = PRIMER_MENU_ITEMS
-        a = menu.addAction(design, lambda: self._open_primer_design_dialog())
-        a.setToolTip("Design PCR primers or FISH probes (choose the type in Mode)")
-        a = menu.addAction(map_, lambda: self._open_map_primers_dialog())
-        a.setToolTip("Test primers against sequences: binding sites and products")
-        a = menu.addAction(database, self._open_primer_database)
+        from repeatviewer.backends.primers import design as dz
+
+        # Submenus are made with their parent and kept by name: a submenu that
+        # only a local variable holds can be freed by Python on some PySide
+        # builds, and its items then do nothing when clicked.
+        design_menu = QMenu(PRIMER_MENU_ITEMS[0], menu)
+        menu.addMenu(design_menu)
+        primers, probes, painting = DESIGN_SUBMENU_ITEMS
+        a = design_menu.addAction(primers, lambda: self._design_in_panel(dz.MODE_PCR))
+        a.setToolTip("PCR primers on the sequence, in the Primers panel")
+        a = design_menu.addAction(probes, lambda: self._design_in_panel(dz.MODE_FISH))
+        a.setToolTip("Oligo probes found in every copy of a repeat")
+        a = design_menu.addAction(painting, self._open_painting_settings)
+        a.setToolTip("Chromosome painting probes over a genome (Chorus2)")
+
+        map_menu = QMenu(PRIMER_MENU_ITEMS[1], menu)
+        menu.addMenu(map_menu)
+        menu._rv_submenus = (design_menu, map_menu)
+        a = map_menu.addAction(MAP_SUBMENU_ITEMS[0], lambda: self._open_map_primers_dialog())
+        a.setToolTip("Where primers bind, and what they amplify")
+        a = map_menu.addAction(MAP_SUBMENU_ITEMS[1],
+                               lambda: self._open_map_primers_dialog(probes=True))
+        a.setToolTip("Where probes bind, and how many copies they hit")
+
+        a = menu.addAction(PRIMER_MENU_ITEMS[2], self._open_primer_database)
         a.setToolTip("Your saved primers, with Tm, hairpin and dimer checks")
+        menu.addSeparator()
         populate = getattr(self, "_populate_pcr_menu_items", None)
         if populate is not None:
             populate(menu)
         menu.setToolTipsVisible(True)
+
+    # ------------------------------------------------- the panel beside the sequence
+
+    def _primers_workspace(self):
+        """The open Primers and Probes workspace tab, or None."""
+        from repeatviewer.views.primers_workspace import PrimersWorkspacePage
+
+        tabs = getattr(self, "_preview_tabs", None)
+        if tabs is None:
+            return None
+        try:
+            for index in range(tabs.count()):
+                page = tabs.widget(index)
+                if isinstance(page, PrimersWorkspacePage):
+                    return page
+        except RuntimeError:
+            pass
+        return None
+
+    def _panel_target_file(self):
+        """The FASTA the workspace should work on.
+
+        The one selected in Files, else the one the workspace already shows,
+        else the file of the tab in front.
+        """
+        for p in self._primer_candidate_files():
+            return Path(p)
+        workspace = self._primers_workspace()
+        if workspace is not None:
+            return workspace.sequence_path()
+        tabs = getattr(self, "_preview_tabs", None)
+        current = tabs.currentWidget() if tabs is not None else None
+        path = getattr(current, "path", None)
+        return Path(path) if path else None
+
+    def _leave_file_page_for_workspace(self, path: Path) -> bool:
+        """Unsaved annotation edits in the file's own tab are settled first.
+
+        The workspace saves primers into the same annotation file, so two views
+        with different unsaved states would overwrite each other.
+        """
+        tabs = getattr(self, "_preview_tabs", None)
+        if tabs is None:
+            return True
+        page = tabs.page_for_path(path)
+        if page is None:
+            return True
+        try:
+            if not page.has_unsaved_annotations():
+                return True
+        except (AttributeError, RuntimeError):
+            return True
+        return bool(tabs.confirm_leave_page(page))
+
+    def _workspace_sequence_candidate(self):
+        """The FASTA selected in Files, for a workspace that has no sequence yet."""
+        for p in self._primer_candidate_files():
+            return Path(p)
+        return None
+
+    def _ensure_primers_workspace(self):
+        """The workspace tab, made (without a sequence) when there is none. None without tabs."""
+        from repeatviewer.views.primers_workspace import PrimersWorkspacePage
+
+        tabs = getattr(self, "_preview_tabs", None)
+        if tabs is None:
+            return None
+        workspace = self._primers_workspace()
+        if workspace is None:
+            workspace = PrimersWorkspacePage()
+            self._wire_primers_workspace(workspace)
+            tabs.open_tool_tab(workspace, workspace.tab_name())
+        return workspace
+
+    def _host_in_workspace(self, section: str, page) -> bool:
+        """Show a tool page (Map, Database, Sanger Check…) as a section of the workspace."""
+        tabs = getattr(self, "_preview_tabs", None)
+        workspace = self._ensure_primers_workspace()
+        if tabs is None or workspace is None:
+            return False
+        workspace.host_page(section, page)
+        tabs.setCurrentWidget(workspace)
+        self._ensure_preview_visible()
+        return True
+
+    def _open_workspace_section(self, key: str) -> None:
+        """A section clicked in the workspace that has no page yet: open it as its menu item does."""
+        openers = {
+            "painting": "_open_painting_settings",
+            "map": "_open_map_primers_dialog",
+            "database": "_open_primer_database",
+            "gel": "_open_gel_document",
+            "sanger": "_open_sanger_dialog",
+            "cloning": "_open_cloning_dialog",
+        }
+        if str(key) == "gel":
+            # A click on the section must not write a file: open the gel that is
+            # selected in Files, else offer to start one.
+            chosen = [p for p in self._selected_files()
+                      if Path(p).is_file() and Path(p).suffix.lower() == ".rvgel"]
+            workspace = self._primers_workspace()
+            if chosen:
+                self._show_new_output(Path(chosen[0]))
+            elif workspace is not None:
+                workspace.show_gel_placeholder(self._new_gel_document)
+            return
+        opener = getattr(self, openers.get(str(key), ""), None)
+        if opener is not None:
+            opener()
+
+    def _wire_primers_workspace(self, workspace) -> None:
+        status = getattr(self, "_set_status_message", None)
+        if status is not None:
+            workspace.statusMessage.connect(lambda text: status(str(text), 6000))
+        workspace.sequence_provider = self._workspace_sequence_candidate
+        workspace.sectionRequested.connect(self._open_workspace_section)
+        opened = getattr(self, "_on_preview_open_requested", None)
+        if opened is not None:
+            workspace.openFileRequested.connect(opened)
+        written = getattr(self, "_on_preview_file_written", None)
+        if written is not None:
+            workspace.fileWritten.connect(written)
+        workspace.annotationsSaved.connect(self._on_workspace_annotations_saved)
+        extracted = getattr(self, "_on_preview_sequence_extracted", None)
+        if extracted is not None:
+            workspace.sequenceExtracted.connect(extracted)
+        tabs = getattr(self, "_preview_tabs", None)
+        if tabs is not None and not getattr(self, "_workspace_follows_file_saves", False):
+            tabs.annotationsSaved.connect(self._on_file_annotations_saved_for_workspace)
+            self._workspace_follows_file_saves = True
+
+    def _on_workspace_annotations_saved(self, written: object) -> None:
+        """The workspace saved annotations: Files and the file's own tab follow."""
+        saved = getattr(self, "_on_preview_annotations_saved", None)
+        if saved is not None:
+            saved(written)
+        workspace = self._primers_workspace()
+        tabs = getattr(self, "_preview_tabs", None)
+        if workspace is not None and tabs is not None and workspace.sequence_path() is not None:
+            tabs.reload_paths([workspace.sequence_path()])
+
+    def _on_file_annotations_saved_for_workspace(self, written: object) -> None:
+        """A file's own tab saved annotations: the workspace on that file follows."""
+        workspace = self._primers_workspace()
+        if workspace is None or not written:
+            return
+        try:
+            saved = Path(str(written))
+            sequence = workspace.sequence_path()
+            if sequence is None or saved.parent.resolve() != sequence.parent.resolve():
+                return
+            if not (saved.name.startswith(sequence.stem + ".")
+                    or saved.name.startswith(sequence.name)):
+                return
+        except OSError:
+            return
+        workspace.reload_annotations()
+
+    def _primers_workspace_takes_file(self, path: Path) -> bool:
+        """A file clicked in Files while the workspace is in front.
+
+        A path field of the workspace that had the cursor takes it; a gel opens
+        in the Gel section; a FASTA becomes the sequence when Design, PCR or
+        Digest is shown. True when the click was used here, so Preview does not
+        open the file. Right-click > Open in Additional Tab still opens it in a
+        tab of its own.
+        """
+        from repeatviewer.views.primers_workspace import SEQUENCE_SECTIONS
+
+        tabs = getattr(self, "_preview_tabs", None)
+        workspace = self._primers_workspace()
+        if tabs is None or workspace is None or tabs.currentWidget() is not workspace:
+            return False
+        try:
+            target = Path(path)
+            if not target.is_file():
+                return False
+            if workspace.fill_armed_path(target):
+                return True
+            if target.suffix.lower() == ".rvgel":
+                workspace.show_gel(target)
+                return True
+            if workspace.section() not in SEQUENCE_SECTIONS or not is_primer_fasta(target):
+                return False
+        except OSError:
+            return False
+        if self._leave_file_page_for_workspace(target):
+            workspace.set_sequence(target)
+        return True
+
+    def _open_primers_panel(self, *, tab: str = "design", mode: str | None = None,
+                            digest: bool = False):
+        """Show the Primers and Probes workspace on ``tab``; returns its PrimersPanel."""
+        from repeatviewer.views.primers_workspace import (
+            PANEL_DESIGN,
+            PANEL_PRIMER,
+            same_file,
+            section_key,
+        )
+
+        path = self._panel_target_file()
+        if path is None:
+            QMessageBox.information(
+                self, "Primers and Probes",
+                "Click the FASTA to work on in the Files panel first.",
+            )
+            return None
+        tabs = getattr(self, "_preview_tabs", None)
+        if tabs is None:
+            return None
+        made = self._primers_workspace() is None
+        workspace = self._ensure_primers_workspace()
+        if (not same_file(path, workspace.sequence_path())
+                and self._leave_file_page_for_workspace(path)):
+            workspace.set_sequence(path)
+        if not workspace.has_sequence():
+            if made:
+                index = tabs.indexOf(workspace)
+                if index >= 0:
+                    tabs._close_tab(index, ask=False)
+            QMessageBox.information(
+                self, "Primers and Probes",
+                f"{path.name} has no sequence view, so the workspace cannot "
+                "open on it. Click a FASTA in the Files panel and try again.",
+            )
+            return None
+        tabs.setCurrentWidget(workspace)
+        # Design opens on its settings, "primer" on the primers of the sequence.
+        page = {"design": PANEL_DESIGN, "primer": PANEL_PRIMER}.get(tab)
+        workspace.set_section(section_key(tab), page=page)
+        self._ensure_preview_visible()
+        primers = workspace.primers_panel()
+        if mode is not None:
+            pane = primers.design_pane
+            modes = [pane.mode.itemData(i) for i in range(pane.mode.count())]
+            if mode in modes:
+                pane.mode.setCurrentIndex(modes.index(mode))
+        if digest:
+            enzymes = primers.enzyme_pane
+            if enzymes.ticked_rows():
+                enzymes.digest_button.click()
+        return primers
+
+    def _design_in_panel(self, mode: str) -> None:
+        if not self._primers_ready():
+            return
+        self._open_primers_panel(tab="design", mode=mode)
+
+    def _open_painting_settings(self) -> None:
+        """Chromosome painting as a tab: a genome job, with its own settings panel."""
+        if not self._primers_ready():
+            return
+        from repeatviewer.views.painting_page import PaintingPage
+
+        tabs = getattr(self, "_preview_tabs", None)
+        if tabs is None:
+            return
+        page = PaintingPage(options=self._primer_options,
+                            start_job=self._start_painting_from_page)
+        self._host_in_workspace("painting", page)
+        self._painting_page = page
+
+    def _start_painting_from_page(self, settings: dict) -> None:
+        """Run Chorus2 (or the selection) with the settings of the painting tab."""
+        opts = replace(self._primer_options, painting=dict(settings or {}))
+        self._save_primer_options(opts)
+        self._start_painting_job(self._primer_options)
 
     def _open_primers_manual(self) -> None:
         from PySide6.QtCore import QUrl
@@ -245,57 +540,23 @@ class PrimerActionsMixin:
     def _quick_primer_design_right_click(self) -> None:
         self._run_primer_design_default()
 
-    def _open_primer_design_dialog(self, *, mode: str | None = None,
-                                   files: list[Path] | None = None) -> None:
+    def _start_design_from_panel(self, payload: dict) -> None:
+        """Design on the selected files with the settings of the Primers panel."""
         if not self._primers_ready():
             return
-        from repeatviewer.views.primer_dialogs import PrimerDesignDialog
-
-        opts = self._primer_options
-        if mode:
-            from repeatviewer.backends.primers import design as dz
-
-            current = opts.design_settings()
-            if current.mode != mode:
-                data = current.to_dict()
-                data.update(dz.mode_preset(mode))
-                data["mode"] = mode
-                opts = replace(opts, design=data, last_dialog_tab=PRIMER_DIALOG_TAB_PRIMERS)
-        start_files = list(files or [])
-        dialog = PrimerDesignDialog(
-            initial=opts,
-            files=start_files or self._primer_candidate_files(),
-            project_genome=self._genome_path_resolved(),
-            parent=self,
-        )
-
-        def _accepted(d) -> None:
-            self._save_primer_options(d.options())
-            if not d.should_run():
-                self._set_status_message("Primer Design settings saved", 4000)
-                return
-            if d.is_painting():
-                self._start_painting_job(self._primer_options)
-                return
-            # What the window shows; with Use selected and nothing shown yet, the panel.
-            files = d.template_files() or (
-                (start_files or self._primer_candidate_files())
-                if d.uses_selected() else [])
-            if not files:
-                QMessageBox.information(
-                    self, "Primer Design",
-                    "Choose the template: click a FASTA in the Files panel (or fill "
-                    "Template with Define inputs), then Run.",
-                )
-                return
-            missing = [p for p in files if not Path(p).is_file()]
-            if missing:
-                QMessageBox.warning(self, "Primer Design",
-                                    f"The template does not exist:\n{missing[0]}")
-                return
-            self._start_primer_job(PRIMER_JOB_DESIGN, files, self._primer_options)
-
-        self._present_te_viz_dialog(dialog, _accepted)
+        files = self._primer_candidate_files()
+        if not files:
+            QMessageBox.information(
+                self, "Primer Design",
+                "Tick the FASTA files to design on in the Files panel first.",
+            )
+            return
+        opts = replace(self._primer_options,
+                       design=dict(payload.get("settings") or {}),
+                       annotate_design=bool(payload.get("annotate_design", True)),
+                       save_design_to_database=bool(payload.get("save_design_to_database")))
+        self._save_primer_options(opts)
+        self._start_primer_job(PRIMER_JOB_DESIGN, files, self._primer_options)
 
     # ------------------------------------------------------------- map
 
@@ -399,12 +660,15 @@ class PrimerActionsMixin:
     def _open_map_primers_dialog(self, *, check_stock: bool = False,
                                  primer_names: list[str] | None = None,
                                  database_path: str = "", strict: dict | None = None,
-                                 sequence: str = "") -> None:
-        """Map Primers; ``check_stock``: preset to test the Database primers (the
-        selected ones, or all) on a sequence."""
+                                 sequence: str = "", probes: bool = False) -> None:
+        """Map as a tab: where the primers bind on the selected files.
+
+        ``probes``: a probe binds on its own, so no pairs, no products and no
+        3' end rule. ``check_stock``: the Database asked to test its primers.
+        """
         if not self._primers_ready():
             return
-        from repeatviewer.views.primer_dialogs import MapPrimersDialog
+        from repeatviewer.views.map_page import MapPage
 
         opts = self._primer_options
         if check_stock:
@@ -413,55 +677,20 @@ class PrimerActionsMixin:
         elif opts.map.get("primer_names"):
             # A selection from the Database window is for that one check only.
             opts = replace(opts, map={**opts.map, "primer_names": []})
-        dialog = MapPrimersDialog(
-            initial=opts,
-            files=self._primer_candidate_files(),
-            project_genome=self._genome_path_resolved(),
-            parent=self,
-        )
+        if probes:
+            opts = replace(opts, map={**opts.map, "search_forward": False,
+                                      "search_reverse": False, "search_probe": True,
+                                      "pairs_only": False, "three_prime_exact": 0,
+                                      "use_max_mismatches": True})
+        files = self._primer_candidate_files()
         if sequence:
-            dialog._input_define.setChecked(True)
-            dialog._seq_row.set_path(Path(sequence))
-
-        def _no_sequence(d) -> str:
-            files = d.run_files() or (
-                self._primer_candidate_files() if d.uses_selected() else [])
-            return "" if files else (
-                "Choose the sequences: click a FASTA in the Files panel (or fill "
-                "Sequences with Define inputs), then Run.")
-
-        # Checked before the window closes, so OK brings you back to it.
-        dialog._run_check = _no_sequence
-
-        def _forget_selection() -> None:
-            if self._primer_options.map.get("primer_names"):
-                self._save_primer_options(replace(
-                    self._primer_options, map={**self._primer_options.map, "primer_names": []}))
-
-        def _accepted(d) -> None:
-            self._save_primer_options(d.options())
-            if not d.should_run():
-                _forget_selection()
-                self._set_status_message("Map Primers settings saved", 4000)
-                return
-            files = d.run_files() or (
-                self._primer_candidate_files() if d.uses_selected() else [])
-            if not files:
-                QMessageBox.information(
-                    self, "Map Primers",
-                    "Choose the sequences: click a FASTA in the Files panel (or fill "
-                    "Sequences with Define inputs), then Run.",
-                )
-                return
-            missing = [p for p in files if not Path(p).is_file()]
-            if missing:
-                QMessageBox.warning(self, "Map Primers",
-                                    f"The file does not exist:\n{missing[0]}")
-                return
-            self._start_primer_job(PRIMER_JOB_MAP, files, self._primer_options)
-            _forget_selection()   # the job already has its own copy of the settings
-
-        self._present_te_viz_dialog(dialog, _accepted)
+            files = [Path(sequence)] + [p for p in files if str(p) != sequence]
+        page = MapPage(files, options=opts,
+                       database_path=database_path or opts.database_path)
+        if getattr(self, "_preview_tabs", None) is None:
+            return
+        self._host_in_workspace("map", page)
+        self._map_page = page
 
     def _quick_map_primers_right_click(self) -> None:
         if not self._primers_ready():
@@ -479,12 +708,18 @@ class PrimerActionsMixin:
             return
         from repeatviewer.views.primer_dialogs import PrimerDatabaseDialog
 
+        tabs = getattr(self, "_preview_tabs", None)
         existing = self._primer_database_dialog
-        if existing is not None:
+        if existing is not None and tabs is not None:
+            # already open as the Database section of the workspace: show it
             try:
-                if existing.isVisible():
-                    existing.raise_()
-                    existing.activateWindow()
+                workspace = self._primers_workspace()
+                holder = getattr(existing, "parent", lambda: None)()
+                if (workspace is not None and holder is not None
+                        and workspace.hosted_page("database") is holder):
+                    tabs.setCurrentWidget(workspace)
+                    workspace.set_section("database")
+                    self._ensure_preview_visible()
                     return
             except RuntimeError:
                 self._primer_database_dialog = None
@@ -511,22 +746,15 @@ class PrimerActionsMixin:
             dialog.deleteLater()
 
         dialog.finished.connect(_closed)
-        dialog.show()
-        dialog.raise_()
-        dialog.activateWindow()
+        if tabs is None:            # no preview area (tests, headless): the old window
+            dialog.show()
+            dialog.raise_()
+            dialog.activateWindow()
+            return
+        from repeatviewer.views.tool_page import ToolDialogPage
 
-    # ------------------------------------------------------------- tab memory
-
-    def _remember_primer_dialog_tab(self, dialog) -> bool:
-        """Cancel keeps the open tab (like the other tool windows)."""
-        from repeatviewer.views.primer_dialogs import MapPrimersDialog, PrimerDesignDialog
-
-        if isinstance(dialog, PrimerDesignDialog):
-            tab = persistable_dialog_tab(dialog.current_dialog_tab(),
-                                         first_tab=PRIMER_DIALOG_TAB_PRIMERS)
-            self._save_primer_options(replace(self._primer_options, last_dialog_tab=tab))
-            return True
-        return isinstance(dialog, MapPrimersDialog)
+        page = ToolDialogPage(dialog, "Primer Database")
+        self._host_in_workspace("database", page)
 
     # ------------------------------------------------------------- jobs
 
@@ -553,7 +781,7 @@ class PrimerActionsMixin:
                                "from the server\u201d.")
         if problem:
             if open_dialog_on_error:
-                self._open_primer_design_dialog()
+                self._open_painting_settings()
             QMessageBox.information(self, "Chromosome painting", problem)
             return
         self._start_primer_job(PRIMER_JOB_PAINTING, [Path(anchor).expanduser()], opts)

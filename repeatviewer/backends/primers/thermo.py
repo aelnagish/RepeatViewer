@@ -326,6 +326,84 @@ def calc_tm_range(seq: str, settings: ThermoSettings | None = None) -> tuple[flo
     return round(min(values), 2), round(max(values), 2)
 
 
+# --------------------------------------------------------------------------
+# Hybridisation (FISH) conditions
+# --------------------------------------------------------------------------
+
+#: Na⁺ in 1× SSC: 150 mM NaCl + 15 mM trisodium citrate (3 Na⁺ each).
+SSC_NA_MM = 195.0
+#: Tm drop per % formamide (Hutton 1977, Nucleic Acids Res 4:3537; 0 to 50 %,
+#: 0.035 to 0.88 M Na⁺).
+FORMAMIDE_TM_PER_PCT = 0.60
+
+
+@dataclass
+class HybConditions:
+    """FISH hybridisation and stringent wash (defaults: the lab protocol).
+
+    Hybridisation mix: 50 % formamide, 2× SSC, 10 % dextran sulfate, 37 °C
+    overnight. Stringent wash: 20 % formamide, 0.1× SSC, 42 °C. Dextran sulfate
+    speeds hybridisation but does not change Tm, so it is not a setting.
+    """
+
+    formamide_pct: float = 50.0
+    ssc: float = 2.0
+    temp_c: float = 37.0
+    wash_formamide_pct: float = 20.0
+    wash_ssc: float = 0.1
+    wash_temp_c: float = 42.0
+    probe_nM: float = 100.0
+
+    def __post_init__(self) -> None:
+        self.formamide_pct = min(100.0, max(0.0, float(self.formamide_pct)))
+        self.wash_formamide_pct = min(100.0, max(0.0, float(self.wash_formamide_pct)))
+        self.ssc = max(0.001, float(self.ssc))
+        self.wash_ssc = max(0.001, float(self.wash_ssc))
+        self.temp_c = float(self.temp_c)
+        self.wash_temp_c = float(self.wash_temp_c)
+        self.probe_nM = max(0.01, float(self.probe_nM))
+
+    def sodium_mM(self, wash: bool = False) -> float:
+        return (self.wash_ssc if wash else self.ssc) * SSC_NA_MM
+
+    def thermo(self, wash: bool = False) -> ThermoSettings:
+        """Salt and probe conditions as ThermoSettings (Owczarzy 2004 salt model)."""
+        return ThermoSettings(
+            tm_method="santalucia", salt_method="owczarzy",
+            monovalent_mM=self.sodium_mM(wash), divalent_mM=0.0, dntp_mM=0.0,
+            oligo_nM=self.probe_nM, temperature_c=self.wash_temp_c if wash else self.temp_c)
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict | None) -> HybConditions:
+        data = dict(data or {})
+        known = {k: data[k] for k in cls.__dataclass_fields__ if k in data}
+        return cls(**known)
+
+    def describe(self) -> str:
+        return (
+            f"hybridisation in {self.formamide_pct:g} % formamide, {self.ssc:g}× SSC "
+            f"({self.sodium_mM():g} mM Na⁺) at {self.temp_c:g} °C; stringent wash in "
+            f"{self.wash_formamide_pct:g} % formamide, {self.wash_ssc:g}× SSC "
+            f"({self.sodium_mM(True):g} mM Na⁺) at {self.wash_temp_c:g} °C; "
+            f"{self.probe_nM:g} nM probe"
+        )
+
+
+def hyb_tm(seq: str, cond: HybConditions | None = None, *, wash: bool = False) -> float:
+    """Probe Tm (°C) under hybridisation (or stringent wash) conditions.
+
+    SantaLucia 1998 nearest neighbour Tm with the Owczarzy 2004 Na⁺ correction
+    (primer3), minus 0.60 °C per % formamide (Hutton 1977).
+    """
+    c = cond or HybConditions()
+    tm = calc_tm(seq, c.thermo(wash))
+    pct = c.wash_formamide_pct if wash else c.formamide_pct
+    return round(tm - FORMAMIDE_TM_PER_PCT * pct, 2)
+
+
 @dataclass
 class Structure:
     """A hairpin / dimer from Primer3's thal: Tm, ΔG and a text drawing."""

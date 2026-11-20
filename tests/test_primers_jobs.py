@@ -178,3 +178,22 @@ def test_result_json_is_plain_json(data):
     main, _files, _payload = pj.run_design([data.gene], _s(dz.MODE_PCR))
     raw = (data.gene.parent / "gene.fa_primers_details" / "gene.fa_primers.json").read_text()
     assert json.loads(raw)["kind"] == "design"
+
+
+def test_fish_run_reports_hybridisation_and_avoids_other_files(data):
+    main, _files, payload = pj.run_design([data.monomers, data.gene], _s(dz.MODE_FISH))
+    assert payload["pairs"], payload.get("explain")
+    assert "formamide" in payload["thermo"] and payload["avoided_files"] == [str(data.gene)]
+    assert "unsuitable" in payload
+    html = main.read_text(encoding="utf-8")
+    assert "Before you use a probe" in html and "Hutton" in html and "0.60 °C per %" in html
+
+
+def test_fish_on_a_dimer_consensus_uses_the_monomer(data, tmp_path):
+    from primer_testdata import revcomp  # noqa: F401  (module import check)
+    mono = data.mono
+    dimer = tmp_path / "consensus_dimer.fasta"
+    dimer.write_text(">TRC_1_dimer\n" + mono + mono + "\n")
+    _main, _files, payload = pj.run_design([dimer], _s(dz.MODE_FISH, min_coverage=0.5))
+    assert payload["templates"][0]["length"] == len(mono)
+    assert any("dimer consensus" in x for x in payload["explain"])

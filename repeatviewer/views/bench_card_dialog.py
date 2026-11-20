@@ -378,6 +378,8 @@ class BenchCardDialog(QDialog):
                 shown = ", ".join(f"{x:,}" for x in off_sizes[:6])
                 more = f" and {len(off_sizes) - 6} more" if len(off_sizes) > 6 else ""
                 note.append(f"Possible off-target bands: {shown}{more} bp.")
+            note.append("<i>A product from genomic DNA is not a FISH probe: clone and "
+                        "sequence it first.</i>")
             note.append("Notes:<br><br>_______________________________")
             self.gel_note.setText("<br>".join(note))
         if self.show_labels.isChecked():

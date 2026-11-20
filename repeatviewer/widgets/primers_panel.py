@@ -14,7 +14,7 @@ import html
 import math
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import QSettings, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QFontDatabase
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -28,6 +28,9 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSizePolicy,
+    QScrollArea,
+    QStackedWidget,
+    QTabBar,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -106,7 +109,7 @@ def find_main_window():
     if app is None:
         return None
     for w in app.topLevelWidgets():
-        if hasattr(w, "_open_primer_design_dialog"):
+        if hasattr(w, "_open_primers_panel"):
             return w
     return None
 
@@ -139,6 +142,23 @@ class _Tile(QWidget):
         lay.addWidget(self.value)
 
 
+def _scrolled(inner: QWidget, parent: QWidget) -> QScrollArea:
+    """A page that scrolls when its contents are taller than the panel."""
+    area = QScrollArea(parent)
+    # room for the scroll bar, so nothing is clipped on the right
+    inner.setContentsMargins(0, 0, 12, 0)
+    # Never wider than the panel: a wide child (a gel, a table) shrinks
+    # instead of pushing the help buttons under the scroll bar.
+    policy = inner.sizePolicy()
+    policy.setHorizontalPolicy(QSizePolicy.Policy.Ignored)
+    inner.setSizePolicy(policy)
+    area.setWidget(inner)
+    area.setWidgetResizable(True)
+    area.setFrameShape(QScrollArea.Shape.NoFrame)
+    area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+    return area
+
+
 class PrimersPanel(QWidget):
     """Rail page body. ``set_host`` must be called before use."""
 
@@ -162,7 +182,43 @@ class PrimersPanel(QWidget):
         self._report_timer.setInterval(120)
         self._report_timer.timeout.connect(self._refresh_inspector)
 
-        lay = QVBoxLayout(self)
+        # Workbench tabs: Design (around a region of this sequence) | Primer (the list
+        # and the selected primer) | PCR (live products) | Enzymes (restriction map,
+        # methylation from data). The Design window stays for many files and modes.
+        from repeatviewer.widgets.primer_design_pane import DesignPane
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(8)
+        self.tabs = QTabBar(self)
+        self.tabs.setExpanding(True)
+        self.tabs.setDrawBase(False)
+        self.tabs.addTab("Design")
+        self.tabs.addTab("Primer")
+        self.tabs.addTab("PCR")
+        self.tabs.addTab("Enzymes")
+        outer.addWidget(self.tabs)
+        self.pages = QStackedWidget(self)
+        outer.addWidget(self.pages, 1)
+        self.design_pane = DesignPane(self.pages)
+        self.pages.addWidget(_scrolled(self.design_pane, self.pages))
+        # Every page scrolls by itself, so the rail around the panel never
+        # needs a second scroll bar.
+        primer_page = QWidget(self.pages)
+        self.primer_page = primer_page
+        self.pages.addWidget(_scrolled(primer_page, self.pages))
+        from repeatviewer.widgets.primer_pcr_pane import PcrPane
+
+        self.pcr_pane = PcrPane(self, self.pages)
+        self.pages.addWidget(_scrolled(self.pcr_pane, self.pages))
+        from repeatviewer.widgets.primer_enzyme_pane import EnzymePane
+
+        self.enzyme_pane = EnzymePane(self, self.pages)
+        self.pages.addWidget(_scrolled(self.enzyme_pane, self.pages))
+        self.tabs.currentChanged.connect(self._on_workbench_tab)
+        self.design_pane.keepRequested.connect(self._on_keep_designed)
+        self.design_pane.jobRequested.connect(self._on_design_job)
+        lay = QVBoxLayout(primer_page)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(8)
 
@@ -170,9 +226,10 @@ class PrimersPanel(QWidget):
         grid.setContentsMargins(0, 0, 0, 0)
         grid.setHorizontalSpacing(6)
         grid.setVerticalSpacing(6)
-        self.add_button = QPushButton("Add Primer…", self)
-        self.database_button = QPushButton("From Database…", self)
-        self.design_button = QPushButton("Design…", self)
+        self.add_button = QPushButton("Add Primer", self)
+        self.database_button = QPushButton("From Database", self)
+        self.design_button = QPushButton("Design", self)
+        self.design_button.setToolTip("Design new primers around a region of this sequence")
         self.pcr_button = QPushButton("Run PCR", self)
         for i, b in enumerate((self.add_button, self.database_button,
                                self.design_button, self.pcr_button)):
@@ -264,9 +321,57 @@ class PrimersPanel(QWidget):
         snap_row.addWidget(self.snap_button, 1)
         snap_row.addWidget(self.snap_tm)
         il.addLayout(snap_row)
+        # Outside the Design settings: amber chips (never blocked).
+        self.flags_label = QLabel(self.inspector)
+        self.flags_label.setWordWrap(True)
+        self.flags_label.setTextFormat(Qt.TextFormat.RichText)
+        self.flags_label.hide()
+        il.addWidget(self.flags_label)
+        # Every binding site on this sequence: ◀ n of N ▶ with its own numbers.
+        nav = QHBoxLayout()
+        nav.setContentsMargins(0, 0, 0, 0)
+        nav.setSpacing(6)
+        nav_label = QLabel("Binding site", self.inspector)
+        self.site_prev = QPushButton("◀", self.inspector)
+        self.site_next = QPushButton("▶", self.inspector)
+        for b, tip in ((self.site_prev, "Previous binding site"), (self.site_next, "Next binding site")):
+            b.setFixedWidth(34)
+            b.setToolTip(tip)
+            b.setAccessibleName(tip)
+        self.site_count = QLabel(self.inspector)
+        self.site_count.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.site_count.setMinimumWidth(64)
+        nav.addWidget(nav_label)
+        nav.addStretch(1)
+        nav.addWidget(self.site_prev)
+        nav.addWidget(self.site_count)
+        nav.addWidget(self.site_next)
+        il.addLayout(nav)
+        self.site_label = QLabel(self.inspector)
+        self.site_label.setWordWrap(True)
+        self.site_label.setTextFormat(Qt.TextFormat.RichText)
+        il.addWidget(self.site_label)
+        self._sites: list = []
+        self._site_index = 0
+        # Dragging the primer on the bases previews the change here; Apply keeps it.
+        self.drag_note = QLabel(self.inspector)
+        self.drag_note.setWordWrap(True)
+        self.drag_note.setTextFormat(Qt.TextFormat.RichText)
+        il.addWidget(self.drag_note)
+        apply_row = QHBoxLayout()
+        apply_row.setContentsMargins(0, 0, 0, 0)
+        apply_row.setSpacing(6)
+        self.revert_button = QPushButton("Revert", self.inspector)
+        self.apply_button = QPushButton("Apply", self.inspector)
+        self.apply_button.setDefault(True)
+        apply_row.addStretch(1)
+        apply_row.addWidget(self.revert_button)
+        apply_row.addWidget(self.apply_button)
+        il.addLayout(apply_row)
+        self._pending: tuple[str, str] | None = None   # (name, sequence before the drag)
         self.fix_button = QPushButton("Fix Mismatches to Match Template", self.inspector)
-        self.edit_button = QPushButton("Edit Primer…", self.inspector)
-        self.genome_button = QPushButton("Sites in Genome…", self.inspector)
+        self.edit_button = QPushButton("Edit Primer", self.inspector)
+        self.genome_button = QPushButton("Sites in Genome", self.inspector)
         for b in (self.fix_button, self.edit_button, self.genome_button):
             b.setMinimumWidth(0)
             b.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
@@ -279,6 +384,10 @@ class PrimersPanel(QWidget):
         self.design_button.clicked.connect(self._on_design)
         self.pcr_button.clicked.connect(self._on_pcr)
         self.edit_button.clicked.connect(lambda: self.edit_primer(self._selected))
+        self.apply_button.clicked.connect(self._apply_drag)
+        self.site_prev.clicked.connect(lambda: self._step_site(-1))
+        self.site_next.clicked.connect(lambda: self._step_site(1))
+        self.revert_button.clicked.connect(self._revert_drag)
         self.fix_button.clicked.connect(self._on_fix)
         self.snap_button.clicked.connect(self._on_snap)
         self.genome_button.clicked.connect(self._on_genome)
@@ -292,6 +401,244 @@ class PrimersPanel(QWidget):
 
     def set_host(self, host) -> None:
         self._host = host
+        self.design_pane.set_host(host)
+        tab = QSettings().value("primers/workbench_tab", 1)
+        try:
+            self.tabs.setCurrentIndex(max(0, min(3, int(tab))))
+        except (TypeError, ValueError):
+            self.tabs.setCurrentIndex(1)
+        self.pages.setCurrentIndex(self.tabs.currentIndex())
+        self.design_pane.overlay_enabled = self.tabs.currentIndex() == 0
+        self.pcr_pane.active = self.tabs.currentIndex() == 2
+        self.enzyme_pane.active = self.tabs.currentIndex() == 3
+
+    def _on_workbench_tab(self, index: int) -> None:
+        self.pages.setCurrentIndex(index)
+        QSettings().setValue("primers/workbench_tab", int(index))
+        # The region band and candidates belong to Design, the products to PCR.
+        self.design_pane.overlay_enabled = index == 0
+        self.pcr_pane.active = index == 2
+        self.enzyme_pane.active = index == 3
+        self.design_pane.push_overlay()
+        self._push_edit_primer()
+        self.enzyme_pane.push_overlay()
+        if index == 2:
+            self.pcr_pane.refresh_primers()
+            self.pcr_pane.push_overlay()
+        if index == 3:
+            self.enzyme_pane.schedule()
+
+    def show_design_tab(self) -> None:
+        self.tabs.setCurrentIndex(0)
+
+    def show_pcr_tab(self) -> None:
+        """The PCR page; it picks up the ticked primers of this sequence by itself."""
+        self.tabs.setCurrentIndex(2)
+
+    def push_workbench_overlay(self) -> None:
+        """Redraw what the current page shows on the sequence (rail tab shown again)."""
+        self.design_pane.push_overlay()
+        self._push_edit_primer()
+        if self.tabs.currentIndex() == 2:
+            self.pcr_pane.push_overlay()
+        self.enzyme_pane.push_overlay()
+
+    def on_sequence_selection(self, start: int, end: int) -> None:
+        """The map selection becomes the Design region (single clicks are ignored)."""
+        self.design_pane.set_region(start, end)
+
+    # ------------------------------------------------------------- drag on bases
+
+    def _flags(self, p: Primer, place) -> list[str]:
+        """The primer against the Design tab's settings and region."""
+        from repeatviewer.backends.primers import workbench as wb
+
+        from repeatviewer.backends.primers import tails as tl
+
+        try:
+            flags = wb.primer_flags(p.sequence, place, self.design_pane.settings(),
+                                    self.design_pane.region())
+        except Exception:  # noqa: BLE001 - flags are advice
+            flags = []
+        try:
+            partner, partner_name = self._partner(p, place)
+            flags += tl.tail_warnings(p.sequence, insert=self._template,
+                                      insert_name="open sequence",
+                                      partner_seq=partner, partner_name=partner_name)
+        except Exception:  # noqa: BLE001
+            pass
+        return flags
+
+    def _partner(self, p: Primer, place) -> tuple[str, str]:
+        """The primer most likely used with this one: ticked, on the other strand."""
+        if place is None:
+            return "", ""
+        for other in self.ticked_primers() + self._primers:
+            if other.name == p.name:
+                continue
+            op = self._placements.get(other.name)
+            if op is not None and op.strand != place.strand:
+                return other.sequence, other.name
+        return "", ""
+
+    def _refresh_sites(self, p: Primer, place) -> None:
+        from repeatviewer.backends.primers import workbench as wb
+
+        try:
+            self._sites = wb.binding_sites(p.sequence, self._template)
+        except Exception:  # noqa: BLE001
+            self._sites = []
+        self._site_index = 0
+        if place is not None:
+            for i, site in enumerate(self._sites):
+                if (site.start, site.end) == (place.start, place.end):
+                    self._site_index = i
+                    break
+        self._show_site(move=False)
+
+    def _step_site(self, step: int) -> None:
+        if not self._sites:
+            return
+        self._site_index = (self._site_index + step) % len(self._sites)
+        self._show_site(move=True)
+
+    def _show_site(self, *, move: bool) -> None:
+        n = len(self._sites)
+        self.site_prev.setEnabled(n > 1)
+        self.site_next.setEnabled(n > 1)
+        if not n:
+            self.site_count.setText("none")
+            self.site_label.setText(
+                '<span style="color:gray">No site with up to 2 mismatches on this sequence.</span>')
+            return
+        site = self._sites[self._site_index]
+        self.site_count.setText(f"<b>{self._site_index + 1}</b> of {n}")
+        mm = ("no mismatch" if not site.mismatches else
+              f"{site.mismatches} mismatch{'es' if site.mismatches > 1 else ''}")
+        tm = f"Tm {site.tm:.1f} °C" if site.tm else "Tm –"
+        self.site_label.setText(
+            f"{site.start:,} – {site.end:,} ({'→' if site.strand == '+' else '←'}), "
+            f"{site.annealed} annealed, {mm}, {tm}, 3′ end exact {site.three_exact}")
+        if move and self._host is not None:
+            show = getattr(self._host, "primers_host_show_range", None)
+            try:
+                (show or self._host.primers_host_show)(site.start, site.end)
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _push_edit_primer(self) -> None:
+        """Make the selected primer draggable on the bases (Primer page only)."""
+        host = self._host
+        if host is None or not hasattr(host, "primers_host_edit_primer"):
+            return
+        place = self._placements.get(self._selected) if self.tabs.currentIndex() == 1 else None
+        try:
+            if place is None:
+                host.primers_host_edit_primer(None)
+            else:
+                flagged = bool(self._flags(self._primer(self._selected), place))
+                host.primers_host_edit_primer((place.start, place.end), place.strand, flagged)
+        except Exception:  # noqa: BLE001 - drawing is a convenience
+            pass
+
+    def on_primer_dragged(self, start: int, end: int, finished: bool) -> None:
+        """The selected primer was dragged to start..end: preview it, Apply keeps it."""
+        name = self._selected
+        p = self._primer(name)
+        if p is None:
+            return
+        if self._pending is None or self._pending[0] != name:
+            self._pending = (name, p.sequence)
+        base = Primer(name=name, sequence=self._pending[1], kind=p.kind, note=p.note,
+                      source=p.source, extra=dict(p.extra))
+        try:
+            place0 = osq.place_primer(base.sequence, self._template, name=name)
+        except Exception:  # noqa: BLE001
+            place0 = None
+        if place0 is None:
+            return
+        from repeatviewer.backends.primers import workbench as wb
+
+        new_seq = wb.primer_for_span(base.sequence, place0, self._template, start, end)
+        self._set_primer_sequence(name, new_seq)
+        if finished:
+            self._refresh_inspector()
+            self._push_edit_primer()
+        else:
+            self._report_timer.start()
+
+    def _set_primer_sequence(self, name: str, sequence: str) -> None:
+        """Change one primer in memory (not saved) and place it again."""
+        out = []
+        for p in self._primers:
+            if p.name == name:
+                p = Primer(name=p.name, sequence=sequence, kind=p.kind, note=p.note,
+                           source=p.source, extra=dict(p.extra))
+            out.append(p)
+        self._primers = out
+        try:
+            self._placements[name] = osq.place_primer(sequence, self._template, name=name)
+        except Exception:  # noqa: BLE001
+            self._placements[name] = None
+
+    def _apply_drag(self) -> None:
+        if self._pending is None:
+            return
+        name = self._pending[0]
+        self._pending = None
+        out = []
+        for p in self._primers:
+            if p.name == name:
+                extra = dict(p.extra)
+                extra["edited"] = True      # a later Design run never replaces it
+                p = Primer(name=p.name, sequence=p.sequence, kind=p.kind, note=p.note,
+                           source=p.source, extra=extra)
+            out.append(p)
+        self.set_primers(out, select=name)
+        self._refresh_inspector()
+        self._push_edit_primer()
+
+    def _revert_drag(self, *, reselect: bool = True) -> None:
+        if self._pending is None:
+            return
+        name, seq = self._pending
+        self._pending = None
+        self._set_primer_sequence(name, seq)
+        if reselect:
+            self._refresh_inspector()
+            self._push_edit_primer()
+
+    def _on_keep_designed(self, primers: list) -> None:
+        added = self.add_primers(list(primers), tick=True)
+        if added:
+            self.tabs.setCurrentIndex(1)
+
+    def _page_of(self, widget) -> int:
+        """Index of the page holding this pane (it may sit in a scroll area)."""
+        for i in range(self.pages.count()):
+            page = self.pages.widget(i)
+            if page is widget or getattr(page, "widget", lambda: None)() is widget:
+                return i
+        return 0
+
+    def _load_design_options(self) -> None:
+        """The two after-the-run options come from the saved primer options."""
+        mw = find_main_window()
+        opts = getattr(mw, "_primer_options", None) if mw is not None else None
+        if opts is not None:
+            self.design_pane.set_options(bool(opts.annotate_design),
+                                         bool(opts.save_design_to_database))
+
+    def _on_design_job(self, payload: dict) -> None:
+        """Design on every FASTA ticked in the Files panel, through the usual job."""
+        mw = find_main_window()
+        start = getattr(mw, "_start_design_from_panel", None) if mw is not None else None
+        if start is None:
+            return
+        try:
+            start(payload)
+        except Exception:  # noqa: BLE001 - the window reports its own errors
+            pass
 
     def primers(self) -> list[Primer]:
         return list(self._primers)
@@ -317,9 +664,15 @@ class PrimersPanel(QWidget):
         except Exception:  # noqa: BLE001 - no data loaded yet
             return
         same_file = self._path is not None and path == self._path
+        if not same_file or seq_id != self._seq_id or len(template or "") != len(self._template):
+            self.design_pane.reset_for_sequence()
+        self._load_design_options()
+        new_sequence = not same_file or seq_id != self._seq_id or template != self._template
         self._path = path
         self._seq_id = seq_id
         self._template = template or ""
+        if new_sequence:
+            self.enzyme_pane.reset_for_sequence()
         stored = osq.load_sequence_primers(path)
         legacy = osq.primers_from_features(features, self._template, stored)
         self._primers = stored + legacy
@@ -329,6 +682,7 @@ class PrimersPanel(QWidget):
         self._place_all()
         self._fill_table()
         self._push_marks()
+        self.pcr_pane.refresh_primers()
 
     def _place_all(self) -> None:
         self._placements = {}
@@ -387,9 +741,13 @@ class PrimersPanel(QWidget):
         row_h = self.table.verticalHeader().defaultSectionSize()
         self.table.setFixedHeight(self.table.horizontalHeader().sizeHint().height()
                                   + rows * row_h + 4)
-        self._selected = self._current_name()
+        new = self._current_name()
+        if self._pending is not None and self._pending[0] != new:
+            self._revert_drag(reselect=False)   # leaving without Apply keeps the old primer
+        self._selected = new
         self._sync_visible()
         self._report_timer.start()
+        self._push_edit_primer()
 
     def _select_row_of(self, name: str) -> None:
         for row in range(self.table.rowCount()):
@@ -460,7 +818,7 @@ class PrimersPanel(QWidget):
         if not names:
             return
         menu = QMenu(self)
-        menu.addAction("Edit Primer…", lambda: self.edit_primer(names[0]))
+        menu.addAction("Edit Primer", lambda: self.edit_primer(names[0]))
         menu.addAction("Copy Sequence", lambda: self._copy_sequences(names))
         menu.addAction("Add to Primer Database", lambda: self._add_to_database(names))
         menu.addSeparator()
@@ -524,6 +882,28 @@ class PrimersPanel(QWidget):
                 where += (f'<br><span style="color:{CHECK_COLOR}">{place.other_sites} more '
                           "site(s) here with ≤ 2 mismatches</span>")
         self.where_label.setText(where)
+        self._refresh_sites(p, place)
+        flags = self._flags(p, place)
+        if flags:
+            chips = " ".join(
+                '<span style="background:#FFF4E5; color:#7A4A00; border:1px solid #E8A33D;">'
+                f"&nbsp;{html.escape(f)}&nbsp;</span>" for f in flags)
+            self.flags_label.setText(chips)
+        self.flags_label.setVisible(bool(flags))
+        self.snap_button.setDefault(any(f.startswith("Tm") for f in flags))
+        pending = self._pending is not None and self._pending[0] == p.name
+        self.apply_button.setVisible(pending)
+        self.revert_button.setVisible(pending)
+        if pending:
+            self.drag_note.setText(
+                "<b>Moved on the sequence.</b> Apply keeps the new primer "
+                f"(was {html.escape(self._pending[1])}); Revert puts it back.")
+        else:
+            self.drag_note.setText(
+                '<span style="color:gray">Drag the primer on the bases to move it, or drag '
+                "an end to make it longer or shorter.</span>"
+                + (' <span style="color:gray">Edited by hand.</span>'
+                   if p.extra.get("edited") else ""))
         self.fix_button.setEnabled(place is not None and place.mismatches > 0)
         self.snap_button.setEnabled(place is not None)
         self._push_marks()
@@ -554,6 +934,7 @@ class PrimersPanel(QWidget):
         self._save()
         self._fill_table()
         self._push_marks()
+        self.pcr_pane.refresh_primers()
         self.primersChanged.emit()
 
     def add_primers(self, primers: list[Primer], *, tick: bool = False) -> list[Primer]:
@@ -647,21 +1028,11 @@ class PrimersPanel(QWidget):
                 self.add_primers(picked, tick=len(picked) <= 2)
 
     def _on_design(self) -> None:
-        mw = find_main_window()
-        if mw is None or self._path is None:
-            return
-        try:
-            mw._open_primer_design_dialog(files=[self._path])
-        except TypeError:
-            mw._open_primer_design_dialog()
+        self.show_design_tab()
 
     def _on_pcr(self) -> None:
-        mw = find_main_window()
-        if mw is None or self._path is None:
-            return
-        opener = getattr(mw, "_open_pcr_window", None)
-        if opener is not None:
-            opener(templates=[self._path], primers=self.ticked_primers())
+        """The PCR page of this panel, with the ticked primers already chosen."""
+        self.show_pcr_tab()
 
     def _on_genome(self) -> None:
         mw = find_main_window()

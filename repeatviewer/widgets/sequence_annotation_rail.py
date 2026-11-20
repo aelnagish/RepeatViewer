@@ -145,6 +145,8 @@ _GENETIC_CODE_HELP = (
 
 _RAIL_TAB_WIDTH = 24
 _MODULE_WIDTH = 260
+# The Primers tab holds the primer workbench (Design / Primer): it needs more room.
+_PRIMERS_MODULE_WIDTH = 330
 _TAB_BUTTON_HEIGHT_MIN = 36
 _TAB_PILL_RADIUS = 7
 _TAB_TEXT_PAD = 4  # vertical padding around rotated label
@@ -899,6 +901,9 @@ class SequenceAnnotationRail(QWidget):
             tab_layout.addWidget(btn, 0, Qt.AlignmentFlag.AlignHCenter)
             self._tab_buttons.append(btn)
             btn.clicked.connect(lambda _checked=False, i=index: self._on_tab_clicked(i))
+        # Primers and Probes is reached from the menu, which opens this page on
+        # the item that was clicked, so the rail has no button of its own for it.
+        self._tab_buttons[PRIMERS_TAB_INDEX].setVisible(False)
         tab_layout.addStretch(1)
 
         root.addWidget(self._stack, 0)
@@ -1045,6 +1050,7 @@ class SequenceAnnotationRail(QWidget):
             setattr(self, store_rule_as, rule)
         title_layout.addWidget(title_widget)
         shell_layout.addWidget(title_host, 0)
+        shell.sticky_title = title_host
 
         scroll = self._wrap_scroll(body)
         # Transparent scroll so shell Window fill matches Annotations.
@@ -1672,7 +1678,10 @@ class SequenceAnnotationRail(QWidget):
         layout.setSpacing(8)
         self.primers_panel = PrimersPanel(page, width=self._module_width)
         layout.addWidget(self.primers_panel, 1)
-        return self._shell_with_sticky_title("Primers", page)
+        shell = self._shell_with_sticky_title("Primers", page)
+        # The Primers and Probes workspace names its sections itself and hides this.
+        self.primers_page_title = shell.sticky_title
+        return shell
 
     def show_primers_tab(self) -> None:
         self.set_current_tab(PRIMERS_TAB_INDEX)
@@ -2997,6 +3006,7 @@ class SequenceAnnotationRail(QWidget):
             btn.setVisible(True)
         self._module_width = _MODULE_WIDTH
         self._apply_module_geometry()
+        self._sync_width_for_tab(self._active_tab)
 
     def set_boundary_prediction_text(self, html: str) -> None:
         """Show (or clear with "") the Boundary prediction summary."""
@@ -3142,6 +3152,7 @@ class SequenceAnnotationRail(QWidget):
             self._divider.setVisible(True)
             self.setFixedWidth(self._expanded_rail_width())
         self._stack.setCurrentIndex(index)
+        self._sync_width_for_tab(index)
         self._sync_tab_checked_state(index)
         if was_collapsed:
             self.panelCollapsedChanged.emit(False)
@@ -3167,6 +3178,14 @@ class SequenceAnnotationRail(QWidget):
             self._stack.setCurrentIndex(index)
             self._sync_tab_checked_state(index)
             self._save_rail_ui_state()
+        self._sync_width_for_tab(index)
+
+    def _sync_width_for_tab(self, index: int) -> None:
+        """Primers (the workbench) is 330 px wide, the other tabs 260 px."""
+        want = _PRIMERS_MODULE_WIDTH if index == PRIMERS_TAB_INDEX else _MODULE_WIDTH
+        if int(self._module_width) != want:
+            self._module_width = want
+            self._apply_module_geometry()
 
     def _settings(self) -> QSettings:
         settings = QSettings()
@@ -3183,8 +3202,12 @@ class SequenceAnnotationRail(QWidget):
             except (TypeError, ValueError):
                 tab = _DEFAULT_TAB_INDEX
             tab = max(0, min(tab, self._stack.count() - 1))
+            if tab == PRIMERS_TAB_INDEX:
+                # Primers and Probes opens from its menu only, never by itself.
+                tab = _DEFAULT_TAB_INDEX
             self._active_tab = tab
             self._stack.setCurrentIndex(tab)
+            self._sync_width_for_tab(tab)
 
             collapsed_raw = settings.value(_SETTINGS_COLLAPSED_KEY, False)
             if isinstance(collapsed_raw, str):
@@ -3214,7 +3237,10 @@ class SequenceAnnotationRail(QWidget):
     def _save_rail_ui_state(self, *_args) -> None:
         settings = self._settings()
         try:
-            settings.setValue(_SETTINGS_TAB_KEY, int(self._active_tab))
+            if self._active_tab != PRIMERS_TAB_INDEX:
+                # The Primers page is not remembered: the next file opens on the
+                # tab that was in use before the menu brought Primers up.
+                settings.setValue(_SETTINGS_TAB_KEY, int(self._active_tab))
             settings.setValue(_SETTINGS_COLLAPSED_KEY, bool(self._panel_collapsed))
             sections = getattr(self, "_annotation_sections", None) or {}
             expanded = [

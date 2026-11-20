@@ -526,7 +526,9 @@ def primers_of_pair(pair: dict) -> list[Primer]:
         try:
             out.append(Primer(name=o.get("name") or f"{pair.get('name', 'pair')}_{key[0].upper()}",
                               sequence=o["sequence"], source="Primer Design",
-                              note=f"{pair.get('name', '')}, product {pair.get('product_size', '')} bp"))
+                              note=(f"{pair.get('name', '')}, product {pair.get('product_size')} bp"
+                                    if pair.get("product_size") else
+                                    f"{pair.get('name', '')}, FISH probe")))
         except th.PrimerError:
             continue
     return out

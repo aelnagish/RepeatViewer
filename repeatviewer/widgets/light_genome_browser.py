@@ -32,12 +32,10 @@ from PySide6.QtCore import (
     Signal,
 )
 from PySide6.QtGui import (
-    QAction,
     QColor,
     QFont,
     QFontMetrics,
     QGuiApplication,
-    QKeySequence,
     QContextMenuEvent,
     QPainter,
     QPainterPath,
@@ -2805,12 +2803,6 @@ class LightGenomeBrowserPanel(QWidget):
         # the page may be deleted while a BAM is open: stop its decoding threads then
         self.destroyed.connect(lambda *_a, b=box: release_track(b.get("track")))
 
-        copy = QAction(self)
-        copy.setShortcut(QKeySequence.StandardKey.Copy)
-        copy.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
-        copy.triggered.connect(self._copy_locus)
-        self.addAction(copy)
-
     # ------------------------------------------------------------ loading
     def load(self, path: Path, *, reference: Path | None = None, forced: bool = False) -> None:
         path = Path(path).expanduser().resolve()
@@ -3657,10 +3649,14 @@ class LightGenomeBrowserPanel(QWidget):
             self._bookmarks.remove(bm)
             self._save_bookmarks()
 
-    def _copy_locus(self) -> None:
-        if self.canvas.chrom:
-            a, b = self.canvas.view_range()
-            QGuiApplication.clipboard().setText(f"{self.canvas.chrom}:{a + 1}-{b}")
+    def copy_locus_to_clipboard(self) -> str:
+        """Edit > Copy (main window): copy the visible locus, return a status line."""
+        if not self.canvas.chrom:
+            return ""
+        a, b = self.canvas.view_range()
+        locus = f"{self.canvas.chrom}:{a + 1}-{b}"
+        QGuiApplication.clipboard().setText(locus)
+        return f"Copied {locus}"
 
     # ------------------------------------------------------------ view menu
     def _set_mode(self, *, text: bool, remember: bool) -> None:

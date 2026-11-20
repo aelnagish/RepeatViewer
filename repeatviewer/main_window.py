@@ -88,6 +88,26 @@ _BROWSER_DOCK_WIDTH = 480
 _BROWSER_FOLDER_TREE_WIDTH = 120
 
 
+class _SubmenuRow(QPushButton):
+    """A popup row that opens a submenu: its label, and a small arrow on the right."""
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        super().paintEvent(event)
+        lit = self.underMouse() or bool(self.property("subOpen"))
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor("#ffffff" if lit else "#1d1d1f"))
+        x = self.width() - 12
+        y = self.height() / 2
+        from PySide6.QtCore import QPointF
+        from PySide6.QtGui import QPolygonF
+
+        painter.drawPolygon(QPolygonF([QPointF(x - 4, y - 4.5), QPointF(x + 1, y),
+                                       QPointF(x - 4, y + 4.5)]))
+        painter.end()
+
+
 class _ToolbarPopup(QWidget):
     """Toolbar dropdown that does not steal the mouse grab.
 
@@ -105,7 +125,9 @@ class _ToolbarPopup(QWidget):
     _SHADOW = 12
     _TOP_PAD = 2
 
-    def __init__(self, actions: list[QAction], parent: QWidget | None = None) -> None:
+    def __init__(self, actions: list[QAction], parent: QWidget | None = None,
+                 owner: QMenu | None = None,
+                 parent_popup: "_ToolbarPopup | None" = None) -> None:
         # parent=None → true top-level window so move/setGeometry use global
         # screen coordinates (matching mapToGlobal). A MainWindow parent can
         # make macOS treat positions as parent-relative and shift the menu up.
@@ -120,6 +142,18 @@ class _ToolbarPopup(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setObjectName("ToolbarPopup")
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        # A submenu opens beside its row as a popup of its own, like a macOS
+        # menu; the first popup (the root) closes them all.
+        self._parent_popup = parent_popup
+        self._child: _ToolbarPopup | None = None
+        self._open_row: QPushButton | None = None
+        self._hover_timer = QTimer(self)
+        self._hover_timer.setSingleShot(True)
+        self._hover_timer.setInterval(120)
+        self._hover_timer.timeout.connect(self._open_hovered_submenu)
+        self._hovered_row: QPushButton | None = None
+        if parent_popup is not None:
+            self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(self._SHADOW, self._TOP_PAD, self._SHADOW, self._SHADOW)
@@ -148,7 +182,8 @@ class _ToolbarPopup(QWidget):
             "  color: #1d1d1f;"
             "  font-size: 13px;"
             "}"
-            "QWidget#ToolbarPopupPanel QPushButton:hover {"
+            "QWidget#ToolbarPopupPanel QPushButton:hover,"
+            "QWidget#ToolbarPopupPanel QPushButton[subOpen=\"true\"] {"
             "  background: #0a84ff;"
             "  color: #ffffff;"
             "}"
@@ -164,37 +199,172 @@ class _ToolbarPopup(QWidget):
         shadow.setColor(QColor(0, 0, 0, 48))
         panel.setGraphicsEffect(shadow)
 
+        self._layout = layout
+        # Everything a row can trigger stays referenced for as long as the
+        # popup lives: the menu the actions came from, its submenus, the actions.
+        self._keep: list = [owner, *actions]
         for action in actions:
-            if action.isSeparator():
-                row = QWidget(panel)
-                row_layout = QHBoxLayout(row)
-                row_layout.setContentsMargins(8, 1, 8, 1)
-                row_layout.setSpacing(0)
-                separator = QFrame(row)
-                separator.setFixedHeight(1)
-                separator.setStyleSheet("background: #d8d8d8; border: 0;")
-                row_layout.addWidget(separator)
-                layout.addWidget(row)
-                continue
-            label = action.text().replace("&", "")
-            button = QPushButton(label, panel)
-            button.setCursor(Qt.CursorShape.ArrowCursor)
-            button.setEnabled(action.isEnabled())
-            # QAction.toolTip() falls back to the action text when unset — that
-            # just repeats the button label in a white hover box (Visualization,
-            # BLAST, …). Only keep a tip when it adds something new.
-            tip = (action.toolTip() or "").replace("&", "").strip()
-            button.setToolTip(tip if tip and tip != label.strip() else "")
-            button.clicked.connect(
-                lambda _checked=False, selected=action: self._run_action(selected)
-            )
-            layout.addWidget(button)
+            self._add_entry(action, 0)
 
         outer.addWidget(panel)
 
+    def _add_entry(self, action: QAction, depth: int) -> None:
+        """One row of the popup. A submenu is a row with an arrow that opens
+        its items beside it, as in the menu bar."""
+        panel, layout = self._panel, self._layout
+        if action.isSeparator():
+            row = QWidget(panel)
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(8, 1, 8, 1)
+            row_layout.setSpacing(0)
+            separator = QFrame(row)
+            separator.setFixedHeight(1)
+            separator.setStyleSheet("background: #d8d8d8; border: 0;")
+            row_layout.addWidget(separator)
+            layout.addWidget(row)
+            return
+        label = action.text().replace("&", "")
+        submenu = action.menu()
+        if submenu is not None:
+            self._keep.append(submenu)
+            self._keep.extend(submenu.actions())
+            row = _SubmenuRow(label, panel)
+            row.setCursor(Qt.CursorShape.ArrowCursor)
+            row.setEnabled(action.isEnabled())
+            row.setStyleSheet("padding-right: 30px;")
+            row._rv_submenu = submenu  # type: ignore[attr-defined]
+            row.installEventFilter(self)
+            row.clicked.connect(lambda _checked=False, r=row: self._open_submenu(r))
+            layout.addWidget(row)
+            return
+        button = QPushButton(label, panel)
+        button.installEventFilter(self)
+        button.setCursor(Qt.CursorShape.ArrowCursor)
+        button.setEnabled(action.isEnabled())
+        if depth:
+            button.setStyleSheet(f"padding-left: {12 + 14 * depth}px;")
+        # QAction.toolTip() falls back to the action text when unset — that
+        # just repeats the button label in a white hover box (Visualization,
+        # BLAST, …). Only keep a tip when it adds something new.
+        tip = (action.toolTip() or "").replace("&", "").strip()
+        button.setToolTip(tip if tip and tip != label.strip() else "")
+        button.clicked.connect(
+            lambda _checked=False, selected=action: self._run_action(selected)
+        )
+        layout.addWidget(button)
+
+    # ------------------------------------------------------------ submenus
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802
+        """Hovering a row with an arrow opens its submenu; any other row closes it."""
+        if event.type() == QEvent.Type.Enter and isinstance(obj, QPushButton):
+            if isinstance(obj, _SubmenuRow):
+                self._hovered_row = obj
+                self._hover_timer.start()
+            else:
+                self._hovered_row = None
+                self._hover_timer.stop()
+                self._close_child()
+        return super().eventFilter(obj, event)
+
+    def _open_hovered_submenu(self) -> None:
+        row = self._hovered_row
+        if row is not None and row.underMouse():
+            self._open_submenu(row)
+
+    def _open_submenu(self, row: QPushButton) -> None:
+        if self._open_row is row and self._child is not None:
+            return
+        self._close_child()
+        submenu = getattr(row, "_rv_submenu", None)
+        if submenu is None:
+            return
+        actions = list(submenu.actions())
+        if not actions:
+            return
+        child = _ToolbarPopup(actions, owner=submenu, parent_popup=self)
+        self._child = child
+        self._open_row = row
+        row.setProperty("subOpen", True)
+        row.style().unpolish(row)
+        row.style().polish(row)
+        row.update()
+        child.closed.connect(lambda c=child: self._child_closed(c))
+        child.show_beside(row)
+
+    def _child_closed(self, child: "_ToolbarPopup") -> None:
+        if self._child is not child:
+            return
+        self._child = None
+        row, self._open_row = self._open_row, None
+        if row is not None:
+            try:
+                row.setProperty("subOpen", False)
+                row.style().unpolish(row)
+                row.style().polish(row)
+                row.update()
+            except RuntimeError:
+                pass
+
+    def _close_child(self) -> None:
+        child = self._child
+        if child is None:
+            return
+        try:
+            child.close()
+        except RuntimeError:
+            self._child_closed(child)
+
+    def _root(self) -> "_ToolbarPopup":
+        popup = self
+        while popup._parent_popup is not None:
+            popup = popup._parent_popup
+        return popup
+
+    def _chain_active(self) -> bool:
+        popup = self._root()
+        while popup is not None:
+            try:
+                if popup.isActiveWindow():
+                    return True
+            except RuntimeError:
+                return False
+            popup = popup._child
+        return False
+
+    def show_beside(self, row: QWidget) -> None:
+        """Open to the right of ``row``, its first item level with the row."""
+        self.adjustSize()
+        width = max(self.sizeHint().width(), 1)
+        height = max(self.sizeHint().height(), 1)
+        top_left = row.mapToGlobal(QPoint(0, 0))
+        right = row.mapToGlobal(QPoint(row.width(), 0)).x()
+        panel_margin = 5
+        x = right + 4 - self._SHADOW
+        y = top_left.y() - panel_margin - self._TOP_PAD - 1
+        screen = row.screen()
+        if screen is not None:
+            available = screen.availableGeometry()
+            if x + width > available.right() + 1:
+                # no room on the right: open on the left of the parent menu
+                parent = self._parent_popup
+                left = (parent._panel.mapToGlobal(QPoint(0, 0)).x()
+                        if parent is not None else top_left.x())
+                x = left - width + self._SHADOW - 4
+            x = max(available.left(), x)
+            y = max(available.top(), min(y, available.bottom() - height + 1))
+        self.setGeometry(QRect(x, y, width, height))
+        self.show()
+        self.raise_()
+
     def _run_action(self, action: QAction) -> None:
-        self.close()
-        action.trigger()
+        self._root().close()
+        try:
+            action.trigger()
+        except RuntimeError:
+            # The action was freed under us: say so instead of doing nothing.
+            QMessageBox.warning(None, "RepeatViewer",
+                                "That menu item is no longer available. Open the menu again.")
 
     def show_below(self, widget: QWidget) -> None:
         """Place the visible menu panel fully below ``widget`` (global coords)."""
@@ -243,10 +413,15 @@ class _ToolbarPopup(QWidget):
         QTimer.singleShot(0, self._close_if_unfocused)
 
     def _close_if_unfocused(self) -> None:
-        if self.isVisible() and not self.isActiveWindow():
-            self.close()
+        try:
+            if self.isVisible() and not self._chain_active():
+                self._root().close()
+        except RuntimeError:
+            pass
 
     def hideEvent(self, event) -> None:  # noqa: N802
+        self._hover_timer.stop()
+        self._close_child()
         super().hideEvent(event)
         self.closed.emit()
 
@@ -3130,6 +3305,29 @@ class MainWindow(
         self._update_directory_watchers()
         self._update_status()
         QTimer.singleShot(0, self._finalize_browser_layout)
+        QTimer.singleShot(0, self._open_last_file_at_startup)
+
+    def _open_last_file_at_startup(self) -> None:
+        """Show the file that was open last time, so Preview does not start empty.
+
+        Only at startup and only when nothing is open yet: switching folders
+        later still just highlights the last file (fast for large files).
+        """
+        tabs = self._preview_tabs
+        folder = self._current_folder
+        if tabs is None or folder is None or tabs.count() > 0:
+            return
+        key = self._folder_memory_key(folder)
+        remembered = self._last_file_by_folder.get(key) if key is not None else None
+        if not remembered:
+            return
+        path = Path(remembered)
+        if not path.is_file():
+            return
+        try:
+            self._open_file_in_preview(path)
+        except Exception:  # noqa: BLE001 - an empty Preview is better than no window
+            pass
 
     def _finalize_browser_layout(self) -> None:
         """Re-check dock tiling after the first paint (restoreState can lag)."""
@@ -3565,6 +3763,12 @@ class MainWindow(
         if self._preview_tabs is not None and not self._preview_tabs.confirm_close_pages(
             self._preview_tabs.unsaved_pages()
         ):
+            event.ignore()
+            return
+        # The Primers and Probes workspace can hold unsaved annotation edits too.
+        workspace_of = getattr(self, "_primers_workspace", None)
+        workspace = workspace_of() if workspace_of is not None else None
+        if workspace is not None and not workspace.confirm_leave():
             event.ignore()
             return
         if self._find_dialog is not None:
@@ -6718,6 +6922,19 @@ class MainWindow(
             if message:
                 self._set_status_message(message, 5000)
                 return
+        widget = self._edit_focus()[1]
+        if not isinstance(widget, (QLineEdit, QTextEdit, QPlainTextEdit)):
+            # The genome browser copies its visible locus (it has no Ctrl+C of its own:
+            # a second shortcut next to this menu item made both ambiguous).
+            parent = widget
+            while parent is not None:
+                copy_locus = getattr(parent, "copy_locus_to_clipboard", None)
+                if callable(copy_locus):
+                    message = copy_locus()
+                    if message:
+                        self._set_status_message(message, 5000)
+                    return
+                parent = parent.parentWidget()
         self._edit_forward_key("copy", QKeySequence.StandardKey.Copy)
 
     def _edit_paste(self) -> None:
@@ -7652,7 +7869,7 @@ class MainWindow(
             if not actions:
                 return
 
-            popup = _ToolbarPopup(actions)
+            popup = _ToolbarPopup(actions, owner=scratch)
             self._active_toolbar_menu = popup
             self._active_toolbar_menu_button = btn
             btn.setDown(True)
@@ -7970,7 +8187,7 @@ class MainWindow(
             self._add_toolbar_text_menu_button(
                 bar,
                 "Primers and Probes",
-                lambda: self._open_primer_design_dialog(),
+                lambda: self._design_in_panel(None),
                 lambda menu, skip_default=True: self._populate_primers_menu(menu),
                 tooltip=(
                     "Click: Design, Map or Database (as in Tools › Primers and Probes).\n"
@@ -10629,6 +10846,11 @@ class MainWindow(
                     return
             except OSError:
                 pass
+        # The Primers and Probes workspace in front: a clicked FASTA becomes
+        # the sequence it works on, and no file tab opens over it.
+        takes = getattr(self, "_primers_workspace_takes_file", None)
+        if takes is not None and takes(path):
+            return
         self._open_file_in_preview(path)
 
     def _resolve_te_masking_input_path(self, path: Path) -> Path | None:
@@ -11005,8 +11227,6 @@ class MainWindow(
         current_tab = getattr(dialog, "current_dialog_tab", None)
         if not callable(current_tab):
             return
-        if self._remember_primer_dialog_tab(dialog):
-            return
         if self._remember_ncbi_dialog_tab(dialog):
             return
         tab = current_tab()
@@ -11308,7 +11528,7 @@ class MainWindow(
             self._sync_samtools_params_dialog_from_files(panel_path)
             self._sync_tree_trait_dialog_from_files(panel_path)
             self._sync_primer_check_dialog_from_files(panel_path)
-            self._sync_pcr_window_from_files(panel_path)
+            self._sync_primer_genome_from_files(panel_path)
             filled_transfer = self._sync_transfer_source_from_files(panel_path)
             if not filled_transfer:
                 self._stop_transfer_session_on_file_navigation(panel_path)

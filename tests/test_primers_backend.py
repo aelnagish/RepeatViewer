@@ -367,3 +367,68 @@ def test_gel_ladder_choice_and_band_order():
     assert [b.size for b in bands] == [400, 201]
     svg = gel.gel_svg([gel.Lane("pair", bands)], ladder="100 bp")
     assert svg.startswith("<svg") and "pair" in svg
+
+
+# ---------------------------------------------------------------- FISH hybridisation
+
+
+def test_hyb_tm_formamide_and_salt():
+    from repeatviewer.backends.primers import thermo as tt
+    probe = "ATGCGTACGTTAGCATCGATCGTAGCTAGCTAGGCTAGCTAGCATCGATCGATCGTAGCTAG"[:50]
+    c = tt.HybConditions()                      # 50 % formamide, 2x SSC
+    assert c.sodium_mM() == 390.0 and abs(c.sodium_mM(wash=True) - 19.5) < 1e-9
+    no_fa = tt.hyb_tm(probe, tt.HybConditions(formamide_pct=0))
+    assert abs(no_fa - tt.hyb_tm(probe, c) - 30.0) < 0.01     # 0.60 °C per %
+    assert tt.hyb_tm(probe, c, wash=True) < no_fa
+    assert tt.HybConditions.from_dict(c.to_dict()) == c
+
+
+def test_unsuitable_regions_found():
+    import random
+    from repeatviewer.backends.primers import low_complexity as lc
+    rnd = random.Random(3)
+    r = lambda n: "".join(rnd.choice("ACGT") for _ in range(n))  # noqa: E731
+    stem = r(15)
+    rc = stem[::-1].translate(str.maketrans("ACGT", "TGCA"))
+    seq = r(100) + "AT" * 15 + r(100) + stem + r(30) + rc + r(100) + "A" * 25 + r(200)
+    kinds = {(x.start, x.kind) for x in lc.unsuitable_regions(seq)}
+    assert (99, "simple repeat") in kinds and (99, "low complexity") in kinds
+    assert (230, "inverted repeat") in kinds and (275, "inverted repeat") in kinds
+    assert (390, "simple repeat") in kinds
+    assert not [x for x in lc.unsuitable_regions(r(3000)) if x.kind == "low complexity"]
+
+
+def test_dimer_consensus_becomes_monomer():
+    from repeatviewer.backends.primers import design as dz
+    mono = "ACGTTGCAAGCTTAGCCTAGGATCCAAGTCGATCGGATCCTTAGCAAGTCC"
+    assert dz.monomer_from_dimer(mono + mono) == (mono, True)
+    assert dz.monomer_from_dimer(mono + mono[::-1])[1] is False
+
+
+def test_ladder_turns_template_mispriming_off():
+    from repeatviewer.backends.primers import design as dz
+    assert all(v == -1 for v in dz.LADDER_NO_TEMPLATE_MISPRIMING.values())
+
+
+def test_fish_probes_use_hybridisation_tm_and_skip_regions():
+    import random
+    from repeatviewer.backends.primers import design as dz
+    from repeatviewer.backends.primers import low_complexity as lc
+    from repeatviewer.backends.primers import thermo as tt
+    rnd = random.Random(7)
+    mono = "".join(rnd.choice("ACGT") for _ in range(300))
+    copies = [(f"c{i}", mono) for i in range(5)]
+    s = dz.DesignSettings(mode=dz.MODE_FISH, **dz.mode_preset(dz.MODE_FISH))
+    skip = [lc.Region(0, 150, "low complexity")]
+    pairs = dz.design_fish("m", mono, copies, s, avoid=[("other", mono[200:280])], skip=skip)
+    assert pairs
+    for p in pairs:
+        pr = p.probe
+        assert pr.start > 150
+        assert s.tm_min <= pr.tm <= s.tm_max
+        assert abs(pr.tm - tt.hyb_tm(pr.sequence, s.hyb)) < 0.01
+        assert pr.extra["wash_tm"] >= s.hyb.wash_temp_c
+    hit = [p for p in pairs if p.coverage["cross_hits"]]
+    assert all(p.coverage["cross_names"] == ["other"] for p in hit)
+    back = dz.DesignSettings.from_dict(s.to_dict())
+    assert back.hyb == s.hyb

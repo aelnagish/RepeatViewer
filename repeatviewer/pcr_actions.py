@@ -13,6 +13,12 @@ from PySide6.QtWidgets import QMessageBox
 
 from repeatviewer.backends.job_cancel import CANCELLED_MESSAGE
 
+
+def sanger_read_suffixes() -> tuple[str, ...]:
+    from repeatviewer.backends.primers import sanger as sg
+
+    return sg.AB1_SUFFIXES
+
 PCR_SETTINGS_GROUP = "pcr"
 PCR_JOB_STEPS = 4
 
@@ -87,74 +93,101 @@ class PcrJobWorker(QObject):
 
 
 class PcrActionsMixin:
-    _pcr_window = None
     _primer_genome_dialog = None
     _bench_card_dialog = None
 
     # ------------------------------------------------------------- menu
 
     def _populate_pcr_menu_items(self, menu) -> None:
-        a = menu.addAction("In-silico PCR", lambda: self._open_pcr_window())
-        a.setToolTip("In-silico PCR: products of the primers on the selected sequences")
+        a = menu.addAction("In-silico PCR", self._open_pcr_in_panel)
+        a.setToolTip("In-silico PCR: products of the primers on this sequence or the ticked files")
+        a = menu.addAction("Restriction Digest", self._open_digest_in_panel)
+        a.setToolTip("Restriction map and digest of the sequence, with your methylation data")
+        a = menu.addAction("Gel", self._open_gel_document)
+        a.setToolTip("A gel: open the selected one, or start an empty one")
+        menu.addSeparator()
+        a = menu.addAction("Sanger Check", lambda: self._open_sanger_dialog())
+        a.setToolTip("Sanger reads (.ab1) of a clone against the sequence it should carry")
+        menu.addSeparator()
+        a = menu.addAction("Cloning", lambda: self._open_cloning_dialog())
+        a.setToolTip("Put a PCR product into a vector: orientation, colony PCR, warnings")
 
-    # ------------------------------------------------------------- PCR window
+    def _open_pcr_in_panel(self) -> None:
+        """PCR page of the Primers panel, live on the open sequence."""
+        self._open_primers_panel(tab="pcr")
+
+    def _open_digest_in_panel(self) -> None:
+        """Enzymes page of the Primers panel, on its Digest view."""
+        self._open_primers_panel(tab="enzymes", digest=True)
+
+    def _open_gel_document(self) -> None:
+        """Open the selected gel, or make an empty one to fill in."""
+        from repeatviewer.backends.primers import gel_doc as gd
+
+        chosen = [p for p in self._selected_files()
+                  if Path(p).is_file() and Path(p).suffix.lower() == gd.GEL_SUFFIX]
+        if chosen:
+            self._show_new_output(Path(chosen[0]))
+            return
+        self._new_gel_document()
+
+    # ------------------------------------------------------------- cloning
+
+    def _open_cloning_dialog(self, *, insert: str = "", insert_name: str = "",
+                             path=None, features=()) -> None:
+        """Cloning as a tab in the middle, with its settings on the right."""
+        from repeatviewer.views.cloning_page import CloningPage
+        from repeatviewer.views.sanger_dialog import _read_fasta
+
+        if not insert:
+            source = Path(path) if path else next(
+                (p for p in (self._selected_files() if hasattr(self, "_selected_files") else [])
+                 if Path(p).is_file()), None)
+            if source is not None:
+                records = _read_fasta(Path(source))
+                if records:
+                    insert_name, insert = records[0][0], records[0][1]
+                    path = source
+        folder = Path(path).parent if path else None
+        page = CloningPage(insert, insert_name=insert_name, folder=folder, features=features)
+        if getattr(self, "_preview_tabs", None) is None:
+            return
+        self._host_in_workspace("cloning", page)
+        self._cloning_page = page
+
+    def _open_sanger_dialog(self, *, expected: str = "", expected_name: str = "",
+                            path=None) -> None:
+        """Sanger Check as a tab in the middle, with its settings on the right."""
+        from repeatviewer.views.sanger_dialog import _read_fasta
+        from repeatviewer.views.sanger_page import SangerPage
+
+        picked = [Path(p) for p in self._selected_files()] if hasattr(self, "_selected_files") \
+            else []
+        reads = [p for p in picked if p.suffix.lower() in sanger_read_suffixes()]
+        if not expected:
+            source = Path(path) if path else next(
+                (p for p in picked if p not in reads and p.is_file()), None)
+            if source is not None:
+                records = _read_fasta(source)
+                if records:
+                    expected_name, expected = records[0][0], records[0][1]
+                    path = source
+        folder = Path(path).parent if path else (reads[0].parent if reads else None)
+        page = SangerPage(expected, expected_name=expected_name, folder=folder)
+        if reads:
+            page.add_reads(reads)
+        if getattr(self, "_preview_tabs", None) is None:
+            return
+        self._host_in_workspace("sanger", page)
+        self._sanger_page = page
+
+    # ------------------------------------------------------------- templates
 
     def _pcr_template_candidates(self) -> list[Path]:
         try:
             return self._primer_candidate_files()
         except Exception:  # noqa: BLE001
             return []
-
-    def _open_pcr_window(self, *, templates: list[Path] | None = None,
-                         primers: list | None = None) -> None:
-        if not self._primers_ready():
-            return
-        from repeatviewer.views.pcr_dialog import PcrWindow
-
-        settings, rc = load_pcr_settings()
-        templates = list(templates) if templates else self._pcr_template_candidates()
-        if primers is None:
-            primers = self._primers_of_files(templates)
-        win = self._pcr_window
-        try:
-            alive = win is not None and win.objectName() is not None
-        except RuntimeError:
-            alive = False
-        if alive:
-            # Reuse the window (it may be hidden after opening a result in Preview).
-            for t in templates:
-                win.apply_path_from_panel(Path(t))
-            win.add_primers(list(primers))
-            win.show()
-            win.raise_()
-            win.activateWindow()
-            return
-        db = self._primer_options.database_path or None
-        win = PcrWindow(settings, templates=templates, primers=primers,
-                        database_path=Path(db) if db else None, right_click_runs=rc, parent=self)
-        win.setWindowFlag(Qt.WindowType.Tool, True)
-        win.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
-        self._pcr_window = win
-        win.runRequested.connect(self._start_pcr_job)
-        win.saveRequested.connect(
-            lambda s, w=win: (save_pcr_settings(s, w.right_click_runs()),
-                              self._set_status_message("PCR settings saved", 4000)))
-        win.openGelRequested.connect(
-            lambda res, w=win: (self._step_aside(w), self._open_gel_for_pcr(res)))
-        win.openFileRequested.connect(
-            lambda path, w=win: (self._step_aside(w), self._on_preview_open_requested(path)))
-        win.benchCardRequested.connect(self._open_bench_card)
-        win.sitesRequested.connect(
-            lambda prims, genome, w=win: self._open_primer_genome_view(prims, genome=genome, parent=w))
-
-        def _closed(*_a) -> None:
-            if self._pcr_window is win:
-                self._pcr_window = None
-
-        win.destroyed.connect(_closed)
-        win.show()
-        win.raise_()
-        win.activateWindow()
 
     def _primers_of_files(self, files: list[Path]) -> list:
         """Primers kept with the files (Primers tab); ticked ones are not known here."""
@@ -175,27 +208,20 @@ class PcrActionsMixin:
         if rc and files and primers:
             self._start_pcr_job(files, primers, settings)
             return
-        self._open_pcr_window(templates=files, primers=primers)
+        self._open_pcr_in_panel()
 
-    def _sync_pcr_window_from_files(self, clicked_path: Path | None) -> None:
+    def _sync_primer_genome_from_files(self, clicked_path: Path | None) -> None:
+        """A click in the Files panel fills the path of the open Binding Sites window."""
         if clicked_path is None:
             return
         gdlg = self._primer_genome_dialog
-        if gdlg is not None:
-            try:
-                pcr_open = self._pcr_window is not None and self._pcr_window.isVisible()
-                if gdlg.isVisible() and not pcr_open:
-                    gdlg.apply_path_from_panel(clicked_path)
-            except RuntimeError:
-                self._primer_genome_dialog = None
-        win = self._pcr_window
-        if win is None:
+        if gdlg is None:
             return
         try:
-            if win.isVisible():
-                win.apply_path_from_panel(clicked_path)
+            if gdlg.isVisible():
+                gdlg.apply_path_from_panel(clicked_path)
         except RuntimeError:
-            self._pcr_window = None
+            self._primer_genome_dialog = None
 
     def _start_pcr_job(self, templates, primers, settings) -> None:
         files = [Path(t) for t in templates]
@@ -229,24 +255,11 @@ class PcrActionsMixin:
         from repeatviewer.backends.primers import pcr
 
         self._set_status_message(f"PCR finished: {pcr.describe(result)}", 10000)
-        win = self._pcr_window
-        if win is not None:
-            try:
-                win.show_result(result, outputs)
-                win.raise_()
-            except RuntimeError:
-                self._pcr_window = None
 
     def _on_pcr_failed(self, error: str) -> None:
         if error.strip() == CANCELLED_MESSAGE:
             return
         QMessageBox.warning(self, "PCR", error.strip() or "Unknown error.")
-        win = self._pcr_window
-        if win is not None:
-            try:
-                win.show_result(None)
-            except RuntimeError:
-                pass
 
     # ------------------------------------------------------------- gel
 
@@ -256,10 +269,6 @@ class PcrActionsMixin:
 
         first = Path(result.templates[0]) if result.templates else Path.cwd()
         base = pcr.output_base(first, result.primers)
-        win = self._pcr_window
-        outputs = getattr(win, "_outputs", {}) if win is not None else {}
-        if outputs.get("base"):
-            base = outputs["base"]
         path = first.parent / f"{base}{gd.GEL_SUFFIX}"
         if path.exists():
             # Same run: reuse; another run with this base: new name.
@@ -298,6 +307,16 @@ class PcrActionsMixin:
         if self._current_folder and Path(path).parent == Path(self._current_folder):
             self._populate_file_list(self._current_folder, new_outputs=[path],
                                      source_files=[], open_preview=False)
+        if Path(path).suffix.lower() == ".rvgel":
+            # a gel belongs to the Gel section of the Primers and Probes workspace
+            ensure = getattr(self, "_ensure_primers_workspace", None)
+            workspace = ensure() if ensure is not None else None
+            tabs = getattr(self, "_preview_tabs", None)
+            if workspace is not None and tabs is not None:
+                workspace.show_gel(Path(path))
+                tabs.setCurrentWidget(workspace)
+                self._ensure_preview_visible()
+                return
         self._open_preview_tab(path, replace=False)
 
     # ------------------------------------------------------------- genome view, bench card
@@ -322,21 +341,6 @@ class PcrActionsMixin:
         self._primer_genome_dialog = dlg
         dlg.show()
         dlg.raise_()
-
-    def _step_aside(self, win) -> None:
-        """Hide a tool window so what it opened in Preview is in front.
-
-        The window keeps its results; Tools > Primers and Probes > PCR (or the
-        Primers tab's Run PCR) shows it again.
-        """
-        try:
-            win.hide()
-        except RuntimeError:
-            return
-        self.raise_()
-        self.activateWindow()
-        self._set_status_message(
-            "PCR window hidden; Tools > Primers and Probes > PCR shows it again", 6000)
 
     def _open_bench_card(self, result) -> None:
         from repeatviewer.views.bench_card_dialog import BenchCardDialog
