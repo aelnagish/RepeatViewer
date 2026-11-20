@@ -164,10 +164,10 @@ class PaintingPage(QWidget):
         lay = QVBoxLayout(middle)
         lay.setContentsMargins(12, 12, 12, 12)
         lay.setSpacing(10)
-        self.verdict = QLabel(middle)
-        self.verdict.setWordWrap(True)
+        from repeatviewer.widgets.primer_design_pane import VerdictLabel
+
+        self.verdict = VerdictLabel(middle)
         self.verdict.setObjectName("paintingVerdict")
-        lay.addWidget(self.verdict)
 
         self.table = QTableWidget(0, 4, middle)
         self.table.setHorizontalHeaderLabels(["Chromosome", "Probes", "Per Mb", "Length"])
@@ -190,6 +190,7 @@ class PaintingPage(QWidget):
         lay.addLayout(pic_head)
         self.picture = ProbePicture(middle)
         lay.addWidget(_card(self.picture, middle), 1)
+        lay.addWidget(self.verdict)     # under the boxes, when there is one
         _results_surface(middle)
         outer.addWidget(middle, 1)
 

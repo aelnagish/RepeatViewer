@@ -70,10 +70,10 @@ class CloningPage(QWidget):
         lay = QVBoxLayout(middle)
         lay.setContentsMargins(12, 12, 12, 12)
         lay.setSpacing(10)
-        self.verdict = QLabel(middle)
-        self.verdict.setWordWrap(True)
+        from repeatviewer.widgets.primer_design_pane import VerdictLabel
+
+        self.verdict = VerdictLabel(middle)
         self.verdict.setObjectName("cloningVerdict")
-        lay.addWidget(self.verdict)
 
         head = QHBoxLayout()
         head.addWidget(QLabel("<b>Clone</b>", middle), 1)
@@ -106,6 +106,7 @@ class CloningPage(QWidget):
         self.gel = GelView(middle, compact=True)
         self.gel.setMinimumHeight(220)
         lay.addWidget(_card(self.gel, middle), 1)
+        lay.addWidget(self.verdict)     # under the boxes, when there is one
         _results_surface(middle)
         outer.addWidget(middle, 1)
 

@@ -223,6 +223,22 @@ def _results_surface(widget: QWidget) -> None:
     widget.setAutoFillBackground(True)
 
 
+class VerdictLabel(QLabel):
+    """The result line of a page: shown under the boxes, and only when it is a
+    result or a problem (green or amber). A plain hint stays out of sight, so
+    the boxes sit at the same place in every section; the "?" explains the page.
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWordWrap(True)
+        self.hide()
+
+    def setStyleSheet(self, sheet: str) -> None:  # noqa: N802
+        super().setStyleSheet(sheet)
+        self.setVisible(bool(sheet))
+
+
 def _card(widget: QWidget, parent: QWidget) -> QFrame:
     """``widget`` in a white box with a thin border and round corners."""
     frame = QFrame(parent)
