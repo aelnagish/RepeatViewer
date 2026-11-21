@@ -142,7 +142,7 @@ class PcrPane(QWidget):
         self.database_button = QPushButton("From Database", sec)
         self.database_button.setFixedWidth(FIELD_W)
         # its text starts where the text of the menus above starts
-        self.database_button.setStyleSheet("QPushButton { text-align: left; }")
+        self.database_button.setStyleSheet("QPushButton { text-align: left; padding-left: 3px; }")
         self.database_button.setToolTip(
             "Put saved primers on this sequence, so they can be chosen above")
         self.database_button.clicked.connect(lambda: self._panel.database_button.click())

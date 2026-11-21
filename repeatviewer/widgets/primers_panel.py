@@ -1066,6 +1066,37 @@ class PrimersPanel(QWidget):
             if dlg.save_to_database():
                 self._add_to_database([dlg.primer().name])
 
+    def add_primer_from_region(self, strand: str) -> str:
+        """Make the bases of the Design region (the map selection) a primer.
+
+        ``strand`` "+" takes them as they are (forward), "-" their reverse
+        complement (reverse). Returns "" when the primer was added, else what
+        is wrong, to show the user.
+        """
+        start = int(self.design_pane.region_from.value())
+        end = int(self.design_pane.region_to.value())
+        if not self._template:
+            return "Open a sequence first."
+        if end <= start:
+            return "Drag over the bases of the primer on the sequence first."
+        start, end = max(1, start), min(len(self._template), end)
+        length = end - start + 1
+        if not 10 <= length <= 60:
+            return (f"The selection is {length:,} bases. A primer is 10 to 60: "
+                    "drag over fewer bases." if length > 60 else
+                    f"The selection is {length} bases. A primer is 10 to 60: "
+                    "drag over more bases.")
+        bases = self._template[start - 1:end].upper()
+        if strand == "-":
+            bases = th.reverse_complement(bases)
+        base = "primer_F" if strand != "-" else "primer_R"
+        added = self.add_primers(
+            [Primer(name=osq.new_primer_name(base, self._primers), sequence=bases)])
+        if not added:
+            return "That primer could not be added."
+        self._select_row_of(added[0].name)
+        return ""
+
     def edit_primer(self, name: str) -> None:
         from repeatviewer.views.primer_edit_dialog import EditPrimerDialog
 

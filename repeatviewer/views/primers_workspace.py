@@ -100,6 +100,9 @@ LIST_HELP = (
     "Right-click it to edit, copy, save to the Primer Database or remove it.<br>"
     "<b>Add Primer</b>, <b>From Database</b>: put a primer on the sequence by hand, or "
     "from your saved primers.<br>"
+    "<b>From Selection</b>: drag over 10 to 60 bases on the sequence, then choose "
+    "Forward Primer (the bases as they are) or Reverse Primer (their reverse "
+    "complement). The primer appears on the sequence and can be dragged or edited.<br>"
     "<b>Open Report</b>: writes the usual primer report for the last Design run."
 )
 
@@ -414,7 +417,12 @@ class PrimersWorkspacePage(QWidget):
     def _on_section_changed(self, index: int) -> None:
         if self._syncing:
             return
-        self.set_section(str(self.sections.tabData(index) or SECTION_DESIGN))
+        key = str(self.sections.tabData(index) or SECTION_DESIGN)
+        if self.section() == SECTION_GEL and section_key(key) != SECTION_GEL \
+                and not self._gel_can_leave():
+            self._select_in_bar(SECTION_GEL)        # Cancel: stay on the gel
+            return
+        self.set_section(key)
 
     # ------------------------------------------------ pages of other sections
 
@@ -442,10 +450,35 @@ class PrimersWorkspacePage(QWidget):
     def hosted_page(self, section: str):
         return self._hosted.get(section_key(section))
 
+    def _gel_can_leave(self) -> bool:
+        """A new gel that was never saved asks first. True to go on."""
+        ask = getattr(self._hosted.get(SECTION_GEL), "confirm_leave", None)
+        try:
+            return bool(ask()) if callable(ask) else True
+        except RuntimeError:
+            return True
+
+    def show_new_gel(self, folder: Path | str | None = None) -> None:
+        """The Gel section on an empty gel that is no file until it is saved."""
+        from repeatviewer.widgets.gel_view import GelDocumentPanel
+
+        if not self._gel_can_leave():
+            return
+        panel = self._hosted.get(SECTION_GEL)
+        if not isinstance(panel, GelDocumentPanel):
+            panel = GelDocumentPanel(self)
+            panel.openRequested.connect(self.openFileRequested.emit)
+            panel.fileWritten.connect(self.fileWritten.emit)
+            self.host_page(SECTION_GEL, panel, show=False)
+        panel.new_untitled(Path(folder) if folder else None)
+        self.set_section(SECTION_GEL)
+
     def show_gel(self, path: Path | str) -> None:
         """The Gel section on this gel file (.rvgel)."""
         from repeatviewer.widgets.gel_view import GelDocumentPanel
 
+        if not self._gel_can_leave():
+            return
         panel = self._hosted.get(SECTION_GEL)
         if not isinstance(panel, GelDocumentPanel):
             panel = GelDocumentPanel(self)
@@ -564,7 +597,17 @@ class PrimersWorkspacePage(QWidget):
         self.list_note = design.cand_note
         # one line here; the whole text shows when the pointer rests on it
         self.list_note.set_elided(True)
-        for button in (primers.add_button, primers.database_button):
+        # A primer straight from the bases dragged over on the sequence.
+        from PySide6.QtWidgets import QMenu
+
+        self.selection_button = QPushButton("From Selection", page)
+        self.selection_button.setToolTip(
+            "Drag over 10 to 60 bases on the sequence, then make them a primer")
+        pick = QMenu(self.selection_button)
+        pick.addAction("Forward Primer", lambda: self._add_from_selection("+"))
+        pick.addAction("Reverse Primer", lambda: self._add_from_selection("-"))
+        self.selection_button.setMenu(pick)
+        for button in (primers.add_button, primers.database_button, self.selection_button):
             button.setSizePolicy(QPushButton().sizePolicy())
             bar.addWidget(button)
         bar.addWidget(self.list_note, 1)
@@ -633,6 +676,12 @@ class PrimersWorkspacePage(QWidget):
 
         self.list.picked.connect(self._on_list_picked)
         self.list.cellClicked.connect(self._on_list_cell_clicked)
+
+    def _add_from_selection(self, strand: str) -> None:
+        """The bases dragged over become a primer; a problem shows in the note."""
+        problem = self.primers.add_primer_from_region(strand)
+        if problem:
+            self.list_note.setText(problem)
 
     def _on_list_picked(self, kind: str) -> None:
         from repeatviewer.widgets.primers_workspace_list import KIND_PRIMER
@@ -933,6 +982,8 @@ class PrimersWorkspacePage(QWidget):
 
     def confirm_leave(self) -> bool:
         """Unsaved annotation changes: Save / Don't Save / Cancel. True to go on."""
+        if not self._gel_can_leave():
+            return False
         if not self.has_unsaved_changes():
             return True
         box = QMessageBox(self.window())
