@@ -292,6 +292,15 @@ class PcrActionsMixin:
         from repeatviewer.backends.primers import gel_doc as gd
 
         folder = Path(self._current_folder) if self._current_folder else Path.home()
+        # An empty gel is no file yet: it is written when the user saves it,
+        # so clicking Gel does not leave Gel.rvgel files behind.
+        ensure = getattr(self, "_ensure_primers_workspace", None)
+        workspace = ensure() if ensure is not None else None
+        tabs = getattr(self, "_preview_tabs", None)
+        if workspace is not None and tabs is not None and hasattr(workspace, "show_new_gel"):
+            workspace.show_new_gel(folder)
+            tabs.setCurrentWidget(workspace)
+            return
         path = gd.unique_gel_path(folder, "Gel")
         doc = gd.GelDoc()
         doc.lanes = [gd.ladder_lane(doc.ladder)]

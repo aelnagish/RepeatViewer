@@ -539,3 +539,24 @@ def test_the_rail_never_comes_back_on_primers(qapp, isolated_settings):
     assert rail._active_tab == PRIMERS_TAB_INDEX
     again = SequenceAnnotationRail()             # the next file, or the next start
     assert again._active_tab == before != PRIMERS_TAB_INDEX
+
+
+def test_dimer_lines_fold_the_fine_pairs_and_shorten_names():
+    from repeatviewer.widgets.primers_panel import dimer_lines, short_names
+
+    names = ["Putative_CroSat1_mono2_C1_F", "Putative_CroSat1_mono2_C1_R",
+             "Putative_CroSat1_mono2_C5_R"]
+    short = short_names(names)
+    assert short[names[0]] == "C1_F" and short[names[2]] == "C5_R"
+    assert short_names(["F", "R"]) == {"F": "F", "R": "R"}          # nothing shared
+    assert short_names(["only_one"]) == {"only_one": "only_one"}
+
+    cross = [(names[1], -2.6, "ok"), (names[2], -8.8, "check")]
+    lines, hidden = dimer_lines(cross, short, show_all=False)
+    assert "2 checked" in lines[0] and "1 to check" in lines[0]
+    assert len(lines) == 2 and "C5_R" in lines[1] and hidden == 1
+    lines, hidden = dimer_lines(cross, short, show_all=True)
+    assert len(lines) == 3 and hidden == 0
+    lines, hidden = dimer_lines([(names[1], -2.6, "ok")], short, show_all=False)
+    assert "all ok" in lines[0] and len(lines) == 1 and hidden == 1
+    assert dimer_lines([], short, show_all=False) == ([], 0)

@@ -49,11 +49,15 @@ RUN_FILES = "files"
 #   two boxes:   2 * BOX2_W + JOIN2_W     = FIELD_W
 #   one box:     BOX2_W + JOIN2_W (the unit) stays on the same left edge
 LABEL_W = 86
-FIELD_W = 186
-BOX3_W = 60
+# The label and field columns together fill the panel (330 px wide) up to the
+# help buttons, also when a scroll bar is shown.
+FIELD_W = 198
+BOX3_W = 64
 GAP3 = 3
-BOX2_W = 80
+BOX2_W = 84
 JOIN2_W = 26
+# two equal buttons over the label and field columns
+HALF_ROW_W = (LABEL_W + 2 + FIELD_W - 6) // 2
 GAP = 2
 # Older name, kept so nothing outside breaks.
 BOX_W = BOX2_W
@@ -223,6 +227,73 @@ def _results_surface(widget: QWidget) -> None:
     widget.setAutoFillBackground(True)
 
 
+class NoteLabel(QLabel):
+    """A status line. Wrapped by default; ``set_elided`` keeps it on one line,
+    cut with "…" when it does not fit, the whole text in its tooltip."""
+
+    def __init__(self, text: str = "", parent: QWidget | None = None) -> None:
+        super().__init__(text, parent)
+        self._full = str(text)
+        self._elided = False
+
+    def set_elided(self, on: bool) -> None:
+        self._elided = bool(on)
+        self.setWordWrap(not on)
+        if on:
+            policy = self.sizePolicy()
+            policy.setHorizontalPolicy(QSizePolicy.Policy.Ignored)
+            self.setSizePolicy(policy)
+        self._apply()
+
+    def setText(self, text: str) -> None:  # noqa: N802
+        self._full = str(text)
+        self._apply()
+
+    def text(self) -> str:
+        return self._full
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        if self._elided:
+            self._apply()
+
+    def _apply(self) -> None:
+        if not self._elided:
+            super().setText(self._full)
+            return
+        shown = self.fontMetrics().elidedText(
+            self._full, Qt.TextElideMode.ElideRight, max(0, self.width() - 2))
+        super().setText(shown)
+        self.setToolTip(self._full if shown != self._full else "")
+
+
+def _relax_wrapped_labels(root: QWidget) -> None:
+    """A wrapped label never asks for more width than the panel has.
+
+    A long word without spaces (a primer name, a sequence) otherwise makes the
+    panel "want" to be wider; its height is then worked out for that width, and
+    the boxes and lines end up squeezed into too little room.
+    """
+    for label in root.findChildren(QLabel):
+        if label.wordWrap() and label.minimumWidth() == label.maximumWidth():
+            continue                                   # a fixed width stays
+        if label.wordWrap():
+            policy = label.sizePolicy()
+            policy.setHorizontalPolicy(QSizePolicy.Policy.Ignored)
+            label.setSizePolicy(policy)
+
+
+def _scroll_middle(middle: QWidget, parent: QWidget) -> QScrollArea:
+    """The result side of a page: it scrolls in a short window, so the last
+    box keeps its bottom edge."""
+    area = QScrollArea(parent)
+    area.setWidget(middle)
+    area.setWidgetResizable(True)
+    area.setFrameShape(QScrollArea.Shape.NoFrame)
+    area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+    return area
+
+
 class VerdictLabel(QLabel):
     """The result line of a page: shown under the boxes, and only when it is a
     result or a problem (green or amber). A plain hint stays out of sight, so
@@ -255,6 +326,30 @@ def _card(widget: QWidget, parent: QWidget) -> QFrame:
     return frame
 
 
+def _field_buttons(parent: QWidget, *buttons: QWidget, label: str = "") -> QHBoxLayout:
+    """Buttons in the field column: together as wide as a field, equal in width.
+
+    ``label`` goes in the label column, as for any other row.
+    """
+    row = QHBoxLayout()
+    row.setContentsMargins(0, 0, 0, 0)
+    row.setSpacing(GAP)
+    pad = QLabel(label, parent)
+    pad.setFixedWidth(LABEL_W)
+    row.addWidget(pad)
+    inner = QHBoxLayout()
+    inner.setContentsMargins(0, 0, 0, 0)
+    inner.setSpacing(6)
+    room = FIELD_W - 6 * (len(buttons) - 1)
+    for i, button in enumerate(buttons):
+        width = room // len(buttons) + (1 if i < room % len(buttons) else 0)
+        button.setFixedWidth(width)
+        inner.addWidget(button)
+    row.addLayout(inner)
+    row.addStretch(1)
+    return row
+
+
 def _action_row(parent: QWidget, left: QWidget, *right: QWidget) -> QWidget:
     """The buttons at the end of a panel: ``left`` starts where the labels
     start, ``right`` end where the fields end."""
@@ -274,6 +369,7 @@ def _scroll_panel(panel: QWidget, parent: QWidget) -> QScrollArea:
     """The settings panel of a page: it scrolls in a short window, so its
     fields are never squeezed."""
     width = panel.maximumWidth()
+    _relax_wrapped_labels(panel)
     panel.setMinimumWidth(0)
     panel.setMaximumWidth(16777215)
     area = QScrollArea(parent)
@@ -481,11 +577,16 @@ class DesignPane(QWidget):
         sec, sl, self.adv_title = _section("Advanced", self, "Advanced", ADVANCED_HELP)
         self.adv_toggle = QPushButton("Show", sec)
         self.adv_toggle.setCheckable(True)
-        self.adv_toggle.setFixedWidth(BOX2_W)
+        self.adv_toggle.setFixedWidth(HALF_ROW_W)
         self.adv_summary = QLabel(sec)
         self.adv_summary.setWordWrap(True)
         self.adv_summary.setStyleSheet("color: palette(placeholder-text);")
-        sl.addLayout(_row("", self.adv_toggle, parent=sec))
+        # at the left edge, on the grid of the two buttons at the top
+        tr = QHBoxLayout()
+        tr.setContentsMargins(0, 0, 0, 0)
+        tr.addWidget(self.adv_toggle)
+        tr.addStretch(1)
+        sl.addLayout(tr)
         sl.addWidget(self.adv_summary)
         self.adv_body = QWidget(sec)
         ab = QVBoxLayout(self.adv_body)
@@ -594,9 +695,11 @@ class DesignPane(QWidget):
         self.design_button.setDefault(True)
         br = QHBoxLayout()
         br.setContentsMargins(0, 2, 0, 0)
+        self.save_button.setFixedWidth(HALF_ROW_W)
+        br.setSpacing(6)
+        br.addWidget(self.save_button)
         br.addWidget(self.defaults_button)
         br.addStretch(1)
-        br.addWidget(self.save_button)
         br.addWidget(self.design_button)
         sl.addLayout(br)
         self.saved_note = QLabel("", sec)
@@ -625,7 +728,7 @@ class DesignPane(QWidget):
             self.table.setColumnWidth(c, w)
         self.table.setMinimumHeight(150)
         sl.addWidget(self.table)
-        self.cand_note = QLabel("None yet. Press Design.", sec)
+        self.cand_note = NoteLabel("None yet. Press Design.", sec)
         self.cand_note.setWordWrap(True)
         self.cand_note.setStyleSheet("color: palette(placeholder-text);")
         sl.addWidget(self.cand_note)

@@ -292,6 +292,10 @@ class GelDocumentPanel(QWidget):
         self._path: Path | None = None
         self._doc: gd.GelDoc | None = None
         self._loading = False
+        # A new gel has no file until it is saved: where it would go, and
+        # whether it was changed since it was made.
+        self._folder: Path | None = None
+        self._dirty = False
         self._save_timer = QTimer(self)
         self._save_timer.setSingleShot(True)
         self._save_timer.setInterval(400)
@@ -336,6 +340,8 @@ class GelDocumentPanel(QWidget):
         bl.addStretch(1)
         self.save_button = QPushButton("Save", bar)
         save_menu = QMenu(self.save_button)
+        save_menu.addAction("Gel", self.save_document)
+        save_menu.addSeparator()
         save_menu.addAction("Figure as SVG…", lambda: self._export("svg"))
         save_menu.addAction("Figure as PNG (300 dpi)…", lambda: self._export("png"))
         save_menu.addAction("Figure as PDF…", lambda: self._export("pdf"))
@@ -440,8 +446,72 @@ class GelDocumentPanel(QWidget):
 
     # ---------------------------------------------------------------- load/save
 
+    def new_untitled(self, folder: Path | None = None) -> None:
+        """An empty gel (a ladder only) that is not a file yet.
+
+        Nothing is written until Save > Gel; after that it saves itself as
+        any gel does.
+        """
+        self._path = None
+        self._folder = Path(folder) if folder else None
+        self._dirty = False
+        self._doc = gd.GelDoc()
+        self._doc.lanes = [gd.ladder_lane(self._doc.ladder)]
+        self._doc.title = "Gel"
+        self._sync_controls()
+        self.view.set_doc(self._doc)
+
+    def has_unsaved(self) -> bool:
+        """A new gel that was changed and never saved."""
+        return self._path is None and self._doc is not None and self._dirty
+
+    def save_document(self) -> bool:
+        """Write the gel (.rvgel). A new gel gets its file now. False when it failed."""
+        if self._doc is None:
+            return False
+        if self._path is not None:
+            self._save()
+            return True
+        folder = self._folder if self._folder and self._folder.is_dir() else Path.home()
+        path = gd.unique_gel_path(folder, "Gel")
+        self._doc.title = path.stem
+        try:
+            self._doc.save(path)
+        except OSError as exc:
+            QMessageBox.warning(self, "Gel", f"Could not save the gel:\n{exc}")
+            return False
+        self._path = path
+        self._dirty = False
+        self.fileWritten.emit(path)
+        return True
+
+    def confirm_leave(self) -> bool:
+        """An unsaved new gel: Save / Discard / Cancel. True to go on."""
+        if not self.has_unsaved():
+            return True
+        box = QMessageBox(self.window())
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("Unsaved Gel")
+        box.setText("Save this gel?")
+        box.setInformativeText("It was not saved yet. Discard throws it away.")
+        box.setStandardButtons(
+            QMessageBox.StandardButton.Save
+            | QMessageBox.StandardButton.Discard
+            | QMessageBox.StandardButton.Cancel
+        )
+        box.setDefaultButton(QMessageBox.StandardButton.Save)
+        box.setEscapeButton(QMessageBox.StandardButton.Cancel)
+        choice = box.exec()
+        if choice == QMessageBox.StandardButton.Save:
+            return self.save_document()
+        if choice == QMessageBox.StandardButton.Discard:
+            self._dirty = False
+            return True
+        return False
+
     def load(self, path: Path) -> None:
         self._path = Path(path)
+        self._dirty = False
         try:
             self._doc = gd.GelDoc.load(self._path)
         except (OSError, ValueError) as exc:
@@ -458,6 +528,9 @@ class GelDocumentPanel(QWidget):
 
     def _changed(self) -> None:
         self.view.refresh()
+        if self._path is None:
+            self._dirty = True          # a new gel: kept in memory until Save
+            return
         self._save_timer.start()
 
     def _save(self) -> None:

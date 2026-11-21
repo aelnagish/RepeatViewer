@@ -100,8 +100,39 @@ LIST_HELP = (
     "Right-click it to edit, copy, save to the Primer Database or remove it.<br>"
     "<b>Add Primer</b>, <b>From Database</b>: put a primer on the sequence by hand, or "
     "from your saved primers.<br>"
+    "<b>From Selection</b>: drag over 10 to 60 bases on the sequence, then choose "
+    "Forward Primer (the bases as they are) or Reverse Primer (their reverse "
+    "complement). The primer appears on the sequence and can be dragged or edited.<br>"
     "<b>Open Report</b>: writes the usual primer report for the last Design run."
 )
+
+
+class _RecordCombo(QComboBox):
+    """The record chooser of the row above the map: a small box.
+
+    A name that does not fit is cut in the middle, because record names share
+    their beginning and differ at the end. The opened list is as wide as the
+    longest name, and the whole name is in the tooltip.
+    """
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        from PySide6.QtWidgets import QStyle, QStyleOptionComboBox, QStylePainter
+
+        painter = QStylePainter(self)
+        option = QStyleOptionComboBox()
+        self.initStyleOption(option)
+        painter.drawComplexControl(QStyle.ComplexControl.CC_ComboBox, option)
+        field = self.style().subControlRect(
+            QStyle.ComplexControl.CC_ComboBox, option,
+            QStyle.SubControl.SC_ComboBoxEditField, self)
+        option.currentText = self.fontMetrics().elidedText(
+            option.currentText, Qt.TextElideMode.ElideMiddle, max(0, field.width() - 4))
+        painter.drawControl(QStyle.ControlElement.CE_ComboBoxLabel, option)
+
+    def showPopup(self) -> None:  # noqa: N802
+        view = self.view()
+        view.setMinimumWidth(max(self.width(), view.sizeHintForColumn(0) + 32))
+        super().showPopup()
 
 
 def _path_row_of(widget):
@@ -224,8 +255,14 @@ class PrimersWorkspacePage(QWidget):
         self.sequence_row.hide()
         # Record sits in the Position row of the map once there is a map.
         self.record_label = QLabel("Record:", self.seq_page)
-        self.record_combo = QComboBox(self.seq_page)
-        self.record_combo.setMinimumWidth(180)
+        self.record_combo = _RecordCombo(self.seq_page)
+        self.record_combo.setFixedWidth(104)
+        self.record_combo.currentIndexChanged.connect(
+            lambda _i: self.record_combo.setToolTip(self.record_combo.currentText()))
+        # the chooser needs no word before it
+        self.record_label.setFixedSize(0, 0)
+        self.length_label = QLabel("", self.seq_page)
+        self.length_label.hide()
         self.record_combo.setToolTip("For a file with several sequences: the one to work on.")
         self.record_label.hide()
         self.record_combo.hide()
@@ -257,6 +294,18 @@ class PrimersWorkspacePage(QWidget):
         self.panel.sequenceExtracted.connect(self.sequenceExtracted.emit)
         self.panel.activeSequenceChanged.connect(self._on_panel_record_changed)
         self.primers = self.panel.primers_panel()
+        from PySide6.QtWidgets import QSizePolicy
+
+        from repeatviewer.widgets.primer_design_pane import _relax_wrapped_labels
+
+        # Long names and sequences must not make the panel want more width
+        # than it has (its boxes would be squeezed), nor the row above the map.
+        _relax_wrapped_labels(self.primers)
+        for widget in (getattr(self.primers, "name_label", None),):
+            if widget is not None:
+                policy = widget.sizePolicy()
+                policy.setHorizontalPolicy(QSizePolicy.Policy.Ignored)
+                widget.setSizePolicy(policy)
         self._place_record_chooser()
         self._plain_settings_side()
         self._build_list_area()
@@ -284,26 +333,65 @@ class PrimersWorkspacePage(QWidget):
         return super().eventFilter(obj, event)
 
     def _place_record_chooser(self) -> None:
-        """Record goes into the Position row, before the length on the right."""
-        toolbar = getattr(self.panel._map, "_toolbar", None)
-        bar = toolbar.layout() if toolbar is not None else None
+        """The row above the map, made to fit: zoom, two position boxes, Select,
+        Fit, the record chooser and the length. Words that are not needed go."""
+        tool = getattr(self.panel._map, "_toolbar", None)
+        bar = tool.layout() if tool is not None else None
         several = self.record_combo.count() > 1
         if bar is None:
             row = QHBoxLayout()
             row.setContentsMargins(12, 6, 12, 6)
             row.setSpacing(8)
-            row.addWidget(self.record_label)
             row.addWidget(self.record_combo)
             row.addStretch(1)
+            row.addWidget(self.length_label)
             self._seq_layout.insertLayout(0, row)
         else:
+            view = self.panel._map
+            # "Position:" goes, "to" becomes a thin dash between the two boxes
+            for label in tool.findChildren(QLabel):
+                text = label.text().strip()
+                if text == "Position:":
+                    label.setText("")
+                    label.setFixedWidth(0)
+                elif text == "to":
+                    label.setText("–")
+                    label.setFixedWidth(10)
+                    label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            # room for five digits; a longer number scrolls inside its box
+            for box, tip in ((getattr(view, "_pos_start", None), "Start"),
+                             (getattr(view, "_pos_end", None), "End")):
+                if box is not None:
+                    box.setFixedWidth(66)
+                    box.setToolTip(tip)
+            slider = getattr(view, "_zoom_slider", None)
+            if slider is not None:
+                slider.setFixedWidth(90)
+            # the length alone replaces "Length: … GC: …"
+            stats = getattr(view, "_sequence_stats_label", None)
+            if stats is not None:
+                stats.setFixedWidth(0)
             self.record_combo.setMaximumHeight(22)
-            at = max(0, bar.count() - 1)
-            bar.insertWidget(at, self.record_label, 0, Qt.AlignmentFlag.AlignVCenter)
+            at = max(0, bar.count() - 2)            # before the stretch
+            bar.insertSpacing(at, 6)
             bar.insertWidget(at + 1, self.record_combo, 0, Qt.AlignmentFlag.AlignVCenter)
-            bar.insertSpacing(at + 2, 12)
-        self.record_label.setVisible(several)
+            bar.addWidget(self.length_label, 0, Qt.AlignmentFlag.AlignVCenter)
+        self.length_label.show()
+        self.record_label.setVisible(False)
         self.record_combo.setVisible(several)
+        self._sync_length()
+
+    def _sync_length(self) -> None:
+        """The length of the shown record, as the map states it ("509 bp")."""
+        import re
+
+        stats = getattr(self.panel._map, "_sequence_stats_label", None) if self.panel else None
+        try:
+            found = re.search(r"Length:\s*([\d.,\u00a0\u202f ]*\d\s*[kMG]?bp)",
+                              stats.text() if stats is not None else "")
+        except RuntimeError:
+            found = None
+        self.length_label.setText(found.group(1).strip() if found else "")
 
     def _plain_settings_side(self) -> None:
         """No line between the map and the settings: the two colours say it."""
@@ -401,7 +489,12 @@ class PrimersWorkspacePage(QWidget):
     def _on_section_changed(self, index: int) -> None:
         if self._syncing:
             return
-        self.set_section(str(self.sections.tabData(index) or SECTION_DESIGN))
+        key = str(self.sections.tabData(index) or SECTION_DESIGN)
+        if self.section() == SECTION_GEL and section_key(key) != SECTION_GEL \
+                and not self._gel_can_leave():
+            self._select_in_bar(SECTION_GEL)        # Cancel: stay on the gel
+            return
+        self.set_section(key)
 
     # ------------------------------------------------ pages of other sections
 
@@ -429,10 +522,35 @@ class PrimersWorkspacePage(QWidget):
     def hosted_page(self, section: str):
         return self._hosted.get(section_key(section))
 
+    def _gel_can_leave(self) -> bool:
+        """A new gel that was never saved asks first. True to go on."""
+        ask = getattr(self._hosted.get(SECTION_GEL), "confirm_leave", None)
+        try:
+            return bool(ask()) if callable(ask) else True
+        except RuntimeError:
+            return True
+
+    def show_new_gel(self, folder: Path | str | None = None) -> None:
+        """The Gel section on an empty gel that is no file until it is saved."""
+        from repeatviewer.widgets.gel_view import GelDocumentPanel
+
+        if not self._gel_can_leave():
+            return
+        panel = self._hosted.get(SECTION_GEL)
+        if not isinstance(panel, GelDocumentPanel):
+            panel = GelDocumentPanel(self)
+            panel.openRequested.connect(self.openFileRequested.emit)
+            panel.fileWritten.connect(self.fileWritten.emit)
+            self.host_page(SECTION_GEL, panel, show=False)
+        panel.new_untitled(Path(folder) if folder else None)
+        self.set_section(SECTION_GEL)
+
     def show_gel(self, path: Path | str) -> None:
         """The Gel section on this gel file (.rvgel)."""
         from repeatviewer.widgets.gel_view import GelDocumentPanel
 
+        if not self._gel_can_leave():
+            return
         panel = self._hosted.get(SECTION_GEL)
         if not isinstance(panel, GelDocumentPanel):
             panel = GelDocumentPanel(self)
@@ -549,7 +667,19 @@ class PrimersWorkspacePage(QWidget):
         bar.setContentsMargins(0, 0, 0, 0)
         bar.setSpacing(8)
         self.list_note = design.cand_note
-        for button in (primers.add_button, primers.database_button):
+        # one line here; the whole text shows when the pointer rests on it
+        self.list_note.set_elided(True)
+        # A primer straight from the bases dragged over on the sequence.
+        from PySide6.QtWidgets import QMenu
+
+        self.selection_button = QPushButton("From Selection", page)
+        self.selection_button.setToolTip(
+            "Drag over 10 to 60 bases on the sequence, then make them a primer")
+        pick = QMenu(self.selection_button)
+        pick.addAction("Forward Primer", lambda: self._add_from_selection("+"))
+        pick.addAction("Reverse Primer", lambda: self._add_from_selection("-"))
+        self.selection_button.setMenu(pick)
+        for button in (primers.add_button, primers.database_button, self.selection_button):
             button.setSizePolicy(QPushButton().sizePolicy())
             bar.addWidget(button)
         bar.addWidget(self.list_note, 1)
@@ -619,6 +749,12 @@ class PrimersWorkspacePage(QWidget):
         self.list.picked.connect(self._on_list_picked)
         self.list.cellClicked.connect(self._on_list_cell_clicked)
 
+    def _add_from_selection(self, strand: str) -> None:
+        """The bases dragged over become a primer; a problem shows in the note."""
+        problem = self.primers.add_primer_from_region(strand)
+        if problem:
+            self.list_note.setText(problem)
+
     def _on_list_picked(self, kind: str) -> None:
         from repeatviewer.widgets.primers_workspace_list import KIND_PRIMER
 
@@ -659,11 +795,22 @@ class PrimersWorkspacePage(QWidget):
         lay = QVBoxLayout(header)
         lay.setContentsMargins(0, 0, 0, 6)
         lay.setSpacing(6)
+        from PySide6.QtWidgets import QSizePolicy
+
+        from repeatviewer.widgets.primer_design_pane import HALF_ROW_W as _HALF
+
+        # The title takes the width of the left button below it, so Show starts
+        # where the right button starts and runs up to the "?".
         top = QHBoxLayout()
         top.setContentsMargins(0, 0, 0, 0)
-        top.addWidget(QLabel("<b>Design Settings</b>", header), 1)
+        top.setSpacing(6)
+        title_label = QLabel("<b>Design Settings</b>", header)
+        title_label.setFixedWidth(_HALF)
+        top.addWidget(title_label)
         self.show_settings_button = QPushButton("Show", header)
-        top.addWidget(self.show_settings_button)
+        self.show_settings_button.setSizePolicy(QSizePolicy.Policy.Expanding,
+                                                QSizePolicy.Policy.Fixed)
+        top.addWidget(self.show_settings_button, 1)
         top.addWidget(make_help_button(header, "Design Settings", SETTINGS_HEADER_HELP))
         lay.addLayout(top)
         self.settings_summary = QLabel(header)
@@ -692,10 +839,15 @@ class PrimersWorkspacePage(QWidget):
         dl.setSpacing(6)
         dtop = QHBoxLayout()
         dtop.setContentsMargins(0, 0, 0, 0)
-        dtop.addWidget(QLabel("<b>Design Settings</b>", dh), 1)
+        dtop.setSpacing(6)
+        dtitle = QLabel("<b>Design Settings</b>", dh)
+        dtitle.setFixedWidth(_HALF)
+        dtop.addWidget(dtitle)
         self.hide_settings_button = QPushButton("Hide", dh)
         self.hide_settings_button.setToolTip("Back to the selected primer")
-        dtop.addWidget(self.hide_settings_button)
+        self.hide_settings_button.setSizePolicy(QSizePolicy.Policy.Expanding,
+                                                QSizePolicy.Policy.Fixed)
+        dtop.addWidget(self.hide_settings_button, 1)
         dtop.addWidget(make_help_button(dh, "Design Settings", SETTINGS_HEADER_HELP))
         dl.addLayout(dtop)
         drow = QHBoxLayout()
@@ -706,9 +858,9 @@ class PrimersWorkspacePage(QWidget):
         drow.addStretch(1)
         dl.addLayout(drow)
         # Two equal buttons over the label and field columns of the form.
-        from repeatviewer.widgets.primer_design_pane import FIELD_W, GAP, LABEL_W
+        from repeatviewer.widgets.primer_design_pane import HALF_ROW_W
 
-        half = (LABEL_W + GAP + FIELD_W - 6) // 2
+        half = HALF_ROW_W
         for b in (design.defaults_button, design.design_button,
                   self.header_defaults_button, self.header_design_button):
             b.setFixedWidth(half)
@@ -810,8 +962,9 @@ class PrimersWorkspacePage(QWidget):
         finally:
             self.record_combo.blockSignals(False)
         several = self.record_combo.count() > 1
-        self.record_label.setVisible(several)
         self.record_combo.setVisible(several)
+        self.record_combo.setToolTip(self.record_combo.currentText())
+        QTimer.singleShot(0, self._sync_length)
 
     def _on_record_chosen(self, index: int) -> None:
         seq_id = self.record_combo.itemData(index)
@@ -824,6 +977,8 @@ class PrimersWorkspacePage(QWidget):
             self.record_combo.blockSignals(True)
             self.record_combo.setCurrentIndex(index)
             self.record_combo.blockSignals(False)
+        self.record_combo.setToolTip(self.record_combo.currentText())
+        QTimer.singleShot(0, self._sync_length)
 
     def _show_sequence_in_field(self) -> None:
         self.sequence_row.set_path(self._sequence_path, emit=False)
@@ -902,6 +1057,8 @@ class PrimersWorkspacePage(QWidget):
 
     def confirm_leave(self) -> bool:
         """Unsaved annotation changes: Save / Don't Save / Cancel. True to go on."""
+        if not self._gel_can_leave():
+            return False
         if not self.has_unsaved_changes():
             return True
         box = QMessageBox(self.window())

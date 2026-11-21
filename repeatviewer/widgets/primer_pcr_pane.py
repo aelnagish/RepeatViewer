@@ -142,7 +142,7 @@ class PcrPane(QWidget):
         self.database_button = QPushButton("From Database", sec)
         self.database_button.setFixedWidth(FIELD_W)
         # its text starts where the text of the menus above starts
-        self.database_button.setStyleSheet("QPushButton { text-align: left; }")
+        self.database_button.setStyleSheet("QPushButton { text-align: left; padding-left: 3px; }")
         self.database_button.setToolTip(
             "Put saved primers on this sequence, so they can be chosen above")
         self.database_button.clicked.connect(lambda: self._panel.database_button.click())
@@ -208,17 +208,22 @@ class PcrPane(QWidget):
         self.bench_button = QPushButton("Bench Card", sec)
         self.gel_button = QPushButton("Open in a Gel", sec)
         self.save_button = QPushButton("Save Products", sec)
-        # Two to a row, equal in width: three in one row do not fit the panel.
-        br = QHBoxLayout()
-        br.setSpacing(6)
-        br.addWidget(self.bench_button, 1)
-        br.addWidget(self.gel_button, 1)
-        sl.addLayout(br)
-        br2 = QHBoxLayout()
-        br2.setSpacing(6)
-        br2.addWidget(self.save_button, 1)
-        br2.addStretch(1)
-        sl.addLayout(br2)
+        lay.addWidget(sec)
+        lay.addWidget(_rule(self))
+
+        # Options: what to do with the result, one button under the other in
+        # the field column, each as wide as a field.
+        from repeatviewer.widgets.primer_design_pane import _field_buttons
+
+        sec, sl, _ = _section(
+            "Options", self, "Options",
+            "<b>Open in a Gel</b>: makes a gel document from this PCR that you can change "
+            "(lanes, agarose, ladder).<br>"
+            "<b>Bench Card</b>: the reaction mix and the cycling programme for the bench.<br>"
+            "<b>Save Products</b>: writes the products as FASTA next to the sequence, with "
+            "the details in a folder beside it.")
+        for button in (self.gel_button, self.bench_button, self.save_button):
+            sl.addLayout(_field_buttons(sec, button))
         lay.addWidget(sec)
         lay.addStretch(1)
 
