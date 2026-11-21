@@ -208,17 +208,11 @@ class PcrPane(QWidget):
         self.bench_button = QPushButton("Bench Card", sec)
         self.gel_button = QPushButton("Open in a Gel", sec)
         self.save_button = QPushButton("Save Products", sec)
-        # Two to a row, equal in width: three in one row do not fit the panel.
-        br = QHBoxLayout()
-        br.setSpacing(6)
-        br.addWidget(self.bench_button, 1)
-        br.addWidget(self.gel_button, 1)
-        sl.addLayout(br)
-        br2 = QHBoxLayout()
-        br2.setSpacing(6)
-        br2.addWidget(self.save_button, 1)
-        br2.addStretch(1)
-        sl.addLayout(br2)
+        # One under the other in the field column, each as wide as a field.
+        from repeatviewer.widgets.primer_design_pane import _field_buttons
+
+        for button in (self.gel_button, self.bench_button, self.save_button):
+            sl.addLayout(_field_buttons(sec, button))
         lay.addWidget(sec)
         lay.addStretch(1)
 
