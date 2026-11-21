@@ -51,11 +51,11 @@ RUN_FILES = "files"
 LABEL_W = 86
 # The label and field columns together fill the panel (330 px wide) up to the
 # help buttons, also when a scroll bar is shown.
-FIELD_W = 207
-BOX3_W = 67
+FIELD_W = 198
+BOX3_W = 64
 GAP3 = 3
-BOX2_W = 90
-JOIN2_W = 27
+BOX2_W = 84
+JOIN2_W = 26
 # two equal buttons over the label and field columns
 HALF_ROW_W = (LABEL_W + 2 + FIELD_W - 6) // 2
 GAP = 2
