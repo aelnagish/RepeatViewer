@@ -19,6 +19,21 @@ _ALIVIEW_RUNTIME = (
 )
 
 
+def load_app_icon_renderer():
+    """Return repeatviewer.widgets.app_icon.render_app_icon_pixmap.
+
+    Loaded from its file so the packaging scripts get the exact geometry the
+    running app uses without importing the whole repeatviewer package.
+    """
+    import importlib.util
+
+    path = Path(__file__).resolve().parents[1] / "repeatviewer" / "widgets" / "app_icon.py"
+    spec = importlib.util.spec_from_file_location("_repeatviewer_app_icon", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.render_app_icon_pixmap
+
+
 def app_version() -> str:
     init = (PKG / "__init__.py").read_text(encoding="utf-8")
     for line in init.splitlines():

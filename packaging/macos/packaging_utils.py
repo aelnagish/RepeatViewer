@@ -12,7 +12,7 @@ from pathlib import Path
 PACKAGING = Path(__file__).resolve().parent
 sys.path.insert(0, str(PACKAGING.parent))
 
-from bundle_datas import app_version, collect_datas_for  # noqa: E402
+from bundle_datas import app_version, collect_datas_for, load_app_icon_renderer  # noqa: E402
 
 PKG = Path(__file__).resolve().parents[2] / "repeatviewer"
 ASSETS = PKG / "assets" / "icons"
@@ -31,51 +31,23 @@ def make_icns(out_icns: Path) -> Path | None:
     if not svg.is_file():
         return None
 
-    from PySide6.QtCore import QByteArray, QRectF, Qt
-    from PySide6.QtGui import QGuiApplication, QPainter, QPixmap
-    from PySide6.QtSvg import QSvgRenderer
+    from PySide6.QtGui import QGuiApplication
 
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     app = QGuiApplication.instance() or QGuiApplication([])
+    render_icon = load_app_icon_renderer()
 
     iconset = out_icns.with_suffix(".iconset")
     if iconset.exists():
         shutil.rmtree(iconset)
     iconset.mkdir(parents=True)
 
-    svg_bytes = QByteArray(svg.read_bytes())
-    renderer = QSvgRenderer(svg_bytes)
-    if not renderer.isValid():
-        return None
-
-    sizes = (16, 32, 64, 128, 256, 512)
-    for size in sizes:
+    for size in (16, 32, 128, 256, 512):
         for scale, suffix in ((1, ""), (2, "@2x")):
-            pixel = size * scale
-            if pixel > 1024:
-                continue
-            pixmap = QPixmap(pixel, pixel)
-            pixmap.fill(Qt.GlobalColor.transparent)
-            painter = QPainter(pixmap)
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-            art = pixel * 0.8125
-            margin = (pixel - art) / 2.0
-            renderer.render(painter, QRectF(margin, margin, art, art))
-            painter.end()
-            name = f"icon_{size}x{size}{suffix}.png"
-            pixmap.save(str(iconset / name), "PNG")
-
-    pixmap = QPixmap(1024, 1024)
-    pixmap.fill(Qt.GlobalColor.transparent)
-    painter = QPainter(pixmap)
-    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-    painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-    art = 1024 * 0.8125
-    margin = (1024 - art) / 2.0
-    renderer.render(painter, QRectF(margin, margin, art, art))
-    painter.end()
-    pixmap.save(str(iconset / "icon_512x512@2x.png"), "PNG")
+            pixmap = render_icon(size * scale)
+            if pixmap is None:
+                return None
+            pixmap.save(str(iconset / f"icon_{size}x{size}{suffix}.png"), "PNG")
 
     out_icns.parent.mkdir(parents=True, exist_ok=True)
     if out_icns.exists():
