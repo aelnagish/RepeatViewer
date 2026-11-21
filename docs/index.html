@@ -98,9 +98,9 @@ p code, li code, dd code { background: var(--sky-soft); padding: .1em .35em; bor
 
 /* Hero */
 .hero { padding: 72px 0 40px; }
-.hero .wrap { display: grid; grid-template-columns: 1.05fr .95fr; gap: 56px; align-items: center; }
-.hero h1 { font-size: clamp(40px, 5.6vw, 66px); line-height: 1.02; letter-spacing: -.035em; font-weight: 800; margin: 0 0 22px; max-width: 12ch; }
-.hero .lede { font-size: 20px; line-height: 1.5; color: var(--muted); margin: 0 0 30px; max-width: 34em; }
+.hero .wrap { display: block; }
+.hero h1 { font-size: clamp(40px, 5.6vw, 66px); line-height: 1.02; letter-spacing: -.035em; font-weight: 800; margin: 0 0 22px; }
+.hero .lede { font-size: 20px; line-height: 1.5; color: var(--muted); margin: 0 0 30px; }
 .actions { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 18px; }
 .btn { display: inline-flex; align-items: center; gap: 8px; padding: 13px 20px; border-radius: 10px; font-weight: 600; font-size: 16px; text-decoration: none; border: 1px solid transparent; }
 .btn-primary { background: var(--brand); color: #fff; }
@@ -181,7 +181,17 @@ h3 { font-size: 21px; line-height: 1.25; letter-spacing: -.01em; margin: 0 0 8px
 .chips li { font-weight: 600; font-size: 14px; padding: 5px 11px; border-radius: 999px; background: var(--surface); border: 1px solid var(--rule); }
 
 /* Everything else */
-.toolgrid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 32px; }
+.linkgrid { display: grid; grid-template-columns: 1fr 2fr; gap: 48px; align-items: start; }
+.linkgrid h3 { font-size: 17px; padding-bottom: 8px; border-bottom: 2px solid var(--brand); margin-bottom: 10px; }
+.linkgrid h3.links-next { margin-top: 32px; }
+.linkgrid ul { list-style: none; padding: 0; margin: 0; }
+.linkgrid li { padding: 7px 0; border-bottom: 1px solid var(--rule); font-size: 15.5px; break-inside: avoid; }
+.linkgrid li > a { font-weight: 600; }
+.linkgrid li span { color: var(--muted); font-size: 14px; display: block; line-height: 1.4; }
+.links-2col { columns: 2; column-gap: 48px; }
+.links-note { color: var(--muted); margin: 32px 0 0; }
+#links { scroll-margin-top: 56px; }
+.toolgrid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 32px; }
 .toolgrid h3 { font-size: 17px; padding-bottom: 8px; border-bottom: 2px solid var(--brand); margin-bottom: 10px; }
 .toolgrid ul { list-style: none; padding: 0; margin: 0; }
 .toolgrid li { padding: 5px 0; border-bottom: 1px solid var(--rule); font-size: 15.5px; }
@@ -191,6 +201,11 @@ h3 { font-size: 21px; line-height: 1.25; letter-spacing: -.01em; margin: 0 0 8px
 .tabs { display: inline-flex; gap: 4px; padding: 4px; border-radius: 10px; background: var(--sky-soft); margin-bottom: 18px; }
 .tabs button { font: inherit; font-weight: 600; font-size: 15px; border: 0; background: transparent; color: var(--muted); padding: 8px 16px; border-radius: 7px; cursor: pointer; }
 .tabs button[aria-selected="true"] { background: var(--surface); color: var(--ink); box-shadow: 0 1px 2px rgba(20,37,64,.15); }
+.downloads { display: flex; flex-wrap: wrap; gap: 12px; }
+.downloads .btn span { font-weight: 500; font-size: 13px; opacity: .8; }
+.dl-note { color: var(--muted); font-size: 15px; max-width: 60rem; margin: 16px 0 44px; }
+.src-title { font-size: 22px; margin-bottom: 4px; }
+.src-lede { color: var(--muted); margin: 0 0 18px; }
 .install-grid { display: grid; grid-template-columns: minmax(0, 7fr) minmax(0, 5fr); gap: 48px; align-items: start; }
 .install-grid > *, .hero .wrap > *, .feature > *, .pair > *, .cite > * { min-width: 0; }
 .steps { list-style: none; padding: 0; margin: 0; counter-reset: s; }
@@ -218,9 +233,9 @@ h3 { font-size: 21px; line-height: 1.25; letter-spacing: -.01em; margin: 0 0 8px
 .faq details > div p { margin: 0 0 10px; }
 
 /* Cite */
-.cite { display: grid; grid-template-columns: 1fr 1fr; gap: 48px; align-items: start; }
+.cite { display: block; }
 .cite p { color: var(--muted); }
-.authors { font-size: 19px; color: var(--ink); line-height: 1.5; margin: 0 0 6px; }
+.authors { font-size: 19px; color: var(--ink); line-height: 1.5; margin: 0 0 18px; overflow-wrap: anywhere; }
 
 /* Footer */
 .site-foot { border-top: 1px solid var(--rule); padding: 32px 0 48px; color: var(--muted); font-size: 15px; }
@@ -242,13 +257,13 @@ h3 { font-size: 21px; line-height: 1.25; letter-spacing: -.01em; margin: 0 0 8px
 
 /* Responsive */
 @media (max-width: 960px) {
-  .hero .wrap, .feature, .install-grid, .cite, .pair { grid-template-columns: 1fr; gap: 32px; }
+  .feature, .install-grid, .cite, .pair, .linkgrid { grid-template-columns: 1fr; gap: 32px; }
+  .links-2col { columns: 1; }
   .feature.flip .feature-text { order: 0; }
   .toolgrid { grid-template-columns: 1fr 1fr; }
   .loop { grid-template-columns: 1fr 1fr; }
   .loop li:nth-child(2) { border-right: 0; }
   .loop li:nth-child(-n+2) { border-bottom: 1px solid var(--rule); }
-  .hero h1 { max-width: 16ch; }
 }
 @media (max-width: 560px) {
   :root { --gutter: 16px; }
@@ -273,6 +288,7 @@ h3 { font-size: 21px; line-height: 1.25; letter-spacing: -.01em; margin: 0 0 8px
       <a href="#install">Install</a>
       <a href="#faq">Questions</a>
       <a href="manual/index.html">Manual</a>
+      <a href="#links">Links</a>
       <a class="gh" href="https://github.com/qjiangzhao/RepeatViewer">GitHub</a>
     </nav>
   </div>
@@ -282,173 +298,35 @@ h3 { font-size: 21px; line-height: 1.25; letter-spacing: -.01em; margin: 0 0 8px
 <div id="top" class="hero">
   <div class="wrap">
     <div>
-      <h1>Curate transposable elements in one window.</h1>
-      <p class="lede">RepeatViewer opens a folder of candidate TE sequences and lets you annotate, align, trim and plot them without leaving the app. Every result lands next to its input, ready for the next step.</p>
+      <h1>Explore and curate transposable elements in one window.</h1>
+      <p class="lede">RepeatViewer is a platform for explorative analysis of repetitive DNA. Open your TE candidates and inspect them further: Annotate, align, trim and plot without leaving the app. Every result lands next to its input, ready for the next step.</p>
       <div class="actions">
-        <a class="btn btn-primary" href="#install">Install RepeatViewer</a>
+        <a class="btn btn-primary" href="#install">Download RepeatViewer</a>
         <a class="btn btn-ghost" href="https://github.com/qjiangzhao/RepeatViewer">Source on GitHub</a>
       </div>
-      <p class="meta">Version 1.1.0. Free. Linux, macOS and Windows, Python 3.10 or later.</p>
+      <p class="meta">Version <span class="rv-version">1.2.0</span>. Free. Linux, macOS and Windows.</p>
     </div>
 
-    <figure class="plot-card" style="margin:0">
-      <svg id="dotplot" viewBox="0 0 384 404" role="img" aria-labelledby="dp-title dp-desc">
-<title id="dp-title">Self dotplot of a modeled Ty1/copia LTR retrotransposon</title>
-<desc id="dp-desc">Exact 14-mer matches of a 5,201 bp element against itself, coloured by the feature each match falls in. The diagonal is the element against itself; the lines in the corners show that the two LTRs are near-identical; the stripes beside the diagonal are a tandem array. The annotation track runs under the plot.</desc>
-<g class="axis">
-<rect x="30" y="24" width="340" height="340" fill="none"/>
-<line x1="30.0" y1="24" x2="30.0" y2="20"/><line x1="30" y1="24.0" x2="26" y2="24.0"/>
-<text x="30.0" y="16" text-anchor="middle">0</text>
-<line x1="95.4" y1="24" x2="95.4" y2="20"/><line x1="30" y1="89.4" x2="26" y2="89.4"/>
-<text x="95.4" y="16" text-anchor="middle">1 kb</text>
-<text x="23" y="92.4" text-anchor="end">1</text>
-<line x1="160.7" y1="24" x2="160.7" y2="20"/><line x1="30" y1="154.7" x2="26" y2="154.7"/>
-<text x="160.7" y="16" text-anchor="middle">2 kb</text>
-<text x="23" y="157.7" text-anchor="end">2</text>
-<line x1="226.1" y1="24" x2="226.1" y2="20"/><line x1="30" y1="220.1" x2="26" y2="220.1"/>
-<text x="226.1" y="16" text-anchor="middle">3 kb</text>
-<text x="23" y="223.1" text-anchor="end">3</text>
-<line x1="291.5" y1="24" x2="291.5" y2="20"/><line x1="30" y1="285.5" x2="26" y2="285.5"/>
-<text x="291.5" y="16" text-anchor="middle">4 kb</text>
-<text x="23" y="288.5" text-anchor="end">4</text>
-<line x1="356.9" y1="24" x2="356.9" y2="20"/><line x1="30" y1="350.9" x2="26" y2="350.9"/>
-<text x="356.9" y="16" text-anchor="middle">5 kb</text>
-<text x="23" y="353.9" text-anchor="end">5</text>
-</g>
-<line class="dp-draw dp-diag" pathLength="1" x1="30.0" y1="24.0" x2="30.3" y2="24.3" stroke="var(--plot-dot)" style="animation-delay:0.15s;animation-duration:0.05s"/>
-<line class="dp-draw dp-diag" pathLength="1" x1="30.3" y1="24.3" x2="64.3" y2="58.3" stroke="var(--ltr)" style="animation-delay:0.15s;animation-duration:0.13s"/>
-<line class="dp-draw dp-diag" pathLength="1" x1="64.3" y1="58.3" x2="64.7" y2="58.7" stroke="var(--plot-dot)" style="animation-delay:0.28s;animation-duration:0.05s"/>
-<line class="dp-draw dp-diag" pathLength="1" x1="64.7" y1="58.7" x2="65.9" y2="59.9" stroke="var(--plot-dot)" style="animation-delay:0.28s;animation-duration:0.05s"/>
-<line class="dp-draw dp-diag" pathLength="1" x1="65.9" y1="59.9" x2="75.7" y2="69.7" stroke="var(--plot-dot)" style="animation-delay:0.29s;animation-duration:0.05s"/>
-<line class="dp-draw dp-diag" pathLength="1" x1="75.7" y1="69.7" x2="114.9" y2="108.9" stroke="var(--gag)" style="animation-delay:0.32s;animation-duration:0.15s"/>
-<line class="dp-draw dp-diag" pathLength="1" x1="114.9" y1="108.9" x2="117.5" y2="111.5" stroke="var(--plot-dot)" style="animation-delay:0.47s;animation-duration:0.05s"/>
-<line class="dp-draw dp-diag" pathLength="1" x1="117.5" y1="111.5" x2="140.4" y2="134.4" stroke="var(--pol-1)" style="animation-delay:0.48s;animation-duration:0.07s"/>
-<line class="dp-draw dp-diag" pathLength="1" x1="140.4" y1="134.4" x2="142.4" y2="136.4" stroke="var(--plot-dot)" style="animation-delay:0.55s;animation-duration:0.05s"/>
-<line class="dp-draw dp-diag" pathLength="1" x1="142.4" y1="136.4" x2="197.3" y2="191.3" stroke="var(--pol-2)" style="animation-delay:0.58s;animation-duration:0.21s"/>
-<line class="dp-draw dp-diag" pathLength="1" x1="197.3" y1="191.3" x2="214.3" y2="208.3" stroke="var(--plot-dot)" style="animation-delay:0.79s;animation-duration:0.06s"/>
-<line class="dp-draw dp-diag" pathLength="1" x1="214.3" y1="208.3" x2="267.9" y2="261.9" stroke="var(--pol-3)" style="animation-delay:0.85s;animation-duration:0.20s"/>
-<line class="dp-draw dp-diag" pathLength="1" x1="267.9" y1="261.9" x2="269.9" y2="263.9" stroke="var(--plot-dot)" style="animation-delay:1.06s;animation-duration:0.05s"/>
-<line class="dp-draw dp-diag" pathLength="1" x1="269.9" y1="263.9" x2="297.3" y2="291.3" stroke="var(--pol-4)" style="animation-delay:1.07s;animation-duration:0.10s"/>
-<line class="dp-draw dp-diag" pathLength="1" x1="297.3" y1="291.3" x2="304.5" y2="298.5" stroke="var(--plot-dot)" style="animation-delay:1.17s;animation-duration:0.05s"/>
-<line class="dp-draw dp-diag" pathLength="1" x1="304.5" y1="298.5" x2="330.6" y2="324.6" stroke="var(--tandem)" style="animation-delay:1.20s;animation-duration:0.10s"/>
-<line class="dp-draw dp-diag" pathLength="1" x1="330.6" y1="324.6" x2="334.6" y2="328.6" stroke="var(--plot-dot)" style="animation-delay:1.30s;animation-duration:0.05s"/>
-<line class="dp-draw dp-diag" pathLength="1" x1="334.6" y1="328.6" x2="335.4" y2="329.4" stroke="var(--plot-dot)" style="animation-delay:1.31s;animation-duration:0.05s"/>
-<line class="dp-draw dp-diag" pathLength="1" x1="335.4" y1="329.4" x2="335.6" y2="329.6" stroke="var(--plot-dot)" style="animation-delay:1.32s;animation-duration:0.05s"/>
-<line class="dp-draw dp-diag" pathLength="1" x1="335.6" y1="329.6" x2="369.7" y2="363.7" stroke="var(--ltr)" style="animation-delay:1.32s;animation-duration:0.13s"/>
-<line class="dp-draw dp-diag" pathLength="1" x1="369.7" y1="363.7" x2="370.0" y2="364.0" stroke="var(--plot-dot)" style="animation-delay:1.45s;animation-duration:0.05s"/>
-<line class="dp-draw dp-off" pathLength="1" x1="31.5" y1="330.8" x2="33.5" y2="332.8" stroke="var(--ltr)" style="animation-delay:1.32s;animation-duration:0.05s"/>
-<line class="dp-draw dp-off" pathLength="1" x1="34.4" y1="333.7" x2="35.3" y2="334.6" stroke="var(--ltr)" style="animation-delay:1.33s;animation-duration:0.05s"/>
-<line class="dp-draw dp-off" pathLength="1" x1="35.4" y1="334.6" x2="38.8" y2="338.0" stroke="var(--ltr)" style="animation-delay:1.34s;animation-duration:0.05s"/>
-<line class="dp-draw dp-off" pathLength="1" x1="39.4" y1="339.0" x2="40.8" y2="340.3" stroke="var(--ltr)" style="animation-delay:1.35s;animation-duration:0.05s"/>
-<line class="dp-draw dp-off" pathLength="1" x1="41.0" y1="340.6" x2="44.8" y2="344.4" stroke="var(--ltr)" style="animation-delay:1.36s;animation-duration:0.05s"/>
-<line class="dp-draw dp-off" pathLength="1" x1="45.0" y1="344.5" x2="47.2" y2="346.7" stroke="var(--ltr)" style="animation-delay:1.38s;animation-duration:0.05s"/>
-<line class="dp-draw dp-off" pathLength="1" x1="48.0" y1="347.6" x2="49.5" y2="349.0" stroke="var(--ltr)" style="animation-delay:1.39s;animation-duration:0.05s"/>
-<line class="dp-draw dp-off" pathLength="1" x1="49.9" y1="349.5" x2="52.6" y2="352.1" stroke="var(--ltr)" style="animation-delay:1.39s;animation-duration:0.05s"/>
-<line class="dp-draw dp-off" pathLength="1" x1="54.4" y1="353.9" x2="57.7" y2="357.2" stroke="var(--ltr)" style="animation-delay:1.41s;animation-duration:0.05s"/>
-<line class="dp-draw dp-off" pathLength="1" x1="57.7" y1="357.3" x2="59.2" y2="358.8" stroke="var(--ltr)" style="animation-delay:1.42s;animation-duration:0.05s"/>
-<line class="dp-draw dp-off" pathLength="1" x1="60.2" y1="359.6" x2="64.3" y2="363.7" stroke="var(--ltr)" style="animation-delay:1.43s;animation-duration:0.05s"/>
-<line class="dp-draw dp-off" pathLength="1" x1="305.2" y1="304.4" x2="306.6" y2="305.8" stroke="var(--tandem)" style="animation-delay:1.22s;animation-duration:0.05s"/>
-<line class="dp-draw dp-off" pathLength="1" x1="305.2" y1="309.7" x2="308.5" y2="312.9" stroke="var(--tandem)" style="animation-delay:1.24s;animation-duration:0.05s"/>
-<line class="dp-draw dp-off" pathLength="1" x1="305.2" y1="314.9" x2="306.1" y2="315.8" stroke="var(--tandem)" style="animation-delay:1.26s;animation-duration:0.05s"/>
-<line class="dp-draw dp-off" pathLength="1" x1="305.2" y1="320.1" x2="309.8" y2="324.7" stroke="var(--tandem)" style="animation-delay:1.28s;animation-duration:0.05s"/>
-<line class="dp-draw dp-off" pathLength="1" x1="306.2" y1="315.9" x2="310.0" y2="319.7" stroke="var(--tandem)" style="animation-delay:1.27s;animation-duration:0.05s"/>
-<line class="dp-draw dp-off" pathLength="1" x1="306.7" y1="305.9" x2="308.3" y2="307.5" stroke="var(--tandem)" style="animation-delay:1.23s;animation-duration:0.05s"/>
-<line class="dp-draw dp-off" pathLength="1" x1="308.4" y1="307.6" x2="311.8" y2="311.0" stroke="var(--tandem)" style="animation-delay:1.23s;animation-duration:0.05s"/>
-<line class="dp-draw dp-off" pathLength="1" x1="308.6" y1="313.0" x2="309.5" y2="313.9" stroke="var(--tandem)" style="animation-delay:1.26s;animation-duration:0.05s"/>
-<line class="dp-draw dp-off" pathLength="1" x1="310.4" y1="299.2" x2="311.8" y2="300.6" stroke="var(--tandem)" style="animation-delay:1.22s;animation-duration:0.05s"/>
-<line class="dp-draw dp-off" pathLength="1" x1="310.4" y1="314.9" x2="311.4" y2="315.8" stroke="var(--tandem)" style="animation-delay:1.26s;animation-duration:0.05s"/>
-<line class="dp-draw dp-off" pathLength="1" x1="310.4" y1="320.1" x2="311.8" y2="321.5" stroke="var(--tandem)" style="animation-delay:1.28s;animation-duration:0.05s"/>
-<line class="dp-draw dp-off" pathLength="1" x1="311.9" y1="300.7" x2="313.5" y2="302.3" stroke="var(--tandem)" style="animation-delay:1.23s;animation-duration:0.05s"/>
-<line class="dp-draw dp-off" pathLength="1" x1="311.9" y1="311.1" x2="313.5" y2="312.7" stroke="var(--tandem)" style="animation-delay:1.25s;animation-duration:0.05s"/>
-<line class="dp-draw dp-off" pathLength="1" x1="311.9" y1="316.3" x2="313.5" y2="318.0" stroke="var(--tandem)" style="animation-delay:1.27s;animation-duration:0.05s"/>
-<line class="dp-draw dp-off" pathLength="1" x1="311.9" y1="321.6" x2="313.5" y2="323.2" stroke="var(--tandem)" style="animation-delay:1.29s;animation-duration:0.05s"/>
-<line class="dp-draw dp-off" pathLength="1" x1="313.6" y1="302.4" x2="317.0" y2="305.8" stroke="var(--tandem)" style="animation-delay:1.23s;animation-duration:0.05s"/>
-<line class="dp-draw dp-off" pathLength="1" x1="313.6" y1="318.0" x2="315.2" y2="319.7" stroke="var(--tandem)" style="animation-delay:1.27s;animation-duration:0.05s"/>
-<line class="dp-draw dp-off" pathLength="1" x1="313.6" y1="323.3" x2="315.0" y2="324.7" stroke="var(--tandem)" style="animation-delay:1.29s;animation-duration:0.05s"/>
-<line class="dp-draw dp-off" pathLength="1" x1="313.8" y1="313.0" x2="314.7" y2="313.9" stroke="var(--tandem)" style="animation-delay:1.26s;animation-duration:0.05s"/>
-<line class="dp-draw dp-off" pathLength="1" x1="315.7" y1="299.2" x2="318.9" y2="302.5" stroke="var(--tandem)" style="animation-delay:1.24s;animation-duration:0.05s"/>
-<line class="dp-draw dp-off" pathLength="1" x1="315.7" y1="314.9" x2="316.6" y2="315.8" stroke="var(--tandem)" style="animation-delay:1.26s;animation-duration:0.05s"/>
-<line class="dp-draw dp-off" pathLength="1" x1="315.7" y1="320.1" x2="318.9" y2="323.4" stroke="var(--tandem)" style="animation-delay:1.28s;animation-duration:0.05s"/>
-<line class="dp-draw dp-off" pathLength="1" x1="316.7" y1="315.9" x2="318.9" y2="318.2" stroke="var(--tandem)" style="animation-delay:1.27s;animation-duration:0.05s"/>
-<line class="dp-draw dp-off" pathLength="1" x1="317.1" y1="305.9" x2="318.7" y2="307.5" stroke="var(--tandem)" style="animation-delay:1.25s;animation-duration:0.05s"/>
-<line class="dp-draw dp-off" pathLength="1" x1="319.0" y1="302.6" x2="319.9" y2="303.5" stroke="var(--tandem)" style="animation-delay:1.26s;animation-duration:0.05s"/>
-<line class="dp-draw dp-off" pathLength="1" x1="319.0" y1="307.8" x2="319.9" y2="308.7" stroke="var(--tandem)" style="animation-delay:1.26s;animation-duration:0.05s"/>
-<line class="dp-draw dp-off" pathLength="1" x1="319.0" y1="318.2" x2="319.9" y2="319.2" stroke="var(--tandem)" style="animation-delay:1.28s;animation-duration:0.05s"/>
-<line class="dp-draw dp-off" pathLength="1" x1="319.0" y1="323.5" x2="319.9" y2="324.4" stroke="var(--tandem)" style="animation-delay:1.30s;animation-duration:0.05s"/>
-<line class="dp-draw dp-off" pathLength="1" x1="320.9" y1="299.2" x2="321.8" y2="300.1" stroke="var(--tandem)" style="animation-delay:1.26s;animation-duration:0.05s"/>
-<line class="dp-draw dp-off" pathLength="1" x1="320.9" y1="304.4" x2="321.8" y2="305.4" stroke="var(--tandem)" style="animation-delay:1.26s;animation-duration:0.05s"/>
-<line class="dp-draw dp-off" pathLength="1" x1="320.9" y1="309.7" x2="321.8" y2="310.6" stroke="var(--tandem)" style="animation-delay:1.26s;animation-duration:0.05s"/>
-<line class="dp-draw dp-off" pathLength="1" x1="320.9" y1="320.1" x2="321.8" y2="321.1" stroke="var(--tandem)" style="animation-delay:1.28s;animation-duration:0.05s"/>
-<line class="dp-draw dp-off" pathLength="1" x1="321.9" y1="300.2" x2="325.7" y2="304.0" stroke="var(--tandem)" style="animation-delay:1.27s;animation-duration:0.05s"/>
-<line class="dp-draw dp-off" pathLength="1" x1="321.9" y1="310.7" x2="324.2" y2="312.9" stroke="var(--tandem)" style="animation-delay:1.27s;animation-duration:0.05s"/>
-<line class="dp-draw dp-off" pathLength="1" x1="321.9" y1="321.1" x2="325.5" y2="324.7" stroke="var(--tandem)" style="animation-delay:1.29s;animation-duration:0.05s"/>
-<line class="dp-draw dp-off" pathLength="1" x1="322.3" y1="305.9" x2="324.0" y2="307.5" stroke="var(--tandem)" style="animation-delay:1.27s;animation-duration:0.05s"/>
-<line class="dp-draw dp-off" pathLength="1" x1="324.0" y1="307.6" x2="325.7" y2="309.2" stroke="var(--tandem)" style="animation-delay:1.27s;animation-duration:0.05s"/>
-<line class="dp-draw dp-off" pathLength="1" x1="324.2" y1="313.0" x2="325.2" y2="313.9" stroke="var(--tandem)" style="animation-delay:1.28s;animation-duration:0.05s"/>
-<line class="dp-draw dp-off" pathLength="1" x1="326.1" y1="299.2" x2="330.7" y2="303.8" stroke="var(--tandem)" style="animation-delay:1.28s;animation-duration:0.05s"/>
-<line class="dp-draw dp-off" pathLength="1" x1="326.1" y1="304.4" x2="327.5" y2="305.8" stroke="var(--tandem)" style="animation-delay:1.28s;animation-duration:0.05s"/>
-<line class="dp-draw dp-off" pathLength="1" x1="326.1" y1="309.7" x2="329.4" y2="312.9" stroke="var(--tandem)" style="animation-delay:1.28s;animation-duration:0.05s"/>
-<line class="dp-draw dp-off" pathLength="1" x1="326.1" y1="314.9" x2="327.1" y2="315.8" stroke="var(--tandem)" style="animation-delay:1.28s;animation-duration:0.05s"/>
-<line class="dp-draw dp-off" pathLength="1" x1="327.1" y1="315.9" x2="330.7" y2="319.5" stroke="var(--tandem)" style="animation-delay:1.29s;animation-duration:0.05s"/>
-<line class="dp-draw dp-off" pathLength="1" x1="327.6" y1="305.9" x2="329.2" y2="307.5" stroke="var(--tandem)" style="animation-delay:1.29s;animation-duration:0.05s"/>
-<line class="dp-draw dp-off" pathLength="1" x1="329.3" y1="307.6" x2="330.7" y2="309.0" stroke="var(--tandem)" style="animation-delay:1.29s;animation-duration:0.05s"/>
-<line class="dp-draw dp-off" pathLength="1" x1="329.5" y1="313.0" x2="330.4" y2="313.9" stroke="var(--tandem)" style="animation-delay:1.30s;animation-duration:0.05s"/>
-<line class="dp-draw dp-off" pathLength="1" x1="336.8" y1="25.5" x2="338.8" y2="27.5" stroke="var(--ltr)" style="animation-delay:1.32s;animation-duration:0.05s"/>
-<line class="dp-draw dp-off" pathLength="1" x1="339.7" y1="28.4" x2="340.6" y2="29.3" stroke="var(--ltr)" style="animation-delay:1.33s;animation-duration:0.05s"/>
-<line class="dp-draw dp-off" pathLength="1" x1="340.6" y1="29.4" x2="344.0" y2="32.8" stroke="var(--ltr)" style="animation-delay:1.34s;animation-duration:0.05s"/>
-<line class="dp-draw dp-off" pathLength="1" x1="345.0" y1="33.4" x2="346.3" y2="34.8" stroke="var(--ltr)" style="animation-delay:1.35s;animation-duration:0.05s"/>
-<line class="dp-draw dp-off" pathLength="1" x1="346.6" y1="35.0" x2="350.4" y2="38.8" stroke="var(--ltr)" style="animation-delay:1.36s;animation-duration:0.05s"/>
-<line class="dp-draw dp-off" pathLength="1" x1="350.5" y1="39.0" x2="352.7" y2="41.2" stroke="var(--ltr)" style="animation-delay:1.38s;animation-duration:0.05s"/>
-<line class="dp-draw dp-off" pathLength="1" x1="353.6" y1="42.0" x2="355.0" y2="43.5" stroke="var(--ltr)" style="animation-delay:1.39s;animation-duration:0.05s"/>
-<line class="dp-draw dp-off" pathLength="1" x1="355.5" y1="43.9" x2="358.1" y2="46.6" stroke="var(--ltr)" style="animation-delay:1.39s;animation-duration:0.05s"/>
-<line class="dp-draw dp-off" pathLength="1" x1="359.9" y1="48.4" x2="363.2" y2="51.7" stroke="var(--ltr)" style="animation-delay:1.41s;animation-duration:0.05s"/>
-<line class="dp-draw dp-off" pathLength="1" x1="363.3" y1="51.7" x2="364.8" y2="53.2" stroke="var(--ltr)" style="animation-delay:1.42s;animation-duration:0.05s"/>
-<line class="dp-draw dp-off" pathLength="1" x1="365.6" y1="54.2" x2="369.7" y2="58.3" stroke="var(--ltr)" style="animation-delay:1.43s;animation-duration:0.05s"/>
-<g class="rail">
-<line class="bb" x1="30" y1="381.5" x2="370" y2="381.5"/>
-<g class="dp-pop" style="animation-delay:0.15s;animation-duration:0.20s"><polygon points="30.3,373 58.3,373 64.3,381.5 58.3,390 30.3,390" fill="var(--ltr)"/><text x="44.3" y="385.1" text-anchor="middle">LTR</text></g>
-<g class="dp-pop" style="animation-delay:0.28s;animation-duration:0.20s"><rect x="65.8" y="371" width="1.8" height="21" fill="var(--tsd)"/><text class="lab" x="66.7" y="400" text-anchor="middle">PBS</text></g>
-<g class="dp-pop" style="animation-delay:0.32s;animation-duration:0.20s"><polygon points="75.7,373 108.9,373 114.9,381.5 108.9,390 75.7,390" fill="var(--gag)"/><text x="92.3" y="385.1" text-anchor="middle">GAG</text></g>
-<g class="dp-pop" style="animation-delay:0.48s;animation-duration:0.20s"><polygon points="117.5,373 134.4,373 140.4,381.5 134.4,390 117.5,390" fill="var(--pol-1)"/><text x="126.0" y="385.1" text-anchor="middle">AP</text></g>
-<g class="dp-pop" style="animation-delay:0.58s;animation-duration:0.20s"><polygon points="142.4,373 191.3,373 197.3,381.5 191.3,390 142.4,390" fill="var(--pol-2)"/><text x="166.8" y="385.1" text-anchor="middle">INT</text></g>
-<g class="dp-pop" style="animation-delay:0.85s;animation-duration:0.20s"><polygon points="214.3,373 261.9,373 267.9,381.5 261.9,390 214.3,390" fill="var(--pol-3)"/><text x="238.1" y="385.1" text-anchor="middle">RT</text></g>
-<g class="dp-pop" style="animation-delay:1.07s;animation-duration:0.20s"><polygon points="269.9,373 291.3,373 297.3,381.5 291.3,390 269.9,390" fill="var(--pol-4)"/><text x="280.6" y="385.1" text-anchor="middle">RH</text></g>
-<g class="dp-pop" style="animation-delay:1.20s;animation-duration:0.20s"><rect x="304.5" y="375" width="26.1" height="13" rx="2" fill="var(--tandem)"/><text x="317.5" y="385.1" text-anchor="middle">TR</text></g>
-<g class="dp-pop" style="animation-delay:1.31s;animation-duration:0.20s"><rect x="332.3" y="371" width="1.8" height="21" fill="var(--tsd)"/><text class="lab" x="333.2" y="400" text-anchor="middle">PPT</text></g>
-<g class="dp-pop" style="animation-delay:1.32s;animation-duration:0.20s"><polygon points="335.6,373 363.7,373 369.7,381.5 363.7,390 335.6,390" fill="var(--ltr)"/><text x="349.6" y="385.1" text-anchor="middle">LTR</text></g>
-</g>
-</svg>
-      <figcaption>
-        Self dotplot of a modeled 5.2 kb Ty1/copia element, computed from exact 14-mer matches and coloured by feature. The lines in the corners are its two LTRs (95% identical); the stripes beside the diagonal are a 5 &times; 80 bp tandem array.
-        <ul class="legend" aria-hidden="true">
-          <li><i style="background:var(--ltr)"></i>LTR</li>
-          <li><i style="background:var(--gag)"></i>GAG</li>
-          <li><i style="background:linear-gradient(90deg,var(--pol-1) 25%,var(--pol-2) 25% 50%,var(--pol-3) 50% 75%,var(--pol-4) 75%)"></i>POL: AP, INT, RT, RH</li>
-          <li><i style="background:var(--tandem)"></i>TR: tandem repeat</li>
-          <li><i class="tick" style="background:var(--tsd)"></i>PBS, PPT</li>
-        </ul>
-      </figcaption>
-    </figure>
   </div>
 </div>
 
 <section class="band" aria-labelledby="loop-title">
   <div class="wrap">
     <div class="section-head">
-      <h2 id="loop-title">Built for the last mile of curation</h2>
+      <h2 id="loop-title">Built for the last mile of curation. Built for exploration.</h2>
       <p>TE discovery pipelines give you candidate consensus sequences that are rarely ready to publish. Boundaries are off, terminal repeats are truncated, alignments carry junk rows. Fixing that is manual and repetitive, so RepeatViewer keeps the whole loop in one place.</p>
     </div>
     <ol class="loop">
-      <li><strong>Add a folder</strong><span>Drag your candidates into the Folders panel. Subfolders, filters and history work like a file browser.</span></li>
-      <li><strong>Click a sequence</strong><span>The Preview shows it as text, as an annotation map and as a dotplot.</span></li>
+      <li><strong>Add a folder</strong><span>Drag your candidates into the Folders panel. Now you can navigate as in a file browser.</span></li>
+      <li><strong>Click a sequence</strong><span>The Preview panel shows content as text, as an annotation map and as a dotplot.</span></li>
       <li><strong>Run a tool</strong><span>BLAST, align, clean, extend or build a consensus from the toolbar. Jobs run in the background.</span></li>
       <li><strong>Pick up the output</strong><span>The result appears in the same folder, highlighted, and becomes the input for the next tool.</span></li>
     </ol>
     <figure class="shot">
       <div class="shot-frame" style="aspect-ratio:1800/1023">
-        <img src="assets/shots/main-window.webp" alt="RepeatViewer main window: folders on the left, files at the top, and an overview of annotated sugar beet retrotransposons in the Preview" loading="lazy">
+        <img src="assets/shots/main-window.webp" alt="RepeatViewer main window: Folders and Files on the left, and the annotation overview of a Ty3/gypsy element in the Preview" loading="lazy">
       </div>
-      <figcaption>Folders on the left, files at the top, Preview below. Here, annotated Ty3 retrotransposons from a sugar beet library.</figcaption>
+      <figcaption>Folders and Files on the left. Preview on the right. Here, an annotated Ty3/gypsy retrotransposon from the demo data.</figcaption>
     </figure>
   </div>
 </section>
@@ -459,25 +337,25 @@ h3 { font-size: 21px; line-height: 1.25; letter-spacing: -.01em; margin: 0 0 8px
     <div class="feature">
       <div class="feature-text">
         <h2>See the structure of every candidate</h2>
-        <p>Auto annotation finds terminal repeats, tandem repeats and open reading frames as soon as you ask. Similarity annotation adds protein domains from your own databases.</p>
+        <p>Auto annotation finds terminal repeats, tandem repeats and open reading frames. Similarity annotation adds protein domains from your own databases.</p>
         <ul>
           <li>Detect LTRs, TIRs, tandem repeats and ORFs interactively</li>
-          <li>Drag feature edges to fix boundaries, then save</li>
+          <li>Drag feature edges to fix the boundaries, then save</li>
           <li>Export the annotation as GFF</li>
         </ul>
       </div>
       <figure class="shot">
         <div class="shot-frame" style="aspect-ratio:1800/1020">
-          <img src="assets/shots/annotation.webp" alt="Annotation tab of a Ty1 copia element showing both LTRs, two ORFs and Pfam domains" loading="lazy">
+          <img src="assets/shots/annotation.webp" alt="Annotation view of a Ty3/gypsy element showing both LTRs, the ORF and its protein domains" loading="lazy">
         </div>
-        <figcaption>A Ty1/copia element with both LTRs, its ORFs and Pfam domains.</figcaption>
+        <figcaption>A Ty3/gypsy element with both LTRs, the ORF and its protein domains.</figcaption>
       </figure>
     </div>
 
     <div class="feature flip">
       <div class="feature-text">
         <h2>Copy annotation to related sequences</h2>
-        <p>Curated one element by hand? Transfer its features to every related sequence. You set the identity and coverage cut-offs, and the matches are drawn as soon as they are found.</p>
+        <p>Curated one TE by hand? Transfer its features to every related sequence. You set the identity and coverage cut-offs, and the matches are drawn as soon as they are found.</p>
         <ul>
           <li>Pick any annotated file as the source</li>
           <li>Tune identity, coverage and strand</li>
@@ -486,15 +364,15 @@ h3 { font-size: 21px; line-height: 1.25; letter-spacing: -.01em; margin: 0 0 8px
       </div>
       <figure class="shot">
         <div class="shot-frame" style="aspect-ratio:1600/906">
-          <video poster="assets/shots/transfer.webp" autoplay muted loop playsinline preload="metadata" aria-label="Annotation transfer from one retrotransposon to another"><source src="assets/shots/transfer.mp4" type="video/mp4"><source src="assets/shots/transfer.webm" type="video/webm"></video>
+          <video poster="assets/shots/transfer.webp" autoplay muted loop playsinline preload="metadata" aria-label="The Transfer annotation section with its identity and coverage cut-offs"><source src="assets/shots/transfer.mp4" type="video/mp4"><source src="assets/shots/transfer.webm" type="video/webm"></video>
         </div>
-        <figcaption>Features from one Retrofit element transferred to a relative.</figcaption>
+        <figcaption>Transfer annotation: choose a source, set identity and coverage, then run.</figcaption>
       </figure>
     </div>
 
     <div class="feature">
       <div class="feature-text">
-        <h2>Find the copies, clean the alignment, in one run</h2>
+        <h2>One click to detect more TE copies, align them and clean the alignment</h2>
         <p>Save a chain of tools as a workflow and run it on any candidate. The built-in BEEA workflow runs BLAST, MSA Extend, MAFFT, MSA Clean, Consensus and TE-Aid in a row, and every intermediate file stays in the folder.</p>
         <ul>
           <li>BLAST against a genome or a pan-genome list</li>
@@ -504,16 +382,16 @@ h3 { font-size: 21px; line-height: 1.25; letter-spacing: -.01em; margin: 0 0 8px
       </div>
       <figure class="shot">
         <div class="shot-frame" style="aspect-ratio:1600/906">
-          <video poster="assets/shots/curate.webp" autoplay muted loop playsinline preload="metadata" aria-label="Running the Blast-Extract-Extend-Align workflow on one TE candidate"><source src="assets/shots/curate.mp4" type="video/mp4"><source src="assets/shots/curate.webm" type="video/webm"></video>
+          <video poster="assets/shots/curate.webp?v=3" autoplay muted loop playsinline preload="metadata" aria-label="The Blast-Extract-Extend-Align workflow, its BLAST settings and an alignment"><source src="assets/shots/curate.mp4?v=3" type="video/mp4"><source src="assets/shots/curate.webm?v=3" type="video/webm"></video>
         </div>
-        <figcaption>One click on a candidate, six tools later the TE-Aid report is open.</figcaption>
+        <figcaption>The Blast-Extract-Extend-Align workflow, its BLAST step and an alignment ready for cleaning.</figcaption>
       </figure>
     </div>
 
     <div class="feature flip">
       <div class="feature-text">
-        <h2>Large alignments, with the annotation on top</h2>
-        <p>Scroll through alignments with tens of thousands of columns without opening another program. Annotation features and a coverage track sit on the alignment, so the real boundaries are easy to see.</p>
+        <h2>Large alignments with the annotations</h2>
+        <p>Scroll through alignments without opening another program. Annotation features and a coverage plot sit above the alignment, so the real boundaries are easy to see.</p>
         <ul>
           <li>Color by nucleotide, conservation or divergence</li>
           <li>Select a region and trim, clean or build a consensus from it</li>
@@ -522,27 +400,27 @@ h3 { font-size: 21px; line-height: 1.25; letter-spacing: -.01em; margin: 0 0 8px
       </div>
       <figure class="shot">
         <div class="shot-frame" style="aspect-ratio:1800/984">
-          <img src="assets/shots/msa.webp" alt="A 16 kb multiple sequence alignment of 84 copies with LTR features and a coverage track" loading="lazy">
+          <img src="assets/shots/msa.webp" alt="A multiple sequence alignment of 24 satellite DNA monomers with the Boundary prediction panel" loading="lazy">
         </div>
-        <figcaption>A 16 kb alignment of 84 copies with the LTRs marked on every row.</figcaption>
+        <figcaption>An alignment of 24 satellite DNA monomers, with the Boundary prediction panel on the right.</figcaption>
       </figure>
     </div>
 
     <div class="feature">
       <div class="feature-text">
         <h2>A dotplot for every sequence</h2>
-        <p>Every sequence has a dotplot tab. Open an alignment and get one dotplot per copy, side by side, to spot the truncated and rearranged ones at a glance.</p>
+        <p>Every sequence has a dotplot tab. Open an alignment and get one dotplot per copy, side by side, to spot truncated and rearranged sequences at a glance.</p>
         <ul>
           <li>Built-in dotplot for single and multiple sequences</li>
           <li>Interactive Flexidot plots that jump to the matching annotation</li>
-          <li>Annotation tracks and sequence boundaries drawn on the axes</li>
+          <li>Annotation tracks and sequence boundaries drawn along the middle diagonal</li>
         </ul>
       </div>
       <figure class="shot">
         <div class="shot-frame" style="aspect-ratio:1800/985">
-          <img src="assets/shots/dotplot.webp" alt="Gallery of self dotplots, one per sequence of an alignment" loading="lazy">
+          <img src="assets/shots/dotplot.webp" alt="Self dotplot of a Ty3/gypsy element" loading="lazy">
         </div>
-        <figcaption>Self dotplots of all 84 copies in the alignment above.</figcaption>
+        <figcaption>Self dotplot of a Ty3/gypsy element. The two LTRs show as short lines in the corners.</figcaption>
       </figure>
     </div>
 
@@ -558,16 +436,16 @@ h3 { font-size: 21px; line-height: 1.25; letter-spacing: -.01em; margin: 0 0 8px
       </div>
       <figure class="shot">
         <div class="shot-frame" style="aspect-ratio:1600/904">
-          <video poster="assets/shots/preview.webp" autoplay muted loop playsinline preload="metadata" aria-label="Clicking through an alignment, a PDF, a TE-Aid report and a GFF file in the Preview"><source src="assets/shots/preview.mp4" type="video/mp4"><source src="assets/shots/preview.webm" type="video/webm"></video>
+          <video poster="assets/shots/preview.webp" autoplay muted loop playsinline preload="metadata" aria-label="An annotated element, its dotplot, a tree and the sequence text in the Preview"><source src="assets/shots/preview.mp4" type="video/mp4"><source src="assets/shots/preview.webm" type="video/webm"></video>
         </div>
-        <figcaption>An alignment PDF, a TE-Aid report and a GFF file, all in the Preview.</figcaption>
+        <figcaption>An annotated element, its dotplot, a tree and the sequence text, all in the Preview.</figcaption>
       </figure>
     </div>
 
     <div class="feature">
       <div class="feature-text">
-        <h2>From one element to the whole genome</h2>
-        <p>When a library is ready, see where it sits in the genome and how old it is. Turn TE types on and off, and save the figure as SVG or PDF.</p>
+        <h2>From one repetitive DNA to the whole genome</h2>
+        <p>After a TE library is ready, check the TE density along the chromosomes. Analyze TE age.</p>
         <ul>
           <li>TE density along chromosomes, divergence landscapes and abundance</li>
           <li>Repeat Quantify with RepeatMasker or BLASTn</li>
@@ -576,39 +454,39 @@ h3 { font-size: 21px; line-height: 1.25; letter-spacing: -.01em; margin: 0 0 8px
       </div>
       <figure class="shot">
         <div class="shot-frame" style="aspect-ratio:1600/792">
-          <video poster="assets/shots/genome.webp" autoplay muted loop playsinline preload="metadata" aria-label="Genome-wide TE density and divergence plots with the LTR class switched off"><source src="assets/shots/genome.mp4" type="video/mp4"><source src="assets/shots/genome.webm" type="video/webm"></video>
+          <video poster="assets/shots/genome.webp" autoplay muted loop playsinline preload="metadata" aria-label="TE density, divergence and abundance plots of the demo genome"><source src="assets/shots/genome.mp4" type="video/mp4"><source src="assets/shots/genome.webm" type="video/webm"></video>
         </div>
-        <figcaption>TE density and divergence in sugar beet, with and without LTR retrotransposons.</figcaption>
+        <figcaption>TE density along two demo chromosomes, the divergence landscape and the family abundance.</figcaption>
       </figure>
     </div>
 
     <div class="feature flip">
       <div class="feature-text">
         <h2>Your parameters, and a record of every run</h2>
-        <p>Every tool opens with its settings, each explained with a help button. Change them, save them as your defaults, or restore the originals. Every command RepeatViewer runs is written to a log you can open from Preferences.</p>
+        <p>Every tool opens with its settings, each explained with a help button. Change them, save them as your defaults, or restore the originals. Every command RepeatViewer runs is written to a log that you can open from Preferences.</p>
         <ul>
-          <li>Parameters for BLAST, MAFFT, MUSCLE, FastGA and the rest</li>
+          <li>Parameters for BLAST, MAFFT, MUSCLE, FastGA, etc.</li>
           <li>Help text next to each option</li>
           <li>Full command lines in the log</li>
         </ul>
       </div>
       <figure class="shot">
         <div class="shot-frame" style="aspect-ratio:1600/906">
-          <video poster="assets/shots/params.webp" autoplay muted loop playsinline preload="metadata" aria-label="BLAST and MAFFT parameter dialogs"><source src="assets/shots/params.mp4" type="video/mp4"><source src="assets/shots/params.webm" type="video/webm"></video>
+          <video poster="assets/shots/params.webp?v=3" autoplay muted loop playsinline preload="metadata" aria-label="BLAST, alignment and tree parameter dialogs"><source src="assets/shots/params.mp4?v=3" type="video/mp4"><source src="assets/shots/params.webm?v=3" type="video/webm"></video>
         </div>
-        <figcaption>The BLAST and alignment dialogs.</figcaption>
+        <figcaption>The BLAST, alignment and tree dialogs.</figcaption>
       </figure>
     </div>
 
     <div class="pair">
       <div>
         <h3>Search your own databases</h3>
-        <p>Point RepeatViewer at protein, DNA and HMM databases once, under Manage Database, and every similarity search uses them.</p>
+        <p>Point RepeatViewer towards a protein, DNA or HMM database once, under Manage Database, and every similarity search will find it.</p>
         <ul class="chips"><li>Pfam</li><li>Dfam</li><li>REXdb</li><li>Repbase</li><li>CDD</li><li>Your own FASTA</li></ul>
       </div>
       <div>
         <h3>Add your own tools</h3>
-        <p>Wrap any command-line program as a tool with its own parameter dialog, or write a plugin in Python for anything bigger. Your tools can join workflows like the built-in ones.</p>
+        <p>Add Plugins, add any command-line program as a tool with its own parameter dialog, or write a plugin for anything bigger. Your tools can join workflows like the built-in ones.</p>
         <p><a href="https://github.com/qjiangzhao/RepeatViewer/blob/main/docs/PLUGINS.md">Read the plugin guide</a></p>
       </div>
     </div>
@@ -620,7 +498,7 @@ h3 { font-size: 21px; line-height: 1.25; letter-spacing: -.01em; margin: 0 0 8px
   <div class="wrap">
     <div class="section-head">
       <h2 id="beyond-title">Beyond curation</h2>
-      <p>Tools for the questions that come after a library is clean: how elements are related, what changed between copies, and where repeats sit in the genome and on chromosomes.</p>
+      <p>Tools for the questions that come after a TE library is clean: how TEs and other repetitive DNAs are related, what changed between TE copies, and where repeats sit in the genome and along chromosomes.</p>
     </div>
     <div class="bc-cards">
 
@@ -641,9 +519,9 @@ h3 { font-size: 21px; line-height: 1.25; letter-spacing: -.01em; margin: 0 0 8px
           <g fill="var(--muted)" opacity=".35"><rect x="10" y="32" width="182" height="7" rx="2"/><rect x="30" y="46" width="150" height="7" rx="2"/><rect x="10" y="60" width="120" height="7" rx="2"/><rect x="60" y="74" width="132" height="7" rx="2"/></g>
           <g fill="var(--tsd)"><rect x="70" y="32" width="2.5" height="7"/><rect x="70" y="46" width="2.5" height="7"/><rect x="120" y="60" width="2.5" height="7"/><rect x="150" y="74" width="2.5" height="7"/></g>
         </svg>
-        <span class="bc-menu">Tools → Map to Reference</span>
-        <h3>Map to Reference</h3>
-        <p>Place copies, contigs or reads on an annotated element with minimap2 or HISAT2, and see which features are intact, changed, partial or lost.</p>
+        <span class="bc-menu">Tools → Mapping</span>
+        <h3>Mapping</h3>
+        <p>Place copies, contigs or reads on an annotated TE with minimap2 or HISAT2, and see which features are intact, changed, partial or lost.</p>
       </div>
 
       <div class="bc-card">
@@ -667,7 +545,7 @@ h3 { font-size: 21px; line-height: 1.25; letter-spacing: -.01em; margin: 0 0 8px
         </svg>
         <span class="bc-menu">Tools → Repeat Quantify</span>
         <h3>Repeat Quantify</h3>
-        <p>Copies, arrays, covered bp and genome share for every family in a satellite library, plus a divergence landscape that shows which families are young and which are old.</p>
+        <p>Copies, arrays, covered bp and genome share for every family in a satellite DNA library, plus a divergence landscape that shows which satellite DNA families are young and which are old.</p>
       </div>
 
       <div class="bc-card">
@@ -698,6 +576,21 @@ h3 { font-size: 21px; line-height: 1.25; letter-spacing: -.01em; margin: 0 0 8px
         <p>Search a motif or probe in the open document and step from hit to hit in the annotation view.</p>
       </div>
 
+      <div class="bc-card">
+        <svg viewBox="0 0 200 84" aria-hidden="true">
+          <rect x="10" y="38" width="120" height="7" rx="2" fill="var(--muted)" opacity=".35"/>
+          <path d="M22 24h26l6 5-6 5H22z" fill="var(--gag)"/>
+          <path d="M118 49H92l-6 5 6 5h26z" fill="var(--tsd)"/>
+          <rect x="22" y="68" width="96" height="4" rx="2" fill="var(--pol-2)"/>
+          <rect x="146" y="8" width="44" height="70" rx="5" fill="var(--muted)" opacity=".16"/>
+          <g fill="var(--muted)" opacity=".7"><rect x="152" y="18" width="12" height="3"/><rect x="152" y="28" width="12" height="3"/><rect x="152" y="39" width="12" height="3"/><rect x="152" y="51" width="12" height="3"/><rect x="152" y="65" width="12" height="3"/></g>
+          <rect x="172" y="39" width="12" height="4" fill="var(--pol-2)"/>
+        </svg>
+        <span class="bc-menu">Tools → Primers and Probes</span>
+        <h3>Primers and probes</h3>
+        <p>Design primers and FISH probes on the sequence itself, keep them in a shared primer database, and test them before ordering with in-silico PCR, a restriction digest and a gel.</p>
+      </div>
+
     </div>
   </div>
 </section>
@@ -705,8 +598,7 @@ h3 { font-size: 21px; line-height: 1.25; letter-spacing: -.01em; margin: 0 0 8px
 <section class="band" aria-labelledby="all-title">
   <div class="wrap">
     <div class="section-head">
-      <h2 id="all-title">Everything else it does</h2>
-      <p>Each tool reads the files you select and writes its output beside them.</p>
+      <h2 id="all-title">What else? A RepeatViewer summary</h2>
     </div>
     <div class="toolgrid">
       <div>
@@ -747,13 +639,6 @@ h3 { font-size: 21px; line-height: 1.25; letter-spacing: -.01em; margin: 0 0 8px
           <li>Open in AliView</li>
         </ul>
       </div>
-      <div>
-        <h3>Benchmarking</h3>
-        <ul>
-          <li>Confusion matrix<span>Compare two classifications of the same library</span></li>
-          <li>TE library benchmark<span>Score a library against a reference with RepeatMasker</span></li>
-        </ul>
-      </div>
     </div>
   </div>
 </section>
@@ -762,8 +647,19 @@ h3 { font-size: 21px; line-height: 1.25; letter-spacing: -.01em; margin: 0 0 8px
   <div class="wrap">
     <div class="section-head">
       <h2 id="install-title">Install</h2>
-      <p>For now, install from source with Python 3.10 or later. Prebuilt packages for macOS, Windows and Linux are in preparation.</p>
+      <p>Download the app for your system. No Python installation needed. Optional tools still need conda.</p>
     </div>
+
+    <div class="downloads">
+      <a class="btn btn-primary" data-asset="macos-arm64" href="https://github.com/qjiangzhao/RepeatViewer/releases/latest">macOS, Apple Silicon<span>.dmg</span></a>
+      <a class="btn btn-primary" data-asset="macos-x86_64" href="https://github.com/qjiangzhao/RepeatViewer/releases/latest">macOS, Intel<span>.dmg</span></a>
+      <a class="btn btn-primary" data-asset="windows-x64" href="https://github.com/qjiangzhao/RepeatViewer/releases/latest">Windows<span>.zip</span></a>
+      <a class="btn btn-primary" data-asset="linux-x86_64" href="https://github.com/qjiangzhao/RepeatViewer/releases/latest">Linux<span>.tar.gz</span></a>
+    </div>
+    <p class="dl-note">Version <span class="rv-version">1.2.0</span>, from the <a href="https://github.com/qjiangzhao/RepeatViewer/releases/latest">latest release</a>. The builds are not code-signed, so the system asks once on first start. <strong>macOS:</strong> drag the app into Applications, then right-click it and choose Open. <strong>Windows:</strong> unzip, start RepeatViewer.exe, and choose More info, then Run anyway. <strong>Linux:</strong> unpack and run <code>./RepeatViewer</code>.</p>
+
+    <h3 class="src-title">Or install from source</h3>
+    <p class="src-lede">With Python 3.10 or later.</p>
 
     <div class="install-grid">
       <div>
@@ -807,7 +703,7 @@ pip install -e .</pre></li>
           <h3>Optional tools</h3>
           <p>Most of RepeatViewer works without extras. Install these only for the tools that need them:</p>
           <ul>
-            <li><strong>RepeatMasker</strong> for Repeat Quantify and library benchmarking</li>
+            <li><strong>RepeatMasker</strong> for Repeat Quantify</li>
             <li><strong>FastGA</strong> for whole-sequence alignment</li>
             <li><strong>IQ-TREE</strong> or <strong>FastTree</strong> for maximum-likelihood trees</li>
             <li><strong>AliView</strong> to open alignments outside the app</li>
@@ -830,23 +726,15 @@ pip install -e .</pre></li>
     <div class="faq">
       <details>
         <summary>Does RepeatViewer find TEs in a genome?</summary>
-        <div><p>No. It does not discover TEs or build consensus sequences from a raw genome. That is what <a href="https://github.com/qjiangzhao/TEtrimmer">TEtrimmer</a> does. RepeatViewer is where you inspect and refine the candidates afterwards.</p></div>
-      </details>
-      <details>
-        <summary>Do I need TEtrimmer?</summary>
-        <div><p>No. The two apps are independent. RepeatViewer works on any folder of TE sequences, whichever tool made them.</p></div>
+        <div><p>No. It does not discover TEs or build consensus sequences from a raw genome. For this, you would rely on other pipelines, such as EDTA, RepeatModeler, TEtrimmer, REPET, RepeatExplorer, etc. RepeatViewer is where you inspect your TE candidates and refine them for downstream analysis.</p></div>
       </details>
       <details>
         <summary>Where do the results go?</summary>
-        <div><p>Into the same folder as the input, highlighted in the Files panel. There is no central results folder. If you do not see a new file, press F5 to refresh.</p></div>
+        <div><p>You are always working locally. All results will be saved in the same folder as the input, highlighted in the Files panel. If you do not see a new file, press F5 to refresh.</p></div>
       </details>
       <details>
-        <summary>A tool says the genome is not set.</summary>
-        <div><p>Open <strong>File → Manage Database</strong> and choose a genome FASTA or a pan-genome list. BLAST, MSA Extend, genome maps and genome-aware TE-Aid all need it.</p></div>
-      </details>
-      <details>
-        <summary>RepeatMasker or FastGA is not found.</summary>
-        <div><p>They are not installed with RepeatViewer. Install them into a conda environment, point <strong>File → Setting → External tools</strong> at it, and click Test. FastGA needs version 1.5 or newer.</p></div>
+        <summary>RepeatMasker or FastGA are not found.</summary>
+        <div><p>These tools are not automatically installed alongside RepeatViewer. Install them into a conda environment, point RepeatViewer (<strong>File → Settings/Preferences → External tools</strong>) to their PATH. FastGA needs version 1.5 or newer.</p></div>
       </details>
       <details>
         <summary>Does it cost anything?</summary>
@@ -860,16 +748,68 @@ pip install -e .</pre></li>
   </div>
 </section>
 
-<section aria-labelledby="cite-title">
+<section id="links" aria-labelledby="links-title">
+  <div class="wrap">
+    <div class="section-head">
+      <h2 id="links-title">Links</h2>
+      <p>RepeatViewer stands on the shoulders of giants. It integrates many tools for repetitive DNA analysis. Please also visit and cite them.</p>
+    </div>
+    <div class="linkgrid">
+      <div>
+        <h3>Repeat databases</h3>
+        <ul>
+          <li><a href="https://www.dfam.org/">Dfam</a><span>TE families and HMMs. <a href="https://doi.org/10.1186/s13100-020-00230-y">Storer et al. 2021</a></span></li>
+          <li><a href="https://www.girinst.org/repbase/">Repbase</a><span>Repeat consensus sequences. <a href="https://doi.org/10.1186/s13100-015-0041-9">Bao et al. 2015</a></span></li>
+          <li><a href="https://repeatexplorer.org/">REXdb</a><span>Plant TE protein domains. <a href="https://doi.org/10.1186/s13100-018-0144-1">Neumann et al. 2019</a></span></li>
+          <li><a href="https://gydb.org/">GyDB</a><span>Ty3/gypsy and retroviral elements. <a href="https://doi.org/10.1093/nar/gkq1061">Llorens et al. 2011</a></span></li>
+          <li><a href="https://www.ebi.ac.uk/interpro/">Pfam</a><span>Protein family HMMs. <a href="https://doi.org/10.1093/nar/gkaa913">Mistry et al. 2021</a></span></li>
+          <li><a href="https://www.ncbi.nlm.nih.gov/cdd/">NCBI CDD</a><span>Conserved protein domains. <a href="https://doi.org/10.1093/nar/gkac1096">Wang et al. 2023</a></span></li>
+          <li><a href="https://www.ncbi.nlm.nih.gov/nuccore/">NCBI Nucleotide</a><span>Sequence download by accession.</span></li>
+        </ul>
+        <h3 class="links-next">Repeat websites</h3>
+        <ul>
+          <li><a href="https://tehub.org/">TE Hub</a><span>Community hub for TE tools and methods. <a href="https://doi.org/10.1186/s13100-021-00244-0">Elliott et al. 2021</a></span></li>
+          <li><a href="https://gydb.org/">GyDB</a><span>The Gypsy Database of mobile genetic elements.</span></li>
+          <li><a href="https://www.dfam.org/">Dfam</a><span>Browse TE families and genome annotations.</span></li>
+          <li><a href="https://repeatexplorer.org/">RepeatExplorer</a><span>Repeat discovery from unassembled reads.</span></li>
+        </ul>
+      </div>
+      <div class="links-wide">
+        <h3>Repeat tools</h3>
+        <ul class="links-2col">
+          <li><a href="https://blast.ncbi.nlm.nih.gov/">BLAST+</a><span>Similarity search. <a href="https://doi.org/10.1186/1471-2105-10-421">Camacho et al. 2009</a></span></li>
+          <li><a href="https://mafft.cbrc.jp/alignment/software/">MAFFT</a><span>Multiple sequence alignment. <a href="https://doi.org/10.1093/molbev/mst010">Katoh and Standley 2013</a></span></li>
+          <li><a href="https://github.com/rcedgar/muscle">MUSCLE</a><span>Multiple sequence alignment. <a href="https://doi.org/10.1038/s41467-022-34630-w">Edgar 2022</a></span></li>
+          <li><a href="https://github.com/thegenemyers/FASTGA">FastGA</a><span>Whole-sequence alignment. <a href="https://doi.org/10.1093/bioadv/vbaf238">Myers et al. 2025</a></span></li>
+          <li><a href="https://github.com/lh3/minimap2">minimap2</a><span>Mapping to a reference. <a href="https://doi.org/10.1093/bioinformatics/bty191">Li 2018</a></span></li>
+          <li><a href="https://daehwankimlab.github.io/hisat2/">HISAT2</a><span>Mapping to a reference. <a href="https://doi.org/10.1038/s41587-019-0201-4">Kim et al. 2019</a></span></li>
+          <li><a href="https://www.htslib.org/">SAMtools</a><span>Alignment files. <a href="https://doi.org/10.1093/gigascience/giab008">Danecek et al. 2021</a></span></li>
+          <li><a href="https://www.repeatmasker.org/">RepeatMasker</a><span>Repeat Quantify. Smit, Hubley and Green, RepeatMasker Open-4.0</span></li>
+          <li><a href="https://github.com/qjiangzhao/TEtrimmer">TEtrimmer</a><span>TE library curation. <a href="https://doi.org/10.1038/s41467-025-63889-y">Qian et al. 2025</a></span></li>
+          <li><a href="https://github.com/clemgoub/TE-Aid">TE-Aid</a><span>TE consensus reports. <a href="https://doi.org/10.1186/s13100-021-00259-7">Goubert et al. 2022</a></span></li>
+          <li><a href="https://github.com/molbio-dresden/flexidot">FlexiDot</a><span>Dotplots. <a href="https://doi.org/10.1093/bioinformatics/bty395">Seibt et al. 2018</a></span></li>
+          <li><a href="https://iqtree.github.io/">IQ-TREE</a><span>Maximum-likelihood trees. <a href="https://doi.org/10.1093/molbev/msaa015">Minh et al. 2020</a></span></li>
+          <li><a href="https://morgannprice.github.io/fasttree/">FastTree</a><span>Fast approximate trees. <a href="https://doi.org/10.1371/journal.pone.0009490">Price et al. 2010</a></span></li>
+          <li><a href="https://github.com/althonos/pyhmmer">PyHMMER</a><span>HMM search. <a href="https://doi.org/10.1093/bioinformatics/btad214">Larralde and Zeller 2023</a></span></li>
+          <li><a href="https://github.com/urmi-21/orfipy">orfipy</a><span>ORF prediction. <a href="https://doi.org/10.1093/bioinformatics/btab090">Singh and Wurtele 2021</a></span></li>
+          <li><a href="https://github.com/lmdu/pytrf">pytrf</a><span>Tandem repeat detection. <a href="https://doi.org/10.1186/s12859-025-06168-3">Du et al. 2025</a></span></li>
+          <li><a href="https://github.com/primer3-org/primer3">Primer3</a><span>Primer design. <a href="https://doi.org/10.1093/nar/gks596">Untergasser et al. 2012</a></span></li>
+          <li><a href="https://github.com/zhangtaolab/Chorus2">Chorus2</a><span>Oligo painting probes. <a href="https://doi.org/10.1111/pbi.13610">Zhang et al. 2021</a></span></li>
+          <li><a href="https://ormbunkar.se/aliview/">AliView</a><span>External alignment viewer. <a href="https://doi.org/10.1093/bioinformatics/btu531">Larsson 2014</a></span></li>
+        </ul>
+      </div>
+    </div>
+    <p class="links-note">Please <a href="https://github.com/qjiangzhao/RepeatViewer/issues">let us know</a> if we should link to another repetitive DNA database.</p>
+  </div>
+</section>
+
+<section class="band" aria-labelledby="cite-title">
   <div class="wrap cite">
-    <div>
-      <h2 id="cite-title">Cite RepeatViewer</h2>
-      <p>The manuscript is in preparation. Until it is out, please cite this repository, and <a href="https://github.com/qjiangzhao/TEtrimmer">TEtrimmer</a> (<em>Nature Communications</em>, 2025) when you used it to build your library.</p>
-    </div>
-    <div>
-      <p class="authors">Jiangzhao Qian, Abdullah El-nagish, Sophie Maiwald, Nusrat Sultana, Shlok Szatkowski, Nicola Schmidt, Tony Heitkam</p>
-      <p style="margin:0">Chair of Molecular Botany, Institute for Biology I, RWTH Aachen University</p>
-    </div>
+    <h2 id="cite-title">Cite RepeatViewer</h2>
+    <p>Please cite:</p>
+    <p class="authors">Jiangzhao Qian, Abdullah El-nagish, Sophie Maiwald, Nusrat Sultana, Shlok Szatkowski, Nicola Schmidt, Tony Heitkam. RepeatViewer: a platform for explorative analysis of repetitive DNAs (2026). <a href="https://github.com/qjiangzhao/RepeatViewer">https://github.com/qjiangzhao/RepeatViewer</a></p>
+    <p>Please also cite <a href="https://github.com/qjiangzhao/TEtrimmer">TEtrimmer</a> (<em>Nature Communications</em>, 2025) when you used it to build your library.</p>
+    <p style="margin:0">RepeatViewer was developed at Chair of Molecular Botany, Institute for Biology I, RWTH Aachen University.</p>
   </div>
 </section>
 </main>
@@ -969,6 +909,27 @@ pip install -e .</pre></li>
     });
   });
   if (/Win/.test(navigator.platform || "")) select(document.getElementById("tab-win"));
+})();
+</script>
+<script>
+(function () {
+  // Show the latest release: its version number and direct download links.
+  // Without it the buttons still open the latest release page.
+  if (!window.fetch) { return; }
+  fetch("https://api.github.com/repos/qjiangzhao/RepeatViewer/releases/latest")
+    .then(function (r) { return r.ok ? r.json() : null; })
+    .then(function (rel) {
+      if (!rel || !rel.tag_name) { return; }
+      var v = String(rel.tag_name).replace(/^v/, "");
+      document.querySelectorAll(".rv-version").forEach(function (el) { el.textContent = v; });
+      document.querySelectorAll("a[data-asset]").forEach(function (a) {
+        var key = a.getAttribute("data-asset");
+        (rel.assets || []).forEach(function (as) {
+          if (as.name.indexOf(key) !== -1 && as.browser_download_url) { a.href = as.browser_download_url; }
+        });
+      });
+    })
+    .catch(function () {});
 })();
 </script>
 </body>
