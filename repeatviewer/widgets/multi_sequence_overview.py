@@ -359,6 +359,39 @@ def _group_predicted_boundaries_by_edge(
     ]
 
 
+def _alternating_boundary_segments(
+    y0: float,
+    y1: float,
+    *,
+    alt_seg_px: float,
+    n_colors: int,
+) -> list[tuple[float, float, int]]:
+    """Content-anchored colour runs for overlapping boundary guides.
+
+    Segment ``i`` covers ``[i * alt_seg_px, (i + 1) * alt_seg_px)`` in content
+    Y, so vertical scroll does not rephase which colour sits on a given row.
+    Returns ``(y_start, y_end, color_index)`` clipped to ``[y0, y1]``.
+    """
+    if y1 <= y0 + 1e-9 or alt_seg_px <= 1e-9 or n_colors <= 0:
+        return []
+    seg_px = float(alt_seg_px)
+    n = max(1, int(n_colors))
+    seg_i = int(math.floor(float(y0) / seg_px))
+    y = float(y0)
+    out: list[tuple[float, float, int]] = []
+    # Bound iterations to avoid runaway if y1 is huge.
+    limit = int(math.ceil((float(y1) - float(y0)) / seg_px)) + 3
+    for _ in range(max(1, limit)):
+        if y >= float(y1) - 0.5:
+            break
+        y_end = min(float(y1), float(seg_i + 1) * seg_px)
+        if y_end > y + 1e-9:
+            out.append((y, y_end, seg_i % n))
+        y = y_end
+        seg_i += 1
+    return out
+
+
 def _wheel_delta_y(event: QWheelEvent) -> int:
     """Vertical pixels for a wheel/trackpad event (do not steal horizontal swipes)."""
     pixel = event.pixelDelta()
@@ -4479,19 +4512,17 @@ class _BarsCanvas(QWidget):
                 continue
             # Same column: cycle method colours down the line; 2× thicker so
             # overlapping methods read clearly as one shared boundary.
+            # Phase from content Y (not clip.top) so scroll keeps figure-1 stripes.
             width = base_width * 2.0
-            y = y0
-            index = 0
-            while y < y1 - 0.5:
-                color, _solid = items[index % n]
-                y_end = min(y1, y + alt_seg_px)
+            for y, y_end, color_i in _alternating_boundary_segments(
+                y0, y1, alt_seg_px=alt_seg_px, n_colors=n
+            ):
+                color, _solid = items[color_i]
                 pen = QPen(color, width, Qt.PenStyle.SolidLine)
                 pen.setCosmetic(True)
                 pen.setCapStyle(Qt.PenCapStyle.FlatCap)
                 painter.setPen(pen)
                 painter.drawLine(QPointF(x, y), QPointF(x, y_end))
-                y = y_end
-                index += 1
         painter.setPen(Qt.PenStyle.NoPen)
 
     def _paint_msa_rows_pixel_sample(
@@ -5777,18 +5808,15 @@ class _ScaleRuler(QWidget):
                     painter.drawLine(QPointF(x, 0.0), QPointF(x, h))
                     continue
                 width_pen = base_width * 2.0
-                y = 0.0
-                index = 0
-                while y < h - 0.5:
-                    color, _solid = items[index % n]
-                    y_end = min(h, y + alt_seg_px)
+                for y, y_end, color_i in _alternating_boundary_segments(
+                    0.0, h, alt_seg_px=alt_seg_px, n_colors=n
+                ):
+                    color, _solid = items[color_i]
                     pen = QPen(color, width_pen, Qt.PenStyle.SolidLine)
                     pen.setCosmetic(True)
                     pen.setCapStyle(Qt.PenCapStyle.FlatCap)
                     painter.setPen(pen)
                     painter.drawLine(QPointF(x, y), QPointF(x, y_end))
-                    y = y_end
-                    index += 1
             painter.setPen(Qt.PenStyle.NoPen)
         painter.end()
 

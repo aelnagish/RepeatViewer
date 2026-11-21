@@ -478,6 +478,41 @@ def test_show_complement_paints_second_nucleotide_row(tmp_path: Path) -> None:
         panel.close()
 
 
+def test_annotation_scroll_matches_sequence_immediately(tmp_path: Path) -> None:
+    """Horizontal pan must move annotations with the sequence (no timer lag)."""
+    from PySide6.QtWidgets import QApplication
+    import sys
+
+    app = QApplication.instance() or QApplication(sys.argv)
+    from repeatviewer.backends.sequence_features import SequenceFeature
+    from repeatviewer.widgets.sequence_map_viewer import SequenceMapPanel
+
+    fasta = tmp_path / "scroll_sync.fa"
+    fasta.write_text(">s1\n" + ("ACGT" * 1200) + "\n", encoding="utf-8")
+    panel = SequenceMapPanel(fasta, autoload=True)
+    try:
+        panel.resize(900, 500)
+        panel.show()
+        app.processEvents()
+        panel._map.set_features(
+            [SequenceFeature(start=200, end=400, name="orf", feature_type="ORF")]
+        )
+        panel._map._apply_zoom_ppb(8.0, sync_slider=True)
+        panel._map._sync_header_views()
+        app.processEvents()
+        hbar = panel._map._hbar
+        assert hbar.maximum() > 50
+        target = min(400, int(hbar.maximum()))
+        # Drive the same path as user scrolling (valueChanged → _on_horizontal_scroll).
+        hbar.setValue(target)
+        # Do not processEvents / wait for the deferred overview timer.
+        assert abs(panel._map._canvas.scroll_px() - float(target)) < 1e-6
+        assert abs(panel._map._annot_track._scroll_px - float(target)) < 1e-6
+        assert abs(panel._map._ruler._scroll_px - float(target)) < 1e-6
+    finally:
+        panel.close()
+
+
 def test_annotation_map_keeps_paper_fill_and_hbar_layout(tmp_path: Path) -> None:
     """Empty space below tracks uses paper fill; zoom-in reserves hbar height."""
     from PySide6.QtWidgets import QApplication
