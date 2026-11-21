@@ -225,9 +225,13 @@ class EditPrimerDialog(QDialog):
         top.addWidget(self.name_edit, 0, 1)
         top.addWidget(QLabel("Note", self), 0, 2)
         self.note_edit = QLineEdit(primer.note, self)
-        top.addWidget(self.note_edit, 0, 3, 1, 2)
-        top.addWidget(make_help_button(self, "Edit Primer", EDIT_HELP), 0, 5,
-                      Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        # Note runs up to the "?", which ends where Copy ends below it.
+        note_row = QHBoxLayout()
+        note_row.setContentsMargins(0, 0, 0, 0)
+        note_row.setSpacing(10)
+        note_row.addWidget(self.note_edit, 1)
+        note_row.addWidget(make_help_button(self, "Edit Primer", EDIT_HELP))
+        top.addLayout(note_row, 0, 3, 1, 3)
 
         top.addWidget(QLabel("Sequence", self), 1, 0)
         self.seq_edit = _OligoEdit("" if primer.sequence == "N" and new else primer.sequence, self)
@@ -236,7 +240,7 @@ class EditPrimerDialog(QDialog):
         top.addWidget(self.seq_edit, 1, 1, 1, 3)
         self.rc_button = QPushButton("Reverse Complement", self)
         self.copy_button = QPushButton("Copy", self)
-        # Reverse Complement ends where Note ends, Copy where the "?" ends.
+        # two equal buttons; Copy ends where the "?" ends
         button_w = max(self.rc_button.sizeHint().width(), self.copy_button.sizeHint().width())
         for column, button in ((4, self.rc_button), (5, self.copy_button)):
             button.setFixedWidth(button_w)
