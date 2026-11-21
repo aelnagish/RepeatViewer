@@ -362,9 +362,15 @@ class MapPage(QWidget):
         pl.addWidget(_rule(panel))
 
         sec, sl, _ = _section("Mismatches", panel, "Mismatches", MISMATCH_HELP)
-        self.mismatches = _spin(0, 10, int(base.get("max_mismatches", 2)), parent=sec)
+        # the box and its "nt" together end where the fields above end
+        from repeatviewer.widgets.primer_design_pane import JOIN2_W
+
+        unit_box_w = FIELD_W - GAP - JOIN2_W
+        self.mismatches = _spin(0, 10, int(base.get("max_mismatches", 2)), parent=sec,
+                                width=unit_box_w)
         sl.addLayout(_row("Max", self.mismatches, parent=sec, unit="nt"))
-        self.exact = _spin(0, 20, int(base.get("three_prime_exact", 3)), parent=sec)
+        self.exact = _spin(0, 20, int(base.get("three_prime_exact", 3)), parent=sec,
+                           width=unit_box_w)
         sl.addLayout(_row("3′ exact", self.exact, parent=sec, unit="nt"))
         pl.addWidget(sec)
         pl.addWidget(_rule(panel))
@@ -394,9 +400,11 @@ class MapPage(QWidget):
         self.save_button = QPushButton("Save", sec)
         self.map_button = QPushButton("Map", sec)
         self.map_button.setDefault(True)
-        from repeatviewer.widgets.primer_design_pane import _action_row
+        # in the field column: one button as wide as a field, then two halves
+        from repeatviewer.widgets.primer_design_pane import _field_buttons
 
-        sl.addWidget(_action_row(sec, self.defaults_button, self.save_button, self.map_button))
+        sl.addLayout(_field_buttons(sec, self.defaults_button))
+        sl.addLayout(_field_buttons(sec, self.save_button, self.map_button))
         self.saved_note = QLabel("", sec)
         self.saved_note.setWordWrap(True)
         self.saved_note.setStyleSheet("color: palette(placeholder-text);")
