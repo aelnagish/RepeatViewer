@@ -212,7 +212,7 @@ class SangerPage(QWidget):
         panel.setObjectName("sangerPanel")
         pl = QVBoxLayout(panel)
         pl.setContentsMargins(10, 6, 10, 8)
-        pl.setSpacing(2)
+        pl.setSpacing(6)
         title = QHBoxLayout()
         title.addWidget(QLabel("<b>Sanger Check</b>", panel), 1)
         title.addWidget(make_help_button(panel, "Sanger Check", SANGER_HELP))

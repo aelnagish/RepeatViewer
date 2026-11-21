@@ -76,10 +76,8 @@ class CloningPage(QWidget):
         self.verdict = VerdictLabel(middle)
         self.verdict.setObjectName("cloningVerdict")
 
-        head = QHBoxLayout()
-        head.addWidget(QLabel("<b>Clone</b>", middle), 1)
-        head.addWidget(make_help_button(middle, "Clone", RESULT_HELP))
-        lay.addLayout(head)
+        # The first box starts right under the section row, as in every
+        # section; the "?" of Colony PCR below explains the table too.
         self.table = QTableWidget(0, 4, middle)
         self.table.setHorizontalHeaderLabels(["Orientation", "Insert", "Plasmid", "Colony PCR"])
         self.table.verticalHeader().hide()
@@ -116,8 +114,8 @@ class CloningPage(QWidget):
         panel = QWidget(self)
         panel.setFixedWidth(PANEL_W)
         pl = QVBoxLayout(panel)
-        pl.setContentsMargins(10, 6, 10, 12)
-        pl.setSpacing(10)
+        pl.setContentsMargins(10, 6, 10, 8)
+        pl.setSpacing(6)
         title = QHBoxLayout()
         title.addWidget(QLabel("<b>Cloning</b>", panel), 1)
         title.addWidget(make_help_button(panel, "Cloning", CLONING_HELP))
