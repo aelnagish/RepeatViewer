@@ -192,7 +192,9 @@ class PaintingPage(QWidget):
         lay.addWidget(_card(self.picture, middle), 1)
         lay.addWidget(self.verdict)     # under the boxes, when there is one
         _results_surface(middle)
-        outer.addWidget(middle, 1)
+        from repeatviewer.widgets.primer_design_pane import _scroll_middle
+
+        outer.addWidget(_scroll_middle(middle, self), 1)
 
         panel = QWidget(self)
         inner = QWidget(panel)

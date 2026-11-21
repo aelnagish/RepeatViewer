@@ -140,6 +140,8 @@ class _Tile(QWidget):
         self.value.setStyleSheet("border: none;")
         lay.addWidget(cap)
         lay.addWidget(self.value)
+        # never squeezed: the caption and the value always show whole
+        self.setMinimumHeight(self.sizeHint().height())
 
 
 def _scrolled(inner: QWidget, parent: QWidget) -> QScrollArea:

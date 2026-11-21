@@ -257,6 +257,19 @@ class PrimersWorkspacePage(QWidget):
         self.panel.sequenceExtracted.connect(self.sequenceExtracted.emit)
         self.panel.activeSequenceChanged.connect(self._on_panel_record_changed)
         self.primers = self.panel.primers_panel()
+        from PySide6.QtWidgets import QSizePolicy
+
+        from repeatviewer.widgets.primer_design_pane import _relax_wrapped_labels
+
+        # Long names and sequences must not make the panel want more width
+        # than it has (its boxes would be squeezed), nor the row above the map.
+        _relax_wrapped_labels(self.primers)
+        for widget in (getattr(self.primers, "name_label", None),
+                       getattr(self.panel._map, "_toolbar", None)):
+            if widget is not None:
+                policy = widget.sizePolicy()
+                policy.setHorizontalPolicy(QSizePolicy.Policy.Ignored)
+                widget.setSizePolicy(policy)
         self._place_record_chooser()
         self._plain_settings_side()
         self._build_list_area()
@@ -549,6 +562,8 @@ class PrimersWorkspacePage(QWidget):
         bar.setContentsMargins(0, 0, 0, 0)
         bar.setSpacing(8)
         self.list_note = design.cand_note
+        # one line here; the whole text shows when the pointer rests on it
+        self.list_note.set_elided(True)
         for button in (primers.add_button, primers.database_button):
             button.setSizePolicy(QPushButton().sizePolicy())
             bar.addWidget(button)
@@ -706,9 +721,9 @@ class PrimersWorkspacePage(QWidget):
         drow.addStretch(1)
         dl.addLayout(drow)
         # Two equal buttons over the label and field columns of the form.
-        from repeatviewer.widgets.primer_design_pane import FIELD_W, GAP, LABEL_W
+        from repeatviewer.widgets.primer_design_pane import HALF_ROW_W
 
-        half = (LABEL_W + GAP + FIELD_W - 6) // 2
+        half = HALF_ROW_W
         for b in (design.defaults_button, design.design_button,
                   self.header_defaults_button, self.header_design_button):
             b.setFixedWidth(half)
