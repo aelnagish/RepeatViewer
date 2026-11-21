@@ -88,6 +88,19 @@ def _render_svg_pixmap(svg_path: Path, logical_size: int, *, device_ratio: float
     return pixmap
 
 
+def render_app_icon_pixmap(size: int) -> QPixmap | None:
+    """Squircle app icon at *size* px, shared with the packaging scripts.
+
+    The .icns/.ico/.png built for a release must use this same geometry, or the
+    icon macOS shows before launch (from the bundle) differs from the one Qt
+    puts in the Dock after launch, and Tahoe wraps the square one in a grey tile.
+    """
+    svg_path = _resolve_app_icon_path()
+    if svg_path is None:
+        return None
+    return _render_svg_pixmap(svg_path, size)
+
+
 @lru_cache(maxsize=1)
 def app_icon() -> QIcon:
     """Return the RepeatViewer application icon at macOS-friendly sizes."""
