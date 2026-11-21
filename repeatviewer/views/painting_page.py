@@ -321,9 +321,11 @@ class PaintingPage(QWidget):
         self.save_button = QPushButton("Save", sec)
         self.run_button = QPushButton("Run", sec)
         self.run_button.setDefault(True)
-        from repeatviewer.widgets.primer_design_pane import _action_row
+        # in the field column: one button as wide as a field, then two halves
+        from repeatviewer.widgets.primer_design_pane import _field_buttons
 
-        sl.addWidget(_action_row(sec, self.defaults_button, self.save_button, self.run_button))
+        sl.addLayout(_field_buttons(sec, self.defaults_button))
+        sl.addLayout(_field_buttons(sec, self.save_button, self.run_button))
         self.saved_note = QLabel("", sec)
         self.saved_note.setWordWrap(True)
         self.saved_note.setStyleSheet("color: palette(placeholder-text);")
