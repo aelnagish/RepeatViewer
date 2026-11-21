@@ -194,13 +194,14 @@ class CloningPage(QWidget):
         pl.addWidget(_rule(panel))
 
         sec, sl, _ = _section("Options", panel, "Options", CLONING_HELP)
-        self.gel_button = QPushButton("Save the Gel", sec)
-        self.report_button = QPushButton("Save Report", sec)
-        row = QHBoxLayout()
-        row.addWidget(self.gel_button)
-        row.addStretch(1)
-        row.addWidget(self.report_button)
-        sl.addLayout(row)
+        self.gel_button = QPushButton("Gel", sec)
+        self.gel_button.setToolTip("Save the colony PCR gel")
+        self.report_button = QPushButton("Report", sec)
+        self.report_button.setToolTip("Save a report of this cloning plan")
+        # side by side in the field column, together as wide as a field
+        from repeatviewer.widgets.primer_design_pane import _field_buttons
+
+        sl.addLayout(_field_buttons(sec, self.gel_button, self.report_button, label="Save"))
         self.saved_note = QLabel("", sec)
         self.saved_note.setWordWrap(True)
         self.saved_note.setStyleSheet("color: palette(placeholder-text);")

@@ -208,7 +208,7 @@ class SangerPage(QWidget):
         panel.setObjectName("sangerPanel")
         pl = QVBoxLayout(panel)
         pl.setContentsMargins(10, 8, 10, 8)
-        pl.setSpacing(6)
+        pl.setSpacing(2)
         title = QHBoxLayout()
         title.addWidget(QLabel("<b>Sanger Check</b>", panel), 1)
         title.addWidget(make_help_button(panel, "Sanger Check", SANGER_HELP))
@@ -276,9 +276,10 @@ class SangerPage(QWidget):
 
         sec, sl, _ = _section("Quality", panel, "Quality", SANGER_HELP)
         self.cutoff = _spin(0.001, 0.5, float(saved.get("cutoff", sg.TRIM_CUTOFF)), decimals=3,
-                            parent=sec)
+                            parent=sec, width=FIELD_W)
         sl.addLayout(_row("Trim cutoff", self.cutoff, parent=sec))
-        self.good_q = _spin(0, 60, int(saved.get("good_quality", sg.GOOD_QUALITY)), parent=sec)
+        self.good_q = _spin(0, 60, int(saved.get("good_quality", sg.GOOD_QUALITY)), parent=sec,
+                            width=FIELD_W)
         sl.addLayout(_row("Real from Q", self.good_q, parent=sec))
         pl.addWidget(sec)
         pl.addWidget(_rule(panel))
@@ -291,17 +292,11 @@ class SangerPage(QWidget):
         self.save_button = QPushButton("Save", sec)
         self.check_button = QPushButton("Check", sec)
         self.check_button.setDefault(True)
-        # the row starts with the labels and ends with the fields
-        actions = QWidget(sec)
-        actions.setFixedWidth(LABEL_W + 2 + FIELD_W)
-        br = QHBoxLayout(actions)
-        br.setContentsMargins(0, 0, 0, 0)
-        br.setSpacing(6)
-        br.addWidget(self.defaults_button)
-        br.addStretch(1)
-        br.addWidget(self.save_button)
-        br.addWidget(self.check_button)
-        sl.addWidget(actions)
+        # in the field column, as wide as the fields: one button, then two halves
+        from repeatviewer.widgets.primer_design_pane import _field_buttons
+
+        sl.addLayout(_field_buttons(sec, self.defaults_button))
+        sl.addLayout(_field_buttons(sec, self.save_button, self.check_button))
         self.saved_note = QLabel("", sec)
         self.saved_note.setStyleSheet("color: palette(placeholder-text);")
         sl.addWidget(self.saved_note)

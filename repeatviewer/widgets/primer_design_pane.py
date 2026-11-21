@@ -326,6 +326,30 @@ def _card(widget: QWidget, parent: QWidget) -> QFrame:
     return frame
 
 
+def _field_buttons(parent: QWidget, *buttons: QWidget, label: str = "") -> QHBoxLayout:
+    """Buttons in the field column: together as wide as a field, equal in width.
+
+    ``label`` goes in the label column, as for any other row.
+    """
+    row = QHBoxLayout()
+    row.setContentsMargins(0, 0, 0, 0)
+    row.setSpacing(GAP)
+    pad = QLabel(label, parent)
+    pad.setFixedWidth(LABEL_W)
+    row.addWidget(pad)
+    inner = QHBoxLayout()
+    inner.setContentsMargins(0, 0, 0, 0)
+    inner.setSpacing(6)
+    room = FIELD_W - 6 * (len(buttons) - 1)
+    for i, button in enumerate(buttons):
+        width = room // len(buttons) + (1 if i < room % len(buttons) else 0)
+        button.setFixedWidth(width)
+        inner.addWidget(button)
+    row.addLayout(inner)
+    row.addStretch(1)
+    return row
+
+
 def _action_row(parent: QWidget, left: QWidget, *right: QWidget) -> QWidget:
     """The buttons at the end of a panel: ``left`` starts where the labels
     start, ``right`` end where the fields end."""

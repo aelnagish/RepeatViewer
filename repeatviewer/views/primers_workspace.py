@@ -674,11 +674,22 @@ class PrimersWorkspacePage(QWidget):
         lay = QVBoxLayout(header)
         lay.setContentsMargins(0, 0, 0, 6)
         lay.setSpacing(6)
+        from PySide6.QtWidgets import QSizePolicy
+
+        from repeatviewer.widgets.primer_design_pane import HALF_ROW_W as _HALF
+
+        # The title takes the width of the left button below it, so Show starts
+        # where the right button starts and runs up to the "?".
         top = QHBoxLayout()
         top.setContentsMargins(0, 0, 0, 0)
-        top.addWidget(QLabel("<b>Design Settings</b>", header), 1)
+        top.setSpacing(6)
+        title_label = QLabel("<b>Design Settings</b>", header)
+        title_label.setFixedWidth(_HALF)
+        top.addWidget(title_label)
         self.show_settings_button = QPushButton("Show", header)
-        top.addWidget(self.show_settings_button)
+        self.show_settings_button.setSizePolicy(QSizePolicy.Policy.Expanding,
+                                                QSizePolicy.Policy.Fixed)
+        top.addWidget(self.show_settings_button, 1)
         top.addWidget(make_help_button(header, "Design Settings", SETTINGS_HEADER_HELP))
         lay.addLayout(top)
         self.settings_summary = QLabel(header)
@@ -707,10 +718,15 @@ class PrimersWorkspacePage(QWidget):
         dl.setSpacing(6)
         dtop = QHBoxLayout()
         dtop.setContentsMargins(0, 0, 0, 0)
-        dtop.addWidget(QLabel("<b>Design Settings</b>", dh), 1)
+        dtop.setSpacing(6)
+        dtitle = QLabel("<b>Design Settings</b>", dh)
+        dtitle.setFixedWidth(_HALF)
+        dtop.addWidget(dtitle)
         self.hide_settings_button = QPushButton("Hide", dh)
         self.hide_settings_button.setToolTip("Back to the selected primer")
-        dtop.addWidget(self.hide_settings_button)
+        self.hide_settings_button.setSizePolicy(QSizePolicy.Policy.Expanding,
+                                                QSizePolicy.Policy.Fixed)
+        dtop.addWidget(self.hide_settings_button, 1)
         dtop.addWidget(make_help_button(dh, "Design Settings", SETTINGS_HEADER_HELP))
         dl.addLayout(dtop)
         drow = QHBoxLayout()
