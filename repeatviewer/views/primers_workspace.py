@@ -107,6 +107,34 @@ LIST_HELP = (
 )
 
 
+class _RecordCombo(QComboBox):
+    """The record chooser of the row above the map: a small box.
+
+    A name that does not fit is cut in the middle, because record names share
+    their beginning and differ at the end. The opened list is as wide as the
+    longest name, and the whole name is in the tooltip.
+    """
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        from PySide6.QtWidgets import QStyle, QStyleOptionComboBox, QStylePainter
+
+        painter = QStylePainter(self)
+        option = QStyleOptionComboBox()
+        self.initStyleOption(option)
+        painter.drawComplexControl(QStyle.ComplexControl.CC_ComboBox, option)
+        field = self.style().subControlRect(
+            QStyle.ComplexControl.CC_ComboBox, option,
+            QStyle.SubControl.SC_ComboBoxEditField, self)
+        option.currentText = self.fontMetrics().elidedText(
+            option.currentText, Qt.TextElideMode.ElideMiddle, max(0, field.width() - 4))
+        painter.drawControl(QStyle.ControlElement.CE_ComboBoxLabel, option)
+
+    def showPopup(self) -> None:  # noqa: N802
+        view = self.view()
+        view.setMinimumWidth(max(self.width(), view.sizeHintForColumn(0) + 32))
+        super().showPopup()
+
+
 def _path_row_of(widget):
     """The PathBrowseRow a focused widget belongs to, or None."""
     from repeatviewer.widgets.path_browse import PathBrowseRow
@@ -227,8 +255,14 @@ class PrimersWorkspacePage(QWidget):
         self.sequence_row.hide()
         # Record sits in the Position row of the map once there is a map.
         self.record_label = QLabel("Record:", self.seq_page)
-        self.record_combo = QComboBox(self.seq_page)
-        self.record_combo.setMinimumWidth(180)
+        self.record_combo = _RecordCombo(self.seq_page)
+        self.record_combo.setFixedWidth(104)
+        self.record_combo.currentIndexChanged.connect(
+            lambda _i: self.record_combo.setToolTip(self.record_combo.currentText()))
+        # the chooser needs no word before it
+        self.record_label.setFixedSize(0, 0)
+        self.length_label = QLabel("", self.seq_page)
+        self.length_label.hide()
         self.record_combo.setToolTip("For a file with several sequences: the one to work on.")
         self.record_label.hide()
         self.record_combo.hide()
@@ -267,8 +301,7 @@ class PrimersWorkspacePage(QWidget):
         # Long names and sequences must not make the panel want more width
         # than it has (its boxes would be squeezed), nor the row above the map.
         _relax_wrapped_labels(self.primers)
-        for widget in (getattr(self.primers, "name_label", None),
-                       getattr(self.panel._map, "_toolbar", None)):
+        for widget in (getattr(self.primers, "name_label", None),):
             if widget is not None:
                 policy = widget.sizePolicy()
                 policy.setHorizontalPolicy(QSizePolicy.Policy.Ignored)
@@ -300,26 +333,65 @@ class PrimersWorkspacePage(QWidget):
         return super().eventFilter(obj, event)
 
     def _place_record_chooser(self) -> None:
-        """Record goes into the Position row, before the length on the right."""
-        toolbar = getattr(self.panel._map, "_toolbar", None)
-        bar = toolbar.layout() if toolbar is not None else None
+        """The row above the map, made to fit: zoom, two position boxes, Select,
+        Fit, the record chooser and the length. Words that are not needed go."""
+        tool = getattr(self.panel._map, "_toolbar", None)
+        bar = tool.layout() if tool is not None else None
         several = self.record_combo.count() > 1
         if bar is None:
             row = QHBoxLayout()
             row.setContentsMargins(12, 6, 12, 6)
             row.setSpacing(8)
-            row.addWidget(self.record_label)
             row.addWidget(self.record_combo)
             row.addStretch(1)
+            row.addWidget(self.length_label)
             self._seq_layout.insertLayout(0, row)
         else:
+            view = self.panel._map
+            # "Position:" goes, "to" becomes a thin dash between the two boxes
+            for label in tool.findChildren(QLabel):
+                text = label.text().strip()
+                if text == "Position:":
+                    label.setText("")
+                    label.setFixedWidth(0)
+                elif text == "to":
+                    label.setText("–")
+                    label.setFixedWidth(10)
+                    label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            # room for five digits; a longer number scrolls inside its box
+            for box, tip in ((getattr(view, "_pos_start", None), "Start"),
+                             (getattr(view, "_pos_end", None), "End")):
+                if box is not None:
+                    box.setFixedWidth(66)
+                    box.setToolTip(tip)
+            slider = getattr(view, "_zoom_slider", None)
+            if slider is not None:
+                slider.setFixedWidth(90)
+            # the length alone replaces "Length: … GC: …"
+            stats = getattr(view, "_sequence_stats_label", None)
+            if stats is not None:
+                stats.setFixedWidth(0)
             self.record_combo.setMaximumHeight(22)
-            at = max(0, bar.count() - 1)
-            bar.insertWidget(at, self.record_label, 0, Qt.AlignmentFlag.AlignVCenter)
+            at = max(0, bar.count() - 2)            # before the stretch
+            bar.insertSpacing(at, 6)
             bar.insertWidget(at + 1, self.record_combo, 0, Qt.AlignmentFlag.AlignVCenter)
-            bar.insertSpacing(at + 2, 12)
-        self.record_label.setVisible(several)
+            bar.addWidget(self.length_label, 0, Qt.AlignmentFlag.AlignVCenter)
+        self.length_label.show()
+        self.record_label.setVisible(False)
         self.record_combo.setVisible(several)
+        self._sync_length()
+
+    def _sync_length(self) -> None:
+        """The length of the shown record, as the map states it ("509 bp")."""
+        import re
+
+        stats = getattr(self.panel._map, "_sequence_stats_label", None) if self.panel else None
+        try:
+            found = re.search(r"Length:\s*([\d.,\u00a0\u202f ]*\d\s*[kMG]?bp)",
+                              stats.text() if stats is not None else "")
+        except RuntimeError:
+            found = None
+        self.length_label.setText(found.group(1).strip() if found else "")
 
     def _plain_settings_side(self) -> None:
         """No line between the map and the settings: the two colours say it."""
@@ -890,8 +962,9 @@ class PrimersWorkspacePage(QWidget):
         finally:
             self.record_combo.blockSignals(False)
         several = self.record_combo.count() > 1
-        self.record_label.setVisible(several)
         self.record_combo.setVisible(several)
+        self.record_combo.setToolTip(self.record_combo.currentText())
+        QTimer.singleShot(0, self._sync_length)
 
     def _on_record_chosen(self, index: int) -> None:
         seq_id = self.record_combo.itemData(index)
@@ -904,6 +977,8 @@ class PrimersWorkspacePage(QWidget):
             self.record_combo.blockSignals(True)
             self.record_combo.setCurrentIndex(index)
             self.record_combo.blockSignals(False)
+        self.record_combo.setToolTip(self.record_combo.currentText())
+        QTimer.singleShot(0, self._sync_length)
 
     def _show_sequence_in_field(self) -> None:
         self.sequence_row.set_path(self._sequence_path, emit=False)
