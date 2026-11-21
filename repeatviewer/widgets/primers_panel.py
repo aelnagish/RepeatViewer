@@ -103,6 +103,49 @@ def status_html(status: str) -> str:
     return f'<span style="color:{color}">{status}</span>'
 
 
+def short_names(names) -> dict[str, str]:
+    """Names without the beginning they all share ("Putative_CroSat1_mono2_").
+
+    The cut falls after a separator, and is made only when at least two names
+    share four characters or more and every name keeps something to show.
+    """
+    names = [str(n) for n in names]
+    same = {n: n for n in names}
+    if len(names) < 2:
+        return same
+    prefix = names[0]
+    for n in names[1:]:
+        while prefix and not n.startswith(prefix):
+            prefix = prefix[:-1]
+    cut = max(prefix.rfind(c) for c in "_-.#/| ") + 1
+    prefix = prefix[:cut]
+    if len(prefix) < 4 or any(not n[len(prefix):] for n in names):
+        return same
+    return {n: n[len(prefix):] for n in names}
+
+
+def dimer_lines(cross, short: dict[str, str], *, show_all: bool) -> tuple[list[str], int]:
+    """The rich-text lines for the dimers with the other primers.
+
+    ``cross`` is a list of (name, dG, status). One summary line, then only the
+    pairs to look at (every pair when ``show_all``). Also returns how many
+    pairs stay hidden.
+    """
+    cross = list(cross)
+    if not cross:
+        return [], 0
+    bad = [row for row in cross if row[2] != "ok"]
+    verdict = (f'<span style="color:{OK_COLOR}">all ok</span>' if not bad else
+               f'<span style="color:{CHECK_COLOR}">{len(bad)} to check</span>')
+    lines = [f"Dimers: {len(cross)} checked, {verdict}"]
+    shown = cross if show_all else bad
+    for name, dg, status in shown:
+        val = f"ΔG {dg:.1f}" if dg else "none"
+        lines.append(f"&nbsp;&nbsp;{html.escape(short.get(name, name))}: {val} "
+                     f"{status_html(status)}")
+    return lines, len(cross) - len(shown)
+
+
 def find_main_window():
     """The RepeatViewer main window (previews can live in their own windows)."""
     app = QApplication.instance()
@@ -306,6 +349,18 @@ class PrimersPanel(QWidget):
         self.checks_label.setTextFormat(Qt.TextFormat.RichText)
         self.checks_label.setWordWrap(True)
         il.addWidget(self.checks_label)
+        # the dimers that are fine stay folded away until asked for
+        self._dimers_open = False
+        self.dimers_button = QPushButton("Show All", self.inspector)
+        self.dimers_button.setToolTip("Every dimer with the other ticked primers, or only "
+                                      "the ones to look at")
+        dr = QHBoxLayout()
+        dr.setContentsMargins(0, 0, 0, 0)
+        dr.addWidget(self.dimers_button)
+        dr.addStretch(1)
+        il.addLayout(dr)
+        self.dimers_button.hide()
+        self.dimers_button.clicked.connect(self._toggle_dimers)
         self.where_label = QLabel(self.inspector)
         self.where_label.setTextFormat(Qt.TextFormat.RichText)
         self.where_label.setWordWrap(True)
@@ -836,6 +891,10 @@ class PrimersPanel(QWidget):
                 return p
         return None
 
+    def _toggle_dimers(self) -> None:
+        self._dimers_open = not self._dimers_open
+        self._refresh_inspector()
+
     def _refresh_inspector(self) -> None:
         p = self._primer(self._selected)
         if p is None:
@@ -863,13 +922,20 @@ class PrimersPanel(QWidget):
         rows.append(("Hairpin", hp.dg, osq.dg_status(hp.dg, limit=th.WARN_HAIRPIN_DG)))
         sd = rep.self_dimer
         rows.append(("Self-dimer", sd.dg, osq.dg_status(sd.dg)))
-        for other, d in rep.cross.items():
-            rows.append((f"Dimer with {other}", d.dg, osq.dg_status(d.dg)))
         lines = []
         for label, dg, st in rows:
             val = f"ΔG {dg:.1f}" if dg else "none"
             lines.append(f"{html.escape(label)}: {val} {status_html(st)}")
-        self.checks_label.setText("<br>".join(lines))
+        cross = [(other, d.dg, osq.dg_status(d.dg)) for other, d in rep.cross.items()]
+        short = short_names([o.name for o in self._primers])
+        more, hidden = dimer_lines(cross, short, show_all=self._dimers_open)
+        self.checks_label.setText("<br>".join(lines + more))
+        # the whole names, for the pointer
+        self.checks_label.setToolTip("\n".join(
+            f"{name}: ΔG {dg:.1f} {st}" for name, dg, st in cross))
+        folded_ok = sum(1 for row in cross if row[2] == "ok")
+        self.dimers_button.setVisible(bool(cross) and folded_ok > 0)
+        self.dimers_button.setText("Hide" if self._dimers_open else "Show All")
         if place is None:
             where = "Does not bind this sequence (up to 4 mismatches)."
         else:
