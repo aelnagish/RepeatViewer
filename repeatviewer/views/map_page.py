@@ -362,16 +362,13 @@ class MapPage(QWidget):
         pl.addWidget(_rule(panel))
 
         sec, sl, _ = _section("Mismatches", panel, "Mismatches", MISMATCH_HELP)
-        # the box and its "nt" together end where the fields above end
-        from repeatviewer.widgets.primer_design_pane import JOIN2_W
-
-        unit_box_w = FIELD_W - GAP - JOIN2_W
+        # as wide as the fields above; the unit sits inside the box
         self.mismatches = _spin(0, 10, int(base.get("max_mismatches", 2)), parent=sec,
-                                width=unit_box_w)
-        sl.addLayout(_row("Max", self.mismatches, parent=sec, unit="nt"))
+                                suffix=" nt", width=FIELD_W)
+        sl.addLayout(_row("Max", self.mismatches, parent=sec))
         self.exact = _spin(0, 20, int(base.get("three_prime_exact", 3)), parent=sec,
-                           width=unit_box_w)
-        sl.addLayout(_row("3′ exact", self.exact, parent=sec, unit="nt"))
+                           suffix=" nt", width=FIELD_W)
+        sl.addLayout(_row("3′ exact", self.exact, parent=sec))
         pl.addWidget(sec)
         pl.addWidget(_rule(panel))
 
