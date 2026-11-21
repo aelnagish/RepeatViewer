@@ -201,6 +201,11 @@ h3 { font-size: 21px; line-height: 1.25; letter-spacing: -.01em; margin: 0 0 8px
 .tabs { display: inline-flex; gap: 4px; padding: 4px; border-radius: 10px; background: var(--sky-soft); margin-bottom: 18px; }
 .tabs button { font: inherit; font-weight: 600; font-size: 15px; border: 0; background: transparent; color: var(--muted); padding: 8px 16px; border-radius: 7px; cursor: pointer; }
 .tabs button[aria-selected="true"] { background: var(--surface); color: var(--ink); box-shadow: 0 1px 2px rgba(20,37,64,.15); }
+.downloads { display: flex; flex-wrap: wrap; gap: 12px; }
+.downloads .btn span { font-weight: 500; font-size: 13px; opacity: .8; }
+.dl-note { color: var(--muted); font-size: 15px; max-width: 60rem; margin: 16px 0 44px; }
+.src-title { font-size: 22px; margin-bottom: 4px; }
+.src-lede { color: var(--muted); margin: 0 0 18px; }
 .install-grid { display: grid; grid-template-columns: minmax(0, 7fr) minmax(0, 5fr); gap: 48px; align-items: start; }
 .install-grid > *, .hero .wrap > *, .feature > *, .pair > *, .cite > * { min-width: 0; }
 .steps { list-style: none; padding: 0; margin: 0; counter-reset: s; }
@@ -297,10 +302,10 @@ h3 { font-size: 21px; line-height: 1.25; letter-spacing: -.01em; margin: 0 0 8px
       <h1>Explore and curate transposable elements in one window.</h1>
       <p class="lede">RepeatViewer is a platform for explorative analysis of repetitive DNA. Open your TE candidates and inspect them further: Annotate, align, trim and plot without leaving the app. Every result lands next to its input, ready for the next step.</p>
       <div class="actions">
-        <a class="btn btn-primary" href="#install">Install RepeatViewer</a>
+        <a class="btn btn-primary" href="#install">Download RepeatViewer</a>
         <a class="btn btn-ghost" href="https://github.com/qjiangzhao/RepeatViewer">Source on GitHub</a>
       </div>
-      <p class="meta">Version 1.2.0. Free. Linux, macOS and Windows, Python 3.10 or later.</p>
+      <p class="meta">Version <span class="rv-version">1.2.0</span>. Free. Linux, macOS and Windows.</p>
     </div>
 
     <figure class="plot-card" style="margin:0">
@@ -773,8 +778,19 @@ h3 { font-size: 21px; line-height: 1.25; letter-spacing: -.01em; margin: 0 0 8px
   <div class="wrap">
     <div class="section-head">
       <h2 id="install-title">Install</h2>
-      <p>For now, install from source with Python 3.10 or later. Prebuilt packages for macOS, Windows and Linux are in preparation.</p>
+      <p>Download the app for your system. No Python needed.</p>
     </div>
+
+    <div class="downloads">
+      <a class="btn btn-primary" data-asset="macos-arm64" href="https://github.com/qjiangzhao/RepeatViewer/releases/latest">macOS, Apple Silicon<span>.dmg</span></a>
+      <a class="btn btn-primary" data-asset="macos-x86_64" href="https://github.com/qjiangzhao/RepeatViewer/releases/latest">macOS, Intel<span>.dmg</span></a>
+      <a class="btn btn-primary" data-asset="windows-x64" href="https://github.com/qjiangzhao/RepeatViewer/releases/latest">Windows<span>.zip</span></a>
+      <a class="btn btn-primary" data-asset="linux-x86_64" href="https://github.com/qjiangzhao/RepeatViewer/releases/latest">Linux<span>.tar.gz</span></a>
+    </div>
+    <p class="dl-note">Version <span class="rv-version">1.2.0</span>, from the <a href="https://github.com/qjiangzhao/RepeatViewer/releases/latest">latest release</a>. The builds are not code-signed, so the system asks once on first start. <strong>macOS:</strong> drag the app into Applications, then right-click it and choose Open. <strong>Windows:</strong> unzip, start RepeatViewer.exe, and choose More info, then Run anyway. <strong>Linux:</strong> unpack and run <code>./RepeatViewer</code>.</p>
+
+    <h3 class="src-title">Or install from source</h3>
+    <p class="src-lede">With Python 3.10 or later.</p>
 
     <div class="install-grid">
       <div>
@@ -1024,6 +1040,27 @@ pip install -e .</pre></li>
     });
   });
   if (/Win/.test(navigator.platform || "")) select(document.getElementById("tab-win"));
+})();
+</script>
+<script>
+(function () {
+  // Show the latest release: its version number and direct download links.
+  // Without it the buttons still open the latest release page.
+  if (!window.fetch) { return; }
+  fetch("https://api.github.com/repos/qjiangzhao/RepeatViewer/releases/latest")
+    .then(function (r) { return r.ok ? r.json() : null; })
+    .then(function (rel) {
+      if (!rel || !rel.tag_name) { return; }
+      var v = String(rel.tag_name).replace(/^v/, "");
+      document.querySelectorAll(".rv-version").forEach(function (el) { el.textContent = v; });
+      document.querySelectorAll("a[data-asset]").forEach(function (a) {
+        var key = a.getAttribute("data-asset");
+        (rel.assets || []).forEach(function (as) {
+          if (as.name.indexOf(key) !== -1 && as.browser_download_url) { a.href = as.browser_download_url; }
+        });
+      });
+    })
+    .catch(function () {});
 })();
 </script>
 </body>
