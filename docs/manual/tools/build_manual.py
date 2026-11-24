@@ -31,7 +31,7 @@ IMG = SRC / "img"
 APP_OUT = ROOT / "repeatviewer" / "assets" / "manuals" / "user_manual"
 PDF_NAME = "RepeatViewer_User_Manual.pdf"
 TITLE = "RepeatViewer User Manual"
-AUTHORS = "Abdullah Yusuf, Nusrat Sultana, Jiangzhao Qian, Tony Heitkam"
+AUTHORS = "Abdullah El-nagish, Nusrat Sultana, Jiangzhao Qian, Tony Heitkam"
 AFFILIATION = "Molecular Botany, RWTH Aachen University, Aachen, Germany"
 
 try:

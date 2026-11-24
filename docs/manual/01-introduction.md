@@ -54,7 +54,7 @@ you type in a terminal are **`repeatviewer`**.
 
 ## Authors
 
-This manual was written by Abdullah Yusuf, Nusrat Sultana, Jiangzhao Qian and
+This manual was written by Abdullah El-nagish, Nusrat Sultana, Jiangzhao Qian and
 Tony Heitkam (Molecular Botany, RWTH Aachen University, Aachen, Germany).
 
 ## How to read this manual
