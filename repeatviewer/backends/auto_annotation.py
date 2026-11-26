@@ -296,6 +296,15 @@ def run_auto_annotations(
         found_by_type: Counter[str] = Counter()
         overlap_by_type: Counter[str] = Counter()
         new_by_type: Counter[str] = Counter()
+        # LTR + TIR both selected: reuse one self-BLAST when both modules use
+        # the same word size. Different word sizes give different hits (a
+        # smaller one adds weak LTR candidates), so they keep separate runs.
+        terminal_blast_cache: dict | None = (
+            {}
+            if AutoAnnotationMode.LTR in ordered and AutoAnnotationMode.TIR in ordered
+            else None
+        )
+        terminal_word_size: int | None = None
         if progress is not None:
             progress(f"0/{total} starting")
         for index, mode in enumerate(ordered, start=1):
@@ -309,6 +318,8 @@ def run_auto_annotations(
                 settings=cfg,
                 num_threads=threads,
                 existing_features=tuple(features),
+                terminal_blast_cache=terminal_blast_cache,
+                terminal_word_size=terminal_word_size,
             )
             if progress is not None:
                 progress(f"{index}/{total} {mode.value}")
@@ -381,6 +392,8 @@ def run_auto_annotation(
     settings: AutoAnnotationSettings | None = None,
     num_threads: int | None = None,
     existing_features: Iterable[SequenceFeature] | None = None,
+    terminal_blast_cache: dict | None = None,
+    terminal_word_size: int | None = None,
 ) -> AutoAnnotationResult:
     """Run the selected auto-annotation module on a single-sequence FASTA."""
     fasta_path = fasta_path.expanduser().resolve()
@@ -467,6 +480,8 @@ def run_auto_annotation(
         ltr_settings=cfg.ltr,
         tir_settings=cfg.tir,
         num_threads=threads,
+        blast_cache=terminal_blast_cache,
+        shared_word_size=terminal_word_size,
     )
     return AutoAnnotationResult(
         features=terminal.features,
