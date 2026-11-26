@@ -15,7 +15,6 @@ from Bio import SeqIO
 
 from repeatviewer.backends.gui_functions import (
     check_cmd_in_path,
-    check_database,
     get_original_file_path,
 )
 from repeatviewer.backends.job_cancel import JobCancelledError, JobCancellation, check_cancelled, run_subprocess_with_cancel
@@ -468,7 +467,7 @@ def _blastn_executable(blast_dir: Path, os_type: str, *, use_system_blast: bool)
 
 def _run_cancellable_self_blastn(
     fasta_path: Path,
-    database_path: str,
+    database_path: str | None,
     work_dir: Path,
     *,
     cancel: JobCancellation | None = None,
@@ -489,8 +488,8 @@ def _run_cancellable_self_blastn(
         blastn,
         "-query",
         str(fasta_path),
-        "-db",
-        database_path,
+        # No database: ``-subject`` aligns the sequence against itself directly.
+        *(["-db", database_path] if database_path else ["-subject", str(fasta_path)]),
         "-max_target_seqs",
         "10000",
         "-outfmt",
@@ -499,8 +498,8 @@ def _run_cancellable_self_blastn(
         "0.05",
         "-out",
         str(blast_raw),
-        "-num_threads",
-        str(max(1, int(num_threads))),
+        # blastn ignores (and warns about) -num_threads with -subject.
+        *(["-num_threads", str(max(1, int(num_threads)))] if database_path else []),
         "-word_size",
         str(effective_ws),
         "-gapopen",
@@ -555,38 +554,24 @@ def run_self_blast(
     word_size: int = DEFAULT_TERMINAL_REPEAT_WORD_SIZE,
     num_threads: int = 1,
 ) -> Path:
-    """Build a database and run self-BLAST; return the headered BLAST table path."""
+    """Self-BLAST one sequence; return the headered BLAST table path.
+
+    Uses ``blastn -subject`` instead of building a database with makeblastdb:
+    the hits are identical for a single sequence, and it saves one process
+    launch per sequence (about 3x faster on macOS, where launches are slow).
+    ``num_threads`` is ignored because blastn does not thread ``-subject`` runs.
+    """
+    del num_threads
     check_cancelled(cancel)
-    os_type = platform.system()
     fasta_path = fasta_path.expanduser().resolve()
     work_dir.mkdir(parents=True, exist_ok=True)
-
-    database = check_database(
-        str(fasta_path),
-        str(work_dir),
-        os_type=os_type,
-        use_system_blast=use_system_blast,
-        cancel=cancel,
-    )
-    if database == "makeblastdb_not_found":
-        raise RuntimeError(
-            "makeblastdb was not found. Install BLAST+ or use the bundled binaries."
-        )
-    if database == "makeblastdb_got_error":
-        raise RuntimeError(
-            "makeblastdb failed while building the self-BLAST database "
-            f"for {fasta_path.name}."
-        )
-
-    check_cancelled(cancel)
     return _run_cancellable_self_blastn(
         fasta_path,
-        database,
+        None,
         work_dir,
         cancel=cancel,
         use_system_blast=use_system_blast,
         word_size=word_size,
-        num_threads=num_threads,
     )
 
 
@@ -601,8 +586,15 @@ def auto_annotate_terminal_repeats(
     ltr_settings: TerminalRepeatSettings | None = None,
     tir_settings: TerminalRepeatSettings | None = None,
     num_threads: int = 1,
+    blast_cache: dict[int, pd.DataFrame] | None = None,
+    shared_word_size: int | None = None,
 ) -> TerminalRepeatResult:
-    """Run self-BLAST on a single-sequence FASTA and detect LTR or TIR features."""
+    """Run self-BLAST on a single-sequence FASTA and detect LTR or TIR features.
+
+    ``blast_cache`` (word size -> hit table) lets a caller that runs LTR and
+    TIR on the same sequence reuse one self-BLAST. ``shared_word_size`` makes
+    both modes use that word size so the cached table can be shared.
+    """
     fasta_path = fasta_path.expanduser().resolve()
     try:
         record_len = _record_length(fasta_path)
@@ -640,17 +632,28 @@ def auto_annotate_terminal_repeats(
         work_dir.mkdir(parents=True, exist_ok=True)
 
     blast_threads = max(1, int(num_threads))
+
+    def _self_blast_df(subdir: str, word_size: int) -> pd.DataFrame:
+        if shared_word_size is not None:
+            word_size = int(shared_word_size)
+        if blast_cache is not None and word_size in blast_cache:
+            return blast_cache[word_size].copy()
+        table = run_self_blast(
+            fasta_path,
+            work_dir / subdir if subdir else work_dir,
+            cancel=cancel,
+            use_system_blast=use_system_blast,
+            word_size=word_size,
+            num_threads=blast_threads,
+        )
+        frame = _load_self_blast_table(table)
+        if blast_cache is not None:
+            blast_cache[word_size] = frame.copy()
+        return frame
+
     try:
         if mode == "LTR":
-            blast_table = run_self_blast(
-                fasta_path,
-                work_dir,
-                cancel=cancel,
-                use_system_blast=use_system_blast,
-                word_size=ltr_word_size,
-                num_threads=blast_threads,
-            )
-            df = _load_self_blast_table(blast_table)
+            df = _self_blast_df("", ltr_word_size)
             return detect_terminal_repeat_features(
                 df,
                 record_len,
@@ -660,15 +663,7 @@ def auto_annotate_terminal_repeats(
             )
 
         if mode == "TIR":
-            blast_table = run_self_blast(
-                fasta_path,
-                work_dir / "tir_self_blast",
-                cancel=cancel,
-                use_system_blast=use_system_blast,
-                word_size=tir_word_size,
-                num_threads=blast_threads,
-            )
-            df = _load_self_blast_table(blast_table)
+            df = _self_blast_df("tir_self_blast", tir_word_size)
             return detect_terminal_repeat_features(
                 df,
                 record_len,

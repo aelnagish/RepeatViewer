@@ -7762,7 +7762,21 @@ class MultiSequenceOverviewPanel(QWidget):
             )
             return
         tsd_opts = None
-        if AutoAnnotationMode.TSD in modes and self._tsd_needs_boundary_prediction():
+        tsd_edges_from_run = False
+        if (
+            AutoAnnotationMode.TSD in modes
+            and (AutoAnnotationMode.LTR in modes or AutoAnnotationMode.TIR in modes)
+            and self._tsd_needs_boundary_prediction()
+        ):
+            # LTR/TIR run in this job: TSD takes its edges from their arrows
+            # afterwards, so Boundary prediction does not have to run first.
+            from dataclasses import replace
+
+            from repeatviewer.job_options import load_tsd_search_options
+
+            tsd_opts = replace(load_tsd_search_options(), left_boundary=0, right_boundary=0)
+            tsd_edges_from_run = True
+        elif AutoAnnotationMode.TSD in modes and self._tsd_needs_boundary_prediction():
             # No Boundary prediction yet: run it, then resume with LTR→Cov→identity.
             self._auto_run_after_boundary = True
             self.statusMessage.emit(
@@ -7772,7 +7786,7 @@ class MultiSequenceOverviewPanel(QWidget):
             if not self._boundary_running():
                 self._auto_run_after_boundary = False
             return
-        if AutoAnnotationMode.TSD in modes:
+        if AutoAnnotationMode.TSD in modes and not tsd_edges_from_run:
             tsd_opts = self._prompt_tsd_boundaries_for_run()
             if tsd_opts is None:
                 return
@@ -7783,6 +7797,7 @@ class MultiSequenceOverviewPanel(QWidget):
             total_steps=max(1, len(target_ids)),
             record_ids=target_ids,
             tsd_search_options=tsd_opts,
+            tsd_edges_from_run=tsd_edges_from_run,
         )
 
     def _on_similarity_run_clicked(self) -> None:
@@ -7870,6 +7885,7 @@ class MultiSequenceOverviewPanel(QWidget):
         total_steps: int,
         record_ids: list[str] | None = None,
         tsd_search_options=None,
+        tsd_edges_from_run: bool = False,
     ) -> None:
         if self._annotation_running():
             return
@@ -7955,6 +7971,7 @@ class MultiSequenceOverviewPanel(QWidget):
                 persist=False,
                 base_features_by_id=base_features,
                 tsd_search_options=tsd_opts,
+                tsd_edges_from_run=tsd_edges_from_run,
             )
 
         worker = Worker(_job, progress=True)
