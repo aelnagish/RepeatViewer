@@ -310,6 +310,9 @@ RepeatViewer/
 generate libraries with [TEtrimmer](https://github.com/qjiangzhao/TEtrimmer), then inspect and refine them in
 RepeatViewer.
 
+**Citation**
+
+
 **Authors:** 
 Jiangzhao Qian, Abdullah El-nagish, Shlok Szatkowski, Sophie Maiwald, Nusrat Sultana, Daniel Costard, Anna Rudzinski, Nicola Schmidt, Tony Heitkam 
 
