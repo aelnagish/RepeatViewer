@@ -42,7 +42,7 @@ from repeatviewer.backends.sequence_features import (
     resolve_sidecar_path,
     save_annotations_multi,
 )
-from repeatviewer.backends.thread_budget import load_batch_workers
+from repeatviewer.backends.thread_budget import analysis_thread_pool, load_batch_workers
 from repeatviewer.backends.tsd_search import (
     detect_tsd_features_by_id,
     tsd_cluster_report_path,
@@ -58,7 +58,12 @@ from repeatviewer.backends.similarity_annotation_settings import load_similarity
 
 
 def _annotation_parallel_sequences(num_sequences: int) -> int:
-    """Like BLAST: Max. parallel jobs capped by selection count and CPUs."""
+    """Max. parallel jobs, capped by selection count and 2x the CPUs.
+
+    Per-sequence jobs are short self-BLASTs that spend most of their time
+    starting the blastn process, not computing, so running more of them than
+    there are cores still pays off (40 seqs: 7 at once ~25 s, 14 at once ~9 s).
+    """
     import os
 
     requested = load_batch_workers()
@@ -66,7 +71,7 @@ def _annotation_parallel_sequences(num_sequences: int) -> int:
     if sequences <= 1 or requested <= 1:
         return 1
     cpus = os.cpu_count() or 4
-    return max(1, min(requested, sequences, cpus))
+    return max(1, min(requested, sequences, 2 * cpus))
 
 
 @dataclass(frozen=True)
@@ -312,6 +317,7 @@ def run_te_annotation_on_fasta(
     persist: bool = True,
     base_features_by_id: Mapping[str, Sequence[SequenceFeature]] | None = None,
     tsd_search_options: TsdSearchOptions | None = None,
+    tsd_edges_from_run: bool = False,
 ) -> TeAnnotationBatchResult:
     """
     Run selected annotation modules on a FASTA (one or many sequences).
@@ -328,6 +334,10 @@ def run_te_annotation_on_fasta(
 
     ``progress(completed, total, label)`` is called after each sequence finishes
     (and once with completed=0 when work starts).
+
+    ``tsd_edges_from_run``: TSD has no TE edges yet and LTR/TIR run in the same
+    job, so TSD runs after them and takes its edges from their arrows (instead
+    of the caller running Boundary prediction first).
     """
     if not options.auto_modes and not options.similarity_databases:
         raise ValueError("Select at least one annotation module.")
@@ -404,7 +414,12 @@ def run_te_annotation_on_fasta(
 
     tsd_report_holder: list[Path] = []
 
-    def _apply_msa_tsd(*, drive_progress: bool = False) -> None:
+    def _apply_msa_tsd(
+        *,
+        drive_progress: bool = False,
+        edges_1based: tuple[int, int] | None = None,
+        after_detectors: bool = False,
+    ) -> None:
         """Scan TSD on the MSA, annotate top cluster, write clustered text report.
 
         When ``drive_progress`` is True (TSD-only Feature detection), report
@@ -439,13 +454,23 @@ def run_te_annotation_on_fasta(
                 )
 
         if progress is not None and not drive_progress:
-            # Mixed Feature detection: TSD runs before per-sequence detectors.
+            # Mixed Feature detection: TSD runs before per-sequence detectors
+            # (or after them when it takes edges from this run's LTR/TIR).
             progress(
                 -1,
                 expected_total,
-                f"{resolved.name}: TSD scan (before other detectors)",
+                f"{resolved.name}: TSD scan "
+                + ("(edges from LTR/TIR)" if after_detectors else "(before other detectors)"),
             )
         tsd_opts = tsd_search_options or load_tsd_search_options()
+        if edges_1based is not None:
+            from dataclasses import replace as _replace
+
+            tsd_opts = _replace(
+                tsd_opts,
+                left_boundary=int(edges_1based[0]),
+                right_boundary=int(edges_1based[1]),
+            )
         # Optional clustered text report (off by default; TSD settings).
         report_path = (
             tsd_cluster_report_path(resolved)
@@ -513,7 +538,18 @@ def run_te_annotation_on_fasta(
     # MSA-wide TSD first when selected (needs full alignment; other detectors
     # then run per sequence and keep these TSD features as base).
     tsd_selected = AutoAnnotationMode.TSD in options.auto_modes and len(all_record_ids) >= 2
-    if tsd_selected and not needs_per_sequence:
+    tsd_after_detectors = bool(
+        tsd_selected
+        and tsd_edges_from_run
+        and needs_per_sequence
+        and (
+            AutoAnnotationMode.LTR in options.auto_modes
+            or AutoAnnotationMode.TIR in options.auto_modes
+        )
+    )
+    if tsd_after_detectors:
+        pass  # runs after LTR/TIR below
+    elif tsd_selected and not needs_per_sequence:
         n = max(1, len(annotate_ids))
         if progress is not None:
             progress(0, n, f"{resolved.name}: TSD scan")
@@ -563,10 +599,16 @@ def run_te_annotation_on_fasta(
             for rid, rec in zip(all_record_ids, records, strict=False)
         }
         total = len(annotate_ids)
-        auto_threads = max(
-            1, int(getattr(auto_cfg, "num_threads", default_annotation_threads()))
-        )
         parallel = _annotation_parallel_sequences(len(annotate_ids))
+        # Split the CPU budget across the sequences running at once, so
+        # Max. parallel jobs x Threads cannot oversubscribe the cores.
+        auto_threads = max(
+            1,
+            min(
+                int(getattr(auto_cfg, "num_threads", default_annotation_threads())),
+                analysis_thread_pool() // max(1, parallel),
+            ),
+        )
         with tempfile.TemporaryDirectory(prefix="repeatviewer_teann_") as tmp:
             tmp_dir = Path(tmp)
             temp_by_id: dict[str, Path] = {}
@@ -627,7 +669,7 @@ def run_te_annotation_on_fasta(
                     0,
                     total,
                     f"{resolved.name}: up to {parallel} sequence(s) in parallel "
-                    f"({auto_threads} feature-detection thread(s) each)",
+                    f"({auto_threads} thread(s) each)",
                 )
             with ThreadPoolExecutor(max_workers=parallel) as pool:
                 futures = [
@@ -663,6 +705,18 @@ def run_te_annotation_on_fasta(
                                 total,
                                 f"{resolved.name}: sequence {done}/{total} ({rid})",
                             )
+
+    if tsd_after_detectors:
+        # TE edges from the LTR/TIR arrows this run just found; none found →
+        # (0, 0) makes TSD scan the whole MSA split at its midpoint.
+        from repeatviewer.backends.tsd_search import (
+            boundaries_from_terminal_features_1based,
+        )
+
+        edges = boundaries_from_terminal_features_1based(
+            {rid: features_by_id.get(rid) or [] for rid in annotate_ids}
+        )
+        _apply_msa_tsd(edges_1based=edges or (0, 0), after_detectors=True)
 
     def _feature_signature(feat: SequenceFeature) -> tuple:
         return (

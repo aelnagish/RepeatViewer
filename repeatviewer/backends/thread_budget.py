@@ -14,7 +14,20 @@ DEFAULT_BATCH_WORKERS = 5
 
 
 def load_batch_workers() -> int:
-    return max(1, int(QSettings().value("batch_workers", DEFAULT_BATCH_WORKERS)))
+    """Max. parallel jobs from Preferences.
+
+    Preferences saves it as ``project/batch_workers``. This used to read a
+    top-level ``batch_workers`` key that nothing writes, so the setting was
+    ignored and every job used the default. Read the saved key first.
+    """
+    s = QSettings()
+    value = s.value("project/batch_workers")
+    if value is None:
+        value = s.value("batch_workers", DEFAULT_BATCH_WORKERS)
+    try:
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        return DEFAULT_BATCH_WORKERS
 
 
 def reserved_app_threads() -> int:
